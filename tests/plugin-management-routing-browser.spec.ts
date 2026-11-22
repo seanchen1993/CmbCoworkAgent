@@ -1,13 +1,13 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readdirSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 
 async function main() {
   const output = resolve("output/plugin-management-routing-browser", String(Date.now()))
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -115,7 +115,7 @@ async function main() {
       })
     )
     await page.goto("http://localhost/")
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     for (const file of readdirSync("out/renderer/assets").filter((name) => name.endsWith(".css")))
       await page.addStyleTag({ path: resolve("out/renderer/assets", file) })
     const nav = page.getByRole("navigation").first()

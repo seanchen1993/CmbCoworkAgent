@@ -1,3 +1,5 @@
+import type { BotDeliveredFileSource } from "./bots/file-delivery"
+
 export const WORKSPACE_FILE_PREVIEW_CANCELLED = "WORKSPACE_FILE_PREVIEW_CANCELLED"
 
 // A preview page must stay cheap to clone over IPC and cheap to project in React.
@@ -7,6 +9,11 @@ export const WORKSPACE_FILE_PREVIEW_MAX_TEXT_LINES = 500
 export const WORKSPACE_FILE_PREVIEW_RENDERER_CACHE_BYTES = 2 * 1024 * 1024
 export const WORKSPACE_FILE_PREVIEW_MAX_LANE_LENGTH = 160
 export const WORKSPACE_FILE_PREVIEW_MAX_TOKEN_LENGTH = 160
+export const OFFICE_PREVIEW_MAX_OUTPUT_BYTES = 64 * 1024
+export const OFFICE_PREVIEW_MAX_NODES = 2_000
+export const OFFICE_PREVIEW_MAX_ROWS = 200
+export const OFFICE_PREVIEW_MAX_COLUMNS = 50
+export const OFFICE_PREVIEW_MAX_SHEETS = 20
 
 export const WORKSPACE_FILE_PREVIEW_ERROR_CODES = {
   CANCELLED: "cancelled",
@@ -39,6 +46,8 @@ export type WorkspaceFilePreviewSource =
       threadId: string
       filePath: string
       workspacePathKind?: WorkspaceFilePreviewWorkspacePathKind
+      /** Bot group previews resolve the retained shared directory, not a member's thread. */
+      botGroupId?: string
       externalGrant?: never
       knowledgeBaseId?: never
     }
@@ -47,12 +56,14 @@ export type WorkspaceFilePreviewSource =
       knowledgeBaseId?: never
       filePath: string
       threadId?: never
+      botGroupId?: never
       workspacePathKind?: never
     }
   | {
       knowledgeBaseId: string
       filePath: string
       threadId?: never
+      botGroupId?: never
       externalGrant?: never
       workspacePathKind?: never
     }
@@ -65,10 +76,14 @@ export interface WorkspaceFilePreviewRequestBase {
 
 export interface WorkspaceFilePreviewReadRequest extends WorkspaceFilePreviewRequestBase {
   offset?: number
+  /** Opt-in semantic preview; ordinary workspace/context reads remain raw text. */
+  officePreview?: true
 }
 
 export interface WorkspaceFilePreviewOpenMediaRequest extends WorkspaceFilePreviewRequestBase {
   mimeType?: string
+  /** Bind a delivered Markdown image request to the still-linked desktop work. */
+  botDeliveryImage?: BotDeliveredFileSource
 }
 
 export interface WorkspaceFilePreviewCancelRequest {
@@ -103,6 +118,14 @@ export type ToolFilePreviewGrantResult =
       error: string
     }
 
+export type WorkspaceOfficePreviewData =
+  | { kind: "docx"; html: string }
+  | {
+      kind: "spreadsheet"
+      sheets: { name: string; rows: string[][]; truncated: boolean }[]
+      truncated: boolean
+    }
+
 export interface WorkspaceFilePreviewTextResult {
   success: true
   content: string
@@ -115,6 +138,8 @@ export interface WorkspaceFilePreviewTextResult {
   hasPrevious: boolean
   truncated: boolean
   lineCount: number
+  /** Bounded semantic data, present only when explicitly requested. */
+  office?: WorkspaceOfficePreviewData
 }
 
 export interface WorkspaceFilePreviewMediaResult {

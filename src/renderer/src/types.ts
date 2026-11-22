@@ -11,14 +11,7 @@ import type { SubagentTranscriptBlobRef } from "../../shared/subagent-transcript
 
 export type { ForkBoundarySource, ForkUnstableReason } from "../../shared/checkpoint-forkability"
 
-export interface FileAttachment {
-  filename: string
-  filePath: string // full path for display
-  content: string // extracted text content
-  mimeType: string
-  size: number
-  truncated: boolean
-}
+export type { FileAttachment } from "../../shared/file-attachment"
 
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
@@ -292,6 +285,9 @@ export interface Message {
   /** Main-process durable source; presentation only, never an execution permission. */
   prompt_origin?: import("../../shared/mods/v2/plugin-prompt").FunctionPluginPromptOrigin
   id: string
+  /** Verified display/edit metadata from native history, not execution authority. */
+  botHistoryInputOrigin?: import("../../shared/bots/message-reply").BotHistoryInputOrigin
+  botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
   /** A rendered Goal event occupies the position immediately before its durable anchor. */
@@ -386,7 +382,13 @@ export interface Message {
 export interface QueuedMessage {
   id: string
   text: string
+  /** Bot-only durable reference; ordinary thread composition does not use it. */
+  botReplyTo?: import("../../shared/bots/contracts").BotMessageReply
+  /** Legacy queued Bot request identity; new composer drafts do not create this field. */
+  botMentions?: import("../../shared/bots/contracts").BotMessageMention[]
   attachmentModelBlocks?: string
+  /** Main-issued Bot attachment receipts; kept separately from user-editable text. */
+  botInputFileIds?: string[]
   attachmentDisplayPrefix?: string
   skillBlock?: string
   pendingMentions?: import("../../shared/mods/v2/composer-mentions").ComposerPendingMention[]
@@ -394,8 +396,17 @@ export interface QueuedMessage {
   fileOnly?: boolean
   skillName?: string
   skillDescription?: string
+  botExplicitSkill?: import("../../shared/bots/skill-selection").BotSkillSelection
+  botSkillTarget?:
+    | { kind: "main" }
+    | { kind: "work"; workId: string }
+    | { kind: "create"; title: string; path: string }
+    | { kind: "create"; title: string; projectId: string }
   builtinBrowser?: boolean
   modelId?: string
+  /** Explicit link/unlink parks old drafts across remount/restart. */
+  parkedForConversationLink?: boolean
+  botHandoffTarget?: { botId: string; workId: string; runId?: string }
   handoffRequestedAt?: Date
   created_at: Date
   updated_at: Date

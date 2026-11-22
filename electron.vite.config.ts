@@ -57,6 +57,16 @@ function copyResources(): { name: string; closeBundle: () => Promise<void> } {
           copyFileSync(resolve("node_modules/typescript/lib", name), resolve(authoringLibs, name))
       }
 
+      // Preserve the original notices for adapted Bot code in packaged builds.
+      const botNotices = resolve("out/resources/notices")
+      mkdirSync(botNotices, { recursive: true })
+      for (const [source, name] of [
+        ["src/renderer/src/components/bots/animation/LICENSE.hermes", "hermes-bots-animation.txt"],
+        ["src/renderer/src/components/bots/animation/vendor/README.md", "grok-avatar-source.md"],
+        ["src/renderer/src/components/bots/EDITOR-SOURCES.md", "grok-group-editor-source.md"]
+      ])
+        copyFileSync(resolve(source), resolve(botNotices, name))
+
       // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
       // require("./generated/*.js") 加载，因此这里把源码副本同步到
       // out/main/generated，保证开发和构建产物都能命中相对路径。
@@ -126,7 +136,10 @@ export default defineConfig({
       },
       lib: {
         entry: {
-          index: "src/main/index.ts",
+          index: "src/main/bootstrap.ts",
+          application: "src/main/index.ts",
+          "bot-browser-host": "src/main/bots/browser-host-entry.ts",
+          "bot-browser-toolbar-preload": "src/main/bots/browser-toolbar-preload.ts",
           "browser-native-host": "src/main/browser/chrome/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
           "code-exec-helper": "src/main/code-exec/helper-entry.ts",
@@ -135,7 +148,9 @@ export default defineConfig({
           "mods-cli": "src/main/mods/devtools/cli-entry.ts",
           "mods-authoring-preflight": "src/main/mods/devtools/authoring-preflight-entry.ts",
           // Test-only exports share the production module instances. Absent in normal builds.
-          ...(process.env.CMB_MODS_E2E === "1" ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" } : {})
+          ...(process.env.CMB_MODS_E2E === "1" ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" } : {}),
+          ...(process.env.CMB_BOTS_E2E === "1" ? { "bots-browser-e2e": "tests/support/bots-browser-e2e-entry.ts" } : {}),
+          ...(process.env.CMB_BOT_APP_E2E === "1" ? { "bots-app-e2e": "tests/support/bots-app-e2e-entry.ts" } : {})
         },
         formats: ["cjs"]
       },

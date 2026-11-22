@@ -2,10 +2,10 @@ import { createHash } from "node:crypto"
 import type { Plugin } from "vite"
 
 const dependency = "@radix-ui/react-scroll-area"
-// Review this transform when upgrading Radix. Only the audited 1.2.10 files qualify.
+// Review this transform when upgrading Radix. Only the audited 1.2.12 files qualify.
 const upstream: Readonly<Record<string, string>> = {
-  mjs: "095677e3de5b3701e3695bc45acc9fb5c38c15dbad25bf0eb51eaec66b2ca940",
-  js: "32ef56e6ce1fa7692cc9bce5265ed644791ed315388658796e7363bbd7b1b086"
+  mjs: "3b667e0a1704e61a556cf4e3956d97372f92d6c70d700dc09301a95f00e67af1",
+  js: "66cd3ddb596617bc5e35325e8634e06b97f34132bd91505da1adf0aee829b749"
 }
 const original = [
   '    document.addEventListener("wheel", handleWheel, { passive: false });',
@@ -31,7 +31,7 @@ export function radixScrollbarWheel(): Plugin {
       const digest = createHash("sha256").update(code).digest("hex")
       const offset = code.indexOf(original)
       if (digest !== upstream[match[1]] || offset < 0 || code.lastIndexOf(original) !== offset)
-        this.error(`Expected Radix ScrollArea 1.2.10 for the renderer wheel transform (${path})`)
+        this.error(`Expected Radix ScrollArea 1.2.12 for the renderer wheel transform (${path})`)
       // Preserve the original scrollbar-only wheel handler, edge behavior and pointer drag.
       return { code: code.slice(0, offset) + scoped + code.slice(offset + original.length), map: null }
     }

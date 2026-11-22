@@ -130,6 +130,8 @@ import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
 import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
 import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
+import { FeatureBotLinkButton, linkFeatureToBot } from "./FeatureBotLinkButton"
+import type { BotFeatureTarget } from "../../../../shared/bots/feature"
 import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
 import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
@@ -3696,13 +3698,17 @@ function FeatureCreateDialog({
   onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
   onDeployUnitToggle: (deployUnitIdMapping: string, checked: boolean) => void
   onOpenDeployUnitSettings: () => void
-  onSubmit: (acknowledgeEntryRequirements?: boolean) => void
+  onSubmit: (target: BotFeatureTarget | null, acknowledgeEntryRequirements?: boolean) => void
 }): React.JSX.Element {
   const [acknowledgedNodePlan, setAcknowledgedNodePlan] = useState<string | null>(null)
   const [pathPickerId, setPathPickerId] = useState<string | null>(null)
   const [dialogContentElement, setDialogContentElement] = useState<HTMLDivElement | null>(null)
   const workspaceInputRef = useRef<HTMLInputElement>(null)
   const dialogTitleRef = useRef<HTMLHeadingElement>(null)
+  const [botTarget, setBotTarget] = useState<BotFeatureTarget | null>(null)
+  useEffect(() => {
+    setBotTarget(null)
+  }, [project?.projectId, mode])
   const editing = mode === "edit"
   const featureNameError = getHarnessNameError("特性名称", featureName)
   const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
@@ -4038,7 +4044,7 @@ function FeatureCreateDialog({
             event.preventDefault()
             if (readOnly || !workspacePath.trim() ||
               (nodePlan?.entryInputFallbacks?.length && acknowledgedNodePlan !== nodePlan.planId)) return
-            onSubmit(nodePlan?.planId === acknowledgedNodePlan)
+            onSubmit(editing ? null : botTarget, nodePlan?.planId === acknowledgedNodePlan)
           }}
         >
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -4138,6 +4144,16 @@ function FeatureCreateDialog({
             </div>
           )}
           <DialogFooter>
+            {!editing && (
+              <div className="min-w-0 sm:mr-auto sm:max-w-[55%]">
+                <FeatureBotLinkButton
+                  mode="create"
+                  target={botTarget}
+                  onSelect={setBotTarget}
+                  disabled={creating}
+                />
+              </div>
+            )}
             <Button
               type="button"
               variant="ghost"
@@ -7887,6 +7903,16 @@ function FeatureDetailPage({
                         Mock
                       </span>
                     )}
+                    <div className="ml-auto">
+                      <FeatureBotLinkButton
+                        key={detailKey}
+                        mode="detail"
+                        projectId={detail.project.projectId}
+                        slug={detail.run.slug}
+                        title={detail.run.title}
+                        disabled={projectInteractionDisabled || detail.run.featureStatus === "archived"}
+                      />
+                    </div>
                   </div>
                   <p className="mt-1.5 max-w-3xl text-xs leading-5 text-muted-foreground">
                     {detail.run.source?.label ? `${detail.run.source.label}` : ""}
@@ -11160,7 +11186,7 @@ function EnterpriseHarnessBoardView({
     [featureMappings, featureWorkspace, handleSelectFeaturePath]
   )
 
-  const handleSubmitFeature = useCallback(async (acknowledgeEntryRequirements = false): Promise<void> => {
+  const handleSubmitFeature = useCallback(async (target: BotFeatureTarget | null, acknowledgeEntryRequirements = false): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
     const feature = sanitizeHarnessNameInput(featureName).trim()
     if (!feature) {
@@ -11239,6 +11265,18 @@ function EnterpriseHarnessBoardView({
         ? await window.api.nodeComposition.create({ ...featureNativePlan.scope, planId: featureNativePlan.plan.planId, feature: featureInput, acknowledgeEntryRequirements })
         : await window.api.harnessBoard.createFeature(featureInput)
       setFeatureNativePlan(null)
+
+      if (target) {
+        try {
+          await linkFeatureToBot(result.projectId, result.slug, target)
+          toast.success("特性已创建并关联到 " + target.label)
+        } catch (error) {
+          toast.error("特性已创建，关联失败：" + cleanIpcError(error), {
+            description: "可在特性详情中重新关联。"
+          })
+        }
+      }
+
       setFeatureDialogProject(null)
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
@@ -11639,12 +11677,12 @@ function EnterpriseHarnessBoardView({
   ])
   const featureDialogSubmitting =
     featureDialogMode === "edit" ? updatingFeatureDeployUnits : creatingFeatureProjectId !== null
-  const handleSubmitFeatureDialog = useCallback((acknowledgeEntryRequirements = false): void => {
+  const handleSubmitFeatureDialog = useCallback((target: BotFeatureTarget | null, acknowledgeEntryRequirements = false): void => {
     if (featureDialogMode === "edit") {
       void handleSubmitFeatureDeployUnits()
       return
     }
-    void handleSubmitFeature(acknowledgeEntryRequirements)
+    void handleSubmitFeature(target, acknowledgeEntryRequirements)
   }, [featureDialogMode, handleSubmitFeature, handleSubmitFeatureDeployUnits])
   const selectedProjectSessionThread = selectedProjectSession
     ? (threadsById.get(selectedProjectSession.threadId) ?? null)
@@ -11893,6 +11931,17 @@ function EnterpriseHarnessBoardView({
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
+
+  const botDestination = useAppStore((state) => state.botFeatureDestination)
+  useEffect(() => {
+    if (!botDestination || useAppStore.getState().botFeatureDestination !== botDestination) return
+    useAppStore.setState({ botFeatureDestination: undefined })
+    openFeatureDetail(botDestination.projectId, botDestination.slug, botDestination.threadId)
+    if (botDestination.threadId) {
+      markRead(botDestination.threadId)
+      void selectThread(botDestination.threadId, { preserveView: true })
+    }
+  }, [botDestination, openFeatureDetail, selectThread, markRead])
 
   const openProjectSession = useCallback(
     (projectId: string, threadId: string, deleted?: boolean): void => {

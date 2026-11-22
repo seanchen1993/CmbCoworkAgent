@@ -1,0 +1,817 @@
+import { deliverBotImFile } from "./bot-file-delivery"
+import { botImReplyText } from "./bot-reply-text"
+import { botInteractionRoutes } from "./bot-interaction-route"
+import { submitFormattedImReply } from "./submit-formatted-reply"
+import { conversationSwitchedToText } from "./withheld-text-notices"
+import type { LocalBotHost } from "../../bots/host"
+import { botImScopeId, type StoredBotImEvent } from "../../bots/im-gateway-store"
+import type {
+  BotImBinding,
+  BotImBindingPage,
+  BotImEvent,
+  BotImReplacement
+} from "../../../shared/bots/im-channel"
+import type { ImGatewayWsClient } from "./gateway-ws-client"
+import { ImGatewayCommandError } from "./gateway-ws-client"
+import { buildImProactiveReplies } from "./reply-segmentation"
+
+export type BotImGatewayClient = Pick<
+  ImGatewayWsClient,
+  | "getStatus"
+  | "supportsBotChannel"
+  | "botBindingCommand"
+  | "sendAcknowledgement"
+  | "acquireBotPermit"
+  | "renewBotPermit"
+  | "submitReply"
+> &
+  Partial<
+    Pick<
+      ImGatewayWsClient,
+      | "deliveryOrder"
+      | "supportsMarkdownReplies"
+      | "supportsBotCards"
+      | "supportsBotFiles"
+      | "supportsParallelBotFiles"
+      | "supportsBotFileReceipts"
+      | "botFileCommand"
+    >
+  >
+
+/** Authenticated IM -> local Bot adapter. Renderer has no event injection API. */
+export class BotImChannelService {
+  private timer?: ReturnType<typeof setInterval>
+  private pumping = false
+  private stopped = false
+  private nextSync = 0
+  private nextGroupSync = 0
+  private readonly groupsToSync = new Set<string>()
+  private syncing = false
+  private activeUploads = 0
+  private checkingReceipts = false
+  private epoch = 0
+  private resolvedHost?: LocalBotHost
+  private unsubscribeOutbox?: () => void
+  private deliveryWake?: ReturnType<typeof setImmediate>
+  private getHost(): LocalBotHost {
+    if (!this.resolvedHost) {
+      this.resolvedHost = this.resolveHost()
+      this.unsubscribeOutbox = this.resolvedHost.imChannel.onEnqueued(() => this.scheduleDelivery())
+    }
+    return this.resolvedHost
+  }
+  private scheduleDelivery(): void {
+    if (this.stopped || this.deliveryWake) return
+    // Coalesce a transaction's writes and claim only after its synchronous commit.
+    this.deliveryWake = setImmediate(() => {
+      this.deliveryWake = undefined
+      this.deliverPending()
+    })
+  }
+  private readonly receiving = new Map<string, Promise<void>>()
+  constructor(
+    private readonly client: BotImGatewayClient,
+    private readonly realm: string,
+    private readonly resolveHost: () => LocalBotHost,
+    private readonly reportError: (error: unknown) => void = console.error,
+    private readonly usesTextReplies = (key: string) =>
+      conversationSwitchedToText(key, console.warn)
+  ) {
+    this.releaseTransport = botInteractionRoutes.setTransport(
+      (realm, principal) =>
+        !this.stopped &&
+        realm === this.realm &&
+        this.client.supportsBotCards?.() === true &&
+        this.client.getStatus().principalId === principal
+    )
+  }
+  private readonly releaseTransport: () => void
+
+  headDeliveryOrder(conversationKey: string): number | null {
+    const principal = this.client.getStatus().principalId
+    if (this.stopped || !principal || !this.client.supportsBotChannel()) return null
+    return this.getHost().imChannel.headDeliveryOrder(botImScopeId(this.realm, principal, conversationKey))
+  }
+
+  isRouteConfirmed(conversation: string, principal: string): boolean {
+    return (
+      !this.stopped &&
+      (this.resolvedHost?.imGateway.hasRoute(this.realm, principal, conversation) ?? false)
+    )
+  }
+  start(): void {
+    this.timer = setInterval(() => {
+      this.expirePermits()
+      void this.pump()
+      void this.syncBindings()
+      this.deliverPending()
+      void this.checkFileReceipts()
+    }, 1000)
+    this.timer.unref?.()
+  }
+  private identity(): string {
+    const principal = this.client.getStatus().principalId
+    if (this.stopped || !this.client.supportsBotChannel() || !principal)
+      throw new Error("请先登录并连接支持 Bot 接入的 IM 网关")
+    return principal
+  }
+  private register(binding: BotImBinding, principal: string): BotImBinding {
+    const host = this.getHost()
+    host.getBot(binding.botId)
+    const route = host.registerImBinding(this.realm, principal, binding)
+    binding = route.binding
+    if (binding.state === "active") {
+      host.imChannel.importImBinding({
+        id: route.id,
+        botId: binding.botId,
+        kind: binding.kind,
+        label: binding.label,
+        channelKey: botImScopeId(this.realm, principal, binding.conversationKey!),
+        version: binding.version
+      })
+      host.setImOnline(binding.botId, route.id, true)
+    } else if (binding.state === "revoked") {
+      try {
+        const local = host.imChannel.get(binding.botId, route.id)
+        host.revokeImBinding(binding.botId, route.id, local.grantVersion)
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND")) throw error
+      }
+      for (const event of host.imGateway.active())
+        if (event.bindingId === route.id) this.cancel(event)
+    }
+    return binding
+  }
+  async replacementTargets(kind: "dm" | "group"): Promise<BotImBinding[]> {
+    const epoch = this.epoch,
+      principal = this.identity(),
+      host = this.getHost()
+    const targets: BotImBinding[] = []
+    // Only locally known Bots can be managed. Bound concurrency avoids flooding
+    // the gateway when an account has many Bots; every page is read.
+    const ids = host.listBotIds()
+    for (let offset = 0; offset < ids.length; offset += 4) {
+      const results = await Promise.all(
+        ids.slice(offset, offset + 4).map(async (id) => {
+          const items: BotImBinding[] = [],
+            seen = new Set<string>()
+          let before: string | undefined
+          do {
+            const page = await this.list(id, before)
+            items.push(
+              ...page.items.filter((binding) => binding.kind === kind && binding.state === "active")
+            )
+            before = page.before ?? undefined
+            if (before && seen.has(before)) throw new Error("IM 绑定分页游标重复")
+            if (before) seen.add(before)
+          } while (before)
+          return items
+        })
+      )
+      if (epoch !== this.epoch || principal !== this.identity())
+        throw new Error("连接已变化，请刷新绑定")
+      targets.push(...results.flat())
+    }
+    return targets
+  }
+  async create(
+    botId: string,
+    kind: "dm" | "group",
+    operationId: string,
+    replace?: BotImReplacement
+  ): Promise<BotImBinding> {
+    const epoch = this.epoch,
+      principal = this.identity(),
+      bot = this.getHost().getBot(botId)
+    if (bot.archived || bot.deleting) throw new Error("请先恢复 Bot")
+    if (replace) {
+      await this.checkReplacement(kind, replace)
+      if (epoch !== this.epoch || principal !== this.identity())
+        throw new Error("连接已变化，请刷新绑定")
+    }
+    const value = await this.client.botBindingCommand(
+      { action: "create", botId, kind, label: bot.name.slice(0, 100) },
+      operationId
+    )
+    if ("items" in value || principal !== this.identity()) throw new Error("IM 身份已变化，请刷新")
+    if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
+    if (value.state !== "active" && (kind === "dm" || replace)) {
+      // Generate the new proof first so a create failure leaves the old route intact.
+      // Retrying uses the same create operation and the gateway's idempotent revoke.
+      if (value.state !== "pending" || Date.parse(value.expiresAt) <= Date.now())
+        throw new Error("换绑指令已失效，请刷新后重新生成")
+      const host = this.getHost()
+      this.register(value, principal)
+      const localId = botImScopeId(this.realm, principal, value.id)
+      const saved = host.imGateway.replacement(localId)
+      if (
+        saved &&
+        replace &&
+        (saved.botId !== replace.botId ||
+          saved.bindingId !== replace.bindingId ||
+          saved.version !== replace.version)
+      )
+        throw new Error("同一绑定指令的替换目标已确定，请重新生成指令。")
+      replace = saved ?? replace
+      if (kind === "dm") {
+        // All callers (including retries from older renderers) get the same
+        // replacement behaviour. Never rely on optional renderer metadata.
+        const current = await this.replacementTargets("dm")
+        if (
+          current.length > 1 ||
+          (replace && current.some((binding) => binding.id !== replace!.bindingId))
+        )
+          throw new Error("私聊接入已变化，请重新生成绑定指令。")
+        if (!replace && current[0]) {
+          const binding = current[0]
+          replace = { botId: binding.botId, bindingId: binding.id, version: binding.version }
+        }
+      }
+      if (replace) {
+        await this.checkReplacement(kind, replace)
+        if (epoch !== this.epoch || principal !== this.identity())
+          throw new Error("连接已变化，请刷新绑定")
+        // The generated binding ID is stable across lost replies and restarts.
+        host.imGateway.rememberReplacement(localId, replace)
+        await this.revoke(replace.botId, replace.bindingId, replace.version)
+      }
+      if (epoch !== this.epoch || principal !== this.identity())
+        throw new Error("连接已变化，请刷新绑定")
+    }
+    return {
+      ...this.register(value, principal),
+      ...(replace && value.state === "pending" ? { replacedBindingId: replace.bindingId } : {})
+    }
+  }
+  private async checkReplacement(kind: "dm" | "group", replace: BotImReplacement): Promise<void> {
+    const target = await this.remoteBinding(replace.botId, replace.bindingId)
+    if (
+      target.kind !== kind ||
+      !(
+        (target.state === "active" && target.version === replace.version) ||
+        (target.state === "revoked" && target.version === replace.version + 1)
+      )
+    )
+      throw new Error("原接入已变化，请重新生成绑定指令。")
+  }
+  private async remoteBinding(botId: string, bindingId: string): Promise<BotImBinding> {
+    this.getHost().getBot(botId)
+    let before: string | undefined
+    const seen = new Set<string>()
+    do {
+      const page = await this.list(botId, before)
+      const binding = page.items.find((item) => item.id === bindingId)
+      if (binding) return binding
+      before = page.before ?? undefined
+      if (before && seen.has(before)) throw new Error("IM 绑定分页游标重复")
+      if (before) seen.add(before)
+    } while (before)
+    throw new Error("绑定不属于当前 Bot")
+  }
+  async list(botId: string, before?: string): Promise<BotImBindingPage> {
+    const epoch = this.epoch,
+      principal = this.identity()
+    this.getHost().getBot(botId)
+    const value = await this.client.botBindingCommand({
+      action: "list",
+      botId,
+      ...(before ? { before } : {})
+    })
+    if (!("items" in value) || principal !== this.identity())
+      throw new Error("IM 身份已变化，请刷新")
+    if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
+    const items = value.items.map((binding) => {
+      if (binding.botId !== botId) throw new Error("网关返回了其他 Bot 的绑定")
+      try {
+        return this.register(binding, principal)
+      } catch (error) {
+        // Keep management/revocation available even when local execution import fails.
+        if (error instanceof Error && "code" in error && error.code === "CONFLICT")
+          return { ...binding, localError: error.message }
+        throw error
+      }
+    })
+    return {
+      ...value,
+      items: this.getHost().imGateway.visibleBindings(this.realm, principal, items)
+    }
+  }
+  async revoke(botId: string, bindingId: string, expectedVersion: number): Promise<BotImBinding> {
+    const epoch = this.epoch,
+      principal = this.identity()
+    await this.remoteBinding(botId, bindingId)
+    if (epoch !== this.epoch || principal !== this.identity())
+      throw new Error("连接已变化，请刷新绑定")
+    const value = await this.client.botBindingCommand({
+      action: "revoke",
+      bindingId,
+      expectedVersion
+    })
+    if ("items" in value || principal !== this.identity()) throw new Error("IM 身份已变化，请刷新")
+    if (epoch !== this.epoch) throw new Error("连接已变化，请刷新绑定")
+    return this.register(value, principal)
+  }
+  remove(botId: string, bindingId: string): void {
+    const principal = this.identity()
+    this.getHost().getBot(botId)
+    this.getHost().imGateway.removeBinding(botId, botImScopeId(this.realm, principal, bindingId))
+  }
+  history(botId: string, bindingId: string, before?: string) {
+    const host = this.getHost(),
+      principal = this.identity()
+    const known = host.imGateway.binding(botImScopeId(this.realm, principal, bindingId))
+    if (!known || known.binding.botId !== botId) throw new Error("绑定不属于当前 Bot")
+    if (known.binding.state === "pending" || known.binding.state === "expired")
+      return { items: [], before: null }
+    try {
+      return host.imChannel.history(botId, known.id, before)
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "NOT_FOUND")
+        return { items: [], before: null }
+      throw error
+    }
+  }
+  receive(payload: BotImEvent): Promise<void> {
+    const epoch = this.epoch
+    const key = payload.event.conversationKey
+    const previous = this.receiving.get(key) ?? Promise.resolve()
+    const run = previous.catch(() => {}).then(() =>
+      epoch === this.epoch ? this.receiveNow(payload, epoch) : undefined
+    ).finally(() => {
+      if (this.receiving.get(key) === run) this.receiving.delete(key)
+    })
+    this.receiving.set(key, run)
+    return run
+  }
+  private async receiveNow(payload: BotImEvent, epoch: number): Promise<void> {
+    const principal = this.identity(),
+      host = this.getHost(),
+      wire = payload.event
+    const old = host.imGateway.event(botImScopeId(this.realm, principal, wire.eventId))
+    if (!old && host.imGateway.active().length >= 16) {
+      await this.client.sendAcknowledgement({
+        type: "busy",
+        eventId: wire.eventId,
+        leaseId: wire.lease.id
+      })
+      return
+    }
+    let receipt: StoredBotImEvent
+    try {
+      receipt = host.imGateway.receive(this.realm, principal, payload)
+    } catch {
+      await this.client.sendAcknowledgement({
+        type: "failed",
+        eventId: wire.eventId,
+        leaseId: wire.lease.id,
+        retryable: false,
+        reasonCode: "BOT_BINDING_NOT_AUTHORIZED"
+      })
+      return
+    }
+    // The gateway updates peerLabel before dispatch. Refresh through the existing binding
+    // protocol without delaying execution; coalesce group traffic and skip redeliveries.
+    if (!old && payload.route.kind === "group") this.groupsToSync.add(payload.route.botId)
+    try {
+      await this.client.sendAcknowledgement({
+        type: "received",
+        eventId: wire.eventId,
+        leaseId: wire.lease.id
+      })
+      if (!["received", "active"].includes(receipt.state)) {
+        await this.ackTerminal(receipt)
+        return
+      }
+      if (old?.state === "active" && old.taskId) {
+        if (old.leaseId !== wire.lease.id || old.expiresAt <= Date.now()) this.cancel(receipt)
+        else
+          await this.client.sendAcknowledgement({
+            type: "accepted",
+            eventId: wire.eventId,
+            leaseId: wire.lease.id
+          })
+        return
+      }
+      const permit = await this.client.acquireBotPermit({
+        eventId: wire.eventId,
+        leaseId: wire.lease.id
+      })
+      const expiry = Date.parse(permit.expiresAt ?? "")
+      if (
+        permit.status !== "granted" ||
+        !Number.isFinite(expiry) ||
+        expiry <= Date.now() ||
+        epoch !== this.epoch ||
+        this.stopped ||
+        principal !== this.identity()
+      ) {
+        this.cancel(receipt)
+        return
+      }
+      const registration = host.imGateway.binding(receipt.bindingId)!
+      this.register(
+        { ...registration.binding, state: "active", conversationKey: wire.conversationKey },
+        principal
+      )
+      host.imGateway.settle(receipt.id, "active", undefined, expiry)
+      if (
+        !receipt.taskId &&
+        /^\/(?:回答|批准|拒绝|门禁批准|门禁拒绝|文字模式|停止托管运行|在当前会话继续托管|开启新会话继续托管)(?:\s|$)/u.test(wire.message.text.trim())
+      ) {
+        const { handleBotImInteractionCommand } = await import("./bot-interaction-command")
+        await this.client.sendAcknowledgement({
+          type: "accepted",
+          eventId: wire.eventId,
+          leaseId: wire.lease.id
+        })
+        await handleBotImInteractionCommand(payload, principal, receipt.id)
+        host.imGateway.settle(receipt.id, "completed")
+        await this.ackTerminal(host.imGateway.event(receipt.id)!)
+        return
+      }
+      if (!receipt.taskId) {
+        const accepted = host.acceptImEvent({
+          bindingId: receipt.bindingId,
+          eventId: receipt.id,
+          messageId: botImScopeId(this.realm, principal, wire.platformMessageId),
+          senderId: botImScopeId(this.realm, principal, payload.route.senderId),
+          text: wire.message.text,
+          mentionsBotIds: [payload.route.botId]
+        })
+        if (!accepted.taskId) throw new Error("已认证的 IM 事件没有创建执行记录")
+        host.imGateway.settle(receipt.id, "active", accepted.taskId)
+      }
+      await this.client.sendAcknowledgement({
+        type: "accepted",
+        eventId: wire.eventId,
+        leaseId: wire.lease.id
+      })
+    } catch (error) {
+      this.cancel(receipt)
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "CONFLICT" &&
+        epoch === this.epoch &&
+        !this.stopped
+      ) {
+        this.reportError(error)
+        await this.ackTerminal(host.imGateway.event(receipt.id)!)
+        return
+      }
+      throw error
+    }
+  }
+  private cancel(event: StoredBotImEvent): void {
+    const host = this.getHost()
+    const current = host.imGateway.event(event.id)
+    // Delayed revocation/renewal responses cannot turn an acknowledged result into an unknown one.
+    if (!current || !["received", "active"].includes(current.state)) return
+    host.imGateway.settle(event.id, "unknown", undefined, 0)
+    for (let batch = 0; batch < 16; batch++) {
+      const tasks = host.imGateway.pendingTasks(event.id)
+      for (const task of tasks) {
+        try {
+          host.cancel(task)
+        } catch (error) {
+          this.reportError(error)
+        }
+      }
+      if (tasks.length < 40) break
+    }
+  }
+  private async ackTerminal(event: StoredBotImEvent): Promise<void> {
+    const wire = event.payload.event
+    await this.client.sendAcknowledgement(
+      event.state === "completed"
+        ? { type: "completed", eventId: wire.eventId, leaseId: event.leaseId }
+        : {
+            type: "failed",
+            eventId: wire.eventId,
+            leaseId: event.leaseId,
+            retryable: false,
+            reasonCode: event.state === "unknown" ? "EVENT_OUTCOME_UNKNOWN" : "BOT_EXECUTION_FAILED"
+          }
+    )
+    this.getHost().imGateway.acknowledged(event.id)
+  }
+  async leaseRevoked(eventId: string): Promise<boolean> {
+    const principal = this.client.getStatus().principalId
+    if (!principal) return false
+    const event = this.getHost().imGateway.event(botImScopeId(this.realm, principal, eventId))
+    if (!event) return false
+    this.cancel(event)
+    return true
+  }
+  private async sync(botIds: string[]): Promise<void> {
+    for (const botId of botIds) {
+      let before: string | undefined
+      const seen = new Set<string>()
+      do {
+        const page = await this.list(botId, before)
+        before = page.before ?? undefined
+        if (before && seen.has(before)) throw new Error("IM 绑定分页游标重复")
+        if (before) seen.add(before)
+      } while (before && !this.stopped)
+    }
+  }
+  private expirePermits(): void {
+    if (this.stopped || !this.client.supportsBotChannel()) return
+    // Independent from slow network requests: an expired grant must stop local execution on time.
+    for (const event of this.getHost().imGateway.active())
+      if (event.expiresAt <= Date.now()) this.cancel(event)
+  }
+  private async syncBindings(): Promise<void> {
+    const now = Date.now(),
+      periodic = now >= this.nextSync
+    if (
+      this.syncing ||
+      this.stopped ||
+      !this.client.supportsBotChannel() ||
+      (!periodic && (!this.groupsToSync.size || now < this.nextGroupSync))
+    )
+      return
+    this.syncing = true
+    try {
+      const botIds = periodic
+        ? this.getHost().imGateway.botIds(this.realm, this.identity())
+        : [...this.groupsToSync]
+      // At most one refresh every five seconds, regardless of group message volume.
+      // Remove before awaiting so new messages during a request still schedule a refresh.
+      for (const id of botIds) this.groupsToSync.delete(id)
+      if (periodic) this.nextSync = now + 30000
+      this.nextGroupSync = now + 5000
+      await this.sync(botIds)
+    } catch (error) {
+      this.reportError(error)
+    } finally {
+      this.syncing = false
+    }
+  }
+  private async pump(): Promise<void> {
+    if (this.pumping || this.stopped || !this.client.supportsBotChannel()) return
+    this.pumping = true
+    const epoch = this.epoch
+    try {
+      const host = this.getHost(),
+        principal = this.identity()
+      const active = host.imGateway.active().filter((event) => {
+        const route = host.imGateway.binding(event.bindingId)
+        return route?.realm === this.realm && route.principal === principal
+      })
+      // Bounded concurrency keeps renewals independent of one slow lease while capping load at 4.
+      for (let offset = 0; offset < active.length && epoch === this.epoch; offset += 4) {
+        await Promise.all(
+          active.slice(offset, offset + 4).map(async (event) => {
+            try {
+              if (!host.imGateway.pendingTasks(event.id).length && event.taskId) {
+                host.imGateway.settle(event.id, host.imGateway.settledTaskOutcome(event.id))
+              } else if (event.expiresAt - Date.now() < 60000) {
+                const permit = await this.client.renewBotPermit({
+                  eventId: event.payload.event.eventId,
+                  leaseId: event.leaseId
+                })
+                const expiry = Date.parse(permit.expiresAt ?? "")
+                if (epoch !== this.epoch || host.imGateway.event(event.id)?.state !== "active")
+                  return
+                if (
+                  permit.status === "granted" &&
+                  Number.isFinite(expiry) &&
+                  expiry > Date.now() &&
+                  !this.stopped
+                )
+                  host.imGateway.settle(event.id, "active", undefined, expiry)
+                else this.cancel(event)
+              }
+            } catch (error) {
+              this.cancel(event)
+              this.reportError(error)
+            }
+          })
+        )
+      }
+      if (epoch !== this.epoch) return
+      for (const event of host.imGateway.pendingAcknowledgements(this.realm, principal))
+        await this.ackTerminal(event)
+    } catch (error) {
+      this.reportError(error)
+    } finally {
+      this.pumping = false
+    }
+  }
+  private deliverPending(): void {
+    if (this.stopped || !this.client.supportsBotChannel()) return
+    try {
+      const host = this.getHost()
+      // beginImDelivery atomically claims only the oldest active row of each conversation.
+      // Once claimed, the next iteration can launch a different recipient immediately.
+      while (true) {
+        // Older gateways retain a single partial upload per desktop socket.
+        const textOnly = this.activeUploads > 0 && !this.client.supportsParallelBotFiles?.()
+        const reply = host.beginImDelivery(textOnly ? "text" : undefined)
+        if (!reply) return
+        if (reply.fileDeliveryId) this.activeUploads++
+        void this.deliver(host, reply).catch(this.reportError)
+      }
+    } catch (error) {
+      this.reportError(error)
+    }
+  }
+
+  private async deliver(host: LocalBotHost, reply: NonNullable<ReturnType<LocalBotHost["beginImDelivery"]>>): Promise<void> {
+    const epoch = this.epoch
+    let release: (() => void) | undefined
+    try {
+      console.info("[Bot IM] reply delivery started", {
+        deliveryId: reply.id,
+        fileCount: reply.files?.length ?? 0,
+        hasText: Boolean(reply.text.trim()),
+        fileTransportAvailable: this.client.supportsBotFiles?.() === true
+      })
+      const registered = host.imGateway.binding(reply.bindingId)
+      if (
+        !registered ||
+        registered.realm !== this.realm ||
+        registered.principal !== this.identity() ||
+        registered.binding.state !== "active" ||
+        !registered.binding.conversationKey
+      ) {
+        host.settleImDelivery(reply.id, "blocked")
+        return
+      }
+      if (this.client.deliveryOrder && reply.deliveryOrder !== undefined) {
+        release = await this.client.deliveryOrder.acquire(registered.binding.conversationKey, "bot", reply.deliveryOrder)
+        if (epoch !== this.epoch) throw new Error("IM 连接已变化")
+        if (!host.mayDeliverImReply(reply.id)) return
+      }
+      const workspace = reply.workId
+        ? host.getWork(reply.botId, reply.workId).workspace?.path
+        : undefined
+      const text = botImReplyText(reply.text, reply.files, workspace ? [workspace] : [])
+      const messages = text.trim()
+        ? buildImProactiveReplies({
+            // A retained pre-upgrade reply may already have an unredacted text receipt.
+            // Version only changed text; keep attachment IDs stable so files are never resent.
+            deliveryId: text === reply.text ? reply.id : `${reply.id}:public-text-v1`,
+            conversationKey: registered.binding.conversationKey,
+            text,
+            format: "markdown"
+          })
+        : []
+      for (const message of messages) {
+        if (this.stopped || epoch !== this.epoch) throw new Error("IM 连接已变化")
+        if (!host.mayDeliverImReply(reply.id)) return
+        const markdown =
+          this.client.supportsMarkdownReplies?.() === true &&
+          !this.usesTextReplies(registered.binding.conversationKey)
+        const result = await submitFormattedImReply(this.client, {
+          ...message,
+          message: { ...message.message, type: markdown ? "markdown" : "text" }
+        })
+        if (result.state === "platform_unknown") {
+          host.settleImDelivery(reply.id, "unknown")
+          return
+        }
+      }
+      for (const [index, file] of (reply.files ?? []).entries()) {
+        if (!this.client.supportsBotFiles?.() || !this.client.botFileCommand)
+          throw new ImGatewayCommandError(
+            "当前网关不支持发送附件，请升级网关；文件可在 App 中查看",
+            { permanent: true }
+          )
+        let progressAt = 0
+        const state = await deliverBotImFile(
+          this.client.botFileCommand.bind(this.client),
+          reply.fileDeliveryId ?? `${reply.id}:file:${index}`,
+          registered.binding.conversationKey,
+          file,
+          () => {
+            if (this.stopped || epoch !== this.epoch || !host.mayDeliverImReply(reply.id))
+              throw new ImGatewayCommandError("附件发送已暂停，连接或绑定发生变化")
+          },
+          {
+            windowed: this.client.supportsBotFileReceipts?.() === true,
+            retryVersion:
+              reply.retryRequested && this.client.supportsBotFileReceipts?.() === true
+                ? reply.receiptVersion
+                : undefined,
+            onReceipt: (result) => {
+              if (result.version !== undefined)
+                host.updateImFileReceiptVersion(reply.id, result.version)
+            },
+            progress: (percent) => {
+              if (percent === 100 || Date.now() - progressAt >= 250) {
+                progressAt = Date.now()
+                host.updateImFileProgress(reply.id, percent)
+              }
+            }
+          }
+        )
+        if (state === "unknown" || state === "sent") {
+          host.settleImDelivery(reply.id, state)
+          return
+        }
+      }
+      host.settleImDelivery(reply.id, "accepted")
+    } catch (error) {
+      if (
+        reply.files?.length &&
+        error instanceof ImGatewayCommandError &&
+        error.permanent &&
+        !this.stopped &&
+        epoch === this.epoch &&
+        host.mayDeliverImReply(reply.id)
+      ) {
+        const route = host.imGateway.binding(reply.bindingId)
+        if (route?.binding.conversationKey) {
+          const notice = buildImProactiveReplies({
+            deliveryId: `${reply.id}:file-error`,
+            conversationKey: route.binding.conversationKey,
+            text: "附件未全部发送成功，请在 App 中查看或重新交付。"
+          })
+          for (const message of notice) await this.client.submitReply(message).catch(() => {})
+        }
+      }
+      host.settleImDelivery(
+        reply.id,
+        error instanceof ImGatewayCommandError && error.resultUnknown
+          ? "unknown"
+          : error instanceof ImGatewayCommandError && error.permanent
+            ? reply.fileDeliveryId
+              ? "failed"
+              : "blocked"
+            : "pending",
+        error instanceof ImGatewayCommandError ? error.reasonCode : undefined
+      )
+      this.reportError(error)
+    } finally {
+      release?.()
+      if (reply.fileDeliveryId) this.activeUploads--
+      this.scheduleDelivery()
+    }
+  }
+  private async checkFileReceipts(): Promise<void> {
+    if (
+      this.checkingReceipts ||
+      this.stopped ||
+      !this.client.supportsBotFileReceipts?.() ||
+      !this.client.botFileCommand
+    )
+      return
+    this.checkingReceipts = true
+    const epoch = this.epoch
+    try {
+      const host = this.getHost(),
+        principal = this.identity()
+      const rows = host.imChannel.receiptBatch().filter((reply) => {
+        const route = host.imGateway.binding(reply.bindingId)
+        return (
+          route?.realm === this.realm &&
+          route.principal === principal &&
+          Boolean(route.binding.conversationKey)
+        )
+      })
+      if (!rows.length) return
+      const result = await this.client.botFileCommand({
+        action: "status",
+        deliveries: rows.map((reply) => ({
+          deliveryId: reply.fileDeliveryId!,
+          conversationKey: host.imGateway.binding(reply.bindingId)!.binding.conversationKey!
+        }))
+      })
+      if (this.stopped || epoch !== this.epoch || principal !== this.identity()) return
+      if (result.state !== "receipts" || !Array.isArray(result.receipts))
+        throw new Error("附件送达回执无效")
+      for (const receipt of result.receipts) {
+        const row = rows.find((row) => row.fileDeliveryId === receipt.deliveryId)
+        if (!row) continue
+        if (receipt.state === "sent" || receipt.state === "failed" || receipt.state === "unknown")
+          host.settleImFileReceipt(row.id, receipt.state, receipt.reasonCode, receipt.version)
+        else if (receipt.state === "missing")
+          host.settleImFileReceipt(row.id, "unknown", "FILE_RECEIPT_MISSING")
+      }
+    } catch (error) {
+      this.reportError(error)
+    } finally {
+      this.checkingReceipts = false
+    }
+  }
+  disconnected(): void {
+    this.epoch++
+    this.nextSync = 0
+    this.nextGroupSync = 0
+    this.groupsToSync.clear()
+    const host = this.resolvedHost
+    if (!host) return
+    host.setImOffline()
+    for (const event of host.imGateway.active()) this.cancel(event)
+  }
+  stop(): void {
+    this.stopped = true
+    this.releaseTransport()
+    this.unsubscribeOutbox?.()
+    if (this.deliveryWake) clearImmediate(this.deliveryWake)
+    if (this.timer) clearInterval(this.timer)
+    this.disconnected()
+  }
+}

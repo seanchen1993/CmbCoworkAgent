@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 
 async function main() {
@@ -14,7 +14,7 @@ async function main() {
     app,
     /fallback=\{<SettingsLoadingShell onClose=\{\(\) => setShowCustomizeView\(false\)\} \/>\}/
   )
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -92,7 +92,7 @@ async function main() {
       checks: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<div id="root" style="height:100vh;position:relative"></div>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const settings = page.getByRole("dialog", { name: "设置", exact: true })
     const backText = settings
       .getByRole("button", { name: "返回应用", exact: true })

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "crypto"
 import { BrowserWindow } from "electron"
-import type { UserInputQuestion, UserInputRequest, UserInputResponse } from "../types"
+import type { UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import { HOST_INPUT_RESUME_CAPABILITIES } from "../../shared/project-runtime/host-types"
 import type {
@@ -21,6 +21,7 @@ type UserInputResult = UserInputResponse | AutoResolvedUserInputResponse
 
 interface PendingUserInput {
   acknowledged?: boolean
+  originalGroupSenderOnly?: boolean
   request: UserInputRequest
   durable: boolean
   resolve: (response: UserInputResult) => void
@@ -35,9 +36,12 @@ type PendingUserInputListener = (request: Readonly<UserInputRequest>) => void
 type RemovedUserInputListener = (requestId: string, threadId: string) => void
 
 interface RequestUserInputParams {
+  originalGroupSenderOnly?: boolean
   threadId: string
   /** Main tool runtime identity, never a question field supplied by a model. */
   toolCallId?: string
+  /** A local conversation-management choice may only be shown and answered in the desktop App. */
+  kind?: UserInputRequest["kind"]
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   autoResolution?: {
@@ -338,6 +342,23 @@ export function isUserInputRequestAcknowledged(requestId: string, threadId: stri
   return pending?.request.threadId === threadId && pending.acknowledged === true
 }
 
+/** Bounded descriptions for a parent's live status; includes only its own child runtimes. */
+export function summarizePendingUserInputForRuntimeThread(threadId: string): { count: number; questions: string[] } {
+  const questions: string[] = []
+  let count = 0
+  for (const [pendingThreadId, requestId] of pendingUserInputThreads) {
+    if (pendingThreadId !== threadId && !pendingThreadId.startsWith(`${threadId}__`)) continue
+    const request = pendingUserInputs.get(requestId)?.request
+    if (!request) continue
+    count++
+    for (const question of request.questions) {
+      if (questions.length === 3) break
+      questions.push(question.question.slice(0, 500))
+    }
+  }
+  return { count, questions }
+}
+
 export function subscribePendingUserInput(listener: PendingUserInputListener): () => void {
   pendingUserInputListeners.add(listener)
   return () => pendingUserInputListeners.delete(listener)
@@ -407,11 +428,11 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
   const {
     threadId,
     questions,
-    autoResolutionMs,
     autoResolution,
     abortSignal,
     allowDeferredRenderer = false
   } = params
+  const autoResolutionMs = params.kind ? undefined : params.autoResolutionMs
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }
@@ -464,6 +485,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
   const request: UserInputRequest = {
     requestId: randomUUID(),
     threadId,
+    ...(params.kind ? { kind: params.kind } : {}),
     questions,
     autoResolutionMs,
     createdAt: new Date().toISOString()
@@ -519,13 +541,19 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
               for (const question of questions) {
                 const firstOption = question.options[0]
                 if (!firstOption) continue
-                answers[question.id] = {
-                  type: "option",
-                  questionId: question.id,
-                  optionIndex: 0,
-                  label: firstOption.label,
-                  description: firstOption.description
-                }
+                answers[question.id] = question.allowMultiple
+                  ? {
+                      type: "options",
+                      questionId: question.id,
+                      options: [{ optionIndex: 0, ...firstOption }]
+                    }
+                  : {
+                      type: "option",
+                      questionId: question.id,
+                      optionIndex: 0,
+                      label: firstOption.label,
+                      description: firstOption.description
+                    }
               }
             }
             const response: AutoResolvedUserInputResponse = {
@@ -540,6 +568,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
           }, autoResolutionMs)
 
     pendingUserInputs.set(request.requestId, {
+      originalGroupSenderOnly: params.originalGroupSenderOnly,
       request,
       durable: Boolean(hostScope),
       resolve,
@@ -558,6 +587,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       key: `user-input:${request.requestId}`
     })
     sendToThread(threadId, "request", request)
+    if (request.kind === "bot_conversation_action") return
     for (const listener of pendingUserInputListeners) {
       try {
         listener(request)
@@ -582,9 +612,13 @@ export function acknowledgeUserInputRequest(requestId: string, threadId: string)
 
 export function submitUserInputResponse(
   response: UserInputResponse,
-  options: { notifyRenderer?: boolean; reason?: string } = {}
+  options: { notifyRenderer?: boolean; reason?: string; desktopMainFrame?: boolean; verifiedGroupSender?: true } = {}
 ): boolean {
   const current = pendingUserInputs.get(response.requestId)
+  if (current?.originalGroupSenderOnly && !options.verifiedGroupSender && !response.ignored)
+    return false
+  if (current?.request.kind === "bot_conversation_action" && !options.desktopMainFrame && !response.ignored)
+    return false
   const store = current && !current.durable ? undefined : hostPersistence?.store(false)
   const durable = store?.get(response.requestId)
   if (!durable && (!current || current.durable)) return false
@@ -605,6 +639,7 @@ export function submitUserInputResponse(
     }
     // Closing a card is presentation only; it does not supply an answer or cancel the operation.
     if (response.ignored) return true
+    if (!validMultipleChoiceResponse(durable.request, response)) return false
     const normalized = normalizeHostResponse(durable.request, response)
     if (!normalized) return false
     response = normalized
@@ -625,30 +660,14 @@ export function submitUserInputResponse(
     }
   }
   if (!current) return false
+  if (!validMultipleChoiceResponse(current.request, response)) return false
   const answers = { ...response.answers }
   for (const [questionId, answer] of Object.entries(answers)) {
-    if (answer?.type !== "options") continue
+    if (answer?.type !== "options" || "options" in answer) continue
     const question = current.request.questions.find((item) => item.id === questionId)
-    if (
-      question?.multiSelect !== true ||
-      answer.questionId !== questionId ||
-      !Array.isArray(answer.optionIndices) ||
-      !answer.optionIndices.length ||
-      answer.optionIndices.length > question.options.length ||
-      new Set(answer.optionIndices).size !== answer.optionIndices.length ||
-      Array.from(answer.optionIndices).some(
-        (index) => !Number.isSafeInteger(index) || index < 0 || index >= question.options.length
-      )
-    )
-      return false
-    const optionIndices = [...answer.optionIndices].sort((a, b) => a - b)
-    answers[questionId] = {
-      type: "options",
-      questionId,
-      optionIndices,
-      labels: optionIndices.map((index) => question.options[index].label),
-      descriptions: optionIndices.map((index) => question.options[index].description)
-    }
+    const normalized = question && normalizeLegacySelection(question, answer)
+    if (!normalized) return false
+    answers[questionId] = normalized
   }
   // Invalid multiple selection leaves the original request and all waiting state intact.
   if (durable) store!.consume(response.requestId)
@@ -666,6 +685,85 @@ export function submitUserInputResponse(
     submittedAt: response.submittedAt ?? new Date().toISOString()
   })
   return true
+}
+
+/** Only the additive Bot protocol is checked here; legacy single-choice callers retain their contract. */
+function validMultipleChoiceResponse(
+  request: UserInputRequest,
+  response: UserInputResponse
+): boolean {
+  const answers = response.answers as Record<string, unknown>
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+  if (!record(answers)) return false
+  if (
+    !request.questions.some((q) => q.allowMultiple) &&
+    !Object.values(answers).some(
+      (answer) => record(answer) && answer.type === "options" && "options" in answer
+    )
+  )
+    return true
+  if (response.ignored) return Object.keys(answers).length === 0
+  if (Object.keys(answers).length !== request.questions.length) return false
+  return request.questions.every((question) => {
+    const answer = answers[question.id]
+    if (!record(answer) || answer.questionId !== question.id) return false
+    if (answer.type === "other") return typeof answer.text === "string" && !!answer.text.trim()
+    const matches = (option: unknown): boolean => {
+      if (!record(option) || !Number.isInteger(option.optionIndex)) return false
+      const expected = question.options[Number(option.optionIndex)]
+      return (
+        !!expected && expected.label === option.label && expected.description === option.description
+      )
+    }
+    if (question.allowMultiple) {
+      if (
+        answer.type !== "options" ||
+        !Array.isArray(answer.options) ||
+        !answer.options.length ||
+        answer.options.length > question.options.length ||
+        !Array.from(answer.options).every(matches)
+      )
+        return false
+      return (
+        new Set(answer.options.map((option) => option.optionIndex)).size === answer.options.length
+      )
+    }
+    if (question.multiSelect && answer.type === "options" && !("options" in answer)) {
+      return legacySelectionIndices(question, answer.optionIndices) !== null
+    }
+    return answer.type === "option" && matches(answer)
+  })
+}
+
+function legacySelectionIndices(question: UserInputQuestion, input: unknown): number[] | null {
+  if (
+    !question.multiSelect ||
+    !Array.isArray(input) ||
+    !input.length ||
+    input.length > question.options.length ||
+    new Set(input).size !== input.length ||
+    Array.from(input).some((index) => !Number.isSafeInteger(index) || !question.options[index])
+  ) {
+    return null
+  }
+  return [...input].sort((a, b) => a - b)
+}
+
+function normalizeLegacySelection(
+  question: UserInputQuestion,
+  answer: Extract<UserInputAnswer, { optionIndices: number[] }>
+): UserInputAnswer | null {
+  if (answer.questionId !== question.id) return null
+  const optionIndices = legacySelectionIndices(question, answer.optionIndices)
+  if (!optionIndices) return null
+  return {
+    type: "options",
+    questionId: question.id,
+    optionIndices,
+    labels: optionIndices.map((index) => question.options[index].label),
+    descriptions: optionIndices.map((index) => question.options[index].description)
+  }
 }
 
 function cancelStoredRequest(requestId: string, reason: string): void {
@@ -736,23 +834,19 @@ function normalizeHostResponse(
         ...(answer.additionalText === undefined ? {} : { additionalText: answer.additionalText })
       }
     } else if (answer.type === "options") {
-      if (
-        !question.multiSelect ||
-        !Array.isArray(answer.optionIndices) ||
-        !answer.optionIndices.length ||
-        new Set(answer.optionIndices).size !== answer.optionIndices.length ||
-        answer.optionIndices.some(
-          (index) => !Number.isSafeInteger(index) || !question.options[index]
-        )
-      )
-        return null
-      const indices = [...answer.optionIndices].sort((a, b) => a - b)
-      answers[question.id] = {
-        type: "options",
-        questionId: question.id,
-        optionIndices: indices,
-        labels: indices.map((index) => question.options[index].label),
-        descriptions: indices.map((index) => question.options[index].description)
+      if ("options" in answer) {
+        answers[question.id] = {
+          type: "options",
+          questionId: question.id,
+          options: answer.options.map(({ optionIndex }) => ({
+            optionIndex,
+            ...question.options[optionIndex]
+          }))
+        }
+      } else {
+        const normalized = normalizeLegacySelection(question, answer)
+        if (!normalized) return null
+        answers[question.id] = normalized
       }
     } else return null
   }

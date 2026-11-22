@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { modsCoreLaunchOptions } from "./support/mods-core-packaged-launch"
-import { projectBuiltPreview } from "./support/project-built-preview"
+import { hashProjectBuiltMain, projectBuiltPreview } from "./support/project-built-preview"
 
 const fixture = mkdtempSync(join(tmpdir(), "cmb-mods-core-launch-test-"))
 const isolated = join(fixture, "profile")
@@ -105,7 +105,19 @@ try {
   assert.equal(projectBuiltPreview(fixture, directory, {}).execution, "packaged-asar")
   pass("Project preview is explicit, digest pinned, and cannot override an explicit package")
 
-  assert.equal(checks.length, 9)
+  const application = join(dirname(entry), "application.js")
+  writeFileSync(entry, 'require("./application.js")')
+  writeFileSync(application, "reviewed-main-bundle")
+  const splitPreview = projectBuiltPreview(fixture, undefined, {
+    ...previewEnv,
+    CMB_PROJECT_EXPECTED_MAIN_SHA256: hashProjectBuiltMain(entry)
+  })
+  splitPreview.assertCurrent()
+  writeFileSync(application, "unreviewed-main-bundle")
+  assert.throws(() => splitPreview.assertCurrent(), /MAIN_CHANGED/)
+  pass("Split Main preview detects changes to the application bundle with a stable launcher")
+
+  assert.equal(checks.length, 10)
 } finally {
   // Only remove the mkdtemp tree created by this test, including links to its own fixtures.
   assert.equal(dirname(resolve(fixture)), resolve(tmpdir()))

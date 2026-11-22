@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, resolve } from "node:path"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture, unexpectedThreadDeletionExports } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
@@ -12,7 +12,7 @@ async function main() {
   const output = resolve("output/project-unified-entry-browser")
   mkdirSync(output, { recursive: true })
   const renderer = resolve("src/renderer/src")
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -59,6 +59,7 @@ async function main() {
         window.fixtureAccount=()=>state.accountRevision++;
         export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state;useAppStore.subscribe=()=>()=>{};
         export const isThreadDeletionPending=()=>false,isThreadRetired=()=>false;
+            ${unexpectedThreadDeletionExports}
         export const adoptThreadSearchSummary=()=>{throw new Error("Search is outside this project entry fixture")};
       `
           }))
@@ -151,7 +152,7 @@ async function main() {
     })
     await page.setContent('<html><body><div id="root"></div></body></html>')
     await page.addStyleTag({ content: compiler.build(candidates) })
-    await page.addScriptTag({ content: bundled.outputFiles[0].text })
+    await page.addScriptTag({ content: bundled })
     await page.getByRole("button", { name: "新建项目", exact: true }).click()
     for (const name of ["项目编号 *", "项目名称 *", "系统编号 *", "系统名称 *", "项目开发配置"])
       assert.equal(

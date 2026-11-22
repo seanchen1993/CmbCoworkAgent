@@ -1,3 +1,12 @@
+import { formatTransferredBotReplyEdit, parseBotMessageReply, verifiedBotMessageReply } from "../../../../shared/bots/message-reply"
+import { parseBotHistoryFileDelivery } from "../../../../shared/bots/file-delivery"
+import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem
+} from "@/components/ui/context-menu"
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
 import { ModCards } from "./ModCards"
@@ -18,8 +27,27 @@ import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview
 } from "@/lib/resource-preview-events"
-import React, { useLayoutEffect, useMemo, useRef, useState } from "react"
+import React, { useContext, useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
+  ChatReplyActionsContext,
+  ChatPresentationContext,
+  ChatDesktopWorkIdContext,
+  ChatActivityPresentationContext,
+  ChatMessageIdentityContext,
+  ChatExecutionDetailsContext,
+  ChatExecutionCardCallIdsContext,
+  ChatFoldedToolCallsContext,
+  ChatToolPresentationContext,
+  ChatMessagePresentationContext,
+  ChatUserTextPresentationContext
+} from "./chat-presentation-context"
+import { BotMessageActions } from "@/components/bots/BotMessageActions"
+import { BotDeliveredFiles } from "@/components/bots/BotDeliveredFile"
+import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
+import { botToolResultStatus } from "@/lib/bot-tool-result-status"
+import { isBotExecutionTool, visibleBotDelivery } from "@/lib/bot-execution-visibility"
+import {
+  Reply,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -57,6 +85,7 @@ import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { FunctionSite } from "./FunctionSite"
 import { FunctionToolGroup } from "./FunctionToolGroup"
+import { useModsChatScope } from "@/lib/mods-chat-scope"
 import { FunctionMessageText } from "./FunctionMessageText"
 import { formatMessageTimeLabel, getAssistantStartTime } from "@/lib/message-bubble-timing"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
@@ -217,6 +246,16 @@ function hydrateToolCall(
       ...(toolCall.args || {})
     }
   }
+}
+
+const BOT_TOOL_STATUS_LABELS: Record<ToolCallStatus, string> = {
+  queued: "等待执行",
+  awaiting_approval: "等待确认",
+  running: "处理中",
+  completed: "已返回",
+  failed: "工具失败",
+  interrupted: "已中断",
+  rejected: "已拒绝"
 }
 
 function getToolStatusMeta(status: ToolCallStatus): { label: string; className: string } {
@@ -404,6 +443,23 @@ function MessageBubbleImpl({
   userSendTimeLabel = null,
   searchLocation
 }: MessageBubbleProps): React.JSX.Element | null {
+  const replyActions = useContext(ChatReplyActionsContext)
+  const presentation = useContext(ChatPresentationContext)
+  const desktopWorkId = useContext(ChatDesktopWorkIdContext)
+  const historicalReply = useMemo(() => message.role === "user" && typeof message.content === "string"
+    ? verifiedBotMessageReply(message.content, message.botHistoryInputOrigin?.replyTo)?.reply : undefined,
+    [message])
+  const activeReply = useMemo(() => replyActions?.quoteFor(message), [replyActions, message])
+  const staticReply = activeReply ? undefined : historicalReply
+  const quotedReply = activeReply ?? staticReply
+  const showExecutionDetails = useContext(ChatExecutionDetailsContext)
+  const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
+  const activityPresentation = useContext(ChatActivityPresentationContext)
+  const foldedToolCalls = useContext(ChatFoldedToolCallsContext)
+  const presentTool = useContext(ChatToolPresentationContext)
+  const modsEnabled = useModsChatScope(threadId)
+  const presentMessage = useContext(ChatMessagePresentationContext)
+  const presentUserText = useContext(ChatUserTextPresentationContext)
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
   const toolDisclosureScope = JSON.stringify([threadId, message.id])
@@ -426,16 +482,28 @@ function MessageBubbleImpl({
   const isUser = message.role === "user"
   const pluginOrigin = isUser && isFunctionPluginPromptOrigin(message.prompt_origin)
     ? message.prompt_origin : undefined
+  const historicalSkillName = presentation === "default" && isUser
+    ? message.botHistoryInputOrigin?.explicitSkill?.name : undefined
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
   const reasoningText = useMemo(
-    () => (!isUser ? normalizeVisibleReasoningText(message.reasoning) : ""),
-    [isUser, message.reasoning]
+    () =>
+      !isUser
+        ? normalizeVisibleReasoningText(message.reasoning) ||
+          (presentation === "bot" && typeof message.content === "string"
+            ? splitBotInlineReasoning(message.content).reasoning
+            : "")
+        : "",
+    [isUser, message.reasoning, message.content, presentation]
   )
   const displayMessageContent = useMemo<Message["content"]>(() => {
+    if (isUser && quotedReply && typeof message.content === "string") {
+      const parsed = parseBotMessageReply(message.content)
+      if (parsed?.reply.id === quotedReply.id) return parsed.message
+    }
     if (isUser || !reasoningText) return message.content
     if (typeof message.content === "string") {
       return stripThinkBlocksForDisplay(message.content)
@@ -450,7 +518,20 @@ function MessageBubbleImpl({
       return { ...block, text }
     })
     return changed ? projected : message.content
-  }, [isUser, message.content, reasoningText])
+  }, [isUser, message.content, reasoningText, quotedReply])
+  const editUserMessage = () => {
+    if (!onEditUserMessage || replyActions?.editReady === false) return
+    const transferredQuote = staticReply ?? (activeReply?.sourceThreadId ? activeReply : undefined)
+    // An imported reference has no jump/reply identity in this task. Preserve
+    // its context as ordinary quoted text when editing, never as a foreign ID.
+    replyActions?.setDraftReply(transferredQuote ? null : quotedReply ?? null)
+    onEditUserMessage(replyActions || staticReply ? {
+      ...message,
+      content: transferredQuote && typeof displayMessageContent === "string"
+        ? formatTransferredBotReplyEdit(displayMessageContent, transferredQuote)
+        : displayMessageContent
+    } : message)
+  }
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
     if (typeof displayMessageContent === "string") {
@@ -591,7 +672,7 @@ function MessageBubbleImpl({
 
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(message.content, {
+  const plainTextForCopy = extractMessagePlainText(displayMessageContent, {
     stripSkillUse: isUser && !pluginOrigin,
     stripBuiltinBrowser: isUser && !pluginOrigin
   })
@@ -683,7 +764,7 @@ function MessageBubbleImpl({
     if (typeof displayMessageContent === "string") {
       const displayContent = displayMessageContent
       // Empty content (after potentially stripping the trailing skill-use block below)
-      if (!displayContent.trim()) {
+      if (!displayContent.trim() && !historicalSkillName) {
         return null
       }
 
@@ -695,13 +776,17 @@ function MessageBubbleImpl({
         const skillContent = pluginOrigin
           ? { visibleText: displayContent, skillName: null }
           : parseUserVisibleSkillContent(displayContent)
+        const skillName = pluginOrigin ? null : historicalSkillName ?? skillContent.skillName
         const browserContent = pluginOrigin
           ? { visibleText: displayContent, browserSelected: false }
           : parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
         return (
-          <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
-            {skillContent.skillName && (
-              <SkillChip label={skillContent.skillName} compact className="mr-2" />
+          <div
+            data-user-message-text
+            className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
+          >
+            {skillName && (
+              <SkillChip label={skillName} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
             {messageText(
@@ -713,7 +798,7 @@ function MessageBubbleImpl({
                 data-chat-search-source-start={0}
                 data-chat-search-source-end={displayContent.length}
               >
-                {safeText}
+                {presentation === "bot" && !modsEnabled ? presentUserText?.(message, safeText) ?? safeText : safeText}
               </span>
             )}
           </div>
@@ -724,6 +809,7 @@ function MessageBubbleImpl({
         0,
         (safeText) => <AssistantMessageMarkdown
           isStreaming={isStreaming}
+          botTranscript={presentation === "bot"}
           threadId={threadId}
           messageId={message.id}
           messageGeneration={messageGeneration}
@@ -746,16 +832,20 @@ function MessageBubbleImpl({
             const skillContent = pluginOrigin
               ? { visibleText: displayText, skillName: null }
               : parseUserVisibleSkillContent(displayText)
+            const firstText = displayMessageContent.findIndex(item => item.type === "text" && item.text?.trim())
+            const skillName = pluginOrigin ? null
+              : (index === firstText ? historicalSkillName : undefined) ?? skillContent.skillName
             const browserContent = pluginOrigin
               ? { visibleText: displayText, browserSelected: false }
               : parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
             return (
               <div
                 key={index}
+                data-user-message-text
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
-                {skillContent.skillName && (
-                  <SkillChip label={skillContent.skillName} compact className="mr-2" />
+                {skillName && (
+                  <SkillChip label={skillName} compact className="mr-2" />
                 )}
                 {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
                 {messageText(
@@ -779,6 +869,7 @@ function MessageBubbleImpl({
             (safeText) => <AssistantMessageMarkdown
               key={index}
               isStreaming={isStreaming}
+              botTranscript={presentation === "bot"}
               threadId={threadId}
               messageId={message.id}
               messageGeneration={messageGeneration}
@@ -815,7 +906,7 @@ function MessageBubbleImpl({
                 pendingApproval.tool_call.id === toolCall.id
         )
     const inferredStatus: ToolCallStatus =
-      toolState?.status ||
+      (presentation === "bot" ? botToolResultStatus(resolvedToolCall, result) ?? toolState?.status : toolState?.status) ||
       (needsApproval
         ? "awaiting_approval"
         : result !== undefined
@@ -904,13 +995,61 @@ function MessageBubbleImpl({
   }
 
   // Don't render if there's no content and no tool calls
+  const presentedMessage = presentation === "bot" && !modsEnabled && !pluginOrigin && !message.function_row && !message.function_row_invalid
+    ? presentMessage?.(message) : null
+  if (presentedMessage) return <>{presentedMessage}</>
+
   if (!content && !hasToolCalls && !reasoningText) {
     return null
   }
 
+  const hasDeliveredFiles = presentation === "bot" && message.tool_calls?.some((call, index) => {
+    if (call.name !== "bot_deliver_files") return false
+    const result = toolResults?.get(getWorkerToolUiKey(message.id, call.id, index))
+    return result && !result.is_error && Boolean(visibleBotDelivery(result.content, message.botHistoryDeliveryScope, desktopWorkId))
+  })
+  const replyButton =
+    replyActions &&
+    replyActions.canReply !== false &&
+    (isUser || presentation === "bot" || !isStreaming) &&
+    (plainTextForCopy.trim() || hasDeliveredFiles) ? (
+      <button
+        type="button"
+        className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+        aria-label="回复消息"
+        title="回复"
+        onClick={() => replyActions.reply(message.id)}
+      >
+        <Reply className={presentation === "bot" ? "size-4" : "size-3"} />
+      </button>
+    ) : null
+  // Keep Bot stream content mounted when its reply actions become available.
+  const withReplyMenu = (bubble: React.ReactElement) =>
+    replyButton || (presentation === "bot" && !isUser) ? (
+      <ContextMenu>
+        <ContextMenuTrigger asChild disabled={!replyButton}>
+          {bubble}
+        </ContextMenuTrigger>
+        {replyButton && (
+          <ContextMenuContent data-bot-popup>
+            <ContextMenuItem onSelect={() => replyActions!.reply(message.id)}>
+              <Reply size={15} />
+              回复
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => void handleCopyMessage()}>
+              <Copy size={15} />
+              复制
+            </ContextMenuItem>
+          </ContextMenuContent>
+        )}
+      </ContextMenu>
+    ) : (
+      bubble
+    )
+
   if (isUser) {
-    return (
-      <div className="group flex justify-end overflow-hidden py-4">
+    return withReplyMenu(
+      <div data-message-bubble="user" className="group flex justify-end overflow-hidden py-4">
         <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1">
           {pluginOrigin && (
             <span data-plugin-prompt-source={pluginOrigin.name}
@@ -920,6 +1059,7 @@ function MessageBubbleImpl({
             </span>
           )}
           <div
+            data-message-body
             className={cn(
               "min-w-0 max-w-full overflow-hidden rounded-lg p-3",
               goalUserSetMessage || goalUserControlMessage
@@ -927,6 +1067,24 @@ function MessageBubbleImpl({
                 : "bg-primary/10"
             )}
           >
+            {staticReply && (
+              <div className="bot-group-reply-preview" aria-label="原消息引用">
+                <Reply size={14} />
+                <span>“{cleanUserAttachmentContentForDisplay(staticReply.preview ?? staticReply.text)}”</span>
+              </div>
+            )}
+            {activeReply && replyActions && (
+              <button
+                type="button"
+                className="bot-group-reply-preview"
+                disabled={Boolean(activeReply.sourceThreadId)}
+                aria-label={activeReply.sourceThreadId ? "来自主对话的引用" : "跳转到被回复的消息"}
+                onClick={() => replyActions.jump(activeReply)}
+              >
+                <Reply size={14} />
+                <span>“{cleanUserAttachmentContentForDisplay(activeReply.preview ?? activeReply.text)}”</span>
+              </button>
+            )}
             <div
               ref={userContentRef}
               data-chat-search-user-content-collapse-threshold={USER_MESSAGE_COLLAPSED_MAX_PX}
@@ -964,7 +1122,10 @@ function MessageBubbleImpl({
               </button>
             )}
           </div>
-          <div className="flex max-w-full flex-wrap items-center justify-end gap-1">
+          <div
+            data-message-actions
+            className="flex max-w-full flex-wrap items-center justify-end gap-1"
+          >
             {userSendTimeLabel && (
               <time
                 dateTime={userSendTimeLabel}
@@ -974,52 +1135,149 @@ function MessageBubbleImpl({
                 {userSendTimeLabel}
               </time>
             )}
-            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-              <button
-                type="button"
-                onClick={handleCopyMessage}
-                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                title="复制消息"
-                aria-label="复制消息"
-              >
-                {copySuccess ? (
-                  <Check className="size-3 text-status-nominal" />
-                ) : (
-                  <Copy className="size-3" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => onEditUserMessage?.(message)}
-                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                title="编辑后重新发送"
-                aria-label="编辑后重新发送"
-              >
-                <PencilLine className="size-3" />
-              </button>
-              {canSetGoalFromMessage && (
+            {presentation === "bot" ? (
+              <BotMessageActions
+                messageId={message.id}
+                allowReaction={false}
+                replyAction={replyButton}
+                className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+                moreActions={
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleCopyMessage}
+                      aria-label="复制消息"
+                      title="复制消息"
+                      className="rounded p-1 hover:bg-accent"
+                    >
+                      {copySuccess ? <Check className="size-3" /> : <Copy className="size-3" />}
+                    </button>
+                    {onEditUserMessage && (
+                      <button
+                        type="button"
+                        aria-label="编辑后重新发送"
+                        disabled={replyActions?.editReady === false}
+                        title="编辑后重新发送"
+                        className="rounded p-1 hover:bg-accent"
+                        onClick={editUserMessage}
+                      >
+                        <PencilLine className="size-3" />
+                      </button>
+                    )}
+                    {canSetGoalFromMessage && (
+                      <button
+                        type="button"
+                        aria-label="设为 Goal"
+                        className="rounded p-1 hover:bg-accent"
+                        onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                      >
+                        <Flag className="size-3" />
+                      </button>
+                    )}
+                  </>
+                }
+              />
+            ) : (
+              <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                {replyButton}
                 <button
                   type="button"
-                  onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
-                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                  title="设为 Goal"
-                  aria-label="设为 Goal"
+                  onClick={handleCopyMessage}
+                  className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                  title="复制消息"
+                  aria-label="复制消息"
                 >
-                  <Flag className="size-3" />
-                  <span className="text-[11px]">设为目标</span>
+                  {copySuccess ? (
+                    <Check className="size-3 text-status-nominal" />
+                  ) : (
+                    <Copy className="size-3" />
+                  )}
                 </button>
-              )}
-            </div>
+                <button
+                  type="button"
+                  onClick={editUserMessage}
+                  disabled={replyActions?.editReady === false}
+                  className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                  title="编辑后重新发送"
+                  aria-label="编辑后重新发送"
+                >
+                  <PencilLine className="size-3" />
+                </button>
+                {canSetGoalFromMessage && (
+                  <button
+                    type="button"
+                    onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                    title="设为 Goal"
+                    aria-label="设为 Goal"
+                  >
+                    <Flag className="size-3" />
+                    <span className="text-[11px]">设为目标</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
     )
   }
 
-  return (
-    <div className="group overflow-hidden space-y-1.5">
+  const assistantBody = content ? (
+    <div
+      data-message-body
+      className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]"
+    >
+      <ChatMessageIdentityContext.Provider value={message.id}>
+        {content}
+      </ChatMessageIdentityContext.Provider>
+    </div>
+  ) : null
+  const botAssistantActions =
+    presentation === "bot" ? (
+      <BotMessageActions
+        messageId={message.id}
+        replyAction={replyButton}
+        className={cn(
+          !content && "px-3",
+          "opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+        )}
+        moreActions={
+          <>
+            <button
+              type="button"
+              onClick={handleCopyMessage}
+              aria-label="复制消息"
+              title="复制消息"
+              className="rounded p-1 hover:bg-accent"
+            >
+              {copySuccess ? <Check className="size-3" /> : <Copy className="size-3" />}
+            </button>
+            {canForkFromMessage && (
+              <button
+                type="button"
+                disabled={forkFromMessageDisabled}
+                aria-label="从这里 fork"
+                title="从这里 fork"
+                className="rounded p-1 hover:bg-accent"
+                onClick={() => onForkFromMessage?.(message)}
+              >
+                {isForkingThisMessage ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <GitFork className="size-3" />
+                )}
+              </button>
+            )}
+          </>
+        }
+      />
+    ) : null
+
+  return withReplyMenu(
+    <div data-message-bubble="assistant" className="group overflow-hidden space-y-1.5">
       {shouldShowMessageHead && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4">
+        <div data-message-meta className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4">
           <CmbDevClawLogo className="size-5 shrink-0 object-contain" />
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
           {assistantStartTimeLabel && (
@@ -1045,8 +1303,13 @@ function MessageBubbleImpl({
           )}
         </div>
       )}
-      <div className="flex-1 min-w-0 space-y-2 overflow-hidden">
-        {reasoningText && (
+      <div
+        className={cn(
+          "flex-1 min-w-0 space-y-2 overflow-hidden",
+          presentation === "bot" && "bot-assistant-content"
+        )}
+      >
+        {reasoningText && showExecutionDetails && (
           <div className="px-3">
             <button
               type="button"
@@ -1073,10 +1336,25 @@ function MessageBubbleImpl({
             )}
           </div>
         )}
-        {content && (
-          <div className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]">
-            {content}
+        {reasoningText &&
+          !showExecutionDetails &&
+          activityPresentation == null &&
+          isStreaming &&
+          !content &&
+          !hasToolCalls && (
+            <div className="px-3 text-xs text-muted-foreground" role="status">
+              正在思考…
+            </div>
+          )}
+        {presentation === "bot" && content ? (
+          <div className="bot-assistant-content-row">
+            <div className="bot-message-bubble-wrap">
+              {assistantBody}
+              {botAssistantActions}
+            </div>
           </div>
+        ) : (
+          assistantBody
         )}
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
@@ -1153,6 +1431,44 @@ function MessageBubbleImpl({
                         isStreaming={isStreaming}
                       />
                     )
+                  }
+
+                  const safeResult = safe
+                    ? typeof safe.output === "string" ? { ...result, content: safe.output } : undefined
+                    : result
+                  const presented = !modsEnabled || safe ? (
+                    presentation === "bot" &&
+                    !showExecutionDetails &&
+                    resolvedToolCall.name === "request_user_input" &&
+                    inferredStatus === "interrupted" &&
+                    !executionCardCallIds.has(resolvedToolCall.id)
+                      ? presentTool?.(displayCall, safeResult)
+                      : result && !result.is_error && inferredStatus === "completed"
+                        ? presentTool?.(displayCall, safeResult, message.id, message.botHistoryDeliveryScope)
+                        : !result && inferredStatus === "running"
+                          ? presentTool?.(displayCall)
+                          : null
+                    ) : null
+                  const desktopClient = window.api?.bots
+                  const retainedFiles = (!modsEnabled || safe) && !presented && presentation === "default" &&
+                    desktopClient?.authorizeDeliveredFile && result && !result.is_error &&
+                    resolvedToolCall.name === "bot_deliver_files" && inferredStatus === "completed"
+                    ? parseBotHistoryFileDelivery(safeResult?.content ?? "", message.botHistoryDeliveryScope)
+                    : null
+                  if (presented || (retainedFiles?.some(file => file.attachmentPath) && desktopClient))
+                    return (
+                      <React.Fragment key={toolId}>
+                        {presented ?? (
+                          <BotDeliveredFiles files={retainedFiles!} callId={resolvedToolCall.id}
+                            client={desktopClient!} threadId={threadId} assistantMessageId={message.id} />
+                        )}
+                      </React.Fragment>
+                    )
+
+                  if (presentation === "bot" && !showExecutionDetails) {
+                    if (foldedToolCalls.has(toolId) && inferredStatus === "completed") return null
+                    if (!isBotExecutionTool(displayCall, safeResult) ||
+                      (inferredStatus !== "failed" && inferredStatus !== "interrupted")) return null
                   }
 
                   // 工具执行完成后，显示折叠的标题
@@ -1245,7 +1561,7 @@ function MessageBubbleImpl({
                           <div
                             className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${statusMeta.className}`}
                           >
-                            {statusMeta.label}
+                            {presentation === "bot" ? BOT_TOOL_STATUS_LABELS[inferredStatus] : statusMeta.label}
                           </div>
                         </div>
                       </div>
@@ -1332,8 +1648,13 @@ function MessageBubbleImpl({
               )}
           </div>
         )}
-        {shouldShowAssistantActions && (
-          <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
+        {!content && botAssistantActions}
+        {shouldShowAssistantActions && presentation !== "bot" && (
+          <div
+            data-message-actions
+            className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+          >
+            {replyButton}
             <button
               type="button"
               onClick={handleCopyMessage}

@@ -30,27 +30,28 @@ export interface FunctionConversationProjectionSelection {
 
 type SqlRow = Record<string, NativeSqliteValue>
 const SEALED_COLUMN_NAMES = FUNCTION_CONVERSATION_PROJECTION_COLUMNS.map(name => `'${name}'`).join(",")
-// The fork replay key is ordinary storage lineage, never part of a native receipt. Accept
-// both database layouts so installing the additive migration leaves existing seals valid.
-const FORK_LINEAGE_COLUMN = `name = 'fork_replay_key' AND upper(type) = 'TEXT'
-  AND "notnull" = 0 AND dflt_value IS NULL AND pk = 0 AND hidden = 0`
+// The ordinary fork stores lineage and Bot quote metadata outside the native receipt.
+// Accept only the exact nullable TEXT migrations so existing seals remain valid.
+const NULLABLE_FORK_COLUMNS = `name IN ('fork_replay_key','bot_input_projection','bot_fork_reply_origin')
+  AND upper(type) = 'TEXT' AND "notnull" = 0 AND dflt_value IS NULL AND pk = 0 AND hidden = 0`
 // The ordinary generation only selects fragments. Native receipts still reject every
 // physical fragment and fragment state, so no generated value can alter the sealed body.
 const FRAGMENT_GENERATION_COLUMN = `name = 'fragment_generation' AND upper(type) = 'TEXT'
   AND "notnull" = 1 AND dflt_value = quote('') AND pk = 0 AND hidden = 0`
 export const FUNCTION_CONVERSATION_PROJECTION_SCHEMA_QUERY = `SELECT COUNT(*) AS schema_count,
-  COALESCE(SUM(${FORK_LINEAGE_COLUMN}),0) AS schema_fork_lineage,
+  COALESCE(SUM(${NULLABLE_FORK_COLUMNS}),0) AS schema_fork_columns,
   COALESCE(SUM(${FRAGMENT_GENERATION_COLUMN}),0) AS schema_fragment_generation,
   COALESCE(SUM(hidden <> 0 OR (name NOT IN (${SEALED_COLUMN_NAMES}) AND
-    NOT COALESCE((${FORK_LINEAGE_COLUMN}) OR (${FRAGMENT_GENERATION_COLUMN}),0))),0) AS schema_extra
+    NOT COALESCE((${NULLABLE_FORK_COLUMNS}) OR (${FRAGMENT_GENERATION_COLUMN}),0))),0) AS schema_extra
   FROM pragma_table_xinfo('thread_messages')`
 
 export function assertFunctionConversationProjectionSchema(facts: SqlRow | undefined): void {
-  const lineage = facts?.schema_fork_lineage
+  const forkColumns = facts?.schema_fork_columns
   const generation = facts?.schema_fragment_generation
-  if ((lineage !== 0 && lineage !== 1) ||
+  if (typeof forkColumns !== "number" || !Number.isInteger(forkColumns) ||
+    forkColumns < 0 || forkColumns > 3 ||
     (generation !== 0 && generation !== 1) ||
-    facts?.schema_count !== FUNCTION_CONVERSATION_PROJECTION_COLUMNS.length + lineage + generation ||
+    facts?.schema_count !== FUNCTION_CONVERSATION_PROJECTION_COLUMNS.length + forkColumns + generation ||
     facts?.schema_extra !== 0) fail("MODS_CONVERSATION_PROJECTION_SCHEMA")
 }
 

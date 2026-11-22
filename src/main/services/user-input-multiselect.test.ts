@@ -104,3 +104,37 @@ it("a single-choice request refuses multi answers and still accepts its original
     additionalText: "Keep original note"
   })
 })
+
+it("keeps Bot responses bound to the verified sender and their own multi-select format", async () => {
+  const choices = [
+    { label: "Review", description: "Inspect code" },
+    { label: "Test", description: "Run tests" }
+  ]
+  const pending = requestUserInput({
+    threadId,
+    originalGroupSenderOnly: true,
+    questions: [{ id: "choice", header: "Steps", question: "Choose steps", allowMultiple: true, options: choices }]
+  })
+  void pending.catch(() => {})
+  const requestId = getPendingUserInputForThread(threadId)!.requestId
+  const answer = {
+    type: "options",
+    questionId: "choice",
+    options: [{ optionIndex: 1, ...choices[1] }, { optionIndex: 0, ...choices[0] }]
+  } as const
+  expect(submitUserInputResponse({
+    requestId, answers: { choice: { ...answer, options: [...answer.options] } }
+  })).toBe(false)
+  expect(submitUserInputResponse({
+    requestId,
+    answers: { choice: { type: "options", questionId: "choice", optionIndices: [1], labels: [], descriptions: [] } }
+  }, { verifiedGroupSender: true })).toBe(false)
+  expect(submitUserInputResponse({
+    requestId, answers: { choice: { ...answer, options: new Array(1) } }
+  }, { verifiedGroupSender: true })).toBe(false)
+  expect(getPendingUserInputForThread(threadId)?.requestId).toBe(requestId)
+  expect(submitUserInputResponse({
+    requestId, answers: { choice: { ...answer, options: [...answer.options] } }
+  }, { verifiedGroupSender: true })).toBe(true)
+  expect((await pending).answers.choice).toEqual(answer)
+})

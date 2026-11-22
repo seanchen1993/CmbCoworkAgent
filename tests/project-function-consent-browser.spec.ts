@@ -1,11 +1,11 @@
 /** Actual React native consent; persistence/compiler/VM and IPC have independent real tests. */
 import assert from "node:assert/strict"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium, type Browser } from "playwright"
 
 async function aggregateConsent(browser: Browser, projectOwned = false) {
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -54,7 +54,7 @@ async function aggregateConsent(browser: Browser, projectOwned = false) {
   page.on("pageerror", (error) => errors.push(error.message))
   try {
     await page.setContent('<div id="root"></div>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const button = page.getByRole("button", { name: "确认以上权限并启用项目", exact: true })
     await page.getByText("请填写并保存参数：参数包。", { exact: true }).waitFor()
     if (projectOwned) {
@@ -133,7 +133,7 @@ async function aggregateConsent(browser: Browser, projectOwned = false) {
 }
 
 async function dependencyConsent(browser: Browser) {
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -185,7 +185,7 @@ async function dependencyConsent(browser: Browser) {
   page.on("pageerror", (error) => errors.push(error.message))
   try {
     await page.setContent('<div id="root"></div>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const rules = page.getByRole("region", { name: "依赖功能：generic-rules", exact: true })
     const knowledge = page.getByRole("region", { name: "依赖功能：generic-knowledge", exact: true })
     await rules.waitFor()
@@ -362,7 +362,7 @@ async function dependencyConsent(browser: Browser) {
 }
 
 async function main() {
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -396,7 +396,7 @@ async function main() {
       errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<div id="root"></div>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const approve = page.getByRole("button", { name: "允许本包在当前目录运行", exact: true })
     await approve.waitFor()
     assert(await approve.isEnabled())

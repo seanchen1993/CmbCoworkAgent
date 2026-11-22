@@ -1,0 +1,22 @@
+{"label": "stream-01", "args": ["--import", "tsx", "tests/stream-message-ids.spec.ts"], "exitCode": 1, "seconds": 0.76, "log": "stream-01.log.txt"}
+✓ testExplicitIdWins
+✓ testSummarizationMessagesUseStructuralFiltering
+✓ testFallbackIdIsStableForSameValuesMessage
+✓ testFallbackIdIgnoresGrowingContent
+✓ testFallbackIdChangesWhenStructuralIdentityChanges
+✓ testSystemFallbackIdIsDistinctFromAssistant
+✓ testMessagesAndValuesFallbackIdsAlignForAssistantAndTool
+✓ testSyntheticCheckpointBaselineIncludesCoordinatorCurrentTurnIds
+✓ testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent
+✓ testNormalValuesSnapshotAliasesChangedProviderMessageId
+✓ testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges
+✓ testCurrentRunCompletedAliasSealsProviderOccurrenceAcrossDelayedChunk
+✓ testCurrentRunCompletedAliasReservesSlotBeforeFirstAssistantChunk
+✓ testSparseValuesKeepsCurrentRunProviderOccurrences
+✓ testCurrentRunCompletedAliasAcceptsStableSourceIdForKnownSlot
+✓ testIdlessCurrentRunCompletionReservesStableSlot
+✓ testIdlessCurrentRunCompletionRekeysPreBoundaryPartial
+Error: an id-less completion must render durably before delayed transport chunks arrive: expected first final, got undefined
+    at assertEqual (<repo>/tests/stream-message-ids.spec.ts:34:11)
+    at testFragmentedIdlessCurrentRunCompletionKeepsStableSlot (<repo>/tests/stream-message-ids.spec.ts:1359:3)
+    at runTests (<repo>/tests/stream-message-ids.spec.ts:3091:11)

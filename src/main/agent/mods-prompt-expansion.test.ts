@@ -145,7 +145,7 @@ it("repairs the manual project/slash path and goal reference only within the exa
     // Same direct error as the UI: the retained registry intentionally refuses an installation path.
     expect(await prepare()).toMatchObject({
       accepted: false,
-      reason: `显式选择的技能不存在或已禁用：${name}`
+      reason: `显式选择的技能不存在、已禁用或不在当前可用范围：${name}`
     })
     for (const [trusted, goal] of [
       [false, false],

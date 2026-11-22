@@ -1,0 +1,12 @@
+{
+  "src/main/agent/bot-dispatch-feedback.ts": "962d47aa9a390b88b4212a7565d39de6825f3d59e6843459e35938f0fbb75f39",
+  "src/main/agent/bot-skill-dispatch.test.ts": "42bb898f614de03df19162c4cb5a4aa232d7fc7afbd65c77d381e6df67c411c2",
+  "src/main/bots/store.ts": "14b68c164dd2439b9a7d7788c65af466682a81967c698257771c60c2afb3966c",
+  "src/main/bots/work-projection.test.ts": "cf26af5e5537ea2b5bca092a6d3905d5289c7cf743cdd091f74cef6ea9b17b0f",
+  "src/main/bots/work-tools.test.ts": "c3994f355a82fce4e1fbdb1d02a8cb7c5cb4b1f2215c8a1c0f86ea9f6ee91078",
+  "tests/desktop-agent-invoke-characterization.spec.ts": "200a2ba435ad28c54d361d18214407563a2db3481370f410a5e8493193ea8943",
+  "tests/standard-thread-turn-architecture.spec.ts": "fc1151b609e399ce73488f8119360f5233ef09130a9f597fa22e15dcf933375d",
+  "tests/stream-message-ids.spec.ts": "f5a353d8357130d1deb457395bc5e018a122ba14c4c36eae65262e6a9be0f2b7",
+  "tests/support/bot-slash-skill-fixture.ts": "f2e134e197709d6d30d149dcf552273ce86db2e1073d46a61644c29045800cb8",
+  "tests/bots-task-routing-app.spec.ts": "bfc1a01267214911730559722e33863e3a4d07848cb1f072365ac34043fe18f1"
+}

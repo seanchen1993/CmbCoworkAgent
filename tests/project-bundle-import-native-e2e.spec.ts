@@ -830,7 +830,8 @@ async function archiveAndReadExistingHistory(
       "The real historical Composer must be read-only after archival"
     )
     await chat.getByText("项目已归档，仅可查看历史会话。", { exact: true }).waitFor()
-    assert.equal(await chat.getByText(/Response is not JSON|Unexpected token/).count(), 0)
+    await chat.locator("[data-chat-read-only-reason][role=status]").waitFor()
+    assert.equal(await chat.getByText(/Response is not JSON|Unexpected token|灵件显示更新失败/).count(), 0)
     assert.equal(await page!.getByRole("button", { name: "项目能力", exact: true }).count(), 0)
     await page!.screenshot({
       path: join(fixture.isolated, "archived-existing-conversation-read-only.png"),

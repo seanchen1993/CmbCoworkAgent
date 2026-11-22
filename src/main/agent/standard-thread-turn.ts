@@ -5,6 +5,7 @@ import { isInternalHarnessProjectId } from "../harness-board/internal-project-co
 import { createClawSkillPolicy } from "../mods/claw-skills"
 import { readNativeSkillUsagePolicy } from "../plugins/native-skill-usage"
 import { captureNativeCapabilityContext } from "../mods/project-capability-context"
+import { SelectedModelUnavailableError } from "../models/selection-error"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -22,7 +23,8 @@ import {
   getEnabledPluginSkillSourceMetadata,
   getEnabledSkillsSources,
   getGlobalRoutingMode,
-  getPlugins
+  getPlugins,
+  getStoredBotContextBudget
 } from "../storage"
 import {
   type ProjectModeSkillScope
@@ -44,15 +46,16 @@ import {
 } from "./goals/internal-prompt"
 import { buildOrderedChain } from "./failover"
 import { getManagedRunModelOverride } from "../harness-board/managed-run-model"
-import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import { activateSkillLifecycle, formatSkillHookContext } from "./skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
 import { relocateRetainedExplicitSkill } from "./skill-lifecycle/retained-explicit-skill"
+import { requestedBotSkill } from "../bots/named-skill"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import { resolveModel, type RoutingContext, type RoutingResult } from "../routing"
 import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
 import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
+import { intersectSkillNames } from "../../shared/skill-selection"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
@@ -62,7 +65,7 @@ import {
   type SkillUseBlockMetadata
 } from "../../shared/skill-use-block"
 
-export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat" | "mods"
+export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat" | "mods" | "bot"
 
 export interface StandardThreadMetadata {
   metadata: Record<string, unknown>
@@ -406,6 +409,8 @@ export type PreparedUserPrompt =
   | {
       accepted: true
       content: string
+      /** Actual submit body after rewrite, excluding Hook/skill additional context. */
+      submissionContent: string
       explicitSkillHookContext?: string
     }
   | {
@@ -441,21 +446,25 @@ function isDisabledSkillMatch(skill: SkillLifecycleMatch): boolean {
 }
 
 async function buildSkillLifecycleRegistryForHooks(
-  visibilityScope?: ProjectModeSkillScope
+  visibilityScope?: ProjectModeSkillScope,
+  allowedSkillNames?: readonly string[]
 ): Promise<SkillLifecycleRegistry | null> {
+  if (allowedSkillNames?.length === 0) return null
   const rootSources = await getEnabledSkillsSources()
   const pluginSources = getEnabledPluginSkillSourceMetadata().filter(
     (source) => !visibilityScope || isSkillVisibleForProjectMode(source, visibilityScope)
   )
   const sources = [...rootSources, ...pluginSources]
-  return sources.length > 0 ? new SkillLifecycleRegistry(sources) : null
+  return sources.length > 0 ? new SkillLifecycleRegistry(sources, allowedSkillNames) : null
 }
 
 export async function validateExplicitSkillReference(
   input: { name: string; path: string },
-  scope?: Partial<ProjectModeSkillScope> & { workspacePath?: string; threadId?: string; signal?: AbortSignal }
+  scope?: Partial<ProjectModeSkillScope> & { workspacePath?: string; threadId?: string; signal?: AbortSignal },
+  allowedSkillNames?: readonly string[],
+  exactIdentity = false
 ): Promise<string | null> {
-  if (scope?.workspacePath && scope.threadId) {
+  if (!exactIdentity && scope?.workspacePath && scope.threadId) {
     try {
       input = await relocateRetainedExplicitSkill(input, {
         workspacePath: scope.workspacePath,
@@ -474,9 +483,14 @@ export async function validateExplicitSkillReference(
     boundPluginId: scope.boundPluginId,
     boundPluginName: scope.boundPluginName
   }
-  const registry = await buildSkillLifecycleRegistryForHooks(visibilityScope)
-  const skill = registry?.resolveExplicit({ skillName: input.name, skillPath: input.path })
-  if (!skill || isDisabledSkillMatch(skill)) return `显式选择的技能不存在或已禁用：${input.name}`
+  const skill = await resolveEnabledExplicitSkill(
+    { skillName: input.name, skillPath: input.path }, visibilityScope, allowedSkillNames, exactIdentity
+  )
+  if (!skill) {
+    return allowedSkillNames === undefined
+      ? `显式选择的技能不存在或已禁用：${input.name}`
+      : `显式选择的技能不存在、已禁用或不在当前可用范围：${input.name}`
+  }
   if (typeof scope?.workspacePath === "string" && typeof scope.threadId === "string") {
     try {
       const { getModsManager } = await import("../mods/manager")
@@ -496,10 +510,39 @@ export async function validateExplicitSkillReference(
   return null
 }
 
+/** Resolve names within the current Bot catalog; only the host supplies the installation path. */
+export async function resolveNamedBotSkill(input: { name: string } | { name?: string; request: string; original?: string },
+  allowedSkillNames?: readonly string[]) {
+  const registry = await buildSkillLifecycleRegistryForHooks({ projectMode: false }, allowedSkillNames)
+  const names = "request" in input ? registry?.names() ?? [] : []
+  const name = "request" in input ? requestedBotSkill(input.request, names, input.name) : input.name
+  if ("request" in input && input.original !== undefined) requestedBotSkill(input.original, names, name)
+  const matches = registry?.exactNameMatches(name).filter(skill => !isDisabledSkillMatch(skill)) ?? []
+  if (matches.length !== 1) throw new Error(matches.length
+    ? `存在多个同名技能「${name}」，请先确认唯一的安装项。`
+    : `技能「${name}」不存在、已禁用或不在当前 Bot 的可用范围。`)
+  return { name: matches[0].name, path: matches[0].path }
+}
+
+async function resolveEnabledExplicitSkill(
+  input: { skillName: string; skillPath: string },
+  visibilityScope?: ProjectModeSkillScope,
+  allowedSkillNames?: readonly string[],
+  exactIdentity = false
+): Promise<SkillLifecycleMatch | null> {
+  const registry = await buildSkillLifecycleRegistryForHooks(visibilityScope, allowedSkillNames)
+  const skill = registry?.resolveExplicit(input)
+  if (!skill || isDisabledSkillMatch(skill)) return null
+  if (exactIdentity && (skill.name.trim() !== input.skillName.trim() ||
+      skill.path.trim() !== input.skillPath.trim())) return null
+  return skill
+}
+
 async function activateExplicitSkillFromMessage({
   signal,
   agentId,
   message,
+  exactIdentity,
   workspacePath,
   pluginOutputDir,
   systemId,
@@ -523,6 +566,7 @@ async function activateExplicitSkillFromMessage({
   originalPrompt,
   isPreparationCurrent,
   skillVisibility,
+  allowedSkillNames,
   bindHookAccounting = context => context
 }: {
   signal?: AbortSignal
@@ -531,6 +575,7 @@ async function activateExplicitSkillFromMessage({
   isPreparationCurrent?: () => boolean
   bindHookAccounting?: HookAccountingBinder
   message: string
+  exactIdentity?: boolean
   workspacePath: string
   pluginOutputDir?: string
   systemId?: string
@@ -552,11 +597,12 @@ async function activateExplicitSkillFromMessage({
   onHookResult?: HookResultCallback
   onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   skillVisibility?: ProjectModeSkillScope
+  allowedSkillNames?: readonly string[]
 }): Promise<ExplicitSkillActivation | null> {
   let parsed = parseSkillUseBlock(message)
   if (!parsed) return null
 
-  try {
+  if (!exactIdentity) try {
     const selected = await relocateRetainedExplicitSkill({
       name: parsed.skillName,
       path: parsed.skillPath
@@ -580,17 +626,12 @@ async function activateExplicitSkillFromMessage({
     return { parsed, blocked: true, reason: error instanceof Error ? error.message : String(error) }
   }
 
-  const registry = await buildSkillLifecycleRegistryForHooks(skillVisibility)
-  const skill = registry?.resolveExplicit({
-    skillName: parsed.skillName,
-    skillPath: parsed.skillPath
-  })
-
-  if (!skill || isDisabledSkillMatch(skill)) {
+  const skill = await resolveEnabledExplicitSkill(parsed, skillVisibility, allowedSkillNames, exactIdentity)
+  if (!skill) {
     return {
       parsed,
       blocked: true,
-      reason: `显式选择的技能不存在或已禁用：${parsed.skillName}`
+      reason: `显式选择的技能不存在、已禁用或不在当前可用范围：${parsed.skillName}`
     }
   }
 
@@ -751,7 +792,10 @@ export async function prepareStandardUserPrompt({
   rawMessage,
   initialModelInput,
   trustedExplicitSkill,
+  exactTrustedExplicitSkill,
   allowExplicitSkillFromMessage = true,
+  allowedSkillNames,
+  internalGoalInput,
   threadId,
   workspacePath,
   turnState,
@@ -773,8 +817,14 @@ export async function prepareStandardUserPrompt({
    * trusting a user-authored CMBDEVCLAW-SKILL-USE block.
    */
   trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Host-selected skill catalog, intersected with existing run restrictions. */
+  allowedSkillNames?: readonly string[]
+  /** Desktop Bot drafts preserve the precise catalog identity through dispatch. */
+  exactTrustedExplicitSkill?: boolean
   /** Desktop transport payloads are trusted by default; untrusted transports disable this. */
   allowExplicitSkillFromMessage?: boolean
+  /** Trusted caller provenance; absent preserves existing callers' marker handling. */
+  internalGoalInput?: boolean
   threadId: string
   workspacePath: string
   turnState: PromptPreparationTurnState
@@ -810,6 +860,7 @@ export async function prepareStandardUserPrompt({
     message: explicitSkillActivationMessage,
     originalPrompt: rawMessage,
     isPreparationCurrent,
+    exactIdentity: Boolean(trustedExplicitSkillBlock && exactTrustedExplicitSkill),
     workspacePath,
     pluginOutputDir: harnessAgentContext.pluginOutputDir,
     systemId: harnessAgentContext.systemId,
@@ -821,7 +872,8 @@ export async function prepareStandardUserPrompt({
     skillUseTracker: turnState.skillUseTracker,
     onHookResult,
     onHookSkippedFactory,
-    skillVisibility
+    skillVisibility,
+    allowedSkillNames
   })
   if (isPreparationCurrent && !isPreparationCurrent()) {
     return {
@@ -844,9 +896,9 @@ export async function prepareStandardUserPrompt({
     ? [originalModelSkill.rest.trimEnd(), explicitSkillActivation.parsed.block].join("\n\n")
     : initialModelInput
   preparedMessage = canonicalModelInput
-  const isInternalGoalModelInput =
+  const isInternalGoalModelInput = internalGoalInput ?? (
     initialModelInput.startsWith("[Starting active goal]") ||
-    initialModelInput.startsWith("[Continuing active goal]")
+    initialModelInput.startsWith("[Continuing active goal]"))
   const hookVisibleMessage = isInternalGoalModelInput ? initialModelInput : rawMessage
   const promptSubmitContext: HookContext = bindHookAccounting({
     signal,
@@ -897,6 +949,10 @@ export async function prepareStandardUserPrompt({
     promptSubmitResult?.updatedInput?.message ??
     promptSubmitResult?.updatedInput?.prompt ??
     promptSubmitResult?.updatedInput?.userPrompt
+  const hasUpdatedMessage = typeof updatedMessage === "string" &&
+    (updatedMessage.length > 0 || internalGoalInput === false)
+  const submissionContent = hasUpdatedMessage
+    ? updatedMessage : initialModelInput
   if (isInternalGoalModelInput) {
     preparedMessage = buildInternalGoalPromptFromHookResult(canonicalModelInput, {
       updatedInput: promptSubmitResult?.updatedInput,
@@ -905,8 +961,10 @@ export async function prepareStandardUserPrompt({
         promptSubmitResult?.additionalContext
       ]
     })
-  } else if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
-    preparedMessage = applyPromptRewritePreservingGoalMarker(initialModelInput, updatedMessage)
+  } else if (hasUpdatedMessage) {
+    preparedMessage = internalGoalInput === false
+      ? updatedMessage
+      : applyPromptRewritePreservingGoalMarker(initialModelInput, updatedMessage)
   }
   if (
     !isInternalGoalModelInput &&
@@ -928,6 +986,16 @@ export async function prepareStandardUserPrompt({
   if (!isInternalGoalModelInput && promptContextBlocks.length > 0) {
     preparedMessage = `${promptContextBlocks.join("\n\n")}\n\n${preparedMessage}`
   }
+  // Trusted Bot submissions use the same refusal path for an input fully
+  // removed by its submit Hook, on both a new run and an in-flight addition.
+  if (internalGoalInput === false && promptSubmitResult && hasUpdatedMessage && !preparedMessage.trim()) {
+    return {
+      accepted: false,
+      blockedBy: "user_prompt_submit",
+      reason: "输入处理后没有可提交的内容。",
+      hookResult: promptSubmitResult
+    }
+  }
   if (promptSubmitResult?.systemMessage) {
     onSystemMessage?.(promptSubmitResult.systemMessage)
   }
@@ -937,6 +1005,7 @@ export async function prepareStandardUserPrompt({
   return {
     accepted: true,
     content: preparedMessage,
+    submissionContent,
     explicitSkillHookContext: explicitSkillActivation?.hookContext
   }
 }
@@ -967,6 +1036,7 @@ export async function resolveStandardTurnRouting(
       result: {
         resolvedModelId: managedModelId,
         resolvedTier: "premium",
+        // Retain the existing routing reason in telemetry.
         routeReason: "managed-ultra",
         fallbackChain: [],
         layer: "pinned"
@@ -984,7 +1054,7 @@ export async function resolveStandardTurnRouting(
     continuation: input.continuation,
     routingMode: input.routingMode ?? getGlobalRoutingMode()
   }).catch((error) => {
-    if (error instanceof IdleModelServiceHoursError) throw error
+    if (error instanceof SelectedModelUnavailableError) throw error
     return null
   })
   const effectiveModelId = result?.resolvedModelId ?? input.requestedModelId
@@ -1017,11 +1087,21 @@ export function createStandardTurnTrace(input: {
 }
 
 export interface RemoteTurnPolicy {
+  allowedToolNames?: string[]
+  allowedSkillNames?: string[]
+  allowedExpertNames?: string[]
+  disableHooks?: boolean
+  /** Treat untrusted transport text literally, without slash/prefix controllers. */
+  disableMessageControls?: boolean
+  /** Explicit transport isolation; existing disableAgentsPrompt semantics stay unchanged. */
+  omitPromptExtensions?: boolean
   disableScheduler?: boolean
   disableSkillEvolution?: boolean
   disableRequestUserInput?: boolean
   disableSubagents?: boolean
   disableMemoryInjection?: boolean
+  /** Trusted shared-task policy; excludes desktop personal memory and identity. */
+  sharedTaskContext?: boolean
   disableAgentsPrompt?: boolean
   disableMcpTools?: boolean
   blockedToolNames?: string[]
@@ -1074,8 +1154,29 @@ function applyRemoteTurnPolicy(
     ...(policy.disableRequestUserInput ? { enableRequestUserInput: false } : {}),
     ...(policy.disableSubagents ? { disableSubagents: true } : {}),
     ...(policy.disableMemoryInjection ? { disableMemoryInjection: true } : {}),
+    ...(policy.sharedTaskContext ? { sharedTaskContext: true, memoryEnabled: false } : {}),
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
+    ...(policy.allowedToolNames !== undefined ? { allowedToolNames: policy.allowedToolNames } : {}),
+    ...(policy.allowedSkillNames !== undefined
+      ? {
+          allowedSkillNames: intersectSkillNames(
+            options.allowedSkillNames,
+            policy.allowedSkillNames
+          )
+        }
+      : {}),
+    ...(policy.allowedExpertNames !== undefined
+      ? { allowedExpertNames: policy.allowedExpertNames }
+      : {}),
+    ...(policy.omitPromptExtensions
+      ? {
+          harnessAgentsPrompt: undefined,
+          pluginPromptInject: undefined,
+          additionalAgentsWorkspacePaths: [],
+          additionalAgentsWorkspaceMappings: []
+        }
+      : {}),
     ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
     ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {}),
     ...(policy.autoApproveFileEdits ? { autoApproveFileEdits: true } : {}),
@@ -1086,6 +1187,8 @@ function applyRemoteTurnPolicy(
 export function prepareStandardThreadRuntimeFactory(
   input: StandardThreadRuntimeFactoryInput
 ): PreparedThreadRuntimeFactory {
+  // Snapshot once per run so a file edit cannot change the budget during model failover.
+  const botContextBudget = input.source === "bot" ? getStoredBotContextBudget() : undefined
   const optionsForModel = (modelId?: string): CreateAgentRuntimeOptions => {
     const callerOptions =
       typeof input.baseOptions === "function" ? input.baseOptions() : input.baseOptions
@@ -1099,6 +1202,8 @@ export function prepareStandardThreadRuntimeFactory(
         },
         input.remotePolicy
       ),
+      ...(input.source === "bot" ? { disableModsRuntime: true } : {}),
+      ...(botContextBudget !== undefined ? { contextBudgetTokens: botContextBudget } : {}),
       // Keep ordinary commands attached to the transport's cancellation and permit.
       ...(input.runLease.owner !== "desktop" && { autoBackgroundHandoff: false }),
       modelId,

@@ -1,3 +1,4 @@
+import type { BotMessageReply } from "../../shared/bots/contracts"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { publishedThreadMessageFragmentsSql } from "../db/thread-message-fragment-storage"
 import { legacySearchProjectionIssue } from "../checkpointer/runtime-projection-protocol"
@@ -54,7 +55,9 @@ export function searchDurableThreadMessages(
   threadId: string,
   rawQuery: string,
   options: ThreadMessageSearchOptions = {},
-  checkCancelled: () => void = () => {}
+  checkCancelled: () => void = () => {},
+  resolveVerifiedReplies?: (ids: string[]) => ReadonlyMap<string, Pick<BotMessageReply, "id" | "ordinal" | "role">>,
+  resolveUserInputProjections?: (ids: readonly string[]) => ReadonlyMap<string, string | null>
 ): ThreadMessageSearchPage {
   const normalizedThreadId = typeof threadId === "string" ? threadId.trim() : ""
   const query = typeof rawQuery === "string" ? rawQuery.trim() : ""
@@ -256,6 +259,11 @@ export function searchDurableThreadMessages(
     candidateRowsStatement.free()
   }
 
+  const userIds = resolveVerifiedReplies || resolveUserInputProjections
+    ? candidates.filter((candidate) => candidate.role === "user").map((candidate) => candidate.messageId)
+    : []
+  const verifiedReplies = userIds.length ? resolveVerifiedReplies?.(userIds) : undefined
+  const userInputProjections = userIds.length ? resolveUserInputProjections?.(userIds) : undefined
   const headersById = new Map(
     selectedCandidates.map((candidate, index) => [candidate.messageId, { candidate, index }])
   )
@@ -274,10 +282,17 @@ export function searchDurableThreadMessages(
       checkCancelled()
       const header = headersById.get(candidate.messageId)
       if (!header) continue
+      const projectedInput = candidate.role === "user" ? userInputProjections?.get(candidate.messageId) : undefined
+      if (projectedInput === null || projectedInput === "") {
+        advancedCandidateCount = header.index + 1
+        lastAdvancedCandidate = header.candidate
+        continue
+      }
       const baseBytes =
         1024 +
         Buffer.byteLength(candidate.contentJson, "utf8") +
-        Buffer.byteLength(candidate.toolCallsJson ?? "", "utf8")
+        Buffer.byteLength(candidate.toolCallsJson ?? "", "utf8") +
+        (projectedInput === undefined ? 0 : Buffer.byteLength(projectedInput, "utf8"))
       if (candidate.toolCallsTruncated) truncatedRows = true
 
       if (baseBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
@@ -294,12 +309,12 @@ export function searchDurableThreadMessages(
         continue
       }
 
-      const parsedContent = parseJsonValue(candidate.contentJson)
+      const parsedContent = projectedInput ?? parseJsonValue(candidate.contentJson)
       const fragments: string[] = []
       let candidateBytes = baseBytes
       // Hydration appends fragments only to string content. Rebuild that same bounded value before
       // applying display filters so a split attachment/internal marker cannot leak into search.
-      if (typeof parsedContent === "string") {
+      if (projectedInput === undefined && typeof parsedContent === "string") {
         fragmentStatement.bind([normalizedThreadId, candidate.messageId])
         while (fragmentStatement.step()) {
           checkCancelled()
@@ -324,7 +339,9 @@ export function searchDurableThreadMessages(
         fragments,
         candidate.toolCallsJson,
         candidate.reasoningSample,
-        candidate.reasoningOmitted
+        candidate.reasoningOmitted,
+        options.bodyOnly,
+        verifiedReplies?.get(candidate.messageId)
       )
       if (!plan) {
         advancedCandidateCount = header.index + 1

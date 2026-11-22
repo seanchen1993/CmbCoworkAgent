@@ -69,6 +69,17 @@ it("rejects unresolved feature and malformed scopes", async () => {
   )
 })
 
+it("preserves a linked project chat and prevents Bot ownership from granting flow access", async () => {
+  mocks.metadata.botFeatureFollowId = "feature-link"
+  const bound = await prepareFlowHarnessContext("thread", "/repo")
+  mocks.metadata.botId = "bot"
+  mocks.metadata.botHostId = "local"
+  mocks.metadata.botWorkId = "work"
+  mocks.metadata.botAudienceKey = "desktop"
+  expect(() => bound.assertCurrent()).toThrow("BINDING_INVALID")
+  await expect(prepareFlowHarnessContext("thread", "/repo")).rejects.toThrow("BINDING_INVALID")
+})
+
 it("verifies project sessions without inventing a feature context", async () => {
   mocks.metadata = {
     workspacePath: "/repo",

@@ -6,6 +6,17 @@ describe("development thread eligibility", () => {
     expect(isDevelopmentThreadMetadata({})).toBe(true)
     expect(isDevelopmentThreadMetadata({ agentMode: "normal" })).toBe(true)
   })
+  it("rejects Bot-owned chats while preserving ordinary chats that follow Bot work", () => {
+    expect(isDevelopmentThreadMetadata({
+      botId: "bot",
+      botHostId: "local",
+      botWorkId: "work",
+      botAudienceKey: "desktop"
+    })).toBe(false)
+    expect(isDevelopmentThreadMetadata({ botId: "remote-bot" })).toBe(false)
+    expect(isDevelopmentThreadMetadata({ botFeatureFollowId: "feature-link" })).toBe(true)
+  })
+
   it("rejects background, remote, plugin, child and project metadata", () => {
     for (const key of [
       "workflowRunId",

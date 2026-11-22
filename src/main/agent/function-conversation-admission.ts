@@ -33,6 +33,17 @@ export function inspectFunctionConversationAdmission(input: {
   return { kind: "ordinary", marked: false, invalid: false }
 }
 
+/** Read-only admission for a consumer that can resume only ordinary graph history. */
+export function isOrdinaryFunctionConversationCheckpoint(
+  values: Readonly<Record<string, unknown>> | undefined,
+  guard: () => void
+): boolean {
+  return inspectFunctionConversationAdmission({
+    state: values?.cmbFunctionConversation,
+    messages: Array.isArray(values?.messages) ? values.messages : undefined
+  }, guard).kind === "ordinary"
+}
+
 /** Fork preflight must complete before creating a target, invoking recovery or copying rows. */
 export function inspectFunctionConversationForkAdmission(checkpoints: readonly {
   readonly state: unknown

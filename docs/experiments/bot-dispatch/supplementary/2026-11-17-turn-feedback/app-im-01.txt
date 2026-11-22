@@ -1,0 +1,18 @@
+stage: launch real App <temp>/bot-group-app-8VwBM2
+Failure diagnostics: <temp>/bot-group-app-8VwBM2
+electronApplication.evaluate: Error: Cannot find module '<temp>/bot-integration-build-99rOlC/main/bots-app-e2e.js'
+Require stack:
+- <temp>/bot-integration-build-99rOlC/main/bots-app-e2e.js
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1390:15)
+    at s._resolveFilename (node:electron/js2c/browser_init:2:136600)
+    at defaultResolveImpl (node:internal/modules/cjs/loader:1032:19)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1037:22)
+    at Module._load (node:internal/modules/cjs/loader:1199:37)
+    at c._load (node:electron/js2c/node_init:2:18041)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:244:24)
+    at Module.require (node:internal/modules/cjs/loader:1470:12)
+    at require (node:internal/modules/helpers:147:16)
+    at main (<repository>/tests/bots-private-group-app.spec.ts:338:15) {
+  log: []
+}

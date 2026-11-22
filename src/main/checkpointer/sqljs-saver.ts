@@ -2529,7 +2529,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
                   parent.parent_checkpoint_id,
                   parent.payload_bytes
            FROM message_chain AS chain
-           JOIN snapshot_sizes AS parent
+           -- Keep the recursive row outermost and reuse the precomputed snapshot sizes.
+           CROSS JOIN snapshot_sizes AS parent
              ON parent.checkpoint_id = chain.parent_checkpoint_id
          ), message_payload AS (
            SELECT root_checkpoint_id, SUM(payload_bytes) AS payload_bytes

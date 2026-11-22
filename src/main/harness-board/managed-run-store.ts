@@ -448,6 +448,9 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     !snapshot.featureId.trim() ||
     !MANAGED_RUN_STATUSES.has(snapshot.status as string) ||
     !isOptionalText(snapshot.workspacePath, 4096) ||
+    (snapshot.botOperationId !== undefined &&
+      (typeof snapshot.botOperationId !== "string" ||
+        !/^[0-9a-f]{64}$/.test(snapshot.botOperationId))) ||
     (snapshot.modelSelection !== undefined &&
       snapshot.modelSelection !== "default" &&
       snapshot.modelSelection !== "ultra") ||
@@ -768,7 +771,8 @@ export class ManagedRunStore {
     projectId: string,
     featureId: string,
     workspacePath?: string,
-    modelSelection?: ManagedRunModelSelection
+    modelSelection?: ManagedRunModelSelection,
+    botOperationId?: string
   ): ManagedRunSnapshot {
     const runId = `mr_${randomUUID().replace(/-/gu, "")}`
     const now = formatGmt8Timestamp()
@@ -779,6 +783,7 @@ export class ManagedRunStore {
       featureId,
       status: "running",
       modelSelection: resolveManagedRunModelSelection(modelSelection),
+      ...(botOperationId ? { botOperationId } : {}),
       ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
       providerRetryCount: 0,
       totalRetryCount: 0,

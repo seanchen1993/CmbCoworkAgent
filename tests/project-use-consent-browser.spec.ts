@@ -2,13 +2,13 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 
 async function main() {
   const output = resolve("output", `project-use-consent-browser-${Date.now()}`)
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -68,7 +68,7 @@ async function main() {
   const checks: string[] = []
   try {
     await page.setContent('<div id="root"></div>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const submit = page.getByRole("button", { name: "创建并授权", exact: true })
     await page.waitForFunction("window.fixture.requests.length===1")
     assert(await submit.isDisabled())

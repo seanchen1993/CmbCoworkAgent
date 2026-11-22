@@ -113,12 +113,22 @@ it.each(["full", "read_only", "none"])(
     >(async () => runtime)
     const children = new Map<string, () => void>()
     const closeChild = vi.fn()
+    const bindLifecycle = vi.fn()
+    const createWorkflowChildModsRuntime = vi.fn(async (
+      _input: unknown,
+      create: (bind: typeof bindLifecycle) => Promise<unknown>
+    ) => ({ runtime: await create(bindLifecycle), close: closeChild }))
+    const sessionAllowedSkillNames = Object.freeze(["workflow-review"])
+    const capabilityService = {}
+    const sharedTaskContext = Object.freeze({ taskId: "parent-task" })
+    const abortSignal = new AbortController().signal
+    const disallowedTools = shellAccess === "full" ? [] : ["write_file"]
     const construct = workflowFactory({
       createAgentRuntime,
-      createWorkflowChildModsRuntime: async (_input: unknown,
-        create: (bind: (lifecycle: unknown) => void) => Promise<unknown>) => ({
-        runtime: await create(() => {}), close: closeChild
-      }),
+      createWorkflowChildModsRuntime,
+      sessionAllowedSkillNames,
+      sharedTaskContext,
+      options: { disableModsRuntime: true, capabilityService },
       creatorAccounting: undefined,
       workflowModsChildren: children,
       normalizedHarnessAgentsPrompt: "TEAM_REQUIRED_KNOWLEDGE",
@@ -161,14 +171,33 @@ it.each(["full", "read_only", "none"])(
         threadId: "child",
         agentId: "reviewer",
         shellAccess,
+        abortSignal,
+        disallowedTools,
         toolAllowlist: ["read_file"],
         worktreeIsolation: { workspaceRoot: "isolated-worktree" }
       })
     ).toBe(runtime)
+    expect(createWorkflowChildModsRuntime).toHaveBeenCalledExactlyOnceWith(
+      {
+        parentThreadId: "parent-thread",
+        childThreadId: "child",
+        agentId: "reviewer",
+        workspace: "parent-workspace",
+        fileRoot: "isolated-worktree",
+        signal: abortSignal
+      },
+      expect.any(Function)
+    )
     expect(createAgentRuntime).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         threadId: "child",
         workspacePath: "parent-workspace",
+        allowedSkillNames: sessionAllowedSkillNames,
+        disableModsRuntime: true,
+        onHostLifecycleReady: bindLifecycle,
+        capabilityService,
+        sharedTaskContext,
+        abortSignal,
         allowedToolNames: ["read_file", "structured_output"],
         approvalThreadId: "parent-thread",
         shellParentThreadId: "parent-thread",
@@ -178,7 +207,7 @@ it.each(["full", "read_only", "none"])(
         enableAgentsPrompt: shellAccess === "full",
         disableMemoryInjection: shellAccess !== "full",
         disableSubagents: true,
-        filesystemAccess: { workspacePath: "isolated-worktree", shellAccess, disallowedTools: [] },
+        filesystemAccess: { workspacePath: "isolated-worktree", shellAccess, disallowedTools },
         toolConcurrencyQueueId: "isolated-worktree",
         onFileMutation: undefined
       })

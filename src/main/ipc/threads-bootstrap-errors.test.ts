@@ -10,7 +10,10 @@ function bootstrapHandler(scope: object): (event: object, threadId: string) => P
   const source = ts.createSourceFile("threads.ts",
     readFileSync(resolve("src/main/ipc/threads.ts"), "utf8"), ts.ScriptTarget.Latest, true)
   const handlers: ts.Expression[] = []
+  let desktopHistoryPage: ts.Expression | undefined
   const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      node.name.text === "desktopHistoryPage") desktopHistoryPage = node.initializer
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
       node.expression.expression.getText(source) === "ipcMain" &&
       node.expression.name.text === "handle" && ts.isStringLiteral(node.arguments[0]) &&
@@ -20,10 +23,14 @@ function bootstrapHandler(scope: object): (event: object, threadId: string) => P
   }
   visit(source)
   expect(handlers).toHaveLength(1)
-  const code = ts.transpileModule(`(${handlers[0].getText(source)})`, {
+  if (!desktopHistoryPage) throw new Error("Missing desktop history decorator")
+  const capture = (expression: ts.Expression) => ts.transpileModule(`(${expression.getText(source)})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
   }).outputText
-  return runInNewContext(code, scope)
+  return runInNewContext(capture(handlers[0]), {
+    ...scope,
+    desktopHistoryPage: runInNewContext(capture(desktopHistoryPage), scope)
+  })
 }
 
 function fixture(sourceScope?: ThreadTranscriptSourceScope) {
@@ -42,6 +49,7 @@ function fixture(sourceScope?: ThreadTranscriptSourceScope) {
   const runtimeHead = vi.fn()
   const page = { messages: [{ id: "durable-message" }], total: 1, hasMore: false }
   const pages = vi.fn().mockResolvedValue(page)
+  const decorate = vi.fn(async (_id: string, captured: typeof page) => captured)
   const warn = vi.fn()
   const captureScope = vi.fn((_threadId: string, current: typeof read) => {
     current.assertCurrent()
@@ -56,6 +64,10 @@ function fixture(sourceScope?: ThreadTranscriptSourceScope) {
   let mutationLocked = false
   const handler = bootstrapHandler({
     require: loadWriter,
+    BrowserWindow: { fromWebContents: () => ({}) },
+    decorateBotHistoryPage: decorate,
+    readForkReplyOrigins: vi.fn(),
+    getThreadCore: () => read.row,
     captureThreadDisplayRead: () => read,
     captureThreadTranscriptSourceScope: captureScope,
     captureStockLegacyTranscriptSource: stock,
@@ -86,8 +98,9 @@ function fixture(sourceScope?: ThreadTranscriptSourceScope) {
     setImmediate,
     console: { warn }
   })
-  const event = { sender: { id: 7 } }
-  return { handler, event, read, canonical, legacy, pages, page, runtimeTuple, stats,
+  const mainFrame = {}
+  const event = { sender: { id: 7, mainFrame }, senderFrame: mainFrame }
+  return { handler, event, read, canonical, legacy, pages, page, decorate, runtimeTuple, stats,
     cancelled, unavailable, warn, captureScope, createWriter, loadWriter, stock, finish, runtimeHead }
 }
 
@@ -179,8 +192,44 @@ describe("checkpoint bootstrap IPC outcome classification", () => {
     })
     expect(f.runtimeHead).toHaveBeenCalledExactlyOnceWith("checkpoint.sqlite", "thread", "", "test",
       expect.any(AbortSignal))
-    expect(stockSource.assertCurrent).toHaveBeenCalledTimes(3)
+    expect(stockSource.assertCurrent).toHaveBeenCalledTimes(4)
+    const guards = stockSource.assertCurrent.mock.invocationCallOrder
+    const decoration = f.decorate.mock.invocationCallOrder[0]
+    expect(guards[2]).toBeLessThan(decoration)
+    expect(decoration).toBeLessThan(guards[3])
     expect(f.legacy.mock.invocationCallOrder[0]).toBeLessThan(f.runtimeHead.mock.invocationCallOrder[0])
+  })
+
+  it("rejects a real source failure discovered after desktop decoration", async () => {
+    const f = fixture()
+    const failure = new Error("MODS_CONVERSATION_THREAD_CHANGED")
+    f.decorate.mockImplementation(async (_id, page) => {
+      f.read.assertCurrent.mockImplementation(() => { throw failure })
+      return page
+    })
+
+    await expect(f.handler(f.event, "thread")).rejects.toBe(failure)
+    expect(f.decorate).toHaveBeenCalledOnce()
+    expect(f.pages).toHaveBeenCalledOnce()
+    expect(f.warn).toHaveBeenCalledExactlyOnceWith(
+      "Failed to bootstrap legacy checkpoint transcript:", failure
+    )
+    expect(f.finish).toHaveBeenCalledExactlyOnceWith()
+    expect(f.read.dispose).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it("propagates a second worker failure instead of retrying bootstrap again", async () => {
+    const f = fixture()
+    f.pages.mockRejectedValue(f.unavailable)
+    await expect(f.handler(f.event, "thread")).rejects.toBe(f.unavailable)
+    expect(f.canonical).toHaveBeenCalledOnce()
+    expect(f.legacy).not.toHaveBeenCalled()
+    expect(f.pages).toHaveBeenCalledTimes(2)
+    expect(f.decorate).not.toHaveBeenCalled()
+    expect(f.warn.mock.calls[1]).toEqual([
+      "Failed to bootstrap legacy checkpoint transcript:", f.unavailable
+    ])
+    expect(f.read.dispose).toHaveBeenCalledExactlyOnceWith()
   })
 
   it("restarts an unavailable page reader once without replaying bootstrap", async () => {

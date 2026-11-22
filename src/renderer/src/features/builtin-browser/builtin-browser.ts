@@ -1,6 +1,7 @@
 // Relative (not "@/") so this module stays importable from unit tests that
 // don't resolve the "@/" path alias for runtime values.
 import {
+  BOT_BROWSER_PROMPT_PREFIX,
   LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX as PREVIOUS_BROWSER_PROMPT_PREFIX,
   LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
@@ -71,6 +72,7 @@ export function parseBuiltinBrowserPrompt(input: string): {
     return { visibleText: wrappedText, browserSelected: true }
   }
   for (const prefix of [
+    BOT_BROWSER_PROMPT_PREFIX,
     LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
     PREVIOUS_BROWSER_PROMPT_PREFIX,
     LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX

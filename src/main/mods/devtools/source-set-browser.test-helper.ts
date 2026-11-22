@@ -1,16 +1,15 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "../../../../tests/support/browser-worker-plugin.mjs"
+import { buildRendererBrowserFixture } from "../../../../tests/support/renderer-browser-fixture"
 
 /** Actual creator parent/cards/store; Electron transport bridges to the caller's native services. */
 export async function sourceSetBrowser(
   seed: { threadId: string; workspace: string },
   dispatch: (method: string, input: Record<string, string>) => Promise<unknown>
 ) {
-  const compiled = await build({
-    write: false,
+  const compiled = await buildRendererBrowserFixture({
     bundle: true,
     platform: "browser",
     format: "iife",
@@ -88,7 +87,7 @@ export async function sourceSetBrowser(
     await page.evaluate((value) => {
       Object.assign(window, { fixtureSeed: value })
     }, seed)
-    await page.addScriptTag({ content: compiled.outputFiles[0].text })
+    await page.addScriptTag({ content: compiled })
     return { browser, page, errors }
   } catch (error) {
     await browser.close()

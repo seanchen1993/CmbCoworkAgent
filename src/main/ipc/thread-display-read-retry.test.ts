@@ -23,6 +23,8 @@ function expression(name: string): string {
   let found: ts.Node | undefined
   const visit = (node: ts.Node): void => {
     if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name)
+      found = node.initializer
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
@@ -41,6 +43,7 @@ function expression(name: string): string {
   }).outputText
 }
 const captureCode = expression("captureThreadDisplayRead")
+const desktopHistoryCode = expression("desktopHistoryPage")
 const handlerCode = expression("threads:messages-page")
 
 class Sender extends EventEmitter {
@@ -59,13 +62,18 @@ interface Page {
   attempt: number
   messages: string[]
 }
+interface ThreadRow {
+  created_at: number
+  metadata: string
+}
 interface ReadScope {
+  row: ThreadRow
   assertCurrent(): void
   canRetryMetadata(error: unknown): boolean
   dispose(): void
 }
 type Handler = (
-  event: { sender: Sender },
+  event: { sender: Sender; senderFrame: object },
   request: {
     threadId: string
     options?: { requestScope?: "foreground-hydration"; targetMessageId?: string }
@@ -74,9 +82,9 @@ type Handler = (
 
 function fixture(sourceScope?: ThreadTranscriptSourceScope) {
   const sender = new Sender(),
-    event = { sender }
+    event = { sender, senderFrame: sender.mainFrame }
   let database = {},
-    row: { created_at: number; metadata: string } | null = {
+    row: ThreadRow | null = {
       created_at: 1,
       metadata: JSON.stringify({
         cmb_thread_incarnation: "original",
@@ -130,7 +138,15 @@ function fixture(sourceScope?: ThreadTranscriptSourceScope) {
     current.assertCurrent()
     return sourceScope
   })
+  const decorate = vi.fn(async (_id: string, page: Page, _readRow: () => ThreadRow) => page)
+  const desktopHistoryPage = runInNewContext(desktopHistoryCode, {
+    BrowserWindow: { fromWebContents: () => ({}) },
+    decorateBotHistoryPage: decorate,
+    readForkReplyOrigins: vi.fn(),
+    console: { warn }
+  })
   const handler = runInNewContext(handlerCode, {
+    desktopHistoryPage,
     captureThreadTranscriptSourceScope: captureScope,
     captureThreadDisplayRead: (owner: { sender: Sender }, id: string) => {
       const scope = capture(owner, id)
@@ -153,6 +169,7 @@ function fixture(sourceScope?: ThreadTranscriptSourceScope) {
     worker,
     verify,
     captureScope,
+    decorate,
     handler,
     workerUnavailable,
     warn,
@@ -192,6 +209,28 @@ describe("thread message page metadata invalidation", () => {
     expect(f.accepted).toEqual([{ attempt: 1 }])
     expect(f.sender.eventNames()).toEqual([])
   })
+  it("does not expose decorated output when workspace authority changes after witness verification", async () => {
+    const f = fixture()
+    let witnessedBeforeDecoration: object[] = []
+    let decorationRow: ThreadRow | undefined
+    f.decorate.mockImplementation(async (_threadId, page, readRow) => {
+      witnessedBeforeDecoration = [...f.accepted]
+      f.patch({ workspacePath: "/changed" })
+      decorationRow = readRow()
+      return { ...page, messages: ["decorated-page"] }
+    })
+
+    await expect(f.run()).rejects.toThrow("MODS_CONVERSATION_THREAD_CHANGED")
+    expect(f.decorate).toHaveBeenCalledExactlyOnceWith(
+      "thread", { attempt: 1, messages: ["verified-page-1"] }, expect.any(Function), expect.any(Function)
+    )
+    expect(witnessedBeforeDecoration).toEqual([{ attempt: 1 }])
+    expect(decorationRow).toBe(f.scopes[0].row)
+    expect(JSON.parse(decorationRow!.metadata).workspacePath).toBe("/project")
+    expect(f.sources).toHaveLength(1)
+    expect(f.sender.eventNames()).toEqual([])
+  })
+
   it("returns the original verified page when its source is unchanged", async () => {
     const f = fixture()
     await expect(f.run()).resolves.toEqual({ attempt: 1, messages: ["verified-page-1"] })

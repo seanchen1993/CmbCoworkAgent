@@ -214,7 +214,7 @@ export class ImIngressSequencer {
       const snapshot = existing?.targetSnapshot ?? (await this.resolveTarget(event))
       const received = await this.eventStore.receiveEvent(event, snapshot)
       if (received.duplicate && received.event.state !== "received") {
-        await this.replyClient.sendPending()
+        await this.replyClient.sendPending(event.conversationKey)
         const ack = acknowledgementForDelivery(received.event, event)
         await this.emit(ack)
         return { duplicate: true, event: received.event, acknowledgements: [ack] }
@@ -248,7 +248,7 @@ export class ImIngressSequencer {
           retryable: false
         })
       }
-      await this.replyClient.sendPending()
+      await this.replyClient.sendPending(event.conversationKey)
       const terminalAck = acknowledgementForEvent(terminal)
       await this.emit(terminalAck)
       return {

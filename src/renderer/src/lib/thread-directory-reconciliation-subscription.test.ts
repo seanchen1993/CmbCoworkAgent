@@ -69,9 +69,9 @@ function actualDirectoryReconciler(rows: DirectoryRow[], ids: string[],
   const initialized = new Set(ids), scopes = new Map<string, DirectorySource>()
   const residents = new ThreadResidentTranscripts(), wake = vi.fn()
   const observe = vi.fn(() => missing?.restore)
-  const initialize = vi.fn((id: string, scope: DirectorySource) => {
+  const initialize = vi.fn((id: string, options?: { sourceScope?: DirectorySource }) => {
     initialized.add(id)
-    residents.enter(id, scope)
+    residents.enter(id, options?.sourceScope)
   })
   const reset = vi.fn((id: string, scope: DirectorySource) => residents.enter(id, scope))
   const reconcile = runInNewContext(ts.transpileModule(
@@ -101,7 +101,7 @@ it("keeps the first duplicate row and includes a resident restored before indexi
   f.reconcile()
   expect(f.observe).toHaveBeenCalledExactlyOnceWith({ currentThreadId: "A", account: 3,
     retired: false, rowPresent: true, scope: restored })
-  expect(f.initialize).toHaveBeenCalledExactlyOnceWith("A", restored)
+  expect(f.initialize).toHaveBeenCalledExactlyOnceWith("A", { sourceScope: restored })
   expect(f.scopes.get("A")).toEqual(restored)
   expect(f.residents.get("A")?.scope).toEqual(restored)
   expect(f.wake).toHaveBeenCalledTimes(1)

@@ -5,7 +5,8 @@ import { createHash, randomUUID } from "node:crypto"
 import JSZip from "jszip"
 import { MODS_STARTER_FILES } from "../src/shared/mods/v2/starter-template"
 import { resolve, join, relative } from "node:path"
-import { build, type Plugin } from "esbuild"
+import type { Plugin } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium, type Browser, type Page } from "playwright"
 import type { ClawProfile } from "../src/shared/mods/claw"
 import type { FlowChatTask, FlowDefinition, FlowStep } from "../src/shared/mods/flows/types"
@@ -62,7 +63,7 @@ export async function mount(
   url = "about:blank",
   development = false
 ) {
-  const result = await build({
+  const result = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: root,
       loader: "tsx",
@@ -211,13 +212,13 @@ export async function mount(
   })
   await page.goto(url)
   await page.setContent('<div id="root"></div>')
-  await page.addScriptTag({ content: result.outputFiles[0].text })
+  await page.addScriptTag({ content: result })
   // Existing editor/engine regressions explicitly opt into the retained advanced editor.
   if (advanced) {
     const disclosure = page.locator("[data-diy-flows] > details")
     if (await disclosure.count()) await disclosure.evaluate(element => { (element as HTMLDetailsElement).open = true })
   }
-  return result.outputFiles[0].text
+  return result
 }
 
 export async function chooseSteps(page: Page, value?: string) {

@@ -122,17 +122,22 @@ describe("knowledge APIs", () => {
     expect(data.totals?.totalNum).toBe(806)
     expect(data.errors).toEqual({})
   })
-  it("restricts multi-room roots to their IDs and requests groups with the single numeric room ID", async () => {
-    const request = vi.fn(async (_url: string, init: RequestInit) => {
-      const { orgIds } = JSON.parse(String(init.body))
-      if (orgIds === null)
+  it("restricts room totals to the selected IDs and uses group-distribution for a single room", async () => {
+    const request = vi.fn(async (url: string, init: RequestInit) => {
+      expect(init.method).toBe("POST")
+      expect(init.headers).toEqual({ "Content-Type": "application/json" })
+      const body = JSON.parse(String(init.body))
+      if (url === "http://kb.test/knowledge/org-distribution") {
+        expect(body).toEqual({ orgIds: null })
         return Response.json([
           { id: "1", name: "甲室", value: 9 },
           { id: 3, name: "其他室", value: 10 },
           { id: 2, name: "乙室", value: 4 },
           { id: null, name: null, value: 2 }
         ])
-      expect(orgIds).toEqual([1])
+      }
+      expect(url).toBe("http://kb.test/knowledge/group-distribution")
+      expect(body).toEqual({ orgIds: [1] })
       return Response.json([
         { id: "11", name: "开发组", value: 3 },
         { id: 11, name: "开发组", value: 1 },
@@ -168,13 +173,35 @@ describe("knowledge APIs", () => {
     ).toEqual([])
     expect(request).toHaveBeenCalledTimes(2)
   })
+  it("uses the group endpoint when the overview is scoped to a single room", async () => {
+    const group = { id: "11", name: "示例组", value: 3 }
+    const request = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/group-distribution")) {
+        expect(JSON.parse(String(init.body))).toEqual({ orgIds: [1] })
+        return Response.json([group])
+      }
+      return response(url)
+    })
+    const data = await fetchKnowledgeAccumulation(
+      "http://kb.test",
+      ["1"],
+      undefined,
+      request as typeof fetch
+    )
+    expect(data.orgs).toEqual([group])
+    expect(data.errors).toEqual({})
+    expect(request.mock.calls.map(([url]) => url)).toEqual([
+      "http://kb.test/knowledge/accumulate",
+      "http://kb.test/knowledge/user-distribution",
+      "http://kb.test/knowledge/group-distribution",
+      "http://kb.test/knowledge/system-distribution"
+    ])
+  })
   it("reports a room aggregate returned for a group request as an error", async () => {
-    const room = { id: "992391", name: "零售基础客群经营开发室(成都)", value: 747 }
-    const request = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      const { orgIds } = JSON.parse(String(init?.body))
-      if (orgIds === null) return Response.json([room])
-      expect(orgIds).toEqual([992391])
-      return Response.json([{ ...room, id: 992391 }])
+    const room = { id: "1", name: "甲室", value: 9 }
+    const request = vi.fn(async (url: string | URL | Request) => {
+      if (url === "http://kb.test/knowledge/org-distribution") return Response.json([room])
+      return Response.json([{ ...room, id: 1 }])
     })
     const rooms = await fetchKnowledgeOrgDistribution("http://kb.test", null, undefined, request)
     expect(rooms).toEqual([room])
@@ -183,7 +210,7 @@ describe("knowledge APIs", () => {
     ).rejects.toThrow("组分布接口返回了室汇总")
     expect(request.mock.calls.map(([url]) => url)).toEqual([
       "http://kb.test/knowledge/org-distribution",
-      "http://kb.test/knowledge/org-distribution"
+      "http://kb.test/knowledge/group-distribution"
     ])
   })
   it("sends null for all and keeps a failed section from erasing successful sections", async () => {

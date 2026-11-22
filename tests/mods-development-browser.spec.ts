@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
@@ -9,7 +9,7 @@ async function main() {
   const output = resolve("output/sparks-ux-redesign-20261010", `development-browser-${Date.now()}`)
   mkdirSync(output, { recursive: true })
   const entry = resolve("src/renderer/src/components/customize/ModsDevelopmentPanel.tsx")
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -71,7 +71,7 @@ async function main() {
     await page.route("http://fixture.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: `<html><meta charset="utf-8"><textarea id="composer" aria-label="原聊天输入框"></textarea><div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></html>`
+        body: `<html><meta charset="utf-8"><textarea id="composer" aria-label="原聊天输入框"></textarea><div id="root"></div><script>${bundle.replaceAll("</script", "<\\/script")}</script></html>`
       })
     )
     await page.goto("http://fixture.test")

@@ -2,12 +2,12 @@
 import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -95,7 +95,7 @@ async function main() {
       })
     )
     await page.goto("http://127.0.0.1:47779/")
-    await page.addScriptTag({ content: bundled.outputFiles[0].text })
+    await page.addScriptTag({ content: bundled })
     await page.getByRole("button", { name: "返回项目任务", exact: true }).click()
     await page.getByText("当前：原项目阶段", { exact: true }).waitFor()
     assert(

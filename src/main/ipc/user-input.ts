@@ -24,7 +24,7 @@ export function configureHostInputResumeHandler(handler: typeof resumeHostInput)
   resumeHostInput = handler
 }
 
-function isUserInputResponse(value: unknown): value is UserInputResponse {
+export function isUserInputResponse(value: unknown): value is UserInputResponse {
   if (!value || typeof value !== "object") return false
   const candidate = value as Partial<UserInputResponse>
   return (
@@ -110,7 +110,7 @@ export function registerUserInputHandlers(ipcMain: IpcMain): void {
 
     let record: ReturnType<typeof getHostInputContinuation>
     try {
-      if (!submitUserInputResponse(response)) {
+      if (!submitUserInputResponse(response, { desktopMainFrame: true })) {
         console.warn("[UserInput] Received response for unknown request:", response.requestId)
         return
       }

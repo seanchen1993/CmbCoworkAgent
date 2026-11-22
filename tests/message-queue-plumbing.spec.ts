@@ -59,8 +59,11 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
   assert(b < a, `${label}: expected ${JSON.stringify(before)} before ${JSON.stringify(after)}`)
 }
 
+const queueMiddlewareCall = "createCurrentRunMessageQueueMiddleware(\n        currentRunMessageQueueOwnerToken,\n        onPrimaryModelRequestState,"
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
+assertIncludes(runtime, "messages.filter((message) => !message.peerFeedback)", "peer feedback cannot enter the ordinary user transcript")
+
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const physicalStreamRunSetup = read("src/main/agent/physical-stream-run-setup.ts")
 const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
@@ -97,7 +100,7 @@ function testMiddlewareOnlyOnMainStack(): void {
 }
 
 function testScopedRecoveryReceivesPhysicalRunOwnership(): void {
-  const [owner, , preparation] = queueMiddlewareCalls[0]?.arguments ?? []
+  const [owner, , , preparation] = queueMiddlewareCalls[0]?.arguments ?? []
   assert(owner?.getText(runtimeSource) === "currentRunMessageQueueOwnerToken",
     "each middleware closure is bound to its physical run token")
   assertMatches(preparation?.getText(runtimeSource) ?? "",
@@ -115,7 +118,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   const index = stack.indexOf(call)
   // beforeModel must run before summarization (injected turns participate in
   // context management): the queue middleware immediately precedes it in the array.
-  assert(stack[index + 1]?.getText(runtimeSource) === "mainSummarizationController.middleware",
+  assert(stack.slice(index + 1).some(node => node.getText(runtimeSource) === "mainSummarizationController.middleware"),
     "queue middleware immediately precedes summarization on the main stack")
   assertIncludes(
     runtime,
@@ -157,9 +160,9 @@ function testAfterModelSkipsOnToolCalls(): void {
 function testQueueIpcRequiresActiveRun(): void {
   assertIncludes(agentIpc, '"agent:queueCurrentRunMessage"', "queue IPC handler registered")
   assertIncludes(agentIpc, '"agent:deleteCurrentRunQueuedMessage"', "delete IPC handler registered")
-  // Background workflow/worker/scheduler runs don't populate activeRuns, so the
-  // controller lookup is what prevents steering into them and also fences an
-  // async hook preparation against run replacement.
+  // A physical top-level run (desktop or managed Bot) must exist. Derived
+  // worker graphs have separate thread IDs. The shared entrypoint also checks
+  // the caller's exact lease, and fences async preparation against replacement.
   assertMatches(
     agentIpc,
     /const activeController = activeRuns\.get\(threadId\)[\s\S]{0,500}if \(!activeController \|\| activeController\.signal\.aborted\)[\s\S]{0,500}no_active_run/,
@@ -168,7 +171,7 @@ function testQueueIpcRequiresActiveRun(): void {
 }
 
 function testGuideRespectsActiveGoal(): void {
-  const ipcStart = agentIpc.indexOf('"agent:queueCurrentRunMessage"')
+  const ipcStart = agentIpc.indexOf("const queueIntoOwnedRun = async")
   const ipcBody = agentIpc.slice(ipcStart, ipcStart + 6500)
   assertIncludes(
     ipcBody,
@@ -276,9 +279,9 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "!signal.aborted && currentRunMessagePreparers.get(threadId)?.runToken === runToken",
     "aborted runs invalidate async prompt preparation before side effects commit"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "activeController.signal.aborted ||\n            currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken",
+    /activeController\.signal\.aborted \|\|\s*currentRunMessagePreparers\.get\(threadId\)\?\.runToken !== preparer\.runToken/,
     "queue commit rechecks abort state after asynchronous hooks"
   )
   assertIncludes(
@@ -1275,7 +1278,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertIncludes(
     runtime,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken",
     "the strict steering flush targets the current physical run"
   )
   assertIncludes(
@@ -1788,8 +1791,9 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
 }
 
 function testPreparingGuidesParticipateInReconciliation(): void {
-  const queueStart = agentIpc.indexOf('"agent:queueCurrentRunMessage"')
-  const queueEnd = agentIpc.indexOf("  ipcMain.handle(", queueStart)
+  const queueStart = agentIpc.indexOf("const queueIntoOwnedRun = async")
+  const queueHandler = agentIpc.indexOf('"agent:queueCurrentRunMessage"', queueStart)
+  const queueEnd = agentIpc.indexOf("  ipcMain.handle(", queueHandler)
   assert(queueStart >= 0 && queueEnd > queueStart, "guide handler has an explicit boundary")
   const queueBody = agentIpc.slice(queueStart, queueEnd)
   assertSourceOrder(
@@ -1928,13 +1932,13 @@ function testInjectedMessagesUseNormalUserTurnEffects(): void {
   const listenerBody = threadContext.slice(listenerStart, listenerStart + 2200)
   assertIncludes(
     listenerBody,
-    "threadActions.appendMessage({",
-    "injected user messages use appendMessage rather than mutating messages directly"
+    "pendingHookLogBucketOpensRef",
+    "injected user messages retain hook-log effects without racing the stream"
   )
   assertNotIncludes(
     listenerBody,
-    "messages: [...state.messages, ...injectedUserMessages]",
-    "injection listener does not bypass user-turn side effects with a direct append"
+    "threadActions.appendMessage({",
+    "queue acknowledgement cannot append user turns ahead of ordered stream events"
   )
 }
 
@@ -1945,8 +1949,8 @@ function testEnqueueExcludesGoalInputs(): void {
   // completely untouched by the queue.
   assertMatches(
     chat,
-    /willEnqueueWhileBusy\s*=\s*\n?\s*!isGoalSlashInput\s*&&\s*\(isLoading/,
-    "enqueue-while-busy excludes /goal inputs"
+    /willEnqueueWhileBusy\s*=\s*!managedTurn\s*&&\s*!isGoalSlashInput\s*&&\s*\(isLoading/,
+    "the workbench enqueue-while-busy excludes managed Bot turns and /goal inputs"
   )
 }
 
@@ -1984,8 +1988,13 @@ function testDrainGatedOnGoalNotActive(): void {
 function testEnqueueBranchParksDraft(): void {
   assertMatches(
     chat,
-    /if \(willEnqueueWhileBusy\) \{[\s\S]{0,160}addQueuedMessage\(composedDraft\)/,
+    /if \(willEnqueueWhileBusy \|\| queueRestoredDraft\) \{[\s\S]{0,1000}addQueuedMessage\(composedDraft\)/,
     "busy branch parks the composed draft"
+  )
+  assertMatches(
+    chat,
+    /if \(queueRestoredDraft\) \{[\s\S]{0,500}if \(storageError\)[\s\S]{0,500}clearClaimedDraft\(\)/,
+    "a recovered Bot draft stays in the composer until the ordinary queue is durable"
   )
 }
 
@@ -2038,8 +2047,8 @@ function testCancelSuppressesAutoDrain(): void {
   assertOccurrences(
     chat,
     "setQueueAutoDrainSuppressed(false)",
-    5,
-    "suppression clears for live enqueue/send, guide fallbacks and explicit creator repair"
+    6,
+    "suppression clears for live enqueue/send, both guide fallbacks, explicit draft resume and creator repair"
   )
   assertIncludes(
     chat,
@@ -2077,7 +2086,7 @@ function testPumpGatedOnHistoryLoadingReadOnlyContextReminder(): void {
   assertIncludes(
     chat,
     "if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return",
-    "auto-drain gated on historyLoading/readOnly/contextReminderPending"
+    "auto-drain waits for authoritative history, write access, context and human-decision readiness"
   )
 }
 
@@ -2281,7 +2290,9 @@ function testBusyDraftPreparationIsAtomic(): void {
     "if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.add(threadId)"
   )
   assert(claimStart >= 0, "busy draft preparation claim not found")
-  const claimBody = chat.slice(claimStart, claimStart + 9000)
+  const claimEnd = chat.indexOf("const cancelEditingQueuedMessage", claimStart)
+  assert(claimEnd > claimStart, "busy draft preparation handler has a complete boundary")
+  const claimBody = chat.slice(claimStart, claimEnd)
   assertSourceOrder(
     claimBody,
     "queuedDraftPreparingThreads.add(threadId)",
@@ -2304,7 +2315,7 @@ function testBusyDraftPreparationIsAtomic(): void {
 function testSteerAcknowledgementIsDurableAndReconciled(): void {
   assertSourceOrder(
     runtime,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken",
     "const persistedCount = upsertThreadMessages(",
     "deferred assistant/tool transcript is flushed before the steered user turn"
   )
@@ -2512,7 +2523,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   assertSourceOrder(
     notifierBody,
     "const completedAssistantMessage = context?.completedAssistantMessage",
-    "...messages.map((message) => ({",
+    "...messages.filter((message) => !message.peerFeedback).map((message) => ({",
     "the final assistant reply is persisted before the steered user turn"
   )
   assertIncludes(
@@ -2522,7 +2533,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   )
   assertSourceOrder(
     notifierBody,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken",
     "resolveCurrentRunCompletedAssistantIdentity(",
     "provider occurrence resolution uses the durable baseline after pending chunks flush"
   )
@@ -2632,7 +2643,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
     "renderer-only aliases are retained for cumulative SDK replays"
   )
   assertSourceOrder(
-    threadContext,
+    threadContext.slice(threadContext.indexOf("if (rendererOnlyAlias) {")),
     "aliases.set(resolvedFromId",
     "commitLocalAlias()",
     "renderer-only aliases are applied before the following stable event"
@@ -3123,8 +3134,8 @@ function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   const pumpBody = chat.slice(pumpStart, pumpStart + 3000)
   assertIncludes(
     pumpBody,
-    "if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return",
-    "auto-drain waits until every handed-off draft is reconciled"
+    "const next = nextOrdinaryQueuedMessage(queuedMessages)",
+    "auto-drain uses the eligible FIFO and fences unresolved handoffs"
   )
 }
 

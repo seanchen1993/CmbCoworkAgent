@@ -519,11 +519,18 @@ function testLevel2AvailableToMultiAndWorkflowMainAgents(): void {
   // Multi (normal + task enabled) and Workflow expose the same registry-backed
   // inline task types. Coordinator and leaf runtimes remain excluded.
   assert(
-    RUNTIME_SRC.includes("const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents"),
+    RUNTIME_SRC.includes("const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents") &&
+      RUNTIME_SRC.includes(
+        "const allRegistryProfiles = mainSubagentsEnabled\n    ? await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)\n    : []"
+      ) &&
+      RUNTIME_SRC.includes(
+        "let registryProfiles =\n    sessionAllowedExpertNames === undefined\n      ? allRegistryProfiles\n      : allRegistryProfiles.filter((profile) => sessionAllowedExpertNames.includes(profile.name))"
+      ) &&
+      RUNTIME_SRC.includes("const registrySubagentSpecs = registryProfiles.map((profile) => ({"),
     "registry task subagents follow the task tool's Multi/Workflow availability"
   )
   assert(
-    /let registryProfiles = mainSubagentsEnabled\s*\? await loadAgentProfilesAsync\(workspacePath, projectModeTaskSubagentConfig\)\s*:\s*\[\]/.test(
+    /const allRegistryProfiles = mainSubagentsEnabled\s*\? await loadAgentProfilesAsync\(workspacePath, projectModeTaskSubagentConfig\)\s*:\s*\[\]/.test(
       RUNTIME_SRC
     ),
     "coordinator and leaf runtimes must not load registry profiles"

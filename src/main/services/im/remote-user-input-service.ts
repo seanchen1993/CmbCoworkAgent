@@ -1,3 +1,4 @@
+import { botInteractionRoutes } from "./bot-interaction-route"
 import { randomBytes } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
@@ -52,6 +53,12 @@ interface RemoteUserInputRoute {
   conversationKey: string
   threadId: string
   prefix: string
+  kind?: "dm" | "group"
+  botEventId?: string
+  botBindingRef?: string
+  senderId?: string
+  isCurrent?: () => boolean
+  onQuestionUndeliverable?: (requestId: string) => void
 }
 
 interface RemoteUserInputSession {
@@ -135,12 +142,23 @@ function renderQuestion(session: RemoteUserInputSession): string {
       (option, index) => `${index + 1}. ${option.label} — ${option.description}`
     ),
     "",
-    question.multiSelect === true
-      ? `可多选，回复 /回答 ${session.code} 1,2（用逗号分隔编号）`
-      : `回复 /回答 ${session.code} <编号>`,
+    ...(session.route.kind === "group"
+      ? ["请在本群内 @当前机器人，再发送以下回答指令："]
+      : []),
+    question.allowMultiple
+      ? `回复 /回答 ${session.code} <编号，可用逗号分隔，如 1,2>`
+      : question.multiSelect
+        ? `可多选，回复 /回答 ${session.code} 1,2（用逗号分隔编号）`
+        : `回复 /回答 ${session.code} <编号>`,
     `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`,
     `短码在本轮等待期间一直有效；普通文本不会被当作回答。`
   ].join("\n")
+}
+
+function multipleAnswerLabel(answer: Extract<UserInputAnswer, { type: "options" }>): string {
+  return "options" in answer
+    ? answer.options.map((option) => option.label).join("、")
+    : answer.labels.join(", ")
 }
 
 function answerFor(
@@ -148,15 +166,29 @@ function answerFor(
   rawAnswer: string
 ): { answer: UserInputAnswer } | { message: string } {
   const normalized = rawAnswer.trim()
-  if (question.multiSelect === true && /^\d+(?:\s*[,，]\s*\d+)*$/u.test(normalized)) {
+  if ((question.allowMultiple || question.multiSelect) && /^\d+(?:\s*[,，]\s*\d+)*$/u.test(normalized)) {
     const indices = normalized.split(/[,，]/u).map((value) => Number(value.trim()) - 1)
     if (
       new Set(indices).size !== indices.length ||
       indices.some(
         (index) => !Number.isSafeInteger(index) || index < 0 || index >= question.options.length
       )
-    )
-      return { message: `选项编号无效或重复，请输入 1-${question.options.length}，用逗号分隔。` }
+    ) {
+      return {
+        message: question.allowMultiple
+          ? `请输入不重复的选项编号（1-${question.options.length}），多个编号用逗号分隔。`
+          : `选项编号无效或重复，请输入 1-${question.options.length}，用逗号分隔。`
+      }
+    }
+    if (question.allowMultiple) {
+      return {
+        answer: {
+          type: "options",
+          questionId: question.id,
+          options: indices.map((optionIndex) => ({ optionIndex, ...question.options[optionIndex] }))
+        }
+      }
+    }
     indices.sort((a, b) => a - b)
     return {
       answer: {
@@ -267,6 +299,7 @@ export class ImRemoteUserInputService {
 
   async resolveAnswer(input: {
     argument: string
+    botSenderId?: string
     principalId: string
     conversationKey: string
   }): Promise<string> {
@@ -286,11 +319,21 @@ export class ImRemoteUserInputService {
       return "该输入短码不属于当前招乎会话。"
     }
 
-    const pending = this.dependencies.getPendingForThread(session.route.threadId)
+    if (session.route.isCurrent && !session.route.isCurrent())
+      return "该问题所属的 Bot 连接已变化，请重新发起。"
+    const pending = this.dependencies.getPendingForThread(session.request.threadId)
     if (!pending || pending.requestId !== session.request.requestId) {
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
     }
+    // Group questions can be answered by any member of the same conversation.
+    // Keep the route/grant checks above and private-route identity checks intact.
+    if (
+      session.request.kind === "bot_result_confirmation" && session.route.kind === "group"
+        ? !session.route.senderId || input.botSenderId !== session.route.senderId
+        : session.route.kind !== "group" && session.route.senderId && input.botSenderId !== session.route.senderId
+    )
+      return "请由提出这项问题的群成员回答。"
     const question = session.request.questions[session.questionIndex]
     if (!question) {
       this.removeSession(session.request.requestId)
@@ -330,6 +373,7 @@ export class ImRemoteUserInputService {
     session.pendingCardOutcome = "已回答"
     const submitted = this.dependencies.submitResponse(response, {
       notifyRenderer: true,
+      ...(session.request.kind === "bot_result_confirmation" && session.route.kind === "group" ? { verifiedGroupSender: true as const } : {}),
       reason: "已从招乎完成补充输入。"
     })
     if (!submitted) {
@@ -374,7 +418,7 @@ export class ImRemoteUserInputService {
                 answer.type === "option"
                   ? answer.label
                   : answer.type === "options"
-                    ? answer.labels.join(", ")
+                    ? multipleAnswerLabel(answer)
                     : answer.text
             }
           ]
@@ -410,12 +454,16 @@ export class ImRemoteUserInputService {
     ) {
       return "该表单不属于当前招乎会话。"
     }
-    const pending = this.dependencies.getPendingForThread(session.route.threadId)
+    if (session.route.isCurrent && !session.route.isCurrent())
+      return "该问题所属的 Bot 连接已变化，请重新发起。"
+    const pending = this.dependencies.getPendingForThread(session.request.threadId)
     if (!pending || pending.requestId !== session.request.requestId) {
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
     }
 
+    if (session.request.kind === "bot_result_confirmation" && session.route.kind === "group")
+      return "请由发起人使用群内的回答指令确认发送。"
     const submitted = new Map(input.feedback.map((entry) => [entry.key, entry.value]))
     const staged: Record<string, UserInputAnswer> = {}
     const missing: string[] = []
@@ -425,7 +473,9 @@ export class ImRemoteUserInputService {
       const custom = submitted.get(`${key}${QUESTION_OTHER_SUFFIX}`)?.trim() ?? ""
       const selected = submitted.get(key)?.trim() ?? ""
       // Free text wins: someone who filled it in meant none of the options.
-      const raw = custom ? `其他 ${custom}` : selected ? String(Number(selected) + 1) : ""
+      const raw = custom ? `其他 ${custom}` : selected
+        ? question.allowMultiple ? selected : String(Number(selected) + 1)
+        : ""
       if (!raw) {
         missing.push(`${index + 1}. ${question.header}`)
         continue
@@ -536,14 +586,23 @@ export class ImRemoteUserInputService {
     // waiting on an answer has no timeout. The card earns a shorter notice.
     let carded = false
     try {
-      // The current card transport is single selection. Multi-choice requests use the
-      // established numbered text path until that platform's multi-value receipt is verified.
-      if (!request.questions.some((question) => question.multiSelect === true))
+      // Legacy multi-select requests use the numbered text path.
+      // Group confirmation also requires that path for the authenticated sender.
+      if (
+        !request.questions.some((question) => question.multiSelect === true) &&
+        (request.kind !== "bot_result_confirmation" || route.kind !== "group")
+      )
         carded = await this.publishCard(session)
     } catch (error) {
       this.dependencies.warn("Remote user-input card could not be published.", error)
     }
 
+    if (route.isCurrent && !route.isCurrent()) {
+      if (carded) this.resolveCardFor(session, "原连接已变化")
+      this.removeSession(request.requestId)
+      if (this.isStillPending(session)) route.onQuestionUndeliverable?.(request.requestId)
+      return
+    }
     const notice = buildImProactiveReplies({
       deliveryId: `user-input-request:${request.requestId}:0`,
       conversationKey: route.conversationKey,
@@ -593,6 +652,7 @@ export class ImRemoteUserInputService {
       this.drainReplies()
     } catch (error) {
       this.removeSession(request.requestId)
+      if (this.isStillPending(session)) route.onQuestionUndeliverable?.(request.requestId)
       throw error
     }
   }
@@ -609,6 +669,7 @@ export class ImRemoteUserInputService {
         key: ImRemoteUserInputService.questionKey(index),
         header: question.header,
         question: question.question,
+        allowMultiple: question.allowMultiple,
         options: question.options.map((option) => ({
           label: option.label,
           description: option.description
@@ -618,7 +679,7 @@ export class ImRemoteUserInputService {
           recorded?.type === "option"
             ? recorded.label
             : recorded?.type === "options"
-              ? recorded.labels.join(", ")
+              ? multipleAnswerLabel(recorded)
               : recorded?.type === "other"
                 ? recorded.text
                 : undefined
@@ -630,6 +691,8 @@ export class ImRemoteUserInputService {
   private async publishCard(session: RemoteUserInputSession): Promise<boolean> {
     const interaction = await this.dependencies.cards.publish({
       kind: "user_input",
+      botEventId: session.route.botEventId,
+      botBindingRef: session.route.botBindingRef,
       threadId: session.route.threadId,
       principalId: session.route.principalId,
       conversationKey: session.route.conversationKey,
@@ -639,6 +702,7 @@ export class ImRemoteUserInputService {
       targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
       build: (tag) =>
         buildQuestionCard({
+          group: session.route.kind === "group",
           targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
           questions: this.cardQuestions(session),
           tag
@@ -648,6 +712,12 @@ export class ImRemoteUserInputService {
   }
 
   private resolveRoute(threadId: string): RemoteUserInputRoute | null {
+    if (botInteractionRoutes.has(threadId)) {
+      const route = botInteractionRoutes.get(threadId)
+      return route
+        ? { ...route, isCurrent: () => botInteractionRoutes.get(threadId) === route }
+        : null
+    }
     const thread = this.dependencies.getThread(threadId)
     if (!thread) return null
     const parsed = parseStandardThreadMetadata(thread.metadata)
@@ -803,7 +873,7 @@ export class ImRemoteUserInputService {
    */
   private pruneResolvedSessions(): void {
     for (const [requestId, session] of this.sessions) {
-      const pending = this.dependencies.getPendingForThread(session.route.threadId)
+      const pending = this.dependencies.getPendingForThread(session.request.threadId)
       if (!pending || pending.requestId !== session.request.requestId) {
         this.removeSession(requestId)
       }

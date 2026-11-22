@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 
 interface FixtureWindow {
@@ -21,7 +21,7 @@ async function main() {
   const root = resolve(__dirname, "..")
   const artifacts = resolve(root, "output/project-platform-20261012/browser")
   mkdirSync(artifacts, { recursive: true })
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -82,7 +82,7 @@ async function main() {
     const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<html><body><div id="root"></div></body></html>')
-    await page.addScriptTag({ content: bundled.outputFiles[0].text })
+    await page.addScriptTag({ content: bundled })
     await page.getByText("文档模板 A · 版本 1", { exact: true }).waitFor()
     await page.getByRole("textbox").fill("生成试用文档")
     const create = page.getByRole("button", { name: "准备试用环境", exact: true })

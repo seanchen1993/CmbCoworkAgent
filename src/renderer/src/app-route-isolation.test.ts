@@ -50,6 +50,22 @@ describe("App route isolation", () => {
     expect(surface).toContain("正在切换任务")
   })
 
+  it("keeps the Bot workspace separate from chat, project and resource hosts", () => {
+    const surface = heavyRouteSurface()
+    const bots = surface.indexOf('{renderedMainView === "bots" ? (')
+    const next = surface.indexOf(') : renderedMainView === "kanban" ? (', bots)
+    expect(bots).toBeGreaterThanOrEqual(0)
+    expect(next).toBeGreaterThan(bots)
+    expect(surface.slice(bots, next)).toContain("<BotsWorkspace />")
+    expect(surface.slice(bots, next)).not.toMatch(/<(TabbedPanel|PlatformWorkspace|RightPanel)\b/)
+    expect(surface.match(/<TabbedPanel\b/g)).toHaveLength(1)
+    expect(surface).toMatch(/<TabbedPanel\s+threadId=\{renderedThreadId\}[^>]*\bfloatingChat\b/)
+    expect(surface).toMatch(
+      /renderedMainView !== "bots" && \(\s*<ResourcePanelOverlay\s+moduleMode=\{rightModule\}/
+    )
+    expect(appSource).toMatch(/<ThreadProvider>\s*<BotConversationTransitions\s*\/>/)
+  })
+
   it("keeps the app shell's z-index out of the root stacking context", () => {
     // 壳内的 z-index 必须关在自己的层叠上下文里。Radix 的 Dialog/Popover 都 portal 到
     // document.body，是 #root 的兄弟；壳一旦不构成层叠上下文，壳内任何 positioned +
@@ -62,12 +78,19 @@ describe("App route isolation", () => {
   })
 
   it("reserves automatic thread selection for startup bootstrap", async () => {
-    expect(appSource.match(/loadThreads\(\{ selectInitialThread: true \}\)/g)).toHaveLength(1)
+    const startup = appSource.indexOf("async function init():")
+    const end = appSource.indexOf("\n  useEffect(", startup)
+    expect(startup).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(startup)
+    const startupSurface = appSource.slice(startup, end)
+    expect(startupSurface).toContain("initializeStartupWorkspace(() => !disposed)")
+    expect(startupSurface).toContain("return () => { disposed = true }")
+    expect(appSource.match(/\binitializeStartupWorkspace\s*\(/g)).toHaveLength(1)
 
     const refreshSurface = backgroundThreadRefreshSurface()
     expect(refreshSurface).toContain("onThreadsChanged")
     expect(refreshSurface).toContain('window.addEventListener("focus", onFocus)')
-    expect(refreshSurface).not.toContain("selectInitialThread")
+    expect(refreshSurface).not.toMatch(/\b(?:initializeStartupWorkspace|selectInitialThread|selectThread)\b/)
 
     const file = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest,
       true, ts.ScriptKind.TSX)

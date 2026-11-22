@@ -1,0 +1,409 @@
+{
+  "sql": "SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,\n        (SELECT version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_version,\n      (SELECT attention_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS attention_version,\n      (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,\n      (SELECT updated_at FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_at,\n      (SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_preview,\n      (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id OR\n        (json_extract(t.origin_json,'$.rootWorkId')=+w.id AND t.state IN ('queued','running','waiting_user'))\n      ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,\n      t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,\n      (SELECT json_object('taskId',t.id,'state',t.state,'updatedAt',t.updated_at,'error',substr(t.error,1,1000))\n        FROM bot_tasks t WHERE t.work_id=w.id AND t.injected_into IS NULL\n        ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1) AS last_execution,\n      (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id\n        AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,\n      (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id\n        WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))\n       OR EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (\n         SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id\n       ))) AS background_busy FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.state='active'\n        AND (?='' OR instr(lower(w.title),lower(?))>0) AND w.id IN (\n          SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')\n          UNION SELECT json_extract(origin_json,'$.rootWorkId') FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.rootWorkId') IS NOT NULL\n          UNION SELECT a.id FROM bot_activity a WHERE a.kind='work' AND a.attention_version>a.seen_version\n          UNION SELECT x.id FROM bot_commands c JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))\n          UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))\n        ORDER BY CASE execution_state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,w.updated_at DESC,w.ordinal DESC LIMIT 6",
+  "plan": {
+    "columns": [
+      "id",
+      "parent",
+      "notused",
+      "detail"
+    ],
+    "values": [
+      [
+        5,
+        0,
+        62,
+        "SEARCH w USING INDEX bot_work_owner (bot_id=?)"
+      ],
+      [
+        30,
+        0,
+        0,
+        "LIST SUBQUERY 16"
+      ],
+      [
+        33,
+        30,
+        0,
+        "MERGE (UNION)"
+      ],
+      [
+        35,
+        33,
+        0,
+        "LEFT"
+      ],
+      [
+        37,
+        35,
+        0,
+        "MERGE (UNION)"
+      ],
+      [
+        39,
+        37,
+        0,
+        "LEFT"
+      ],
+      [
+        43,
+        39,
+        78,
+        "SEARCH bot_tasks USING INDEX bot_tasks_queue (state=?)"
+      ],
+      [
+        72,
+        39,
+        0,
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      [
+        81,
+        37,
+        0,
+        "RIGHT"
+      ],
+      [
+        85,
+        81,
+        78,
+        "SEARCH bot_tasks USING INDEX bot_tasks_queue (state=?)"
+      ],
+      [
+        116,
+        81,
+        0,
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      [
+        158,
+        33,
+        0,
+        "RIGHT"
+      ],
+      [
+        160,
+        158,
+        0,
+        "MERGE (UNION)"
+      ],
+      [
+        162,
+        160,
+        0,
+        "LEFT"
+      ],
+      [
+        164,
+        162,
+        0,
+        "MERGE (UNION)"
+      ],
+      [
+        166,
+        164,
+        0,
+        "LEFT"
+      ],
+      [
+        170,
+        166,
+        62,
+        "SEARCH a USING INDEX sqlite_autoindex_bot_activity_1 (kind=?)"
+      ],
+      [
+        183,
+        164,
+        0,
+        "RIGHT"
+      ],
+      [
+        189,
+        183,
+        222,
+        "SCAN x USING INDEX sqlite_autoindex_bot_work_items_1"
+      ],
+      [
+        192,
+        183,
+        62,
+        "SEARCH c USING INDEX bot_commands_owner (thread_id=?)"
+      ],
+      [
+        242,
+        160,
+        0,
+        "RIGHT"
+      ],
+      [
+        247,
+        242,
+        222,
+        "SCAN t USING INDEX bot_tasks_work_family"
+      ],
+      [
+        252,
+        242,
+        0,
+        "BLOOM FILTER ON c (source_task_id=?)"
+      ],
+      [
+        270,
+        242,
+        53,
+        "SEARCH c USING AUTOMATIC PARTIAL COVERING INDEX (source_task_id=?)"
+      ],
+      [
+        328,
+        33,
+        0,
+        "CREATE BLOOM FILTER"
+      ],
+      [
+        338,
+        33,
+        0,
+        "CREATE BLOOM FILTER"
+      ],
+      [
+        362,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 6"
+      ],
+      [
+        369,
+        362,
+        0,
+        "MULTI-INDEX OR"
+      ],
+      [
+        370,
+        369,
+        0,
+        "INDEX 1"
+      ],
+      [
+        376,
+        370,
+        62,
+        "SEARCH t USING INDEX bot_tasks_work_history (work_id=?)"
+      ],
+      [
+        381,
+        369,
+        0,
+        "INDEX 2"
+      ],
+      [
+        407,
+        381,
+        61,
+        "SEARCH t USING INDEX bot_tasks_work_family (<expr>=? AND state=?)"
+      ],
+      [
+        438,
+        362,
+        0,
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      [
+        469,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 1"
+      ],
+      [
+        474,
+        469,
+        39,
+        "SEARCH a USING INDEX sqlite_autoindex_bot_activity_1 (kind=? AND id=?)"
+      ],
+      [
+        485,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 2"
+      ],
+      [
+        490,
+        485,
+        39,
+        "SEARCH a USING INDEX sqlite_autoindex_bot_activity_1 (kind=? AND id=?)"
+      ],
+      [
+        501,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 3"
+      ],
+      [
+        506,
+        501,
+        39,
+        "SEARCH a USING INDEX sqlite_autoindex_bot_activity_1 (kind=? AND id=?)"
+      ],
+      [
+        517,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 4"
+      ],
+      [
+        522,
+        517,
+        39,
+        "SEARCH a USING INDEX sqlite_autoindex_bot_activity_1 (kind=? AND id=?)"
+      ],
+      [
+        533,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 5"
+      ],
+      [
+        538,
+        533,
+        39,
+        "SEARCH a USING INDEX sqlite_autoindex_bot_activity_1 (kind=? AND id=?)"
+      ],
+      [
+        549,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 6"
+      ],
+      [
+        556,
+        549,
+        0,
+        "MULTI-INDEX OR"
+      ],
+      [
+        557,
+        556,
+        0,
+        "INDEX 1"
+      ],
+      [
+        563,
+        557,
+        62,
+        "SEARCH t USING INDEX bot_tasks_work_history (work_id=?)"
+      ],
+      [
+        568,
+        556,
+        0,
+        "INDEX 2"
+      ],
+      [
+        594,
+        568,
+        61,
+        "SEARCH t USING INDEX bot_tasks_work_family (<expr>=? AND state=?)"
+      ],
+      [
+        625,
+        549,
+        0,
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      [
+        632,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 7"
+      ],
+      [
+        638,
+        632,
+        69,
+        "SEARCH t USING INDEX bot_tasks_injected (injected_into=?)"
+      ],
+      [
+        659,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 8"
+      ],
+      [
+        665,
+        659,
+        61,
+        "SEARCH p USING INDEX bot_tasks_work_family (<expr>=? AND state=?)"
+      ],
+      [
+        702,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 9"
+      ],
+      [
+        708,
+        702,
+        216,
+        "SCAN c"
+      ],
+      [
+        716,
+        702,
+        46,
+        "SEARCH p USING INDEX sqlite_autoindex_bot_tasks_1 (id=?) LEFT-JOIN"
+      ],
+      [
+        741,
+        0,
+        0,
+        "CORRELATED SCALAR SUBQUERY 11"
+      ],
+      [
+        746,
+        741,
+        108,
+        "SEARCH r USING INDEX bot_workflow_refs_source (source_task_id=?)"
+      ],
+      [
+        748,
+        741,
+        0,
+        "CORRELATED LIST SUBQUERY 10"
+      ],
+      [
+        752,
+        748,
+        0,
+        "MULTI-INDEX OR"
+      ],
+      [
+        753,
+        752,
+        0,
+        "INDEX 1"
+      ],
+      [
+        759,
+        753,
+        62,
+        "SEARCH wf_owner USING INDEX bot_tasks_work_history (work_id=?)"
+      ],
+      [
+        764,
+        752,
+        0,
+        "INDEX 2"
+      ],
+      [
+        770,
+        764,
+        61,
+        "SEARCH wf_owner USING INDEX bot_tasks_work_family (<expr>=?)"
+      ],
+      [
+        799,
+        0,
+        0,
+        "USE TEMP B-TREE FOR ORDER BY"
+      ]
+    ]
+  }
+}

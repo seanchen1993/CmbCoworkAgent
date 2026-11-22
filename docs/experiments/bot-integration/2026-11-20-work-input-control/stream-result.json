@@ -1,0 +1,48 @@
+{
+  "model": "controlled-local-stream",
+  "passed": true,
+  "results": [
+    {
+      "kind": "bot-main",
+      "samples": 49,
+      "maxBefore": 1,
+      "maxAfter": 1,
+      "duplicates": [],
+      "pendingNearComposer": true,
+      "withdrawal": true,
+      "sameRun": true,
+      "liveOrder": true,
+      "durableOrder": true,
+      "reload": true
+    },
+    {
+      "kind": "bot-work",
+      "samples": 95,
+      "maxBefore": 1,
+      "maxAfter": 1,
+      "duplicates": [],
+      "pendingNearComposer": true,
+      "withdrawal": true,
+      "sameRun": true,
+      "liveOrder": true,
+      "durableOrder": true,
+      "reload": true
+    }
+  ],
+  "requests": [
+    "other",
+    "STEER_START_bot-main",
+    "STEER_SECOND_bot-main",
+    "other",
+    "STEER_MANAGED_bot-work",
+    "other",
+    "other",
+    "STEER_START_bot-work",
+    "other",
+    "other",
+    "STEER_SECOND_bot-work",
+    "other",
+    "other"
+  ],
+  "errors": []
+}

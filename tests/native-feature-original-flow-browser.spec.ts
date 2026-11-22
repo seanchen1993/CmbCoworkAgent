@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture, unexpectedThreadDeletionExports } from "./support/renderer-browser-fixture"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
 import { chromium } from "playwright"
@@ -14,7 +14,7 @@ const entry = resolve(renderer, "components/harness-board/HarnessBoardView.tsx")
 async function main() {
   const output = resolve("output", `native-feature-original-flow-browser-${Date.now()}`)
   mkdirSync(output, { recursive: true })
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     stdin: {
       loader: "tsx",
       resolveDir: process.cwd(),
@@ -186,6 +186,7 @@ async function main() {
             const state={accountRevision:0,threads:[{thread_id:'history-thread',title:'归档历史会话',metadata:{workspacePath:'C:/isolated',harnessFeature:{projectId:'container',slug:'request-a'}}}],models:[],installedPlugins:[],createThread:async()=>{throw Error('UNEXPECTED_NEW_THREAD')},selectThread:async id=>{window.stageFixture.selectedHistoryThreads.push(id)}};
             export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state;useAppStore.subscribe=()=>()=>{};
             export const isThreadDeletionPending=()=>false,isThreadRetired=()=>false;
+            ${unexpectedThreadDeletionExports}
             export const adoptThreadSearchSummary=()=>{throw Error("Unexpected cross-thread search in feature detail fixture")};
           `
           }))
@@ -235,7 +236,7 @@ async function main() {
     )
     await page.goto("https://harness.test/")
     await page.addStyleTag({ content: compiler.build(candidates) })
-    await page.addScriptTag({ content: bundled.outputFiles[0].text })
+    await page.addScriptTag({ content: bundled })
     await page.getByRole("button", { name: "托管运行当前特性", exact: true }).waitFor()
     assert.equal(
       await page.getByRole("button", { name: "项目能力", exact: true }).count(),

@@ -1,5 +1,6 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import { rehypeChatHighlight } from "../../lib/markdown-highlight"
+import type { PluggableList } from "unified"
 import remarkWindowsFileLinks from "@/lib/remark-windows-file-links"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
 import { CHAT_MARKDOWN_REMARK_PLUGINS, markChatMarkdownSearchNavigation } from "../../../../shared/markdown-visible-text"
@@ -8,6 +9,7 @@ import { Check, Copy } from "lucide-react"
 import {
   memo,
   useCallback,
+  useContext,
   useMemo,
   useState,
   type ComponentProps,
@@ -24,6 +26,12 @@ import {
 import { isLocalFileLikeHref } from "@/lib/markdown-file-preview-links"
 import { remarkCompletedMarkdownParseCache, remarkStreamingMarkdownParse,
   remarkStableMarkdownPrefixCache } from "@/lib/markdown-parse-cache"
+import { remarkBotFileLinks } from "@/lib/bot-file-link-remark"
+import { ChatPresentationContext } from "./chat-presentation-context"
+import { BotInlineMentionsContext } from "../bots/BotInlineMentionsContext"
+import { remarkBotMentions } from "@/lib/bot-mention-remark"
+import { rehypeBotTranscript } from "@/lib/bot-transcript-rehype"
+import { remarkBotAutolinks } from "@/lib/bot-autolink-remark"
 
 interface StreamingMarkdownProps {
   children: string
@@ -32,6 +40,7 @@ interface StreamingMarkdownProps {
   searchBlockIndex?: number
   searchLocation?: ChatSearchLocation
   expansion?: { expanded: boolean; onChange(expanded: boolean): void }
+  botTranscript?: boolean
 }
 
 function MarkdownCodeBlock({
@@ -88,6 +97,9 @@ const STABLE_PREFIX_REMARK_PLUGINS = [...CHAT_MARKDOWN_REMARK_PLUGINS, remarkWin
 const REHYPE_PLUGINS = [rehypeChatHighlight, markChatMarkdownSearchNavigation]
 // Streaming skips the expensive syntax-highlighting pass.
 const STREAMING_REHYPE_PLUGINS = [markChatMarkdownSearchNavigation]
+const BOT_REMARK_PLUGINS = [...REMARK_PLUGINS, remarkBotFileLinks]
+const BOT_TRANSCRIPT_REHYPE_PLUGINS = [...REHYPE_PLUGINS, rehypeBotTranscript]
+const BOT_STREAM_REHYPE_PLUGINS = [...STREAMING_REHYPE_PLUGINS, rehypeBotTranscript]
 
 // react-markdown's default URL sanitizer treats a Windows drive letter and
 // custom local schemes as unsafe protocols (for example, `C:/repo/a.ts` and
@@ -155,14 +167,18 @@ const MarkdownFragment = memo(function MarkdownFragment({
   isStreaming,
   threadId,
   start = 0,
-  stablePrefix = false
+  stablePrefix = false,
+  botTranscript = false
 }: {
   text: string
   isStreaming: boolean
   threadId?: string
+  botTranscript?: boolean
   start?: number
   stablePrefix?: boolean
 }): React.JSX.Element {
+  const botPresentation = useContext(ChatPresentationContext) === "bot"
+  const inlineMentions = useContext(BotInlineMentionsContext)
   const renderCodeBlock = useMemo(
     () =>
       function RenderMarkdownCode({
@@ -193,6 +209,42 @@ const MarkdownFragment = memo(function MarkdownFragment({
     threadId,
     renderCodeBlock
   })
+  const mentionComponents = useMemo<Components>(
+    () =>
+      inlineMentions
+        ? {
+            ...components,
+            span: ({ node, children, ...props }) => {
+              const index = Number(node?.properties?.["data-bot-mention"])
+              const mention = Number.isInteger(index) ? inlineMentions.mentions[index] : undefined
+              if (!mention) return <span {...props}>{children}</span>
+              return mention.botId && inlineMentions.canOpen(mention.botId) ? (
+                <button
+                  type="button"
+                  className="bot-inline-mention"
+                  onClick={() => inlineMentions.open(mention.botId!)}
+                >
+                  {inlineMentions.renderLabel?.(mention) ?? children}
+                </button>
+              ) : (
+                <span className="bot-inline-mention">
+                  {inlineMentions.renderLabel?.(mention) ?? children}
+                </span>
+              )
+            }
+          }
+        : components,
+    [components, inlineMentions]
+  )
+  const remarkPlugins = useMemo<PluggableList>(() => {
+    const nativePlugins = isStreaming ? (stablePrefix ? STABLE_PREFIX_REMARK_PLUGINS : REMARK_PLUGINS)
+      : COMPLETED_REMARK_PLUGINS
+    const base = botPresentation && threadId ? BOT_REMARK_PLUGINS : nativePlugins
+    const plugins = botTranscript ? [...base, remarkBotAutolinks] : base
+    return inlineMentions
+      ? [...plugins, [remarkBotMentions, { mentions: inlineMentions.mentions, start }]]
+      : plugins
+  }, [botPresentation, botTranscript, threadId, inlineMentions, start, isStreaming, stablePrefix])
 
   return (
     <div
@@ -201,10 +253,10 @@ const MarkdownFragment = memo(function MarkdownFragment({
       data-chat-search-source-end={start + text.length}
     >
       <ReactMarkdown
-        remarkPlugins={isStreaming ? stablePrefix ? STABLE_PREFIX_REMARK_PLUGINS : REMARK_PLUGINS
-          : COMPLETED_REMARK_PLUGINS}
-        rehypePlugins={isStreaming ? STREAMING_REHYPE_PLUGINS : REHYPE_PLUGINS}
-        components={components}
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={botTranscript ? (isStreaming ? BOT_STREAM_REHYPE_PLUGINS : BOT_TRANSCRIPT_REHYPE_PLUGINS)
+          : isStreaming ? STREAMING_REHYPE_PLUGINS : REHYPE_PLUGINS}
+        components={mentionComponents}
         urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}
       >
         {text}
@@ -219,7 +271,8 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   threadId,
   searchBlockIndex = 0,
   searchLocation,
-  expansion
+  expansion,
+  botTranscript = false
 }: StreamingMarkdownProps): React.JSX.Element {
   const text = useStreamingMarkdownText(children, isStreaming)
   const [expandedText, setExpandedText] = useState<string | null>(null)
@@ -241,10 +294,10 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
       // the existing full-fragment path. Completion parses the entire current
       // suffix (including reference definitions) and restores highlighting; the
       // proven independent code prefix keeps its element identity and selection.
-      const prefixLength = stableMarkdownPrefixLength(plan.head)
+      const prefixLength = botTranscript ? 0 : stableMarkdownPrefixLength(plan.head)
       const head = <>
         <MarkdownFragment key="head" text={prefixLength ? plan.head.slice(0, prefixLength) : plan.head}
-          isStreaming={isStreaming} stablePrefix={prefixLength > 0} threadId={threadId} />
+          isStreaming={isStreaming} stablePrefix={prefixLength > 0} threadId={threadId} botTranscript={botTranscript} />
         {prefixLength > 0 && <MarkdownFragment key="suffix" text={plan.head.slice(prefixLength)}
           isStreaming={isStreaming} start={prefixLength} threadId={threadId} />}
       </>
@@ -291,20 +344,20 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
             )}
           </div>
           <ChatSearchContext location={searchLocation} />
-          <MarkdownFragment
-            text={plan.tail}
-            start={text.length - plan.tail.length}
-            isStreaming={isStreaming}
-            threadId={threadId}
-          />
+          <MarkdownFragment key="tail" text={plan.tail} start={text.length - plan.tail.length}
+            isStreaming={isStreaming} threadId={threadId} botTranscript={botTranscript} />
         </>
       )
     },
-    [text, isStreaming, isExpanded, threadId, searchLocation, setExpanded]
+    [text, isStreaming, isExpanded, threadId, searchLocation, setExpanded, botTranscript]
   )
 
   return (
-    <div className="streaming-markdown" data-chat-search-block-index={searchBlockIndex}>
+    <div
+      className="streaming-markdown"
+      data-chat-search-block-index={searchBlockIndex}
+      data-bot-transcript={botTranscript || undefined}
+    >
       {rendered}
     </div>
   )

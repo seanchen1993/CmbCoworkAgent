@@ -240,6 +240,7 @@ it.each([
       const graph = addMessages(history, [hidden])
       const middleware = createCurrentRunMessageQueueMiddleware(
         runToken,
+        undefined,
         (scope, boundaryId, source) => {
           const previous = db.getThreadMessageProviderOccurrencesBeforeUser(scope, boundaryId, [
             source
@@ -552,6 +553,7 @@ it.each([
       forward("values", { messages: graph })
       const middleware = createCurrentRunMessageQueueMiddleware(
         runToken,
+        undefined,
         (scope, boundaryId, source) => {
           const previous = db.getThreadMessageProviderOccurrencesBeforeUser(scope, boundaryId, [
             source
@@ -662,7 +664,7 @@ it.each([false, true])("prepares provider history and respects the run owner (Go
     content: "Continuation",
     ...(goalTurn && { additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true } })
   })
-  const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined, prepare)
+  const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined, undefined, prepare)
   const wrapModelCall = middleware.wrapModelCall as unknown as (
     request: { runtime: { configurable: { thread_id: string } }; messages: HumanMessage[] },
     handler: () => Promise<AIMessage>
@@ -752,7 +754,7 @@ it.each([false, true])("recovers a pending legacy Goal provider occurrence (frag
       database.close()
     }
     expect(db.hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(true)
-    const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined,
+    const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined, undefined,
       (id, scopedTurn, activeSignal) => prepareLegacyScopedProviderHistory(
         id, scopedTurn, runToken, activeSignal))
     const wrapModelCall = middleware.wrapModelCall as unknown as (

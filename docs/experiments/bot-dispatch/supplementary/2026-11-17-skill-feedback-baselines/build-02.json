@@ -1,0 +1,12 @@
+{
+  "label": "build-02",
+  "args": [
+    "--import",
+    "tsx",
+    "scripts/run-bot-integration-e2e.mjs",
+    "--build-only"
+  ],
+  "exitCode": 0,
+  "seconds": 38.22,
+  "log": "build-02.log.txt"
+}

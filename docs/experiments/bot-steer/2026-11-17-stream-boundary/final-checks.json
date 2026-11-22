@@ -1,0 +1,26 @@
+[
+  {
+    "source": "bot-steer-webcheck-verified.log",
+    "sourceLogModifiedAt": "2026-11-17T04:07:25.014Z",
+    "exitCode": 0,
+    "sha256": "e22d83a1b3f75416254645f6f14cb9bd297d0ab3d78373750943a48f773cfc54",
+    "output": "\n> cmbdevclaw@1.5.5 typecheck:web\n> tsc --noEmit -p tsconfig.web.json --composite false\n\n",
+    "outputKind": "complete"
+  },
+  {
+    "source": "bot-steer-nodecheck-verified.log",
+    "sourceLogModifiedAt": "2026-11-17T04:07:25.014Z",
+    "exitCode": 0,
+    "sha256": "de06bd9435f367d117d49e595daee51bc5b1828f3036a0259538d7969b92842a",
+    "output": "\n> cmbdevclaw@1.5.5 typecheck:node\n> tsc --noEmit -p tsconfig.node.json --composite false\n\n",
+    "outputKind": "complete"
+  },
+  {
+    "source": "bot-steer-build-final.log",
+    "sourceLogModifiedAt": "2026-11-17T04:06:04.294Z",
+    "exitCode": 0,
+    "sha256": "15ebc13ec5da020666fae3861135e2298d8f337522fdbb3ae381dfed7d27bb7c",
+    "output": "✓ built in 3.96s\n✓ built in 70ms\n✓ built in 12.75s\nIsolated Bot test build: <temp>/bot-integration-build-oaNm3S",
+    "outputKind": "build diagnostic excerpt"
+  }
+]

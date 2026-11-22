@@ -1,0 +1,245 @@
+{
+  "originalSha256": "089f1d2a408ee2dd4ab46ecb27ca68d76ed2be6f93d145f56b7b5d6795eb45d0",
+  "transformation": "Vitest suite totals and per-file summaries; all failed assertions retained; paths redacted",
+  "startTime": 1794910676940,
+  "success": false,
+  "numTotalTests": 407,
+  "numPassedTests": 394,
+  "numFailedTests": 13,
+  "numPendingTests": 0,
+  "files": [
+    {
+      "name": "src/main/agent/bot-communication-prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794910681989,
+      "endTime": 1794910681994.721,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/bot-turn-context.test.ts",
+      "status": "failed",
+      "startTime": 1794910679097,
+      "endTime": 1794910679150.6025,
+      "total": 4,
+      "passed": 2,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "Bot event context and reporting boundary"
+          ],
+          "fullName": "Bot event context and reporting boundary retains original visible text and internal receipt identity without modifying the input",
+          "status": "failed",
+          "title": "retains original visible text and internal receipt identity without modifying the input",
+          "duration": 5.95187500000003,
+          "failureMessages": [
+            "AssertionError: expected undefined to be '只检查，不改文件' // Object.is equality\n    at <repo>/src/main/agent/bot-turn-context.test.ts:36:51\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at runSuite (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "Bot event context and reporting boundary"
+          ],
+          "fullName": "Bot event context and reporting boundary appends fresh event context to a resumed checkpoint while retaining the previous model prefix",
+          "status": "failed",
+          "title": "appends fresh event context to a resumed checkpoint while retaining the previous model prefix",
+          "duration": 37.79558300000002,
+          "failureMessages": [
+            "AssertionError: expected [ { type: 'text', …(1) } ] to be [ { type: 'text', …(1) } ] // Object.is equality\n\nIf it should pass with deep equality, replace \"toBe\" with \"toStrictEqual\"\n\nExpected: [ { type: 'text', …(1) } ]\nReceived: serializes to the same string\n\n    at <repo>/src/main/agent/bot-turn-context.test.ts:56:40\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/opening-reply-reminder.test.ts",
+      "status": "failed",
+      "startTime": 1794910678570,
+      "endTime": 1794910678626.853,
+      "total": 12,
+      "passed": 11,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "Bot main-turn opening reply reminder"
+          ],
+          "fullName": "Bot main-turn opening reply reminder nudges after two silent tool calls, continues after an update, and never persists the cue",
+          "status": "failed",
+          "title": "nudges after two silent tool calls, continues after an update, and never persists the cue",
+          "duration": 33.70024999999998,
+          "failureMessages": [
+            "AssertionError: expected false to be true // Object.is equality\n    at <repo>/src/main/agent/opening-reply-reminder.test.ts:84:99\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/prompt.test.ts",
+      "status": "failed",
+      "startTime": 1794910678768,
+      "endTime": 1794910678787.1716,
+      "total": 36,
+      "passed": 35,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "Bot private memory context"
+          ],
+          "fullName": "Bot private memory context includes Bot-shared and current-group references without crossing to private or other groups",
+          "status": "failed",
+          "title": "includes Bot-shared and current-group references without crossing to private or other groups",
+          "duration": 2.810040999999984,
+          "failureMessages": [
+            "SyntaxError: \"undefined\" is not valid JSON\n    at JSON.parse (<anonymous>)\n    at payload (<repo>/src/main/bots/prompt.test.ts:38:8)\n    at <repo>/src/main/bots/prompt.test.ts:369:12\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/runtime-adapter.test.ts",
+      "status": "failed",
+      "startTime": 1794910678288,
+      "endTime": 1794910688661.7947,
+      "total": 338,
+      "passed": 329,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration reports a linked task result in the main conversation without running tools or importing its workspace",
+          "status": "failed",
+          "title": "reports a linked task result in the main conversation without running tools or importing its workspace",
+          "duration": 11.420249999999896,
+          "failureMessages": [
+            "AssertionError: expected { threadId: 't', …(4) } to match object { threadId: 't', …(2) }\n(2 matching properties omitted from actual)\n    at Proxy.<anonymous> (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/expect/dist/index.js:1155:10)\n    at Proxy.<anonymous> (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/expect/dist/index.js:1029:14)\n    at Proxy.methodWrapper (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/chai/index.js:1686:25)\n    at <repo>/src/main/bots/runtime-adapter.test.ts:1249:21\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration uses Bot memory enabled over global false for the whole private turn",
+          "status": "failed",
+          "title": "uses Bot memory enabled over global false for the whole private turn",
+          "duration": 0.9816250000003492,
+          "failureMessages": [
+            "AssertionError: expected false to be true // Object.is equality\n    at <repo>/src/main/bots/runtime-adapter.test.ts:3242:81\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration uses Bot memory inherit over global true for the whole private turn",
+          "status": "failed",
+          "title": "uses Bot memory inherit over global true for the whole private turn",
+          "duration": 0.8204590000004828,
+          "failureMessages": [
+            "AssertionError: expected false to be true // Object.is equality\n    at <repo>/src/main/bots/runtime-adapter.test.ts:3242:81\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration injects accurate environment and authority for 'introduction' turns",
+          "status": "failed",
+          "title": "injects accurate environment and authority for 'introduction' turns",
+          "duration": 5.824291999999332,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain 'first conversation after the user cre…'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:4076:20\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration injects accurate environment and authority for 'user' turns",
+          "status": "failed",
+          "title": "injects accurate environment and authority for 'user' turns",
+          "duration": 5.11358300000029,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain 'PRIVATE_STOPPED_CONTEXT'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:4067:22\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "private Bot selected identity context"
+          ],
+          "fullName": "private Bot selected identity context projects private group identity and Bot members in initial and live-steer context without reading or posting group history",
+          "status": "failed",
+          "title": "projects private group identity and Bot members in initial and live-steer context without reading or posting group history",
+          "duration": 8.013624999999593,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain '{\"kind\":\"group\",\"id\":\"stable-group\",\"…'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:5529:39\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "private Bot selected identity context"
+          ],
+          "fullName": "private Bot selected identity context keeps unavailable private group IDs instead of substituting a same-name group",
+          "status": "failed",
+          "title": "keeps unavailable private group IDs instead of substituting a same-name group",
+          "duration": 3.2600000000002183,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain '{\"kind\":\"group\",\"id\":\"stable-group\",\"…'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:5557:62\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "private Bot selected identity context"
+          ],
+          "fullName": "private Bot selected identity context resolves the current public profile by ID without altering the original user transcript",
+          "status": "failed",
+          "title": "resolves the current public profile by ID without altering the original user transcript",
+          "duration": 3.499041999999463,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain '{\"id\":\"stable-peer\",\"currentName\":\"Re…'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:5588:39\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "private Bot selected identity context"
+          ],
+          "fullName": "private Bot selected identity context marks archived or missing selected IDs unavailable rather than resolving another same-name Bot",
+          "status": "failed",
+          "title": "marks archived or missing selected IDs unavailable rather than resolving another same-name Bot",
+          "duration": 2.2196249999997235,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain '{\"id\":\"stable-peer\",\"available\":false}'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:5607:62\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-result.test.ts",
+      "status": "passed",
+      "startTime": 1794910677748,
+      "endTime": 1794910678251.1345,
+      "total": 15,
+      "passed": 15,
+      "failed": [],
+      "message": ""
+    }
+  ]
+}

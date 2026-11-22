@@ -1596,7 +1596,7 @@ test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", ()
     "agent runtime should not import sync fs helpers on sandbox startup path"
   )
   assert.doesNotMatch(
-    runtimeResourceSection,
+    runtimeResourceSection + codexSandboxBinarySource,
     forbiddenSyncFs,
     "sandbox runtime resource/codex.exe checks should use async fs APIs"
   )
@@ -2122,7 +2122,7 @@ test("user-pasted V1 workflow marker remains visible as literal text (#5)", () =
 test("workflow script writes share admission and backend file locks with agents", () => {
   assert.match(
     runtimeSource,
-    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(threadId\)\.read\(fn, signal\)/,
+    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(options\.toolConcurrencyQueueId \?\? threadId\)\.read\(fn, signal\)/,
     "runtime shares file admission while excluding unknown tools"
   )
   assert.match(
@@ -2558,7 +2558,7 @@ test("flush-failed snapshot gets a real write-back retry on read paths, not just
   )
 })
 
-test("workflow notification turn is recognized on a FULL prompt match, not just the prefix (#1)", () => {
+test("workflow notification requires a FULL prompt match or a trusted Bot checkpoint continuation (#1)", () => {
   // #1: a user can paste the short TRIGGER prefix (from a log / code sample); only the
   // FULL prompt is treated as internal plumbing, so a pasted prefix is neutralized as
   // ordinary text instead of being silently swallowed. The full-match compare now lives
@@ -2568,13 +2568,23 @@ test("workflow notification turn is recognized on a FULL prompt match, not just 
   // hand-rolled compare.
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt = isWorkflowNotificationTurnMessage\(message\)/,
-    "an internal workflow turn requires the shared full-match helper"
+    /matchesWorkflowNotificationPrompt =\s*isWorkflowNotificationTurnMessage\(message\)/,
+    "ordinary workflow notification recognition uses the shared full-match helper"
   )
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt &&\s+parsedThreadMetadata\.agentMode === "workflow"/,
-    "the full-match gate is combined with workflow agent mode"
+    /isWorkflowNotificationTurnMessage\(message\) \|\|\s*\(continueBotTaskCheckpointId !== undefined && workflowNotificationClaim !== undefined\)/,
+    "the additional recognition path requires both a validated Bot checkpoint and its workflow instance"
+  )
+  assert.match(
+    agentIpcSource,
+    /matchesWorkflowNotificationPrompt &&\s*\(parsedThreadMetadata\.agentMode === "workflow" \|\|\s*\(isWorkflowNotificationInvoke && hasBotWorkflowCapability\(metadata\)\)\)/,
+    "the full-match gate requires workflow mode or an authorized Bot receipt"
+  )
+  assert.match(
+    agentIpcSource,
+    /runExecutionContext\.source === "bot" &&\s*runExecutionContext\.workflowInternalNotification === true &&\s*hasBotWorkflowCapability\(initialInvokeMetadata\)/,
+    "ordinary user text cannot impersonate a Bot's workflow receipt"
   )
 })
 
@@ -2872,7 +2882,7 @@ test("actual workflow claim preserves surface owner, exact Host run and atomic f
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
   }).outputText
   const claim = new Function(compile(`async function claim(workflowRunManager, workspacePath,
-    threadId, backgroundNotificationOwner, hostWorkflowNotice) {
+    threadId, backgroundNotificationOwner, hostWorkflowNotice, workflowNotificationClaim) {
       return ${initializers[0].getText(ipcAst)}
     }`) + "; return claim")()
   const managerAst = ts.createSourceFile("run-manager.ts", workflowRunManagerSource,
@@ -2906,7 +2916,7 @@ test("actual workflow claim preserves surface owner, exact Host run and atomic f
     return rows.find(predicate) ?? null
   })
   const manager = new Fixture()
-  const invoke = (owner, notice) => claim(manager, "workspace", "thread", owner, notice)
+  const invoke = (owner, notice, botClaim) => claim(manager, "workspace", "thread", owner, notice, botClaim)
   assert.equal((await invoke("desktop"))?.runId, "new-desktop", "do not take newest foreign owner")
   manager.clearNotificationInFlight("new-desktop")
   const expected = { runId: "old-managed", startedAt: rows[2].startedAt }
@@ -2917,6 +2927,11 @@ test("actual workflow claim preserves surface owner, exact Host run and atomic f
     assert.equal(await invoke(owner, notice), null, "no fallback to another owner/run/incarnation")
     assert.equal(manager.inFlightNotifications.size, 0)
   }
+  assert.equal(await invoke("managed", expected, { ...expected, startedAt: rows[0].startedAt }), null,
+    "conflicting Bot and Host receipts cannot widen the workflow claim")
+  assert.equal((await invoke("managed", undefined, expected))?.runId, expected.runId,
+    "Bot delivery targets its original run even when a newer managed result exists")
+  manager.clearNotificationInFlight(expected.runId)
   const concurrent = await Promise.all([invoke("managed", expected), invoke("managed", expected)])
   assert.equal(concurrent.filter(Boolean).length, 1, "one atomic claim after concurrent async reads")
   assert.equal(concurrent.find(Boolean).runId, expected.runId)
@@ -2942,7 +2957,7 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner,\s*\.\.\.\(hostWorkflowNotice \? \{ expected: \{\s*runId: hostWorkflowNotice\.runId, startedAt: hostWorkflowNotice\.startedAt\s*\}\s*\} : \{\}\)\s*\}\s*\)/,
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner,\s*\.\.\.workflowNotificationClaim,\s*\.\.\.\(hostWorkflowNotice \? \{ expected: \{\s*runId: hostWorkflowNotice\.runId, startedAt: hostWorkflowNotice\.startedAt\s*\}\s*\} : \{\}\)\s*\}\s*\)/,
     "notification turn uses the atomic owner-scoped claim with the exact Host run incarnation"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
@@ -2957,13 +2972,18 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
     notificationClaimHandoff
   )
   const notificationClaimBlockEnd = agentIpcSource.indexOf(
-    "} else if (hasWorkflowNotificationPrefix)",
+    "} else if (messageControlsEnabled && hasWorkflowNotificationPrefix)",
     notificationClaimHandoff
   )
   const notificationClaimTry = agentIpcSource.indexOf("try {", notificationClaimStart)
   const notificationClaimCatch = agentIpcSource.indexOf(
     "} catch (error) {",
     notificationClaimHandoff
+  )
+  assert.ok(notificationClaimStart >= 0, "notification claim start marker exists")
+  assert.ok(
+    notificationClaimBlockEnd > notificationClaimHandoff,
+    "notification claim block ends at the message-control guarded prefix branch"
   )
   assert.ok(
     notificationClaimStart >= 0 &&
@@ -3006,7 +3026,7 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   // can't double-report the same run.
   assert.match(
     workflowRunManagerSource,
-    /if \(run && this\.inFlightNotifications\.has\(run\.runId\)\) return null/,
+    /findUndeliveredTerminalRunAsync\(workspacePath, threadId, \(candidate\) => \{\s*if \(this\.inFlightNotifications\.has\(candidate\.runId\)\) return false/,
     "findPendingNotification excludes in-flight runs"
   )
   // The in-flight set is IN MEMORY: a restart clears it, which is exactly what

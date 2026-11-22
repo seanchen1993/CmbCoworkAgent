@@ -13,6 +13,7 @@ import { dirname, join, resolve } from "node:path"
 import AdmZip from "adm-zip"
 import { _electron } from "playwright"
 import { readModsSourceCandidate } from "./mods-source-candidate"
+import { hashProjectBuiltMain } from "./project-built-preview"
 
 export function projectCompositionCandidate(root: string) {
   const sourcePath = process.env.COMPOSITION_E2E_SOURCE_CANDIDATE
@@ -33,7 +34,9 @@ export function projectCompositionCandidate(root: string) {
   return {
     execution: archive ? "packaged-asar" : "built-output",
     path,
-    sha256: createHash("sha256").update(readFileSync(path)).digest("hex")
+    sha256: archive
+      ? createHash("sha256").update(readFileSync(path)).digest("hex")
+      : hashProjectBuiltMain(path)
   }
 }
 

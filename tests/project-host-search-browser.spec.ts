@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture, unexpectedThreadDeletionExports } from "./support/renderer-browser-fixture"
 import { chromium, type Page } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 import type {
@@ -53,7 +53,7 @@ interface FixtureWindow {
 }
 
 async function main() {
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -109,6 +109,7 @@ async function main() {
             export const useAppStore=selector=>useSyncExternalStore(subscribe,()=>selector(state));
             useAppStore.getState=()=>state;useAppStore.subscribe=subscribe;
             export const isThreadDeletionPending=()=>false,isThreadRetired=()=>false;
+            ${unexpectedThreadDeletionExports}
             export const adoptThreadSearchSummary=()=>{throw new Error('Thread search is outside this project search fixture')};
             window.fixtureAccount=()=>state.accountRevision;
             window.fixtureChangeAccount=()=>{state={...state,accountRevision:state.accountRevision+1};for(const listener of listeners)listener()};
@@ -255,7 +256,7 @@ async function main() {
       })
     )
     await page.goto("http://127.0.0.1/")
-    await page.addScriptTag({ content: bundled.outputFiles[0].text })
+    await page.addScriptTag({ content: bundled })
     const search = page.getByRole("textbox", { name: "搜索项目、系统编号或插件", exact: true })
     const cards = page.locator('[data-project-runtime="host"]')
     const waitQuery = (query: string, after = "", account = 0) =>

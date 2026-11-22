@@ -4,7 +4,10 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Switch } from "@/components/ui/switch"
-import { isBuiltinRobotThreadRemoteAccessEligible } from "@/lib/builtin-robot-remote-access"
+import {
+  botWorkRemoteAccessBlockedReason,
+  isBuiltinRobotThreadRemoteAccessEligible
+} from "@/lib/builtin-robot-remote-access"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { BuiltinRobotRemoteAccessOverview } from "@/types"
@@ -90,7 +93,8 @@ function ThreadRemoteAccessSwitcherImpl({
   const grant = overview?.threadGrants.find((candidate) => candidate.threadId === threadId)
   const enabled = grant?.state === "active"
   const routeAvailable = overview?.routeAvailable === true
-  const toggleDisabled = pending || loading || (!enabled && !routeAvailable)
+  const botWorkBlocked = botWorkRemoteAccessBlockedReason(currentThread)
+  const toggleDisabled = pending || loading || (!enabled && (!routeAvailable || Boolean(botWorkBlocked)))
   const triggerLabel = enabled ? "已接入招乎" : "接入招乎"
   const triggerValue = pending
     ? "处理中"
@@ -163,7 +167,7 @@ function ThreadRemoteAccessSwitcherImpl({
           <div className="min-w-0 flex-1">
             <div className="text-xs font-medium text-foreground">接入当前会话</div>
             <div className="mt-0.5 text-[10px] leading-4 text-muted-foreground">
-              开启后，可从招乎查看并继续此会话
+              {botWorkBlocked ?? "开启后，可从招乎查看并继续此会话"}
             </div>
           </div>
           <Switch

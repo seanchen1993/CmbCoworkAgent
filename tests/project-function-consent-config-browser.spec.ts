@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import type { LocalProjectView } from "../src/shared/project-runtime/platform-api"
 import { saveMutationProjectConfigurationViaUi } from "./support/autobiz-composition-mutation-creator"
@@ -21,7 +21,7 @@ interface FixtureWindow {
 }
 
 async function main() {
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -92,7 +92,7 @@ async function main() {
     const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<html><body><div id="root"></div></body></html>')
-    await page.addScriptTag({ content: bundled.outputFiles[0].text })
+    await page.addScriptTag({ content: bundled })
     const region = page.getByRole("region", { name: "本包功能权限", exact: true })
     const settings = region.locator(":scope > details")
     const summary = settings.locator(":scope > summary")

@@ -1,0 +1,347 @@
+{
+  "kind": "database-task-timestamps-for-routing-1794829096252",
+  "archivedOn": "2026-11-17",
+  "originalSha256": "d3bec05fa9b14f2542154e892e9423b3a20a1c09b725c98e13ef31c7b08dd315",
+  "data": [
+    {
+      "name": "路由验收 · 日常问答",
+      "id": "06c2ef07-8adc-4ad9-b9fc-17aaaf17cb91",
+      "state": "completed",
+      "message": "你好，用一句话说说你能帮我做什么。",
+      "created_at": 1794829100062,
+      "updated_at": 1794829102444,
+      "kind": "user",
+      "durationSeconds": 2.4
+    },
+    {
+      "name": "路由验收 · 短文改写",
+      "id": "e130188a-2d2b-4d3f-8bda-c25cacd96498",
+      "state": "completed",
+      "message": "把这句话改得更礼貌，只给一句：明天下午三点来参加读书会，记得带书。",
+      "created_at": 1794829102710,
+      "updated_at": 1794829104580,
+      "kind": "user",
+      "durationSeconds": 1.9
+    },
+    {
+      "name": "路由验收 · 读取一个文件查事实",
+      "id": "f1b4d32f-0ce7-4aa7-8e12-e5a057edd718",
+      "state": "completed",
+      "message": "看一下 <test-workspace>/lookup/场地.md，告诉我阅览室最多能坐多少人。一句话即可。",
+      "created_at": 1794829104846,
+      "updated_at": 1794829108744,
+      "kind": "user",
+      "durationSeconds": 3.9
+    },
+    {
+      "name": "路由验收 · 文件中修改一个时间",
+      "id": "11f98cd9-b641-4b6a-bc27-895a083555c1",
+      "state": "completed",
+      "message": "把 <test-workspace>/small-edit/notice.txt 中的下午三点改成下午四点，其他内容不变。",
+      "created_at": 1794829109014,
+      "updated_at": 1794829116352,
+      "kind": "user",
+      "durationSeconds": 7.3
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "4e0a6e5a-6c0f-45ce-a44f-c8cf31383153",
+      "state": "completed",
+      "message": "请帮我做好周日读书会筹备方案。工作目录 <test-workspace>/event-plan。读取活动约束.md、场地说明.",
+      "created_at": 1794829116508,
+      "updated_at": 1794829147544,
+      "kind": "user",
+      "durationSeconds": 31
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "f90dbca5-3c14-4ce1-aeff-cadb7d59c555",
+      "state": "completed",
+      "message": "任务：在目录 <test-workspace>/event-plan 下生成 plan.md（中文），内容为「周日读书会筹备方",
+      "created_at": 1794829145094,
+      "updated_at": 1794829175456,
+      "kind": "work",
+      "durationSeconds": 30.4
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "6765ee74-a287-49b2-8a85-a4bf345982a8",
+      "state": "completed",
+      "message": "另外一个小问题：2+3等于几？只回复数字，刚才的工作照常进行。",
+      "created_at": 1794829147576,
+      "updated_at": 1794829149111,
+      "kind": "user",
+      "durationSeconds": 1.5
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "0e0bf7a0-324b-4200-be39-517291deeba6",
+      "state": "completed",
+      "message": "{\"workId\":\"abbc7f28-0fe9-454f-833d-0e4147697c6c\",\"title\":\"周日读书会筹备方案写入 plan.md\",\"executionState\":\"completed\",\"requestCont",
+      "created_at": 1794829175459,
+      "updated_at": 1794829178170,
+      "kind": "work_result",
+      "durationSeconds": 2.7
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "502cd87d-ada1-420d-81c9-1fcdaa93f9df",
+      "state": "completed",
+      "message": "刚才的读书会改成下午四点，仍是90分钟，请更新原来的 plan.md 并交给我。",
+      "created_at": 1794829178338,
+      "updated_at": 1794829185042,
+      "kind": "user",
+      "durationSeconds": 6.7
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "b9491d74-9a29-4d30-8dcc-fa9818bdd684",
+      "state": "completed",
+      "message": "用户要求修改：读书会开始时间由 15:00 改为 16:00，总时长仍为 90 分钟（16:00–17:30）。请直接更新原文件 plan.md（同一工作目录 /var/folders/kq/m0q4z3m91tx9fpfbf501hfrr",
+      "created_at": 1794829183390,
+      "updated_at": 1794829278261,
+      "kind": "work",
+      "durationSeconds": 94.9
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "132d3fa1-e5c6-43d8-8086-5f95b7511923",
+      "state": "completed",
+      "message": "{\"workId\":\"abbc7f28-0fe9-454f-833d-0e4147697c6c\",\"title\":\"周日读书会筹备方案写入 plan.md\",\"executionState\":\"completed\",\"requestCont",
+      "created_at": 1794829278264,
+      "updated_at": 1794829281272,
+      "kind": "work_result",
+      "durationSeconds": 3
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "90ace8f6-eeda-46d0-b35c-100c764f5e42",
+      "state": "completed",
+      "message": "这份方案现在还在运行吗？只查看实际状态告诉我，不用继续改。",
+      "created_at": 1794829281560,
+      "updated_at": 1794829285278,
+      "kind": "user",
+      "durationSeconds": 3.7
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "cba3545f-2ef5-4fc2-b8e5-73913c540ce3",
+      "state": "completed",
+      "message": "刚才已完成的读书会方案还要改一下：改成下午五点，更新同一份 plan.md，其他条件不变。",
+      "created_at": 1794829285463,
+      "updated_at": 1794829299143,
+      "kind": "user",
+      "durationSeconds": 13.7
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "5bb120f3-bc49-4c41-8159-7d96cf5c2f6b",
+      "state": "completed",
+      "message": "用户要求再次调整开始时间：改为下午五点（17:00）开始，总时长仍 90 分钟（17:00–18:30），其他条件不变。请更新同一份文件 <temp>/bo",
+      "created_at": 1794829297561,
+      "updated_at": 1794829314559,
+      "kind": "work",
+      "durationSeconds": 17
+    },
+    {
+      "name": "路由验收 · 多材料筹备方案及交付",
+      "id": "e0667004-5bcd-4d04-8daa-a7d48bcade51",
+      "state": "completed",
+      "message": "{\"workId\":\"abbc7f28-0fe9-454f-833d-0e4147697c6c\",\"title\":\"周日读书会筹备方案写入 plan.md\",\"executionState\":\"completed\",\"requestCont",
+      "created_at": 1794829314566,
+      "updated_at": 1794829317169,
+      "kind": "work_result",
+      "durationSeconds": 2.6
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "0f31aa43-2c6e-4a6f-8476-5f344c46fcd0",
+      "state": "completed",
+      "message": "帮我把周日读书会的筹备方案做好，先放后台推进，做好了告诉我，我这边还要继续聊别的事情。工作目录 <temp>/bot-routing-cases-LENlS",
+      "created_at": 1794829318605,
+      "updated_at": 1794829334718,
+      "kind": "user",
+      "durationSeconds": 16.1
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "dc938acc-aa96-482d-af54-2339ebdf4a73",
+      "state": "completed",
+      "message": "在目录 <test-workspace>/background-plan 中，把\"周日读书会\"的筹备方案写成 plan.md（",
+      "created_at": 1794829332381,
+      "updated_at": 1794829381288,
+      "kind": "work",
+      "durationSeconds": 48.9
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "7260cf7c-8b0f-413f-bf18-43c722116a9b",
+      "state": "completed",
+      "message": "另外一个小问题：2+3等于几？只回复数字，刚才的工作照常进行。",
+      "created_at": 1794829334856,
+      "updated_at": 1794829336534,
+      "kind": "user",
+      "durationSeconds": 1.7
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "777d8814-a3b5-47d1-a9f9-45e302e4fae2",
+      "state": "completed",
+      "message": "{\"workId\":\"81b7e93a-39c6-4b42-999b-91d2a95fe4fa\",\"title\":\"周日读书会筹备方案（含场地比选、费用核算、90分钟流程、分工与应急）\",\"executionState\":\"complete",
+      "created_at": 1794829381292,
+      "updated_at": 1794829383948,
+      "kind": "work_result",
+      "durationSeconds": 2.7
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "c81f57ef-d6d5-4e5b-a6ba-a09d63b15eef",
+      "state": "completed",
+      "message": "刚才的读书会改成下午四点，仍是90分钟，请更新原来的 plan.md 并交给我。",
+      "created_at": 1794829384028,
+      "updated_at": 1794829395323,
+      "kind": "user",
+      "durationSeconds": 11.3
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "7241c1dc-c84b-4a17-8b0e-3c31ea0cfab6",
+      "state": "completed",
+      "message": "用户改时间了：读书会从原定周日下午三点（15:00）改为周日下午四点（16:00）开始，时长仍为90分钟（即 16:00-17:30），人数20人、预算1000元、必备环节（签到/分组讨论/分享）均不变。\n\n请直接更新工作目录 /var/f",
+      "created_at": 1794829393330,
+      "updated_at": 1794829464434,
+      "kind": "work",
+      "durationSeconds": 71.1
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "aa66ee3a-f952-46f2-8a64-6a681416e93e",
+      "state": "completed",
+      "message": "{\"workId\":\"81b7e93a-39c6-4b42-999b-91d2a95fe4fa\",\"title\":\"周日读书会筹备方案（含场地比选、费用核算、90分钟流程、分工与应急）\",\"executionState\":\"complete",
+      "created_at": 1794829464440,
+      "updated_at": 1794829467174,
+      "kind": "work_result",
+      "durationSeconds": 2.7
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "3cc7a8b9-54a6-4878-bb66-beea868175de",
+      "state": "completed",
+      "message": "这份方案现在还在运行吗？只查看实际状态告诉我，不用继续改。",
+      "created_at": 1794829467280,
+      "updated_at": 1794829471368,
+      "kind": "user",
+      "durationSeconds": 4.1
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "0a43dd8f-ea13-4f34-9610-180c81ee43f6",
+      "state": "completed",
+      "message": "刚才已完成的读书会方案还要改一下：改成下午五点，更新同一份 plan.md，其他条件不变。",
+      "created_at": 1794829471537,
+      "updated_at": 1794829489236,
+      "kind": "user",
+      "durationSeconds": 17.7
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "5906089e-7733-472c-ae22-a59607d94740",
+      "state": "completed",
+      "message": "用户再次改时间：开始时间再往后一小时，从周日下午四点（16:00）改为周日下午五点（17:00）开始，时长仍为90分钟，即 17:00-18:30。其余条件全部不变：20人、各带一本书、预算1000元、必须有签到/分组讨论/分享、推荐场地仍",
+      "created_at": 1794829487736,
+      "updated_at": 1794829529252,
+      "kind": "work",
+      "durationSeconds": 41.5
+    },
+    {
+      "name": "路由验收 · 自然要求后台推进方案",
+      "id": "fbac4bf8-84bc-4148-89ac-106693d63e6c",
+      "state": "completed",
+      "message": "{\"workId\":\"81b7e93a-39c6-4b42-999b-91d2a95fe4fa\",\"title\":\"周日读书会筹备方案（含场地比选、费用核算、90分钟流程、分工与应急）\",\"executionState\":\"complete",
+      "created_at": 1794829529268,
+      "updated_at": 1794829533014,
+      "kind": "work_result",
+      "durationSeconds": 3.7
+    },
+    {
+      "name": "路由验收 · 跨文件核对数据并输出报告",
+      "id": "d3e61f83-6a88-46e1-8122-01e4fab8d254",
+      "state": "completed",
+      "message": "工作目录 <test-workspace>/reconcile 有 orders.csv 和 payments.csv。帮我核",
+      "created_at": 1794829563257,
+      "updated_at": 1794829585318,
+      "kind": "user",
+      "durationSeconds": 22.1
+    },
+    {
+      "name": "路由验收 · 跨文件核对数据并输出报告",
+      "id": "b0423030-eda2-4919-9415-649b0aa28629",
+      "state": "completed",
+      "message": "在目录 <test-workspace>/reconcile 中创建文件 reconciliation.md，内容用下面给定的",
+      "created_at": 1794829582999,
+      "updated_at": 1794829599129,
+      "kind": "work",
+      "durationSeconds": 16.1
+    },
+    {
+      "name": "路由验收 · 跨文件核对数据并输出报告",
+      "id": "900505a7-f41e-46a3-ae07-8fd77989dbbd",
+      "state": "completed",
+      "message": "{\"workId\":\"34c95388-ee3a-483e-95d9-97a883bc56e0\",\"title\":\"生成对账报告 reconciliation.md\",\"executionState\":\"completed\",\"reques",
+      "created_at": 1794829599132,
+      "updated_at": 1794829601853,
+      "kind": "work_result",
+      "durationSeconds": 2.7
+    },
+    {
+      "name": "路由验收 · 修复代码并运行验证",
+      "id": "4e002824-02a8-49d0-b1c4-ae4fdb4f1ddd",
+      "state": "completed",
+      "message": "帮我修复 <test-workspace>/code-fix 这个示例项目的折扣计算。payable 的第一个参数是整数分，第",
+      "created_at": 1794829602077,
+      "updated_at": 1794829619293,
+      "kind": "user",
+      "durationSeconds": 17.2
+    },
+    {
+      "name": "路由验收 · 修复代码并运行验证",
+      "id": "d7991328-0ed2-4beb-9897-063b67c1291f",
+      "state": "completed",
+      "message": "在有 Node.js 的当前机器上修复 <test-workspace>/code-fix 这个示例项目的折扣计算，并用 no",
+      "created_at": 1794829617029,
+      "updated_at": 1794829631822,
+      "kind": "work",
+      "durationSeconds": 14.8
+    },
+    {
+      "name": "路由验收 · 修复代码并运行验证",
+      "id": "c57e2660-115c-41dd-b233-642bf3431068",
+      "state": "completed",
+      "message": "{\"workId\":\"68fb4b48-ad52-4699-8a5d-0bf4667875fa\",\"title\":\"修复 code-fix 项目折扣计算并补 100% 边界用例\",\"executionState\":\"completed\",\"",
+      "created_at": 1794829631826,
+      "updated_at": 1794829634344,
+      "kind": "work_result",
+      "durationSeconds": 2.5
+    },
+    {
+      "name": "路由验收 · 从零实现可复用的对账工具",
+      "id": "8951413a-7d34-4ae6-a29b-39076f00641c",
+      "state": "completed",
+      "message": "帮我把 <test-workspace>/reconciliation-cli 做成一个能重复使用的 CSV 对账小项目。实现",
+      "created_at": 1794829634501,
+      "updated_at": 1794829686777,
+      "kind": "user",
+      "durationSeconds": 52.3
+    },
+    {
+      "name": "路由验收 · 从零实现可复用的对账工具",
+      "id": "8f35afa6-a62c-4552-b775-b681a8388646",
+      "state": "running",
+      "message": "在已存在的目录 <test-workspace>/reconciliation-cli 内，把该项目实现为可重复使用的纯 No",
+      "created_at": 1794829685001,
+      "updated_at": 1794829685005,
+      "kind": "work",
+      "durationSeconds": 0
+    }
+  ]
+}

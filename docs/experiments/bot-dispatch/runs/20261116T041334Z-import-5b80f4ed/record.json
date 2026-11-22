@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261116T041334Z-import-5b80f4ed",
+  "kind": "historical-real-model-electron",
+  "startedAt": "2026-11-16T04:13:34.637Z",
+  "displayTimezone": "Asia/Shanghai",
+  "archivedOn": "2026-11-17",
+  "status": "no-failure-recorded",
+  "exitCode": null,
+  "selectedCases": null,
+  "provenance": {
+    "sourceArtifact": "bot-integration-build-d4PFit/artifacts/routing-1794802414637.json",
+    "originalReportSha256": "5b80f4edf34973a133c0817f7624e1e025f881a910a18a50e995fb073a5bea24",
+    "originalExitCodeUnavailable": true,
+    "originalCaseSelectionUnavailable": true,
+    "note": "历史回收。保留缺失字段；未见 error 不等于证实进程成功。未使用当前源码回填历史版本。"
+  },
+  "build": {
+    "builtAt": "2026-11-16T03:59:29.668Z",
+    "mainSha256": "eb885d085129afaafdbb5ba260864ba0a5464e9c7c3117faaab273b7bc8d8896",
+    "sourceAtBuild": null
+  },
+  "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。",
+  "report": {
+    "model": "deepseek-v4-flash",
+    "fixtureApprovalMode": "yolo (disposable profile only)",
+    "wire": {
+      "main": 40,
+      "guided": 40,
+      "worker": 0,
+      "workerCreate": 0
+    },
+    "results": [
+      {
+        "id": "reconciliation-cli",
+        "label": "从零实现可复用的对账工具",
+        "preferred": "independent",
+        "files": {
+          "README.md": "# CSV 对账工具\n待实现。所有样本为虚构数据。\n",
+          "orders.csv": "id,amount,note\nA,120.00,book\nB,80.00,book\nC,250.00,\"card,blue\"\nD,50.00,book\n",
+          "payments.csv": "id,paid\nA,100.00\nA,20.00\nB,80.00\nC,200.00\nX,30.00\n"
+        },
+        "message": "帮我把 <test-workspace>/reconciliation-cli 做成一个能重复使用的 CSV 对账小项目。实现 reconcile.mjs 命令行：node reconcile.mjs orders.csv payments.csv report.json。按订单汇总多笔支付，找出少付、未付、超付和无订单的支付；以整数分计算金额，支持带引号和逗号的CSV字段、CRLF、中文备注，拒绝非法金额和重复订单ID。report.json 中至少包含 orderTotalCents、paymentTotalCents 和 discrepancies，每个差异有 id 和 deltaCents（实收减应收）。用 Node 自带测试框架补至少8个用例，覆盖正常数据与这些边界，真正跑过测试及示例命令。完善 README 的用法和限制，交付代码、测试及样本报告。只用标准库，不装依赖、不提交Git、不访问网络或其他目录。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 205.1,
+        "tools": [
+          "ls",
+          "read_file",
+          "execute",
+          "write_todos",
+          "write_file",
+          "edit_file",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "read_file",
+          "execute",
+          "write_todos",
+          "write_file",
+          "write_file",
+          "write_file",
+          "edit_file",
+          "edit_file",
+          "edit_file",
+          "edit_file",
+          "read_file",
+          "edit_file",
+          "edit_file",
+          "read_file",
+          "edit_file",
+          "edit_file",
+          "write_file",
+          "write_file",
+          "edit_file",
+          "write_file",
+          "write_file",
+          "edit_file",
+          "write_file",
+          "write_todos",
+          "execute",
+          "execute",
+          "execute",
+          "write_file",
+          "read_file",
+          "write_file",
+          "edit_file",
+          "execute",
+          "bot_deliver_files",
+          "execute",
+          "execute",
+          "execute",
+          "bot_deliver_files",
+          "write_todos"
+        ],
+        "reply": "我先查看目标目录的现状，再开始实现。\n\n\n\n现在实现核心模块：CSV 解析（支持引号、逗号、CRLF、中文）、金额转整数分、对账逻辑。\n\n\n\n\n\n\n\n\n\n\n\n\n\n现在写测试：CSV、金额、对账核心与 CLI 四个文件。\n\n\n\n\n\n\n\n\n22 个用例全部通过。现在运行示例命令生成报告，并检查输出。\n\n\n\n\n\n交付前先确认附件能否直接从任务目录发送。\n\n\n\n\n\n项目已在 `/var/folders/.../reconciliation-cli` 完成并验证；附件中的 zip 是完整项目副本，`report.json`、`README.md`、`reconcile.mjs` 可直接查看。\n\n**实测证据**\n- `node --test`：22 个用例全部通过（fail 0），含 4 个真实 CLI 子进程用例。\n- `node reconcile.mjs orders.csv payments.csv report.json`：退出码 0，输出 `订单 4 笔，合计 500.00 元；支付 5 笔，合计 430.00 元；差异 -70.00 元（3 条）`；连续两次运行报告 sha1 一致（`f0513bd…`），确认可重复覆盖。\n- 样本报告：`orderTotalCents=50000`、`paymentTotalCents=43000`、`differenceCents=-7000`；差异为 D `unpaid -5000`、C `underpaid -5000`、X `no_order +3000`，合计等于收付差额。\n\n**实现要点**\n- `lib/csv.mjs`：引号/逗号/字段内换行/`\"\"` 转义、CRLF、BOM、行号；未闭合引号或引号位置错误报错。\n- `lib/money.mjs`：字符串直转整数分，拒绝负数、千分位、货币符号、超过两位小数与超安全整数。\n- `lib/reconcile.mjs`：重复订单 ID、缺列/重复表头/列数不一致/空 ID 校验；支付按 ID 聚合；差异排序与“差异合计 == 收付差额”不变量校验。\n- `reconcile.mjs`：3 参数校验、写出后回读校验、退出码 0/1/2，失败不落盘。\n- 仅标准库，无依赖、无网络、未初始化 Git。限制（单币种、不支持退款/负金额、不解析千分位、一次性读入内存等）已写入 README 的“已知限制”。\n\n注：`node --test test/` 在 Node 25 会把目录当模块而失败，README 记录的是可用的 `node --test` 与 `node --test \"test/*.test.mjs\"`。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      }
+    ]
+  },
+  "logs": [
+    {
+      "name": "bot-routing-cli.log",
+      "text": "{\"case\":\"reconciliation-cli\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":205.1,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"read_file\",\"execute\",\"write_todos\",\"write_file\",\"write_file\",\"write_file\",\"edit_file\",\"edit_file\",\"edit_file\",\"edit_file\",\"read_file\",\"edit_file\",\"edit_file\",\"read_file\",\"edit_file\",\"edit_file\",\"write_file\",\"write_file\",\"edit_file\",\"write_file\",\"write_file\",\"edit_file\",\"write_file\",\"write_todos\",\"execute\",\"execute\",\"execute\",\"write_file\",\"read_file\",\"write_file\",\"edit_file\",\"execute\",\"bot_deliver_files\",\"execute\",\"execute\",\"execute\",\"bot_deliver_files\",\"write_todos\"]}\nRouting evaluation report: <temp>/bot-integration-build-d4PFit/artifacts/routing-1794802414637.json\n",
+      "sha256": "a4a7acd646907a75389214a892c2b99e8dcbd5fc2aed3381c0586b80b8ac0869"
+    }
+  ]
+}

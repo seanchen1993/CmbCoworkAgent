@@ -57,22 +57,62 @@ describe("thread mutation incarnation lease", () => {
   })
 
   it("routes every source-sensitive queued thread operation through the lease helper", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./threads.ts", import.meta.url)),
-      "utf8"
+    const source = ts.createSourceFile(
+      "threads.ts",
+      readFileSync(new URL("./threads.ts", import.meta.url), "utf8"),
+      ts.ScriptTarget.Latest,
+      true
     )
+    const operations = new Map<string, ts.FunctionLikeDeclaration>()
+    const visit = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name) operations.set(node.name.text, node)
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.expression.getText(source) === "ipcMain" &&
+        node.expression.name.text === "handle"
+      ) {
+        const [name, handler] = node.arguments
+        if (ts.isStringLiteral(name) && ts.isArrowFunction(handler)) {
+          operations.set(name.text, handler)
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
 
-    for (const pattern of [
-      /export async function forkThread[\s\S]{0,700}requireThreadMutationLease[\s\S]{0,500}withThreadMutationLeaseLock/,
-      /async function listForkableCheckpoints[\s\S]{0,500}requireThreadMutationLease[\s\S]{0,300}withThreadMutationLeaseLock/,
-      /export async function resolveForkCheckpointForMessage[\s\S]{0,700}requireThreadMutationLease[\s\S]{0,300}withThreadMutationLeaseLock/,
-      /"threads:appendMessages"[\s\S]{0,500}captureThreadMutationLease[\s\S]{0,300}withThreadMutationLeaseLock/,
-      /"threads:replaceMessageId"[\s\S]{0,700}requireThreadMutationLease[\s\S]{0,300}withThreadMutationLeaseLock/,
-      /"threads:update"[\s\S]{0,700}requireThreadMutationLease[\s\S]{0,300}withThreadMutationLeaseLock/,
-      /"threads:mergeThreadValues"[\s\S]{0,500}requireThreadMutationLease[\s\S]{0,300}withThreadMutationLeaseLock/,
-      /"threads:persistSubagentTranscripts"[\s\S]{0,500}requireThreadMutationLease[\s\S]{0,300}withThreadMutationLeaseLock/
+    for (const [name, capture] of [
+      ["forkThread", "requireThreadMutationLease"],
+      ["listForkableCheckpoints", "requireThreadMutationLease"],
+      ["resolveForkCheckpointForMessage", "requireThreadMutationLease"],
+      ["threads:appendMessages", "captureThreadMutationLease"],
+      ["threads:replaceMessageId", "requireThreadMutationLease"],
+      ["threads:update", "requireThreadMutationLease"],
+      ["threads:mergeThreadValues", "requireThreadMutationLease"],
+      ["threads:persistSubagentTranscripts", "requireThreadMutationLease"]
     ]) {
-      expect(source).toMatch(pattern)
+      const body = operations.get(name)?.body
+      expect(body, name).toBeDefined()
+      const leases: ts.VariableDeclaration[] = []
+      const lockCalls: ts.CallExpression[] = []
+      const collect = (node: ts.Node): void => {
+        if (
+          ts.isVariableDeclaration(node) &&
+          node.initializer && ts.isCallExpression(node.initializer) &&
+          node.initializer.expression.getText(source) === capture
+        ) leases.push(node)
+        if (
+          ts.isCallExpression(node) &&
+          node.expression.getText(source) === "withThreadMutationLeaseLock"
+        ) lockCalls.push(node)
+        ts.forEachChild(node, collect)
+      }
+      collect(body!)
+      expect(leases, name).toHaveLength(1)
+      const [lease] = leases
+      expect(lockCalls, name).toHaveLength(1)
+      expect(lockCalls[0].arguments[0].getText(source), name).toBe(lease.name.getText(source))
+      expect(lockCalls[0].getStart(source), name).toBeGreaterThan(lease.getStart(source))
     }
   })
 

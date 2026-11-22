@@ -1,0 +1,183 @@
+[
+  {
+    "stage": "首轮。可控模型，本机招乎受理与结果",
+    "evidence": {
+      "mode": "controlled-model-real-electron-local-ws",
+      "normalDispatchModelCalls": 1,
+      "budgetMainModelCalls": 7,
+      "openingDeliveries": 1,
+      "group": [
+        "我来核对这份数据，查好发到这里。",
+        "群任务结果：需求清单已整理。"
+      ],
+      "ownerDm": [
+        "我来核对这份数据，查好发到这里。",
+        "群任务结果：需求清单已整理。"
+      ],
+      "finding": [
+        "输入有 24 行，其中 3 行重复。 我来核对其余数据。",
+        "群任务结果：需求清单已整理。"
+      ],
+      "resultDeliveries": 1,
+      "realFailureDelivered": true,
+      "laterFindingDelivered": true,
+      "errors": []
+    }
+  },
+  {
+    "stage": "流式预览复测。可控模型与真实 Electron",
+    "evidence": {
+      "mode": "controlled-model-real-electron-local-ws",
+      "normalDispatchModelCalls": 1,
+      "budgetMainModelCalls": 7,
+      "openingDeliveries": 1,
+      "appDraftFlashed": false,
+      "appLookup": "核对结果为 3。",
+      "group": [
+        "我来核对这份数据，查好发到这里。",
+        "这 24 行数据中有 3 行重复。"
+      ],
+      "ownerDm": [
+        "我来核对这份数据，查好发到这里。",
+        "这 24 行数据中有 3 行重复。"
+      ],
+      "finding": [
+        "输入有 24 行，其中 3 行重复。 我来核对其余数据。",
+        "这 24 行数据中有 3 行重复。"
+      ],
+      "resultDeliveries": 1,
+      "realFailureDelivered": true,
+      "laterFindingDelivered": true,
+      "errors": []
+    }
+  },
+  {
+    "stage": "首次真实招乎本人私聊。主对话提前作答，后台停在本机审批；群聊未运行",
+    "evidence": {
+      "model": "deepseek-v4-flash",
+      "gateway": "loopback",
+      "results": [
+        {
+          "channel": "dm",
+          "messages": [
+            "搭档，任务已新开（orders_dm 异常核对）。先按你给的摘录直接答：\n\n**次数**：2 次，都命中「size 为零即拒绝该批次」这条规则，属同一类异常 E_EMPTY_BATCH。\n- 09:15 batch=a，size=0\n- 11:20 batch=b，size=0\n\n**触发原因**：两次都是批次内容为空（size=0），不是批次标识问题，也不是时间窗口问题——a、b 两个不同批次都空，说明是调用方侧数据准备环节没拦住空集，直接把空批次提交了上来，被服务端按规则拒收。\n\n**调用方修复建议**：\n1. 提交前加前置校验：size=0 直接本地短路，不要发请求，避免产生无意义的拒绝日志。\n2. 查上游取数：a、b 两个批次的筛选条件/时间区间是否本来就没数据，尤其 09:15、11:20 这种整点前后的窗口容易漏数据。\n3. 空集要有明确语义：确实无数据时走「空批次跳过」而非「提交空批次」，两者要区分开。\n4. 加监控：同类 E_EMPTY_BATCH 连续出现即告警，两次相隔两小时，说明不是偶发。\n\n需要我把这两条的时间线和批次号整理成表格的话，跟我说一声。"
+          ],
+          "firstMs": 8986
+        }
+      ]
+    }
+  },
+  {
+    "stage": "改用单独的待答事项后。私聊收到两条，首条漏用预设称呼；群聊未运行",
+    "evidence": {
+      "model": "deepseek-v4-flash",
+      "gateway": "loopback",
+      "results": [
+        {
+          "channel": "dm",
+          "messages": [
+            "开个新任务，就这两条摘录核对次数和触发原因，并给出修复建议，结果回到这里。",
+            "搭档，两条都算，共 **2 次**异常。\n\n- 09:15 batch=a size=0 → E_EMPTY_BATCH，批次被拒\n- 11:20 batch=b size=0 → E_EMPTY_BATCH，批次被拒\n\n**触发原因**：两个批次 size 都是 0，命中“size 为零即拒绝该批次”的空批次校验，直接返回 E_EMPTY_BATCH。a、b 是两个不同批次，属于独立重复发生，不是同一批次重试。\n\n**给调用方的修复建议**：\n1. 提交前做前置校验，size 为 0 或空列表时不下发，避免无效调用。\n2. 上游组装批次时过滤空集合，别把空结果当批次发。\n3. 空批次若对业务有意义，本地短路处理并记明细日志，不要靠服务端报错。\n4. 加监控：同一调用方短时间内重复出现 E_EMPTY_BATCH 时告警，防止今天这样两次都白跑。\n\n依据仅限你给的这两条摘录，其他批次和历史记录未核。"
+          ],
+          "firstMs": 6958,
+          "resultMs": 14021
+        }
+      ]
+    }
+  },
+  {
+    "stage": "进一步收紧结果文风后。私聊直接分析了摘录，此次未观察到受理回执，群聊未运行",
+    "evidence": {
+      "model": "deepseek-v4-flash",
+      "gateway": "loopback",
+      "results": [
+        {
+          "channel": "dm",
+          "messages": [
+            "搭档，两次异常都核对完了，结果如下（仅依据你给出的摘录）：\n\n**次数**：2 次，都触发了 `E_EMPTY_BATCH`\n- 09:15 batch=a，size=0\n- 11:20 batch=b，size=0\n\n**判定**：按“size 为零就拒绝该批次”的规则，这两批都应被拒绝，两次拒绝都是正确的。两次出现同一错误码、同一形态（size=0），说明这是调用方每次都会重复出现的问题，而不是偶发。\n\n**触发原因**：调用方提交了空批次，即批次内没有一条记录时就发起了请求。从摘录只能确认到“提交时 size 已为 0”这一步，至于空批次是上游查询没取到数据，还是组装环节把数据漏掉了，仅凭这两条摘录无法判定。\n\n**给调用方的修复建议**：\n1. 发请求前增加 `size > 0` 的前置校验，空批次直接跳过，不要提交。\n2. 如果某段时间确实没有数据，就在调用方区分“无数据”和“异常”两种状态，不要生成空批次。\n3. 排查 batch=a、batch=b 两次的取数条件（时间窗、过滤条件、分页），确认是真的没有数据，还是取数环节漏掉了数据。\n4. 对于连续出现的空批次，在调用方加上监控和告警，避免它每天重复出现。\n\n需要我进一步查取数逻辑的话，把相关文件或日志给我。"
+          ],
+          "firstMs": 6964
+        }
+      ]
+    }
+  },
+  {
+    "stage": "增加显式交办指引后。未校验模型对另外请求的转述，本轮汇报提前出现。旧测试收件器同时读取两条路由，群记录不独立；中止连接后测试代理重复写 HTTP 状态",
+    "evidence": {
+      "model": "deepseek-v4-flash",
+      "gateway": "loopback",
+      "results": [
+        {
+          "channel": "dm",
+          "messages": [
+            "搭档，新任务已开（orders_dm 两条 E_EMPTY_BATCH 异常核对），结论先在这里直接给你：\n\n**次数：2 次**，都是今天，两个不同批次：\n- 09:15 batch=a size=0 → E_EMPTY_BATCH\n- 11:20 batch=b size=0 → E_EMPTY_BATCH\n\n**触发原因：** 按“size 为零即拒绝该批次”的规则，这两批都被拒。摘录里能确认的共同点是提交到 orders_dm 时批次内没有明细行（size=0），因此触发了空批次拦截。至于明细为什么是空的——是上游查询没取到数据、组装批次时漏了行，还是被上游过滤掉了——摘录里看不出来，需要调用方查这两次提交前的取数结果才能定论。\n\n**给调用方的修复建议：**\n1. 提交前校验 size，为 0 就不要发，直接记录“本次无数据”，避免制造一条拒绝日志。\n2. 排查 batch=a 和 batch=b 的取数条件与时间窗口，确认是否真的无数据；若确实无数据属正常，则改成静默跳过。\n3. 若空批是组装环节丢行导致，修组装逻辑，并加空集合断言。\n4. 不要对同一空批次重试，重试只会重复产生 E_EMPTY_BATCH。\n\n补充一句：两次相隔约两小时、批次名不同，更像是调用方的取数/组装问题，而不是偶发。"
+          ],
+          "firstMs": 9069,
+          "failure": "AssertionError [ERR_ASSERTION]: first delivery should only confirm acceptance"
+        },
+        {
+          "channel": "group",
+          "messages": [
+            "搭档，结论一致，补上任务那边的确认：\n\n**次数：2 次**，09:15 batch=a、11:20 batch=b，都是 size=0 被拒。\n\n**触发原因：** 都命中同一条规则——size 为零即拒绝该批次，E_EMPTY_BATCH 表示批次内没有明细。两批相隔约 2 小时、批次名不同，不像偶发，更像是上游组包未完成就提交，或筛选条件把明细全过滤掉。\n\n**给调用方的修复建议：**\n1. 提交前校验 size>0，为空就跳过不发送，避免制造无意义的拒绝记录。\n2. 排查 batch=a、batch=b 的筛选条件、时间窗和分页，确认是否真的取不到数据。\n3. 空批次时补明确日志（批次号、数据源、查询条件），便于定位。\n4. 若业务允许空批次，需与接口方确认是否调整规则；否则保持拒绝，把校验前移到调用侧。\n5. 别对空批次重试，重试只会重复产生同一条错误。\n\n按你的要求，未读本地文件、未跑命令，所以只有今天这两条的频次，没有历史统计。"
+          ],
+          "firstMs": 3930,
+          "failure": "reply delivered outside original conversation"
+        }
+      ]
+    }
+  },
+  {
+    "stage": "宿主原文校验。可控模型，App 画面和私聊、群聊收件",
+    "evidence": {
+      "mode": "controlled-model-real-electron-local-ws",
+      "normalDispatchModelCalls": 1,
+      "budgetMainModelCalls": 7,
+      "openingDeliveries": 1,
+      "appDraftFlashed": false,
+      "appLookup": "核对结果为 3。",
+      "group": [
+        "我来核对这份数据，查好发到这里。",
+        "这 24 行数据中有 3 行重复。"
+      ],
+      "ownerDm": [
+        "我来核对这份数据，查好发到这里。",
+        "这 24 行数据中有 3 行重复。"
+      ],
+      "finding": [
+        "输入有 24 行，其中 3 行重复。 我来核对其余数据。",
+        "这 24 行数据中有 3 行重复。"
+      ],
+      "resultDeliveries": 1,
+      "realFailureDelivered": true,
+      "laterFindingDelivered": true,
+      "errors": []
+    }
+  },
+  {
+    "stage": "宿主原文校验。真实 DeepSeek 与本机招乎网关，独立记录两条路由",
+    "evidence": {
+      "model": "deepseek-v4-flash",
+      "gateway": "loopback",
+      "results": [
+        {
+          "channel": "dm",
+          "messages": [
+            "搭档，我另起了一个任务核对 orders_dm 这两条异常，结论直接回在这里。",
+            "搭档，核对完了：\n\n**次数**：2 次 — 09:15 batch=a、11:20 batch=b，两次都是 size=0 触发 E_EMPTY_BATCH。\n\n**触发原因**：两个批次提交时明细条数都是 0，命中“size 为零即拒绝该批次”的规则，整批被拒收。不是系统故障，属于调用方提交了空批次。\n\n**给调用方的修复建议**：\n1. 提交前先判断批次内明细条数，size=0 直接不提交，本地短路，省掉无效调用。\n2. 空批次多半来自上游筛选或分页取到空结果，在取数环节加空结果判断并跳过。\n3. 若“当天无单”属正常场景，改为返回“无数据”，不发批次。\n4. E_EMPTY_BATCH 单独做日志和告警区分，别和真实失败混在一起。\n\n仅依据你给的两条摘录，未查其他数据。"
+          ],
+          "firstMs": 9982,
+          "resultMs": 16005
+        },
+        {
+          "channel": "group",
+          "messages": [
+            "搭档，我另开一个任务核对这两条空批次异常，结论直接发到这里。",
+            "搭档，核对结果如下：\n\n**次数**：2 次，都在今天。\n- 09:15 batch=a，size=0 → E_EMPTY_BATCH\n- 11:20 batch=b，size=0 → E_EMPTY_BATCH\n\n**触发原因**：两次提交的批次记录数都是 0，按「size 为零即拒绝该批次」的规则，服务端直接拒绝并返回 E_EMPTY_BATCH。两个 batch 标识不同，说明是不同时间各自构造的空批次，不是同一批次重试。摘录里没有堆栈、超时或服务端故障迹象。\n\n**调用方修复建议**：\n1. 发送前做本地校验，`size == 0` 就不发请求，按「无数据」本地处理。\n2. 排查上游数据源：筛选条件、时间窗口、分页逻辑是否把结果筛成空集；batch=b 那次尤其要看是否条件过窄或数据延迟。\n3. 业务允许无数据时走正常分支，不允许时提前报错并告警，别把空批次当提交。\n4. 请求日志带上 batch 和 size 字段，便于区分「真没数据」和「没取到数据」。\n\n要定位更细的根因得看批次生成侧日志，本次按你的要求只依据摘录。"
+          ],
+          "firstMs": 4019,
+          "resultMs": 12027
+        }
+      ]
+    }
+  }
+]

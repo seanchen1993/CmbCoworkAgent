@@ -42,6 +42,23 @@ describe("ordinary thread search scope", () => {
     expect(matchesOrdinaryThreadScope({ metadata }, "C:/project")).toBe(false)
   })
 
+  it("keeps local Bot work searchable while excluding remote Bot and Host project histories", () => {
+    const local = {
+      botId: "assistant",
+      botHostId: "local",
+      botWorkId: "local-work",
+      botAudienceKey: "desktop",
+      workspacePath: "C:/work"
+    }
+    const remote = { ...local, botGroupId: "private-group", botAudienceKey: "im:private-group" }
+
+    expect(matchesOrdinaryThreadScope({ metadata: local }, "C:/work")).toBe(true)
+    expect(matchesOrdinaryThreadScope({ metadata: remote }, "C:/work")).toBe(false)
+    expect(matchesOrdinaryThreadScope({
+      metadata: { ...local, hostProjectRuntime: { projectId: "project" } }
+    }, "C:/work")).toBe(false)
+  })
+
   it("uses the sidebar's display prefixes and ID fallback", () => {
     const thread_id = "123456789012345678901"
     expect(getDisplayThreadTitle({ thread_id, title: "[定时] 每周汇总" })).toBe("每周汇总")

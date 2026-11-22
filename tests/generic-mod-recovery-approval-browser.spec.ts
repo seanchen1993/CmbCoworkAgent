@@ -1,14 +1,14 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve, join } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
   const output = resolve("output/generic-mod-recovery-approval", `run-${Date.now()}`)
   mkdirSync(output, { recursive: true })
-  const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
+  const bundle = await buildRendererBrowserFixture({ stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
 import React from "react";import{createRoot}from"react-dom/client";
 import{ClawRecoveryApproval}from"./src/renderer/src/components/chat/ClawRecoveryApproval";
 import{useAppStore}from"./src/renderer/src/lib/store";
@@ -36,7 +36,7 @@ remove:()=>{binding.capabilities=[];render()}};reset();
     const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     await page.route("http://fixture.test/**", (route) => route.fulfill({ contentType: "text/html",
-      body: `<html><meta charset="utf-8"><div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></html>` }))
+      body: `<html><meta charset="utf-8"><div id="root"></div><script>${bundle.replaceAll("</script", "<\\/script")}</script></html>` }))
     await page.goto("http://fixture.test")
     const card = page.locator('[data-claw-recovery-plugin="provider"]')
     const approve = card.getByRole("button", { name: "授权以上能力", exact: true })

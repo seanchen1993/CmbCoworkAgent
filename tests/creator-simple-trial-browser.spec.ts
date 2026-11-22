@@ -2,14 +2,14 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
   const output = resolve("output/creator-simple-trial-browser", String(Date.now()))
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -75,7 +75,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1200, height: 900 } })
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<html><body><div id="root"></div></body></html>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const dialog = page.getByRole("dialog", { name: "插件试用与整轮验收", exact: true })
     const start = dialog.getByRole("button", { name: "开始试用", exact: true })
     const count = (kind: string) =>

@@ -1,0 +1,28 @@
+
+ RUN  v3.2.4 <repository>
+
+(node:30545) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30544) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/host-work-status.test.ts (5 tests) 1110ms
+   ✓ lists ordinary and Feature tasks together, scopes search and cursors, and separates business completion from a turn  350ms
+ ✓ src/main/bots/browser.test.ts (118 tests) 1924ms
+   ✓ reopens hidden personal IM helper pages from the original desktop and returns skipped  428ms
+(node:30574) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30576) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/work-result.test.ts (15 tests) 772ms
+ ✓ src/main/bots/work-tools.test.ts (9 tests) 814ms
+(node:30606) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/work-input.test.ts (2 tests) 3ms
+ ✓ src/main/bots/feature-steering.test.ts (9 tests) 7ms
+ ✓ src/main/agent/tool-concurrency.test.ts (65 tests) 256ms
+
+ Test Files  7 passed (7)
+      Tests  223 passed (223)
+   Start at  15:35:17
+   Duration  5.44s (transform 579ms, setup 0ms, collect 3.59s, tests 4.89s, environment 1ms, prepare 390ms)
+

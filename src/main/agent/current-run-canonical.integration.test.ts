@@ -26,6 +26,12 @@ import {
   setCurrentRunMessageQueueOwner,
   type CurrentRunInjectionNotifier
 } from "./current-run-message-queue"
+import {
+  registerAgentRunImplementation,
+  sendCurrentAgentRunStreamEvent,
+  startAgentRun,
+  type AgentRunDelivery
+} from "./agent-run-service"
 import { FunctionConversationStore } from "../db/function-conversation-store"
 import { createFunctionConversationTranscriptAccess } from "../db/function-conversation-transcript"
 import { functionConversationCanonicalStamp } from
@@ -141,6 +147,7 @@ function fixture() {
     isCurrentRunMessageQueueOwner,
     captureCurrentRunMessageQueueOwner,
     registerCurrentRunCompletedAssistantRoute,
+    sendCurrentAgentRunStreamEvent,
     BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false,
       webContents: { isDestroyed: () => false, send: (channel: string, payload: unknown) => {
         sends.push({ channel, payload })
@@ -218,10 +225,25 @@ function complete(f: ReturnType<typeof fixture>, raw: AIMessage, text = "safe ca
 describe("canonical current-run completion on actual queue, AppDB and graph", () => {
   it("keeps the actual canonical AI ID and raw columns while steering only the user row", async () => {
     const f = fixture(), g = graph(f, raw => complete(f, raw))
-    const result = await g.run(), safe = g.safe()
+    const results = Promise.withResolvers<Awaited<ReturnType<typeof g.run>>>()
+    const scopedSends = vi.fn<AgentRunDelivery["send"]>()
+    registerAgentRunImplementation(async () => { results.resolve(await g.run()) })
+    const run = await startAgentRun({
+      threadId: f.threadId, message: "original user input", streamRequestId: "canonical-steer"
+    }, { window: {} as AgentRunDelivery["window"], send: scopedSends, isAvailable: () => true })
+    await run.completion
+    const result = await results.promise, safe = g.safe()
     if (!safe?.id) throw Error("ACTUAL_CANONICAL_AI_REQUIRED")
     expect(g.provider.requests).toHaveLength(2)
-    expect(g.provider.requests[1].find(message => message.id === safe.id)).toBe(safe)
+    const modelProjection = g.provider.requests[1].filter(message => message.id === safe.id)
+    expect(modelProjection).toHaveLength(1)
+    // The provider receives a graph message projection. Private receipt identity
+    // is asserted separately at the original queue handoff below.
+    expect(modelProjection[0]).toMatchObject({
+      id: safe.id, content: safe.content, tool_calls: safe.tool_calls
+    })
+    expect(modelProjection[0].additional_kwargs.function_row).toEqual(safe.additional_kwargs.function_row)
+    expect(JSON.stringify(modelProjection[0])).not.toContain("raw provider body")
     expect(g.provider.requests[1].at(-1)?.content).toBe("prepared steering payload")
     expect(safe.content).toBe("safe canonical body")
     expect(f.raw(safe.id)).toEqual(g.before())
@@ -229,7 +251,18 @@ describe("canonical current-run completion on actual queue, AppDB and graph", ()
     expect(f.move).toHaveBeenCalledWith(f.threadId, safe.id, [g.queuedId])
     expect(f.upsert.mock.calls.flatMap(call => call[1]).map(message => message.role)).toEqual(["user"])
     expect(getCurrentRunInjectedMessageIds(f.threadId)).toEqual([g.queuedId])
-    expect(f.sends.some(event => JSON.stringify(event.payload).includes("message_id_alias"))).toBe(false)
+    expect(scopedSends).toHaveBeenCalledExactlyOnceWith(
+      "agent:stream:" + f.threadId + ":request:canonical-steer",
+      expect.objectContaining({ data: expect.objectContaining({
+        type: "current_run_user_injected", completedAssistantId: safe.id,
+        completedAssistantContent: "safe canonical body"
+      }) })
+    )
+    expect(f.sends.map(event => event.channel)).toEqual(["agent:queueInjected:" + f.threadId])
+    expect(sendCurrentAgentRunStreamEvent(f.threadId, { type: "late" })).toBe(false)
+    const published = JSON.stringify([f.sends, scopedSends.mock.calls])
+    expect(published).not.toContain("message_id_alias")
+    expect(published).not.toContain("raw provider body")
     const tuple = await f.saver.getTuple(g.config)
     if (!tuple) throw Error("ACTUAL_COMMITTED_CHECKPOINT_REQUIRED")
     const checkpoint = await f.saver.getTuple(tuple.config)
@@ -240,7 +273,12 @@ describe("canonical current-run completion on actual queue, AppDB and graph", ()
     const persisted = messages.find(message => message.id === safe.id)
     expect(persisted).toBeDefined()
     if (!persisted) throw Error("ACTUAL_CANONICAL_CHECKPOINT_REQUIRED")
-    expect(serializeFunctionConversationNativeMessage(persisted))
+    expect(persisted).toMatchObject({ id: safe.id, content: safe.content,
+      additional_kwargs: safe.additional_kwargs, tool_calls: safe.tool_calls })
+    expect(JSON.stringify(persisted)).not.toContain("raw provider body")
+    // The stock Saver hydrates its own LangChain message shape. Check the exact
+    // committed native bytes against the authenticated Keeper receipt instead.
+    expect(f.store.readReceipt(f.target, safe.id)?.nativePayload)
       .toBe(serializeFunctionConversationNativeMessage(safe))
     expect(result.messages.some(message => message.id === safe.id)).toBe(true)
   })
@@ -251,7 +289,12 @@ describe("canonical current-run completion on actual queue, AppDB and graph", ()
     expect(g.provider.requests).toHaveLength(2)
     const first = g.provider.requests[1].find(message => message instanceof AIMessage)
     expect(first?.id?.startsWith("current-run-assistant:")).toBe(true)
-    expect(f.sends.some(event => JSON.stringify(event.payload).includes("message_id_alias"))).toBe(true)
+    expect(f.sends).toContainEqual({
+      channel: "agent:stream:" + f.threadId,
+      payload: expect.objectContaining({ data: expect.objectContaining({
+        type: "message_id_alias", fromId: "reused-raw-provider-id", toId: first?.id
+      }) })
+    })
     expect(appDb.getThreadMessagesByIds(f.threadId, [g.queuedId])[0]?.content)
       .toBe("visible steering input")
     expect(g.provider.requests[1].at(-1)?.content).toBe("prepared steering payload")

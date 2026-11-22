@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import ts from "typescript"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
@@ -70,7 +70,7 @@ const defaultBody = thread
 async function main() {
   const output = resolve("output/mods-chatcontainer-input-target-browser", String(Date.now()))
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       loader: "tsx",
       resolveDir: process.cwd(),
@@ -168,6 +168,7 @@ async function main() {
           const initial=${defaultBody};
           const noop=()=>{},asyncNoop=async()=>null;
           let actions;export const threadStore=create(()=>({...initial,workspacePath:'C:/fixture',historyLoading:false,currentModel:'test',
+            draftBotReplyTo:undefined,draftBotMentions:undefined,
             historyConversationPresence:'empty',workspaceFiles:[{name:'proof.txt',path:'proof.txt',type:'file'}]}));
           const change=patch=>threadStore.setState(patch);
           actions=new Proxy({setDraftInput:text=>change({draftInput:text,draftRevision:threadStore.getState().draftRevision+1}),
@@ -257,7 +258,7 @@ async function main() {
       }
     ]
   })
-  writeFileSync(resolve(output, "fixture.js"), bundle.outputFiles[0].text)
+  writeFileSync(resolve(output, "fixture.js"), bundle)
   const browser = await chromium.launch({
     headless: true,
     ...(existsSync(chromium.executablePath()) ? {} : { channel: "msedge" })
@@ -281,7 +282,7 @@ async function main() {
       await page.evaluate((value) => {
         ;(window as unknown as { initialHold?: string }).initialHold = value
       }, hold)
-      await page.addScriptTag({ content: bundle.outputFiles[0].text })
+      await page.addScriptTag({ content: bundle })
       await page.waitForFunction("document.querySelector('textarea.composer-textarea')", null, {
         timeout: 15000
       })

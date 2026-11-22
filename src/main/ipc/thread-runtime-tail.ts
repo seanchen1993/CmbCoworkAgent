@@ -10,6 +10,7 @@ import {
   getThreadMessagesForForkReplay
 } from "../db"
 import { withCheckpointer } from "../agent/runtime"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "../agent/agent-run-service"
 import type { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { forkReplayMessageDigest, readGraphInputForkReplay } from "../checkpointer/fork-replay-proof"
 import type { Message } from "../types"
@@ -313,6 +314,8 @@ export async function getDurableRuntimeTail(
     /** Set only after invoke replacement proves every predecessor settled. */
     allowBoundedCheckpointRecovery?: boolean
     resolveFunctionRow?: PersistedRuntimeMessageOptions["resolveFunctionRow"]
+    /** Opt-in managed input decisions; visible rows and checkpoint identity stay intact. */
+    userInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>
   } = {}
 ): Promise<DurableRuntimeTail> {
   const resolveFunctionRow = options.resolveFunctionRow
@@ -363,12 +366,28 @@ export async function getDurableRuntimeTail(
     transcript.visibleMessages,
     options
   )
+  const inputProjections = options.userInputProjections?.(
+    persistedTail.filter(message => message.role === "user").map(message => message.id)
+  )
+  const acceptedTail = persistedTail.filter(message =>
+    message.role !== "user" || !inputProjections?.has(message.id) ||
+    Boolean(inputProjections.get(message.id)))
   return {
     checkpointTuple,
-    messages: persistedTail
-      .map((message) => persistedMessageToRuntimeMessage(message, { resolveFunctionRow }))
+    messages: acceptedTail
+      .map(message => {
+        const content = message.role === "user" ? inputProjections?.get(message.id) : undefined
+        const projected = persistedMessageToRuntimeMessage(
+          typeof content === "string" ? { ...message, content } : message, { resolveFunctionRow })
+        if (projected && typeof content === "string") {
+          projected.additional_kwargs.cmb_coordinator_augmented_user_message = true
+          projected.additional_kwargs.cmb_visible_user_message = message.content
+          projected.additional_kwargs[BOT_PREPARED_USER_REQUEST_KEY] = content
+        }
+        return projected
+      })
       .filter((message): message is BaseMessage => message !== null),
-    persistedMessages: persistedTail,
+    persistedMessages: acceptedTail,
     checkpointHasInterrupt: checkpointHasInterrupt(checkpoint)
   }
 }

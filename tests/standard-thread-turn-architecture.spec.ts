@@ -195,6 +195,20 @@ assertDesktopMetadataParser(invokeStart, resumeStart, [
 ])
 assertDesktopMetadataParser(resumeStart, interruptStart, [desktopRunMetadataRead])
 assertDesktopMetadataParser(interruptStart, "// Handle cancellation", [desktopRunMetadataRead])
+
+const managedEntryGuard = desktop.slice(
+  desktop.indexOf("function rejectDesktopRunForForeignOwner("),
+  desktop.indexOf(
+    "const lease = getLocalThreadRunLease(threadId)",
+    desktop.indexOf("function rejectDesktopRunForForeignOwner(")
+  )
+)
+for (const statement of [
+  "parseStandardThreadMetadata(row?.metadata).metadata",
+  "assertWorkConversationEntry(threadId, row, metadata, context)",
+  "assertBotMockThreadEntry(metadata, context)"
+])
+  assertIncludes(managedEntryGuard, statement, `managed entry guard retains ${statement}`)
 for (const metadataField of [
   'typeof metadata.workspacePath === "string"',
   'typeof metadata.model === "string"',

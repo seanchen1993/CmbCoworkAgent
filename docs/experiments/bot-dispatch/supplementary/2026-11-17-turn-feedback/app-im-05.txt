@@ -1,0 +1,6 @@
+stage: launch real App <temp>/bot-group-app-NIZbQR
+stage: selected Zhaohu group -> real Runtime -> WS delivery -> work -> return group/private
+Failure diagnostics: <temp>/bot-group-app-NIZbQR
+Error: Timed out: findings work result
+    at wait (<repository>/tests/bots-private-group-app.spec.ts:463:42)
+    at async main (<repository>/tests/bots-private-group-app.spec.ts:581:5)

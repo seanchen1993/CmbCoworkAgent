@@ -6,13 +6,21 @@ import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-de
 
 const source = readFileSync(new URL("./threads.ts", import.meta.url), "utf8")
 
+function deletionHandlerSource(): string {
+  const start = source.indexOf("const deleteThread: ThreadDeletionService = async")
+  const end = source.indexOf("const deleteThreadFromRenderer = async", start)
+  expect(start).toBeGreaterThanOrEqual(0)
+  expect(end).toBeGreaterThan(start)
+  return source.slice(start, end)
+}
+
 // Exercise the registered handler and its teardown closure without loading Electron or a DB.
 function loadThreadDeletionHandler({
   externalOwner = false,
   backgroundShell = false
 }: { externalOwner?: boolean; backgroundShell?: boolean } = {}) {
   const start = source.indexOf("const deletingThreads = new Map")
-  const end = source.indexOf("// Get thread history", start)
+  const end = source.indexOf("const deleteThreadFromRenderer = async", start)
   const code = ts.transpileModule(source.slice(start, end), {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText
@@ -36,6 +44,16 @@ function loadThreadDeletionHandler({
     getDb: () => ({}),
     checkpointHydrationOperations: new Map<string, Set<AbortController>>(),
     getAgentModeFromMetadata: () => "normal",
+    threadDeletionMetadata: () => ({}),
+    assertScopedBotWorkThreadDeletion: () => false,
+    findBotWorkThreadOwner: () => undefined,
+    hasBotWorkMetadata: () => false,
+    assertThreadDeletionGroup: noop,
+    threadDeletionRuntime: () => ({
+      hasActiveRun: () => false, isAborting: () => false,
+      hasExternalRun: () => hasExternalThreadRunOwner(), hasWorkflowRun: () => false,
+      hasWorkerRun: () => false, hasBackgroundShell: hasActiveBackgroundTasks
+    }),
     assertThreadDeletionWorkspace,
     isThreadDeletionBusy,
     hasActiveAgentRun: () => false,
@@ -59,10 +77,7 @@ function loadThreadDeletionHandler({
   }
   const execute = new Function(
     ...Object.keys(dependencies),
-    `let execute
-     const ipcMain = { handle: (_channel, callback) => { execute = callback } }
-     ${code}
-     return execute`
+    `${code}\nreturn deleteThread`
   )(...Object.values(dependencies)) as (
     event: { sender: object },
     threadId: string,
@@ -164,12 +179,8 @@ describe("threads:get hydration contract", () => {
   })
 
   it("cancels migration before deletion waits and forgets it only after DB removal", () => {
-    const channel = source.indexOf('"threads:delete"')
-    const start = source.lastIndexOf("ipcMain.handle(", channel)
-    const end = source.indexOf('// Get thread history', start)
-    const handler = source.slice(start, end)
+    const handler = deletionHandlerSource()
 
-    expect(start).toBeGreaterThanOrEqual(0)
     expect(handler).toContain("const lease = requireThreadMutationLease(threadId)")
     expect(handler.indexOf("cancelLegacySubagentTranscriptMigration(threadId)")).toBeLessThan(
       handler.indexOf("withThreadMutationLeaseLock(lease")
@@ -179,9 +190,12 @@ describe("threads:get hydration contract", () => {
     )
     expect(handler).toContain("if (options?.requireIdle)")
     expect(handler.indexOf("isThreadDeletionBusy(")).toBeLessThan(
-      handler.indexOf("performThreadDeletion(event, threadId, metadata, options)")
+      handler.indexOf(
+        "performThreadDeletion(event, threadId, metadata, options, assertOwnership)"
+      )
     )
-    expect(handler).toContain("isExternallyManagedThreadRunBusy(id, metadata)")
+    expect(handler).toContain("isThreadDeletionBusy(threadId, runtime)")
+    expect(source).toContain("isExternallyManagedThreadRunBusy(id, metadata)")
     expect(handler).not.toContain("isThreadForkBusy(")
     expect(handler).not.toContain("restoreWorkersForThread")
     expect(handler).not.toContain("isBusyForThreadAsync")
@@ -196,34 +210,35 @@ describe("threads:get hydration contract", () => {
   })
 
   it("binds grouped deletion to the confirmed incarnation and selector inside the mutation lock", () => {
-    const channel = source.indexOf('"threads:delete"')
-    const start = source.lastIndexOf("ipcMain.handle(", channel)
-    const end = source.indexOf("// Get thread history", start)
-    const handler = source.slice(start, end)
+    const handler = deletionHandlerSource()
     const lockIndex = handler.indexOf("withThreadMutationLeaseLock(lease")
-    const incarnationIndex = handler.indexOf("matchesThreadIncarnation(threadRow")
-    const membershipIndex = handler.indexOf("threadMetadataMatchesGroupSelector(")
+    const selectionIndex = handler.indexOf("assertThreadDeletionGroup(threadRow, metadata")
     const deletionIndex = handler.indexOf(
-      "performThreadDeletion(event, threadId, metadata, options)"
+      "performThreadDeletion(event, threadId, metadata, options, assertOwnership)"
+    )
+    const groupCheck = source.slice(
+      source.indexOf("function assertThreadDeletionGroup("),
+      source.indexOf("function threadDeletionRuntime(")
     )
 
     expect(handler).toContain("normalizeThreadDeleteOptions(rawOptions)")
     expect(lockIndex).toBeGreaterThanOrEqual(0)
-    expect(incarnationIndex).toBeGreaterThan(lockIndex)
-    expect(membershipIndex).toBeGreaterThan(incarnationIndex)
-    expect(deletionIndex).toBeGreaterThan(membershipIndex)
+    expect(selectionIndex).toBeGreaterThan(lockIndex)
+    expect(deletionIndex).toBeGreaterThan(selectionIndex)
+    expect(groupCheck).toContain("matchesThreadIncarnation(row, groupGuard.incarnation)")
+    expect(groupCheck).toContain(
+      "threadMetadataMatchesGroupSelector(metadata, groupGuard.selector)"
+    )
   })
 
   it("rechecks grouped deletion shell activity directly before blocking new starts", () => {
-    const start = source.indexOf('"threads:delete"')
-    const end = source.indexOf("// Get thread history", start)
-    const handler = source.slice(start, end)
+    const handler = deletionHandlerSource()
     const priorDeletion = handler.indexOf("await deletingThreads.get(threadId)")
     const idleCheck = handler.indexOf("await isThreadDeletionBusy(threadId")
-    const shellRecheck = handler.indexOf("busy || hasBackgroundShell(threadId)")
+    const shellRecheck = handler.indexOf("busy || runtime.hasBackgroundShell(threadId)")
     const block = handler.indexOf("LocalSandbox.blockNewBackgroundTasks(threadId)")
 
-    expect(handler).toContain("hasActiveBackgroundTasks(id, { includeChildRuns: true })")
+    expect(source).toContain("hasActiveBackgroundTasks(id, { includeChildRuns: true })")
     expect(priorDeletion).toBeGreaterThanOrEqual(0)
     expect(idleCheck).toBeGreaterThan(priorDeletion)
     expect(shellRecheck).toBeGreaterThan(idleCheck)
@@ -233,21 +248,55 @@ describe("threads:get hydration contract", () => {
 
   it("revalidates a grouped selection again at the synchronous database commit boundary", () => {
     const start = source.indexOf("const performThreadDeletion = async")
-    const end = source.indexOf('"threads:delete"', start)
+    const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
-    const finalIncarnationCheck = deletion.lastIndexOf("matchesThreadIncarnation(")
-    const finalMembershipCheck = deletion.lastIndexOf("threadMetadataMatchesGroupSelector(")
+    const finalSelectionCheck = deletion.indexOf("assertThreadDeletionGroup(latestThread")
+    const finalOwnershipCheck = deletion.indexOf("assertOwnership(latestThread")
     const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
 
-    expect(finalIncarnationCheck).toBeGreaterThanOrEqual(0)
-    expect(finalMembershipCheck).toBeGreaterThan(finalIncarnationCheck)
-    expect(finalMembershipCheck).toBeLessThan(databaseCommit)
-    expect(deletion.slice(finalMembershipCheck, databaseCommit)).not.toContain("await ")
+    expect(finalSelectionCheck).toBeGreaterThanOrEqual(0)
+    expect(finalOwnershipCheck).toBeGreaterThan(finalSelectionCheck)
+    expect(finalOwnershipCheck).toBeLessThan(databaseCommit)
+    expect(deletion.slice(finalSelectionCheck, databaseCommit)).not.toContain("await ")
+  })
+
+  it("routes an owned thread by durable work identity and skips busy bulk items before stopping them", () => {
+    const start = source.indexOf("const deleteThreadFromRenderer = async")
+    const handler = source.slice(start, source.indexOf('ipcMain.handle("threads:history"', start))
+    const owner = handler.indexOf("findBotWorkThreadOwner(threadId)")
+    const group = handler.indexOf("assertThreadDeletionGroup(row, metadata")
+    const busy = handler.indexOf('["queued", "running", "waiting_user"].includes')
+    const deletion = handler.indexOf("await removeBotWork(host, target")
+    expect(owner).toBeGreaterThan(0)
+    expect(group).toBeGreaterThan(owner)
+    expect(busy).toBeGreaterThan(group)
+    expect(deletion).toBeGreaterThan(busy)
+    expect(handler).toContain("deleteThread(event, id, { ...options, requireIdle: true })")
+    expect(handler).not.toContain("withThreadMutationLeaseLock")
+  })
+
+  it("takes work cleanup authority from the main-process scope, never a renderer delete option", () => {
+    const handler = deletionHandlerSource()
+    const ownershipCheck = handler.indexOf("assertScopedBotWorkThreadDeletion(threadId, threadRow")
+    expect(ownershipCheck).toBeGreaterThan(handler.indexOf("withThreadMutationLeaseLock(lease"))
+    expect(handler).toContain("if (scoped && (workOwner || hasBotWorkMetadata(metadata)) && !options?.requireIdle)")
+    expect(handler).toContain("host.getWorkForDeletion(botId, workId)")
+    expect(handler).toContain('work.conversation?.origin === "existing"')
+    expect(handler).toContain(
+      "findBotWorkThreadOwner(threadId) || hasBotWorkMetadata(latestMetadata)"
+    )
+    const start = source.indexOf("function normalizeThreadDeleteOptions")
+    const optionParser = source.slice(
+      start,
+      source.indexOf("export type ThreadDeletionService", start)
+    )
+    expect(optionParser).not.toContain("...source")
+    expect(optionParser).not.toMatch(/authoriz|scoped|confirmed/iu)
   })
 
   it("rechecks owner-managed runs at the synchronous database commit boundary", () => {
     const start = source.indexOf("const performThreadDeletion = async")
-    const end = source.indexOf('"threads:delete"', start)
+    const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
     const finalBusyCheck = deletion.lastIndexOf("isExternallyManagedThreadRunBusy(")
     const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
@@ -259,7 +308,7 @@ describe("threads:get hydration contract", () => {
 
   it("does not turn post-commit artifact cleanup failures into deletion failures", () => {
     const start = source.indexOf("const performThreadDeletion = async")
-    const end = source.indexOf('"threads:delete"', start)
+    const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
     const commitIndex = deletion.indexOf("dbDeleteThread(threadId)")
     const workflowCleanupIndex = deletion.indexOf(
@@ -324,9 +373,7 @@ describe("threads:get hydration contract", () => {
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(handler).toContain(
-      "selectedPage.messages[selectedPage.deferredHydrationIndex ?? 0]"
-    )
+    expect(handler).toContain("selectedPage.messages[selectedPage.deferredHydrationIndex ?? 0]")
     expect(handler).toContain("page.messages[deferredHydrationIndex]")
     expect(handler).toContain("messageIndex: page.start + deferredHydrationIndex")
   })
@@ -376,10 +423,7 @@ describe("threads:get hydration contract", () => {
 
   it("returns only a cancellable bounded worker-checkpoint tail", () => {
     const start = source.indexOf('ipcMain.handle("threads:latest-checkpoint"')
-    const end = source.indexOf(
-      'ipcMain.handle("threads:latest-checkpoint-runtime-state"',
-      start
-    )
+    const end = source.indexOf('ipcMain.handle("threads:latest-checkpoint-runtime-state"', start)
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
@@ -402,10 +446,7 @@ describe("threads:get hydration contract", () => {
 
   it("hydrates only bounded runtime channels in the cancellable projection worker", () => {
     const start = source.indexOf('ipcMain.handle("threads:latest-checkpoint-runtime-state"')
-    const end = source.indexOf(
-      '"threads:bootstrap-legacy-checkpoint-transcript"',
-      start
-    )
+    const end = source.indexOf('"threads:bootstrap-legacy-checkpoint-transcript"', start)
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)

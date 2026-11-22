@@ -33,14 +33,25 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     React,
     IconPopoverButton,
     Plus: () => null,
+    FunctionSite: ({ component }: { component: string }) =>
+      React.createElement("span", { "data-composer-function-site": component }),
+    FunctionFeedback: () => null,
     useHarnessNotifications: () => [],
     useAppStore: appStore,
     useModsAgentInputTarget: () => undefined,
     threadId: "thread",
+    managedTurn: undefined,
+    botReplyActions: undefined,
+    draftBotReplyTo: null,
+    historyLoading: false,
     inputDisabled: false,
     composerControlsDisabled: false,
     contextReminderPending: false,
     readOnly: false,
+    readOnlyReason: null,
+    isLoading: false,
+    surface: "default",
+    updateFunctionHint: () => undefined,
     input: "",
     inputPlaceholder: "输入消息",
     currentForkWorkspacePath: "c:/composer",
@@ -63,6 +74,7 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
   }
   const initializers = new Map<string, ts.Expression>()
   const controls: ts.JsxSelfClosingElement[] = []
+  const composerSurfaces = new Set<ts.JsxExpression>()
   function visit(node: ts.Node): void {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
       initializers.set(node.name.text, node.initializer)
@@ -76,18 +88,28 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
       ) {
         controls.push(node)
       }
+      if (node.tagName.getText(source) === "FunctionSite" &&
+        /component="(?:ChatHeader|AbovePrompt|PromptHint)"/u.test(text)) {
+        let parent: ts.Node = node.parent
+        while (!ts.isJsxExpression(parent) && !ts.isSourceFile(parent)) parent = parent.parent
+        if (ts.isJsxExpression(parent)) composerSurfaces.add(parent)
+      }
     }
     ts.forEachChild(node, visit)
   }
   visit(source)
   if (controls.length !== 2) throw new Error("Composer input/attachment control was not found")
+  if (composerSurfaces.size !== 3) throw new Error("Composer site guards were not found")
   const declarations: string[] = []
   const included = new Set<string>(Object.keys(bindings))
   function dependencies(node: ts.Node): void {
     if (
       ts.isIdentifier(node) &&
       ((ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) ||
-        (ts.isPropertyAssignment(node.parent) && node.parent.name === node))
+        (ts.isPropertyAssignment(node.parent) && node.parent.name === node) ||
+        (ts.isJsxAttribute(node.parent) && node.parent.name === node) ||
+        ((ts.isJsxSelfClosingElement(node.parent) || ts.isJsxOpeningElement(node.parent) ||
+          ts.isJsxClosingElement(node.parent)) && node.parent.tagName === node))
     )
       return
     if (ts.isIdentifier(node) && !included.has(node.text)) {
@@ -112,8 +134,10 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
       }
     }
   }
+  for (const surface of composerSurfaces) dependencies(surface)
+  const nodes = [...controls, ...composerSurfaces]
   const code = ts.transpileModule(
-    `${declarations.join("\n")} return <>${controls.map((node) => node.getText(source)).join("\n")}</>;`,
+    `${declarations.join("\n")} return <>${nodes.map(node => node.getText(source)).join("\n")}</>;`,
     {
       compilerOptions: {
         target: ts.ScriptTarget.ES2022,
@@ -138,6 +162,22 @@ function expectAvailability(markup: string, blocked: boolean): void {
 }
 
 describe("Chat composer rendered decision guards", () => {
+  it("shows explicit project history status without requesting optional Mods sites", () => {
+    const reason = "项目已归档，仅可查看历史会话。"
+    for (const surface of ["harness-project", "harness-feature-session"]) {
+      const markup = renderComposer({ readOnly: true, readOnlyReason: reason, surface })
+      expect(markup).toMatch(/<p data-chat-read-only-reason="true" role="status"[^>]*>项目已归档，仅可查看历史会话。<\/p>/u)
+      expect(markup).not.toContain("data-composer-function-site")
+      expectAvailability(markup, true)
+    }
+    const active = renderComposer({ surface: "harness-project" })
+    const bot = renderComposer({ surface: "bot", readOnly: true, readOnlyReason: "请在 Bot 回答" })
+    for (const markup of [active, bot]) {
+      expect(markup).not.toContain("data-chat-read-only-reason")
+      for (const site of ["ChatHeader", "AbovePrompt", "PromptHint"])
+        expect(markup).toContain(`data-composer-function-site="${site}"`)
+    }
+  })
   it.each(["waiting", "active"])(
     "pauses parent input for a resolved %s sub-session target in the current account",
     (phase) => {
@@ -184,6 +224,18 @@ describe("Chat composer rendered decision guards", () => {
         readOnly: true,
         promptComposer: { suggestion: "Next", decorations: [{ start: 0, end: 1 }] }
       }),
+      true
+    )
+  })
+  it("keeps the existing decision guards when a Bot adds its composer callbacks", () => {
+    const managedTurn = { submitDraft: async () => {}, attachFiles: async () => {} }
+    expectAvailability(renderComposer({ managedTurn }), false)
+    expectAvailability(renderComposer({ managedTurn, historyLoading: true }), true)
+    expectAvailability(renderComposer({ managedTurn, readOnly: true }), true)
+    expectAvailability(renderComposer({ managedTurn, contextReminderPending: true }), true)
+    const notifications = [{ type: "biz_retry", status: "pending", sourceThreadId: "thread" }]
+    expectAvailability(
+      renderComposer({ managedTurn, useHarnessNotifications: () => notifications }),
       true
     )
   })

@@ -1,0 +1,122 @@
+{
+  "userInput": "刚才的读书会改成下午四点，仍是90分钟，请更新原来的 plan.md 并交给我。",
+  "builtMainSha256": "eb885d085129afaafdbb5ba260864ba0a5464e9c7c3117faaab273b7bc8d8896",
+  "original": {
+    "run": "20261119T021959Z-b0b56430",
+    "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47",
+    "modelRequests": 13,
+    "firstToLastModelRequestMs": 26283,
+    "distinctRuntimeUserInputs": 1,
+    "explicitToolChoiceRequests": 0,
+    "calls": [
+      {
+        "callId": "call_00_Q0pHA06O3qQfxoJ9o8sa3146",
+        "requestKey": "update-time-1600-20261119",
+        "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47"
+      },
+      {
+        "callId": "call_00_ET_4Lz96FKFGFYfKUIN2Jec1920",
+        "requestKey": "noop-ack-20261119",
+        "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47"
+      },
+      {
+        "callId": "call_00_5EGtvxcRmgTp0H0YsCy22626",
+        "requestKey": "clarify-noop-20261119",
+        "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47"
+      },
+      {
+        "callId": "call_00_4jbbpZbtIb2EO29LuRa48487",
+        "requestKey": "final-narrow-20261119",
+        "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47"
+      },
+      {
+        "callId": "call_00_ET_d60iSbmkfygxoTZu9xMo3865",
+        "requestKey": "quiet-finish-1600",
+        "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47"
+      },
+      {
+        "callId": "call_00_C62ZWus8U6VU7jKhZ0ii3795",
+        "requestKey": "last-1600-ack",
+        "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47"
+      },
+      {
+        "callId": "call_00_C1VJnprnDuRd1QSRlAeI3337",
+        "requestKey": "deliver-updated-plan-1600",
+        "workId": "7b35a37a-110d-4db0-9fab-d4b540fb3b47"
+      }
+    ],
+    "parentPublications": 1,
+    "unavailableFields": [
+      "message",
+      "finishTurn"
+    ]
+  },
+  "realElectronRetests": [
+    {
+      "run": "20261119T032641Z-94bcfffc",
+      "modelCalls": 1,
+      "workSendCalls": 1,
+      "parentPublications": 1,
+      "mainSeconds": 4.3,
+      "endToEndSeconds": 40.1,
+      "receiptState": "queued",
+      "finishTurn": true,
+      "deliverySha256": "bd42685a4d320bc06cd6f5c6331bd33bbfa82f1480da50f20031b4873b6ae49f"
+    },
+    {
+      "run": "20261119T032834Z-bcb332b3",
+      "modelCalls": 1,
+      "workSendCalls": 1,
+      "parentPublications": 1,
+      "mainSeconds": 5.6,
+      "endToEndSeconds": 52.5,
+      "receiptState": "queued",
+      "finishTurn": true,
+      "deliverySha256": "2322ade45aa91edde63689a80a3e29cd51f2ae23027a14a7c69462c09cac8b5c"
+    },
+    {
+      "run": "20261119T032937Z-bfc65229",
+      "modelCalls": 1,
+      "workSendCalls": 1,
+      "parentPublications": 1,
+      "mainSeconds": 3.7,
+      "endToEndSeconds": 72,
+      "receiptState": "queued",
+      "finishTurn": true,
+      "deliverySha256": "72b6a62c7c543bfac053a6bd6bf39a3ad504c607283e92310f8e830338819c36"
+    },
+    {
+      "run": "20261119T033309Z-5edef8a1",
+      "modelCalls": 2,
+      "workSendCalls": 1,
+      "parentPublications": 1,
+      "mainSeconds": 4.6,
+      "endToEndSeconds": 31.3,
+      "receiptState": "queued",
+      "finishTurn": null,
+      "deliverySha256": "aa16ad0918a691ab5d2938eab817a6e5010e1d5497d8627d3979aa62c284c790"
+    }
+  ],
+  "fourthProbe": {
+    "kind": "controlled real-model probe: omit finishTurn on first revision send only",
+    "firstSendSeen": true,
+    "firstKey": "bookclub-t0-1600-revise",
+    "originally": null,
+    "changed": false
+  },
+  "localControl": {
+    "kind": "controlled-store-and-turn-middleware; no LLM",
+    "sameUserSameTargetSameText": true,
+    "sameKeyNewCallReusesReceipt": true,
+    "newKeyNewCallCreatesNewExecution": true,
+    "acceptedFollowupCount": 2,
+    "omittedFinishTurn": {
+      "accepted": true,
+      "automaticEnd": false
+    },
+    "explicitFinishTurn": {
+      "accepted": true,
+      "automaticEnd": true
+    }
+  }
+}

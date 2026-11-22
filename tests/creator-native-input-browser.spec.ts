@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
@@ -10,7 +10,7 @@ async function main() {
   const root = resolve(__dirname, "..")
   const output = resolve(root, "output/creator-native-input-20261017")
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: { resolveDir: root, loader: "tsx", contents: `
       import React from "react";import{createRoot}from"react-dom/client";
       import{ModsDevelopmentPanel}from"./src/renderer/src/components/customize/ModsDevelopmentPanel";
@@ -57,7 +57,7 @@ async function main() {
     const errors: string[] = []
     page.on("pageerror", error => errors.push(error.message))
     await page.setContent('<div id="root"></div>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const workspaceEntry = page.locator('[data-app-guide="workspace"]')
     await workspaceEntry.waitFor()
     await page.evaluate(() => new Promise(done =>

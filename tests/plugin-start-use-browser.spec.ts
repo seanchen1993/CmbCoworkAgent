@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import type { PluginStartUseIdentity } from "../src/shared/plugin-start-use"
 
@@ -56,7 +56,7 @@ async function main() {
     ProjectFunctionConsent: "export function ProjectFunctionConsent(){return null}",
     SparksDocumentationLink: "export function SparksDocumentationLink(){return null}"
   }
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -220,7 +220,7 @@ async function main() {
       })
     )
     await page.goto("http://127.0.0.1/")
-    await page.addScriptTag({ content: bundled.outputFiles[0].text })
+    await page.addScriptTag({ content: bundled })
     const start = page.getByRole("region", { name: "已安装插件开始使用", exact: true })
     const read = () => start.getByRole("button", { name: "开始使用", exact: true }).click()
     const form = page.getByRole("region", { name: "项目列表", exact: true })

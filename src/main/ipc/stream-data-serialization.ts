@@ -10,6 +10,9 @@ import { projectNativeConversationMessageForStream, serializeNativeConversationS
   requiresFullNativeConversationValuesProjection, isPrivateNativeConversationStreamMessage,
   privateNativeConversationStreamMessageRole, privateNativeConversationStreamLayout }
   from "../agent/native-conversation-stream-projection"
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
+import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
 import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../shared/message-role-collision"
 import { projectDisplayMessageId } from "../display-message-identity"
 
@@ -250,6 +253,19 @@ function messageRecord(message: unknown): Record<string, unknown> | undefined {
   return asRecord(record.kwargs) ?? record
 }
 
+/** Hidden Goal inputs and notification turns own a durable boundary. Same-task Bot feedback stays in the current turn. */
+export function isStreamUserTurnBoundary(message: unknown, view?: StreamMessageView): boolean {
+  const nativeRole = privateNativeConversationStreamMessageRole(message)
+  if (nativeRole !== undefined) return nativeRole === "user"
+  if (!isHumanMessage(message, view)) return false
+  const record = messageRecord(message)
+  const metadata = asRecord(record?.additional_kwargs)
+  if (metadata?.cmb_internal_bot_feedback === true) return false
+  return metadata?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true ||
+    metadata?.[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true ||
+    !isWorkflowPlumbingTranscriptContent(record?.content)
+}
+
 function messageRole(message: unknown): string {
   if (isHumanMessage(message)) return "user"
   const record = asRecord(message)
@@ -384,7 +400,7 @@ function canSerializeAppendedSuffix(
     return false
   }
   for (let index = previous.messageCount; index < messages.length; index += 1) {
-    if (isHumanMessage(messages[index], view) || hasUnsafeIncrementalBoundary(messages[index], view))
+    if (isStreamUserTurnBoundary(messages[index], view) || hasUnsafeIncrementalBoundary(messages[index], view))
       return false
   }
   return true
@@ -416,7 +432,7 @@ function projectStreamDataForSerialization(
     // Only find the layout boundary here. Every scanned native, including the boundary,
     // remains in the slice and receives its complete source/data seal in the serializer.
     const role = privateNativeConversationStreamMessageRole(messages[index])
-    if (role === "user" || (role === undefined && isHumanMessage(messages[index], view))) {
+    if (role === "user" || (role === undefined && isStreamUserTurnBoundary(messages[index], view))) {
       currentTurnBoundary = index
       break
     }
@@ -793,7 +809,7 @@ function sanitizeValuesMessagesForRenderer(
 
   let currentTurnStart = 0
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isHumanMessage(messages[index])) {
+    if (isStreamUserTurnBoundary(messages[index])) {
       currentTurnStart = index + 1
       break
     }

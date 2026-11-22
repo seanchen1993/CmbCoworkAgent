@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
 import { chromium } from "playwright"
@@ -11,7 +11,7 @@ async function main() {
   const renderer = resolve("src/renderer/src")
   const output = resolve("output/project-stage-prompts-browser", String(Date.now()))
   mkdirSync(output, { recursive: true })
-  const script = await build({
+  const script = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -100,7 +100,7 @@ createRoot(document.getElementById('root')).render(<React.StrictMode><App/></Rea
     )
     await page.goto("http://stage-prompts.local/")
     await page.addStyleTag({ content: compiler.build(candidates) })
-    await page.addScriptTag({ content: script.outputFiles[0].text })
+    await page.addScriptTag({ content: script })
     const advanced = page.getByText("高级：查看或直接编辑阶段原文", { exact: true })
     const openAdvanced = async () => {
       await advanced.waitFor()

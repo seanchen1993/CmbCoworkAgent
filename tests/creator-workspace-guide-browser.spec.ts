@@ -1,14 +1,14 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readdirSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 async function main() {
   const output = resolve("output/creator-workspace-guide-browser", String(Date.now()))
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -81,7 +81,7 @@ async function main() {
     await page.route("http://creator-guide.fixture/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: `<html><meta charset="utf-8"><textarea id="composer"></textarea><div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></html>`
+        body: `<html><meta charset="utf-8"><textarea id="composer"></textarea><div id="root"></div><script>${bundle.replaceAll("</script", "<\\/script")}</script></html>`
       })
     )
     const load = async () => {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 
 async function main() {
@@ -12,7 +12,7 @@ async function main() {
       "output/project-preview-recovery-browser"
   )
   mkdirSync(artifacts, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -70,7 +70,7 @@ async function main() {
     const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<html><body><div id="root"></div></body></html>')
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const recover = page.getByRole("button", { name: "核对并恢复原试用", exact: true })
     await recover.waitFor()
     assert(await recover.isDisabled(), "A durable receipt alone is not native confirmation")

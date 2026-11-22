@@ -46,7 +46,11 @@ function testLibraryInvariants(): void {
   // expected count from the directory instead of hardcoding it.
   const libraryDir = join(__dirname, "..", "src", "main", "agent", "library")
   const profileFiles = readdirSync(libraryDir).filter(
-    (f) => f.endsWith(".ts") && f !== "index.ts"
+    (f) =>
+      f.endsWith(".ts") &&
+      !f.endsWith(".test.ts") &&
+      f !== "index.ts" &&
+      f !== "runtime-capabilities.ts" // Skills backend helper, not an agent profile.
   )
   assert(
     LIBRARY_AGENT_PROFILES.length === profileFiles.length,

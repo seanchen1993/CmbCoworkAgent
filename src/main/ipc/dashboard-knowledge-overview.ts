@@ -126,11 +126,11 @@ export async function fetchKnowledgeOrgDistribution(
   if (orgIds?.length === 0) return []
   const roomId = orgIds?.length === 1 ? orgIds[0] : undefined
   const numericId = Number(roomId)
-  // This endpoint accepts null for room totals or one parent ID for its groups.
+  const endpoint = roomId ? "group-distribution" : "org-distribution"
   const parent = roomId
     ? [Number.isSafeInteger(numericId) && String(numericId) === roomId ? numericId : roomId]
     : null
-  const raw = await requestKnowledgeSection(baseUrl, "org-distribution", parent, signal, request)
+  const raw = await requestKnowledgeSection(baseUrl, endpoint, parent, signal, request)
   const items = parseKnowledgeDistribution(raw, roomId ? "group" : "room")
   if (roomId && items.some((item) => item.id === roomId)) {
     throw new Error("组分布接口返回了室汇总，未返回有效的组分布")

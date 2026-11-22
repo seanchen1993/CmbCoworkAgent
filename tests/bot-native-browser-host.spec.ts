@@ -1,0 +1,325 @@
+/** Run with node scripts/run-bot-integration-e2e.mjs --browser; uses isolated profiles and local fixture pages. */
+import assert from "node:assert/strict"
+import { spawn } from "node:child_process"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
+import { createRequire } from "node:module"
+import { pathToFileURL } from "node:url"
+
+async function main() {
+  const require = createRequire(__filename)
+  const root = await mkdtemp(join(tmpdir(), "cmb-bot-native-host-"))
+  const fixture = join(root, "parent.cjs")
+  const fixtureHtml = `<title>Bot browser fixture</title><label>Name <input></label><label>Upload <input type="file"></label><a href="/download" download>Download</a><button onclick="document.querySelector('#answer').textContent = confirm('Synthetic confirmation') ? 'accepted' : 'dismissed'">Confirm</button><span id="answer"></span>`
+  await writeFile(
+    fixture,
+    `
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const http = require('node:http');
+const path = require('node:path');
+const { app, nativeImage } = require('electron');
+app.setPath('userData', ${JSON.stringify(join(root, "parent-profile"))});
+app.on('window-all-closed', () => {});
+app.whenReady().then(async () => {
+  const { startElectronBotBrowser, BotBrowserService, BrowserService, syncBotBrowserProfile, BotBrowserWindow, showBotBrowserWindow } = require(${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "main/bots-browser-e2e.js"))});
+  const foregroundWindow = new BotBrowserWindow();
+  showBotBrowserWindow(foregroundWindow);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  foregroundWindow.minimize();
+  for (let i = 0; i < 50 && !foregroundWindow.isMinimized(); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(foregroundWindow.isMinimized(), true, 'fixture must reach minimized state');
+  showBotBrowserWindow(foregroundWindow);
+  for (let i = 0; i < 50 && foregroundWindow.isMinimized(); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(foregroundWindow.isMinimized(), false, 'open browser must restore minimized state');
+  assert.equal(foregroundWindow.isVisible(), true);
+  assert.equal(foregroundWindow.isAlwaysOnTop(), false);
+  foregroundWindow.destroy();
+  let engine;
+  const workspace = bot => path.join(${JSON.stringify(root)}, 'workspaces', bot);
+  await fs.mkdir(workspace('a'), { recursive: true });
+  await fs.writeFile(path.join(workspace('a'), 'upload.txt'), 'synthetic upload');
+  const server = http.createServer((req, res) => {
+    if (req.url === '/slow-font.woff') {
+      // Deliberately never finish a font request. Preview must not wait for
+      // document.fonts.ready, unlike the old Playwright screenshot path.
+      return;
+    } else if (req.url === '/slow-font') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<style>@font-face{font-family:pending;src:url(/slow-font.woff)}body{background:rgb(220,30,40);font-family:pending}</style><title>Pending font</title><p>Preview must remain available</p>');
+    } else if (req.url === '/login') {
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': 'native-host-auth=synthetic; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax' });
+      res.end('<title>Cookie accepted</title>');
+    } else if (req.url === '/session') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end((req.headers.cookie || '').split(';').some(value => value.trim() === 'native-host-auth=synthetic') ? 'signed-in' : 'signed-out');
+    } else if (req.url === '/download') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Disposition': 'attachment; filename="result.txt"' });
+      res.end('synthetic download');
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(${JSON.stringify(fixtureHtml)});
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const fixtureUrl = 'http://127.0.0.1:' + server.address().port;
+  const service = new BotBrowserService(async () => engine = await startElectronBotBrowser(${JSON.stringify(join(root, "bot-profile"))}), workspace);
+  try {
+    const a = JSON.parse(await service.act('a', { action: 'observe' }, new AbortController().signal));
+    const b = JSON.parse(await service.act('b', { action: 'observe' }, new AbortController().signal));
+    assert.notEqual(a.pageId, b.pageId);
+    const contentPages = async () => (await Promise.all(engine.context.pages().map(async page => (await engine.isContentPage(page)) ? page : null))).filter(Boolean);
+    const pages = await contentPages();
+    assert.equal(pages.length, 2);
+    await assert.rejects(
+      startElectronBotBrowser(${JSON.stringify(join(root, "bot-profile"))}),
+      /Bot 浏览器启动失败/,
+      'a second host must not take ownership of the active profile'
+    );
+    assert.equal((await contentPages()).length, 2, 'the profile owner must remain available');
+    await pages[0].setContent('<label>Name <input></label>');
+    await pages[1].setContent('<label>Name <input></label>');
+    await service.act('a', { action: 'fill', role: 'textbox', name: 'Name', text: 'original Electron 引擎' }, new AbortController().signal);
+    assert.equal(await pages[0].getByLabel('Name').inputValue(), 'original Electron 引擎');
+    assert.equal(await pages[1].getByLabel('Name').inputValue(), '');
+    await service.act('a', { action: 'navigate', url: fixtureUrl }, new AbortController().signal);
+    const uploaded = JSON.parse(await service.act('a', { action: 'upload', name: 'Upload', fileId: 'upload.txt' }, new AbortController().signal));
+    assert.deepEqual(uploaded.upload, { filename: 'upload.txt', state: 'attached' });
+    assert.equal(await pages[0].getByLabel('Upload').evaluate(input => input.files[0].name), 'upload.txt');
+    const dialog = JSON.parse(await service.act('a', { action: 'click', role: 'button', name: 'Confirm' }, new AbortController().signal));
+    assert.equal(dialog.dialog.message, 'Synthetic confirmation');
+    const dialogPreview = await service.preview('a', a.pageId);
+    assert.equal(dialogPreview.pages.find(page => page.id === a.pageId).title, 'Bot browser fixture');
+    assert.equal(dialogPreview.image, null);
+    assert.equal(dialogPreview.dialogPending, true);
+    await service.act('a', { action: 'dialog', accept: true }, new AbortController().signal);
+    assert.equal((await service.preview('a')).dialogPending, false);
+    assert.equal(await pages[0].locator('#answer').textContent(), 'accepted');
+    await service.act('a', { action: 'click', role: 'link', name: 'Download' }, new AbortController().signal);
+    let download;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      download = JSON.parse(await service.act('a', { action: 'observe' }, new AbortController().signal)).downloads.find(item => item.state === 'saved');
+      if (download) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.ok(download, 'download must finish inside the Bot workspace');
+    assert.equal(await fs.readFile(path.join(workspace('a'), download.file), 'utf8'), 'synthetic download');
+    const screenshot = await service.preview('a');
+    assert.ok(screenshot.image.startsWith('data:image/jpeg;base64,'));
+    await pages[0].goto(fixtureUrl + '/slow-font', { waitUntil: 'domcontentloaded' });
+    await pages[0].waitForFunction(() => document.fonts.status === 'loading');
+    await assert.rejects(pages[0].screenshot({ timeout: 500 }), /Timeout|timeout/,
+      'the old screenshot path waits for the pending font');
+    let nativeFrame;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      nativeFrame = await service.preview('a', a.pageId);
+      assert.equal(nativeFrame.captureError, undefined);
+      const pixels = nativeImage.createFromDataURL(nativeFrame.image).toBitmap();
+      // BGRA pixel in the page background, not an empty/white capture.
+      if (pixels[2] > 180 && pixels[1] < 80 && pixels[0] < 80) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const red = nativeImage.createFromDataURL(nativeFrame.image).toBitmap();
+    assert.ok(red[2] > 180 && red[1] < 80 && red[0] < 80, 'hidden page must yield painted pixels despite the stalled font');
+    assert.equal(await pages[0].evaluate(() => document.fonts.status), 'loading');
+    await engine.show(pages[0]);
+    await engine.hide();
+    await pages[0].evaluate(() => document.body.style.background = 'rgb(20,40,220)');
+    let blue;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const frame = await service.preview('a', a.pageId);
+      assert.equal(frame.captureError, undefined);
+      blue = nativeImage.createFromDataURL(frame.image).toBitmap();
+      if (blue[0] > 180 && blue[1] < 80 && blue[2] < 80) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(blue[0] > 180 && blue[1] < 80 && blue[2] < 80, 'preview must refresh after the window is shown then hidden');
+    await pages[0].goto(fixtureUrl);
+    await service.takeOver('a');
+    assert.equal((await service.preview('a')).control, 'human');
+    // Exercise the actual trusted toolbar, not the App-side preview controls.
+    const toolbarFor = async (address) => {
+      for (let i = 0; i < 100; i++) {
+        for (const candidate of engine.context.pages()) {
+          if (!candidate.url().startsWith('data:text/html')) continue;
+          const input = candidate.getByRole('textbox', { name: '网页地址' });
+          if (await input.count() && await input.inputValue() === address && await candidate.getByRole('button', { name: '归还 Bot', exact: true }).isEnabled()) return candidate;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      throw new Error('Active native toolbar not found: ' + address);
+    };
+    let toolbar = await toolbarFor(fixtureUrl + '/');
+
+
+    assert.equal((await service.preview('a')).pages.length, 1, 'trusted toolbar must never become an owned content page');
+    assert.equal(await pages[0].evaluate(() => typeof window.require), 'undefined');
+    await toolbar.getByRole('textbox', { name: '网页地址' }).fill(fixtureUrl + '/toolbar-one');
+    await toolbar.getByRole('button', { name: '打开网址' }).click();
+    await pages[0].waitForURL(fixtureUrl + '/toolbar-one');
+    await toolbar.getByRole('button', { name: '后退', exact: true }).click();
+    await pages[0].waitForURL(fixtureUrl + '/');
+    await toolbar.getByRole('button', { name: '前进', exact: true }).click();
+    await pages[0].waitForURL(fixtureUrl + '/toolbar-one');
+    await pages[0].evaluate(() => document.body.dataset.synthetic = 'changed');
+    await toolbar.getByRole('button', { name: '刷新网页' }).click();
+    await pages[0].waitForFunction(() => !document.body.dataset.synthetic);
+    await toolbar.getByRole('textbox', { name: '网页地址' }).fill('file:///synthetic-secret');
+    await toolbar.getByRole('button', { name: '打开网址' }).click();
+    await toolbar.getByRole('alert').filter({ hasText: 'HTTP' }).waitFor();
+    await toolbar.getByRole('button', { name: '新建网页' }).click();
+    const newToolbar = await toolbarFor('');
+    assert.equal((await service.preview('a')).pages.length, 2);
+    assert.equal((await service.preview('b')).pages.length, 1);
+    // Save evidence of the real native window chrome before closing the new page.
+    await newToolbar.screenshot({ path: ${JSON.stringify(resolve(process.env.BOT_TEST_APP_OUT ?? "out", "artifacts/bot-browser-toolbar.png"))} });
+    await newToolbar.getByRole('button', { name: '关闭当前网页' }).click().catch(error => { if (!/closed/i.test(error.message)) throw error; });
+    toolbar = await toolbarFor(fixtureUrl + '/toolbar-one');
+    assert.equal((await service.preview('a')).pages.length, 1);
+    await toolbar.getByRole('button', { name: '归还 Bot', exact: true }).click();
+    for (let i = 0; i < 100 && (await service.preview('a')).control !== 'bot'; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal((await service.preview('a')).control, 'bot');
+    assert.equal(pages[0].isClosed(), false);
+    await service.takeOver('a', a.pageId);
+    await service.navigateAsHuman('a', a.pageId, fixtureUrl + '/manual');
+    await service.giveBack('a');
+    assert.equal((await service.preview('a')).control, 'bot');
+    let helpStarted;
+    const waitingForHelp = new Promise(resolve => helpStarted = resolve);
+    const help = service.act('a', { action: 'request_help', pageId: a.pageId, instruction: 'Confirm the synthetic page' }, new AbortController().signal, waiting => { if (waiting) helpStarted(); });
+    await waitingForHelp;
+    const helpState = await service.preview('a');
+    assert.equal(helpState.helpInstruction, 'Confirm the synthetic page');
+    assert.equal(helpState.control, 'human');
+    // Other exact targets remain usable; they must not acquire the user's page or lease.
+    const peer = JSON.parse(await service.act('b', { action: 'navigate', pageId: b.pageId, url: fixtureUrl + '/peer' }, new AbortController().signal));
+    assert.equal(peer.pageId, b.pageId);
+    const createdPeer = JSON.parse(await service.act('c', { action: 'navigate', url: fixtureUrl + '/created-peer' }, new AbortController().signal));
+    assert.notEqual(createdPeer.pageId, a.pageId);
+    assert.notEqual(createdPeer.pageId, b.pageId);
+    assert.deepEqual((await service.preview('a')).pages.map(page => page.id), [a.pageId]);
+    assert.deepEqual((await service.preview('c')).pages.map(page => page.id), [createdPeer.pageId]);
+    assert.equal(pages[0].url(), fixtureUrl + '/manual');
+    await service.act('b', { action: 'close', pageId: b.pageId }, new AbortController().signal);
+    await service.act('c', { action: 'close', pageId: createdPeer.pageId }, new AbortController().signal);
+    assert.equal((await service.preview('a')).generation, helpState.generation);
+    assert.equal((await service.preview('a')).control, 'human');
+    await service.takeOver('a', a.pageId);
+    assert.equal((await service.preview('a')).generation, helpState.generation);
+    assert.equal((await service.preview('a')).helpInstruction, 'Confirm the synthetic page');
+    await service.navigateAsHuman('a', a.pageId, fixtureUrl + '/help-confirmed');
+    const helpToolbar = engine.context.pages().find(page => page.url().startsWith('data:text/html') && !page.isClosed());
+    await helpToolbar.getByRole('button', { name: '归还并继续', exact: true }).click();
+    assert.equal(JSON.parse(await help).url, fixtureUrl + '/help-confirmed');
+    // A native/out-of-band close must retire both Playwright's dialog and our cache.
+    // The CDP side channel bypasses Dialog.accept/dismiss, like a manual native close.
+    const nativeSession = await engine.context.newCDPSession(pages[0]);
+    await nativeSession.send('Page.enable');
+    for (const scenario of [
+      { type: 'confirm', accept: true, expected: true },
+      { type: 'confirm', accept: false, expected: false },
+      { type: 'alert', accept: true, expected: undefined }
+    ]) {
+      await service.takeOver('a', a.pageId);
+      const opened = pages[0].waitForEvent('dialog');
+      const result = pages[0].evaluate(type => window[type]('Native close regression'), scenario.type);
+      const nativeDialog = await opened;
+      let replayed = 0;
+      nativeDialog.accept = nativeDialog.dismiss = async () => {
+        replayed++; throw new Error('must not replay a native dialog decision');
+      };
+      assert.equal((await service.preview('a', a.pageId)).dialogPending, true);
+      const closed = pages[0].waitForEvent('dialogclosed');
+      await nativeSession.send('Page.handleJavaScriptDialog', {
+        accept: scenario.accept
+      });
+      assert.equal(await closed, nativeDialog);
+      assert.equal(await result, scenario.expected);
+      const resumed = await service.preview('a', a.pageId);
+      assert.equal(resumed.dialogPending, false);
+      assert.equal(resumed.control, 'human');
+      assert.ok(resumed.image);
+      await service.giveBack('a', resumed.generation);
+      await service.act('a', { action: 'fill', role: 'textbox', name: 'Name', text: 'after native close' }, new AbortController().signal);
+      assert.equal(await pages[0].getByLabel('Name', { exact: true }).inputValue(), 'after native close');
+      assert.equal(replayed, 0);
+    }
+    await nativeSession.detach();
+    // Exercise HTML5 drag on the SAME page whose dialogs were closed. This
+    // failed with the stale upstream DialogManager even when snapshots worked.
+    await pages[0].evaluate(() => {
+      const source = document.createElement('button');
+      source.textContent = 'Native drag';
+      source.draggable = true;
+      source.addEventListener('dragstart', event => event.dataTransfer.setData('text/plain', 'closed-dialog'));
+      const target = document.createElement('button');
+      target.textContent = 'Native drop';
+      target.style.marginLeft = '100px';
+      target.addEventListener('dragover', event => event.preventDefault());
+      target.addEventListener('drop', event => { event.preventDefault(); target.textContent = event.dataTransfer.getData('text/plain'); });
+      document.body.append(source, target);
+    });
+    const dragSnapshot = JSON.parse(await service.act('a', { action: 'observe', pageId: a.pageId }, new AbortController().signal));
+    const nativeRef = name => dragSnapshot.content.split('\\n').find(line => line.includes('"' + name + '"')).split('[ref=')[1].split(']')[0];
+    await service.act('a', { action: 'drag', pageId: a.pageId, ref: nativeRef('Native drag'), toRef: nativeRef('Native drop') }, new AbortController().signal);
+    assert.equal(await pages[0].getByRole('button', { name: 'closed-dialog', exact: true }).count(), 1);
+    console.log('BOT_NATIVE_DIALOG_CLOSE_PASS: accept/dismiss/alert, preview, return, input and same-page HTML5 drag');
+    await (await import(${JSON.stringify(pathToFileURL(resolve("tests/support/bot-browser-automation-journey.mjs")).href)})).default(service, engine, fixtureUrl, workspace);
+    await (await import(${JSON.stringify(pathToFileURL(resolve("tests/support/bot-browser-wps-journey.mjs")).href)})).default(service, engine, BrowserService, syncBotBrowserProfile);
+    // Do not wait for Chromium's periodic cookie flush before closing the host.
+    await service.act('a', { action: 'navigate', url: fixtureUrl + '/login' }, new AbortController().signal);
+    await service.close();
+    const restarted = await startElectronBotBrowser(${JSON.stringify(join(root, "bot-profile"))});
+    try {
+      const restored = await restarted.createPage();
+      await restored.goto(fixtureUrl + '/session');
+      assert.equal(await restored.locator('body').innerText(), 'signed-in', 'new persistent cookies must survive an immediate host restart');
+    } finally {
+      await restarted.close();
+    }
+    await new Promise(resolve => server.close(resolve));
+    console.log('BOT_NATIVE_HOST_PASS');
+    app.exit(0);
+  } catch(error) { console.error(error); await service.close(); server.close(); app.exit(1); }
+}).catch(error => { console.error(error); app.exit(1); });
+`
+  )
+  try {
+    const child = spawn(require("electron"), [fixture], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "" }
+    })
+    let output = ""
+    child.stdout.on("data", (chunk) => {
+      output = (output + chunk.toString()).slice(-16_000)
+    })
+    child.stderr.on("data", (chunk) => {
+      output = (output + chunk.toString()).slice(-16_000)
+    })
+    const timer = setTimeout(() => child.kill(), 90_000)
+    try {
+      const code = await new Promise<number | null>((done, reject) => {
+        child.once("close", done)
+        child.once("error", reject)
+      })
+      assert.equal(code, 0, output)
+      assert.ok(output.includes("BOT_NATIVE_HOST_PASS"), output)
+      assert.ok(output.includes("BOT_WPS_LOGIN_PASS"), output)
+      assert.ok(output.includes("BOT_OWNED_AUTOMATION_PASS"), output)
+      assert.ok(output.includes("BOT_NATIVE_DIALOG_CLOSE_PASS"), output)
+      console.log(
+        "PASS: production Bot browser adapter resolves duplicate labels and iframe refs, isolates task/group pages and popups, runs forms/hover/drag/wait/evaluate, preserves scoped uploads/downloads, paginates long snapshots, and resumes human takeover without replaying input. Native dialog close restores preview, control return and same-page HTML5 drag without replaying decisions. Native previews render hidden pages with stalled fonts and refresh after hiding. Persistent cookies survive a host restart."
+      )
+    } finally {
+      clearTimeout(timer)
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

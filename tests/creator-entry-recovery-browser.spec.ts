@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
@@ -10,7 +10,7 @@ import { enterModsCreatorChat } from "./support/mods-sidebar-navigation"
 async function main() {
   const output = resolve("output/creator-entry-recovery-browser", String(Date.now()))
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -60,7 +60,7 @@ async function main() {
     await page.setContent(
       '<textarea id="composer" aria-label="原聊天输入框"></textarea><div id="root"></div>'
     )
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     const count = (kind: string) =>
       page.evaluate(
         (kind) =>

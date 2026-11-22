@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
+import { BOT_WORK_REMOTE_ACCESS_BLOCKED } from "../../../shared/bots/conversation"
 import { coordinatorWorkerManager } from "../../agent/coordinator-worker-manager"
 import { SqlGoalStore } from "../../agent/goals/goal-store"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
@@ -9,7 +10,10 @@ import {
   type StandardThreadMetadata
 } from "../../agent/standard-thread-turn"
 import { workflowRunManager } from "../../agent/workflow/run-manager"
+import { findBotWorkThreadOwner } from "../../bots/conversation-link-authority"
 import { deleteThread, getThread, type ThreadRow } from "../../db"
+import { withThreadRunMutationLock } from "../../ipc/thread-run-mutation-lock"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../thread-incarnation"
 import { hasPendingUserInputForThread } from "../user-input"
 import {
   imConversationStateStore,
@@ -132,15 +136,21 @@ export class ImRemoteAccessService {
     route: ImGrantRouteIdentity
     threadId: string
   }): Promise<ImThreadGrantRecord> {
+    const original = this.dependencies.getThread(input.threadId)
+    if (!original)
+      throw new ImRemoteAccessError("REMOTE_THREAD_UNAVAILABLE", "会话不存在或已删除。")
+    const incarnation = captureThreadIncarnation(original)
     await this.dependencies.conversations.ensureConversation(input.route)
-    const validation = this.validateGrantableThread(input.threadId)
-    return this.dependencies.grants.enableThreadGrant({
-      route: input.route,
-      threadId: validation.thread.thread_id,
-      title: await this.threadLabel(
-        validation.thread,
-        `会话 ${validation.thread.thread_id.slice(0, 8)}`
-      )
+    return withThreadRunMutationLock(input.threadId, async () => {
+      const { thread } = this.validateGrantableThread(input.threadId)
+      if (!matchesThreadIncarnation(thread, incarnation))
+        throw new ImRemoteAccessError("REMOTE_THREAD_UNAVAILABLE", "原会话已变化，请重新选择后接入。")
+      const title = await this.threadLabel(thread, `会话 ${thread.thread_id.slice(0, 8)}`)
+      // The Bot link's active-grant check uses the same thread lock. Check the
+      // journal after awaits, including preparing and never-exposed native work.
+      if (findBotWorkThreadOwner(thread.thread_id))
+        throw new ImRemoteAccessError("REMOTE_THREAD_UNSUPPORTED", BOT_WORK_REMOTE_ACCESS_BLOCKED)
+      return this.dependencies.grants.enableThreadGrant({ route: input.route, threadId: thread.thread_id, title })
     })
   }
 

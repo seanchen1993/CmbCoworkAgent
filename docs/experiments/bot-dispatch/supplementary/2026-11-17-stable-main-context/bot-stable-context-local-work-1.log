@@ -1,0 +1,78 @@
+stage: launching isolated App <temp>/m05-local-work-app-ZxYYZB
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+Local model fixture failed: AssertionError [ERR_ASSERTION]: main prompt must expose actual waiting_approval runtime state
+    at Server.<anonymous> (<repo>/tests/bots-local-work-app.spec.ts:143:16) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: main prompt must expose actual waiting_approval runtime state
+    at Server.<anonymous> (<repo>/tests/bots-local-work-app.spec.ts:143:16) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: main prompt must expose actual waiting_approval runtime state
+    at Server.<anonymous> (<repo>/tests/bots-local-work-app.spec.ts:143:16) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: main prompt must expose actual waiting_approval runtime state
+    at Server.<anonymous> (<repo>/tests/bots-local-work-app.spec.ts:143:16) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: main prompt must expose actual waiting_approval runtime state
+    at Server.<anonymous> (<repo>/tests/bots-local-work-app.spec.ts:143:16) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: main prompt must expose actual waiting_approval runtime state
+    at Server.<anonymous> (<repo>/tests/bots-local-work-app.spec.ts:143:16) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: main prompt must expose actual waiting_approval runtime state
+    at Server.<anonymous> (<repo>/tests/bots-local-work-app.spec.ts:143:16) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+artifact-directory <temp>/m05-local-work-app-ZxYYZB last model phases [[],[],[],[],[],[],[],[],[],[],[]]
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-ZxYYZB
+locator.waitFor: Timeout 90000ms exceeded.
+Call log:
+  - waiting for getByText('主对话仍然可用。', { exact: true }).last() to be visible
+
+    at main (<repo>/tests/bots-local-work-app.spec.ts:399:62) {
+  log: [
+    "  - waiting for getByText('主对话仍然可用。', { exact: true }).last() to be visible"
+  ],
+  name: 'TimeoutError'
+}

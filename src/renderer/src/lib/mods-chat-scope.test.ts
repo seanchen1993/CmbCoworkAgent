@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { isDevelopmentThreadMetadata } from "../../../shared/mods/development-scope"
+import { isBotThread } from "../../../shared/thread-search-scope"
 import { afterEach, expect, it, vi } from "vitest"
 const hooks = vi.hoisted(() => ({ index: 0, rendering: false, rerender: false, slots: [] as unknown[],
   effects: [] as Array<() => void>, rollbacks: [] as Array<() => void>, cleanups: [] as Array<() => void> }))
@@ -333,15 +334,19 @@ it("the real ChatContainer provider carries revocation, error and retry contract
   const source = ts.createSourceFile("ChatContainer.tsx", readFileSync(
     new URL("../components/chat/ChatContainer.tsx", import.meta.url), "utf8"),
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-  let callback = ""
+  let callback = "", excludeBotMods = ""
   const visit = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "modsChatScope" &&
-      node.initializer && ts.isCallExpression(node.initializer))
-      callback = node.initializer.arguments[0].getText(source)
+    if (ts.isVariableDeclaration(node) && node.initializer) {
+      const name = node.name.getText(source)
+      if (name === "modsChatScope" && ts.isCallExpression(node.initializer))
+        callback = node.initializer.arguments[0].getText(source)
+      if (name === "excludeBotMods") excludeBotMods = node.initializer.getText(source)
+    }
     ts.forEachChild(node, visit)
   }
   visit(source)
   expect(callback).not.toBe("")
+  expect(excludeBotMods).not.toBe("")
   const retry = vi.fn(), isCurrent = () => false
   const modsChatState = { enabled: false, ready: false, error: "denied", retry, isCurrent }
   const loadThreads = vi.fn(async () => {})
@@ -349,8 +354,14 @@ it("the real ChatContainer provider carries revocation, error and retry contract
     currentForkWorkspacePath: "workspace", reloadMissingThread: () => { void loadThreads() },
     surface: "default", readOnly: false, initialTranscriptPending: true,
     currentThread: { metadata: { agentMode: "normal" } as Record<string, unknown> },
-    isDevelopmentThreadMetadata }
-  const read = () => runInNewContext(ts.transpileModule(`(${callback})()`, {
+    managedTurn: undefined as Record<string, unknown> | undefined,
+    isBotThread, isDevelopmentThreadMetadata }
+  const read = () => runInNewContext(ts.transpileModule(`
+    (() => {
+      const excludeBotMods = ${excludeBotMods};
+      return (${callback})();
+    })()
+  `, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText, context) as typeof modsChatState & {
     prefetchHistory: boolean; prioritizeInitialHistory: boolean
@@ -378,7 +389,13 @@ it("the real ChatContainer provider carries revocation, error and retry contract
     context.currentThread.metadata = { agentMode: "normal", ...metadata }
     expect(read().prefetchHistory).toBe(false)
   }
+  context.currentThread.metadata = { agentMode: "normal", botId: "bot" }
+  expect(read()).toMatchObject({ ...modsChatState, prefetchHistory: false })
   context.currentThread.metadata = { agentMode: "normal" }
+  context.managedTurn = {}
+  expect(read()).toMatchObject({ ...modsChatState, prefetchHistory: false })
+  context.managedTurn = undefined
+  expect(read().prefetchHistory).toBe(true)
   expect(read().isCurrent).toBe(isCurrent)
   expect(read().retry).toBe(retry)
   context.currentForkWorkspacePath = ""

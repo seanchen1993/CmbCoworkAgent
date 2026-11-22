@@ -1,3 +1,8 @@
+import {
+  COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
+  coordinatorNotificationReceipt,
+  createCoordinatorNotificationWriteTracker
+} from "../../agent/coordinator-notification-delivery"
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
 import { FunctionTurnRun } from "../../mods/v2/turn-run"
@@ -189,6 +194,8 @@ export interface PreparedRemoteStandardTurnInput {
   coordinatorTurnPrompt?: string
   coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
   onCoordinatorNotificationAction?: (notificationIds: string[]) => void
+  onCoordinatorNotificationInputCommitted?: () => Promise<void>
+  coordinatorNotificationMessages?: string[]
   onDetachedResultAvailable?: (signal: ImDetachedResultSignal) => void
   /**
    * Re-checks this turn's authorization against the thread state the run body
@@ -368,10 +375,13 @@ export async function executePreparedRemoteStandardTurn(
     coordinatorTurnPrompt,
     coordinatorNotificationSelectedSkills,
     onCoordinatorNotificationAction,
+    onCoordinatorNotificationInputCommitted,
+    coordinatorNotificationMessages,
     onDetachedResultAvailable
   } = input
   const localAbortController = new AbortController()
   const signal = AbortSignal.any([parentSignal, localAbortController.signal])
+  const coordinatorNotificationWrites = createCoordinatorNotificationWriteTracker()
   const agentMode = requestedAgentMode ?? getAgentModeFromMetadata(metadata)
   const channel = `scheduler:stream:${threadId}`
   const hookScope = createPersistentThreadHookScope(threadId)
@@ -467,6 +477,12 @@ export async function executePreparedRemoteStandardTurn(
   updateThread(threadId, { status: "busy" })
   notifyRemoteThreadChanged(threadId, "metadata")
   mirrorStandardTurnStreamToRenderer(threadId, { type: "started" })
+  if (coordinatorNotificationMessages) {
+    mirrorStandardTurnStreamToRenderer(threadId, {
+      type: "custom",
+      data: { type: "coordinator_notification_turn_started", runId }
+    })
+  }
   const streamConsumer = new StandardTurnStreamConsumer(
     threadId,
     (streamEvent) => mirrorStandardTurnStreamToRenderer(threadId, streamEvent),
@@ -495,6 +511,16 @@ export async function executePreparedRemoteStandardTurn(
         coordinatorTurnPrompt,
         coordinatorNotificationSelectedSkills,
         onCoordinatorNotificationAction,
+        ...(onCoordinatorNotificationInputCommitted
+          ? {
+              coordinatorNotificationDelivery: {
+                messageId: userMessageId,
+                content: modelPrompt,
+                onPendingWrite: coordinatorNotificationWrites.track,
+                onCommitted: onCoordinatorNotificationInputCommitted
+              }
+            }
+          : {}),
         traceContext: tracer.getTraceContext(),
         hookTurnId: userMessageId,
         hookScope,
@@ -554,7 +580,21 @@ export async function executePreparedRemoteStandardTurn(
         const stream = await agent.stream(
           index === 0
             ? {
-                messages: [new HumanMessage({ id: userMessageId, content: modelPrompt })]
+                messages: [
+                  new HumanMessage({
+                    id: userMessageId,
+                    content: modelPrompt,
+                    ...(coordinatorNotificationMessages
+                      ? {
+                          additional_kwargs: {
+                            cmb_internal_coordinator_notification: true,
+                            [COORDINATOR_NOTIFICATION_RECEIPTS_KEY]:
+                              coordinatorNotificationMessages.map(coordinatorNotificationReceipt)
+                          }
+                        }
+                      : {})
+                  })
+                ]
               }
             : null,
           {
@@ -665,7 +705,11 @@ export async function executePreparedRemoteStandardTurn(
     }
     throw error
   } finally {
-    functionTurn.finish(completionSucceeded ? "answer" : "error")
+    try {
+      await coordinatorNotificationWrites.settle()
+    } finally {
+      functionTurn.finish(completionSucceeded ? "answer" : "error")
+    }
     clearTurnCompletionGateState(threadId, runId)
     if (!completionSucceeded) discardAgentAutoCommitTracking(threadId)
     releasePin()
@@ -680,6 +724,7 @@ export async function executePreparedRemoteStandardTurn(
         ? { type: "done" }
         : {
             type: "error",
+            ...(coordinatorNotificationMessages ? { coordinatorNotificationRunId: runId } : {}),
             error: terminalError instanceof Error ? terminalError.message : "远程任务执行失败"
           }
     )
@@ -966,7 +1011,7 @@ export class ImRemoteRunner {
                   }
                 )
               })
-            await this.dependencies.replyClient.sendPending().catch((error) => {
+            await this.dependencies.replyClient.sendPending(waiting.conversationKey).catch((error) => {
               console.warn("[IM] Remote wait outbox drain deferred; interaction remains active", {
                 eventId: waiting.eventId,
                 threadId: interaction.threadId,
@@ -1345,7 +1390,7 @@ export class ImRemoteRunner {
               : "error",
       targetKind: event.targetSnapshot?.kind ?? "unknown"
     })
-    await this.dependencies.replyClient.sendPending()
+    await this.dependencies.replyClient.sendPending(event.conversationKey)
     await this.dependencies.gateway.sendAcknowledgement(acknowledgementForTerminal(event))
   }
 

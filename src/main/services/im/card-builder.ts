@@ -116,11 +116,15 @@ const KV_SOURCE_TITLE = "来源"
  */
 export const IM_CARD_TEXT_MODE_HINT = "显示不全？发送 /文字模式 改为文字"
 
-function textModeHintComponent(): CardComponent {
-  return contentComponent([IM_CARD_TEXT_MODE_HINT], 1)
+function textModeHintComponent(group = false): CardComponent {
+  return contentComponent(
+    [group ? "显示不全？在本群 @机器人 发送 /文字模式 开" : IM_CARD_TEXT_MODE_HINT],
+    1
+  )
 }
 
 export interface ApprovalCardInput {
+  group?: boolean
   /** Where this gate came from — the reader must never have to guess. */
   targetLabel: string
   operation: string
@@ -165,7 +169,8 @@ export function buildApprovalCard(input: ApprovalCardInput): CardComponent[] {
       { title: KV_SOURCE_TITLE, value: input.targetLabel },
       { title: "操作", value: input.operation }
     ]),
-    textModeHintComponent(),
+    textModeHintComponent(input.group),
+    ...(input.group ? [contentComponent(["仅绑定 Bot 的本人可批准或拒绝本次操作。"], 1)] : []),
     contentComponent(input.detail.split("\n").filter((line) => line.length > 0))
   ]
   if (buttons.length > 0) {
@@ -221,12 +226,14 @@ export interface QuestionCardQuestion {
   header: string
   question: string
   options: ReadonlyArray<{ label: string; description?: string }>
+  allowMultiple?: boolean
   /** True once answered by short code — rendered read-only, never resubmitted. */
   answered?: boolean
   answeredLabel?: string
 }
 
 export interface QuestionCardInput {
+  group?: boolean
   targetLabel: string
   questions: ReadonlyArray<QuestionCardQuestion>
   tag: string
@@ -299,7 +306,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     titleComponent("需要你的选择"),
     statusComponent("待回答", STATUS_STYLE.orange),
     kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }]),
-    textModeHintComponent()
+    textModeHintComponent(input.group)
   ]
 
   const answered = numbered.filter(({ question }) => question.answered)
@@ -321,21 +328,47 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     // Do not hide the only copy in promptText, which is replaced on selection.
     components.push(
       { type: "content", model: 0, list: [{ type: [1], content: title }] },
-      contentComponent([question.question])
+      {
+        type: "content",
+        model: 0,
+        // The client concatenates these rich-text spans. Start each numbered option on a new line.
+        list: [
+          { content: question.question },
+          ...question.options.flatMap((option, index) => [
+            { type: [1], content: `\n${index + 1}. ` },
+            { content: option.description ? `${option.label}（${option.description}）` : option.label }
+          ])
+        ]
+      }
     )
-    controls.push({
-      subType: "listSelector",
-      title,
-      promptText: "请选择",
-      feedbackKey: question.key,
-      required: false,
-      selectModel: LIST_SELECT_CUSTOM_OPTIONS,
-      isMultiple: false,
-      optionArray: question.options.map((option, index) => ({
-        text: option.description ? `${option.label}（${option.description}）` : option.label,
-        value: String(index)
-      }))
-    })
+    // The gateway contract defines string feedback, but not native multi-selector
+    // encoding. Use the supported text input with an explicit numbered format.
+    controls.push(
+      question.allowMultiple
+        ? {
+            subType: "inputBox",
+            title,
+            promptText: "填写编号，多个编号用逗号分隔，如 1,2",
+            feedbackKey: question.key,
+            required: false,
+            minLine: 1,
+            maxLine: 2,
+            fixLine: 1
+          }
+        : {
+            subType: "listSelector",
+            title,
+            promptText: "请选择",
+            feedbackKey: question.key,
+            required: false,
+            selectModel: LIST_SELECT_CUSTOM_OPTIONS,
+            isMultiple: false,
+            optionArray: question.options.map((option, index) => ({
+              text: `${index + 1}. ${option.label}`,
+              value: String(index)
+            }))
+          }
+    )
     // The client caps this box at 1000 characters, where the typed
     // `其他 <回答>` path accepts 4000. An answer longer than the box holds
     // belongs in a message, and the short code under the card still takes it.
@@ -410,21 +443,22 @@ function harnessDecisionContext(context: HarnessDecisionCardContext): CardCompon
 export interface HumanGateCardInput extends HarnessDecisionCardContext {
   message: string
   tag: string
+  group?: boolean
 }
 
 export function buildHumanGateCard(input: HumanGateCardInput): CardComponent[] {
   return [
-    titleComponent("项目模式需要审批"),
+    titleComponent(input.group ? "项目阶段待确认" : "项目模式需要审批"),
     statusComponent("待处理", STATUS_STYLE.orange),
     harnessDecisionContext(input),
-    textModeHintComponent(),
+    textModeHintComponent(input.group),
     contentComponent(input.message.split("\n").filter((line) => line.length > 0)),
     {
       type: "exclusionOperate",
       style: EXCLUSION_STYLE_ACCEPT_REJECT,
       list: [
         {
-          content: "批准",
+          content: input.group ? "批准推进" : "批准",
           action: BUTTON_ACTION_FEEDBACK,
           tag: `${input.tag}:approve`,
           style: 1,
@@ -432,7 +466,7 @@ export function buildHumanGateCard(input: HumanGateCardInput): CardComponent[] {
           disable: 0
         },
         {
-          content: "拒绝",
+          content: input.group ? "拒绝并终止" : "拒绝",
           action: BUTTON_ACTION_FEEDBACK,
           tag: `${input.tag}:reject`,
           style: 2,
@@ -448,6 +482,7 @@ export const BIZ_RETRY_CHOICE_KEY = "choice"
 export const BIZ_RETRY_MESSAGE_KEY = "message"
 
 export interface BizRetryCardInput extends HarnessDecisionCardContext {
+  group?: boolean
   reason: string
   stageName: string
   stageStatus: string
@@ -462,7 +497,7 @@ export function buildBizRetryCard(input: BizRetryCardInput): CardComponent[] {
     titleComponent("托管运行需要介入"),
     statusComponent("待选择", STATUS_STYLE.orange),
     harnessDecisionContext(input),
-    textModeHintComponent(),
+    textModeHintComponent(input.group),
     kvComponent([
       { title: "当前阶段", value: input.stageName },
       { title: "阶段状态", value: input.stageStatus },

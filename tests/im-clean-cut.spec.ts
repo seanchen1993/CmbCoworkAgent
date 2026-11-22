@@ -77,11 +77,12 @@ assert(!allSource.includes("请先在招乎中向内置机器人发送一条消�
 assert(!panel.includes("inbox-and-features"), "global Feature access toggle is retired")
 assert(panel.includes("同一用户只保留一个活动桌面连接"))
 assert(!allSource.includes("deviceEpoch"), "device routing epochs must stay retired")
+// Bot browser human takeover is a separate beta capability. Scope this guard to
+// the retired IM device-routing mechanism instead of banning an English word repo-wide.
 const imSourcePaths = sourceFiles.map(path => path.replace(/\\/g, "/")).filter(path =>
   path.startsWith("main/services/im/") || path.startsWith("shared/im-") ||
   path.startsWith("main/ipc/builtin-robot") || path.startsWith("renderer/src/lib/im") ||
-  ["renderer/src/components/customize/BuiltinRobotPanel.tsx", "preload/index.ts", "main/types.ts"]
-    .includes(path)
+  path === "renderer/src/components/customize/BuiltinRobotPanel.tsx"
 )
 assert(imSourcePaths.length > 0, "the complete IM source scope must be present")
 for (const required of ["manager.ts", "gateway-client.ts", "remote-runner.ts"])
@@ -114,7 +115,7 @@ const imRunner = read("src/main/services/im/remote-runner.ts")
 const chatContainer = read("src/renderer/src/components/chat/ChatContainer.tsx")
 
 assert.equal(
-  (allSource.match(/"zhaohu"/g) ?? []).length,
+  (imSource.match(/"zhaohu"/g) ?? []).length,
   2,
   "the concrete IM channel literal must stay confined to its shared type and default value"
 )

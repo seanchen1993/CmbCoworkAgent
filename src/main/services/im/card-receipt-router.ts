@@ -214,6 +214,8 @@ export class ImCardReceiptRouter {
       }
       return this.dependencies.humanGates.resolveCardDecision({
         notificationId: interaction.requestRef,
+        principalId: receipt.principalId,
+        conversationKey: interaction.conversationKey,
         decision: suffix
       })
     }

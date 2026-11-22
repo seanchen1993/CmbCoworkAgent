@@ -33,6 +33,7 @@ import {
 import { getConfig } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
+import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { Message } from "../types"
 import { captureNativeMessage } from "./native-message-capture"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
@@ -42,6 +43,7 @@ import {
   sameFunctionConversationTranscriptStamp,
   type FunctionConversationTranscriptStamp
 } from "../../shared/mods/v2/conversation-transcript"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "./agent-run-service"
 import {
   getCheckpointTranscriptMessageIdentity,
   isInternalNotificationMessage,
@@ -68,6 +70,22 @@ export interface CurrentRunQueuedMessage {
   id: string
   content: string
   displayContent?: string
+  /** Host-resolved composer selection; never inferred from a Bot's routing text. */
+  trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Only a local user composer may select via a raw trailing marker. */
+  allowTrustedTransportSkillMarker?: boolean
+  /** Set only after the Bot's trusted submit preparation. Empty means omit the request anchor. */
+  botPreparedUserRequest?: string
+  /** Trusted Bot-only data, never a user instruction or permission grant. */
+  peerFeedback?: { senderBotId: string; sourceTaskId: string; targetTaskId: string }
+  /** Optional Bot work authority for admission and foreground command handoff. */
+  botCanDispatch?: () => boolean
+  /** Trusted host receipt, called synchronously before durable transcript/model injection.
+   * False withdraws a cancelled inbox message. Throws fail the turn before model side effects. */
+  beforeInject?: () => boolean
+  /** Trusted host callbacks; never accepted from renderer input. */
+  onInjected?: () => void
+  onDiscarded?: () => void
 }
 
 /** Final assistant reply immediately preceding an afterModel steer. The outer
@@ -300,6 +318,16 @@ function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectio
     ...(providerSourceId ? { providerSourceId } : {}),
     ...(providerOccurrence !== undefined ? { providerOccurrence } : {})
   }
+}
+
+function currentRunInjectionAnchorForTail(
+  messages: readonly unknown[],
+  index: number
+): CurrentRunInjectionAnchor | undefined {
+  // Internal cues exist in graph state but are deliberately absent from the visible
+  // durable transcript. Anchor to the preceding real message, or the empty history.
+  while (index >= 0 && isInternalNotificationMessage(messages[index])) index--
+  return index >= 0 ? currentRunInjectionAnchorForMessage(messages[index]) : undefined
 }
 
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
@@ -550,6 +578,12 @@ export function queueCurrentRunMessage(
   return true
 }
 
+function notifyQueueSettlement(notify: (() => void) | undefined): void {
+  try { notify?.() } catch (error) {
+    console.warn("[Runtime] Current-run receipt settlement failed", error)
+  }
+}
+
 /** Remove a steered message before it is injected (user deleted/un-steered it). */
 export function deleteCurrentRunQueuedMessage(threadId: string, messageId: string): void {
   const withdrawn = withdrawnMessageIds.get(threadId) ?? new Set<string>()
@@ -557,6 +591,9 @@ export function deleteCurrentRunQueuedMessage(threadId: string, messageId: strin
   withdrawnMessageIds.set(threadId, withdrawn)
   const existing = currentRunMessageQueues.get(threadId)
   if (!existing) return
+  for (const message of existing) {
+    if (message.id === messageId) notifyQueueSettlement(message.onDiscarded)
+  }
   const next = existing.filter((message) => message.id !== messageId)
   if (next.length > 0) currentRunMessageQueues.set(threadId, next)
   else currentRunMessageQueues.delete(threadId)
@@ -571,7 +608,9 @@ export function clearCurrentRunMessageQueue(threadId: string, runToken?: string)
     }
     return
   }
+  const pending = currentRunMessageQueues.get(threadId) ?? []
   currentRunMessageQueues.delete(threadId)
+  for (const message of pending) notifyQueueSettlement(message.onDiscarded)
   currentRunMessageQueueOwners.delete(threadId)
   currentRunMessageQueueOwnerIdentities.delete(threadId)
   scopedGraphOccurrencesByThread.delete(threadId)
@@ -619,9 +658,28 @@ async function drainCurrentRunMessagesForInjection(
   | undefined
 > {
   const owner = currentRunMessageQueueOwnerIdentities.get(threadId)
-  const queued = drainCurrentRunMessageQueue(threadId, runToken).filter((message) =>
-    message.content.trim()
-  )
+  const restoreOrDiscard = (messages: CurrentRunQueuedMessage[]) => {
+    if (owner && currentRunMessageQueueOwnerIdentities.get(threadId) === owner &&
+        isCurrentRunMessageQueueOwner(threadId, runToken)) {
+      const arrivals = currentRunMessageQueues.get(threadId) ?? []
+      currentRunMessageQueues.set(threadId, [...messages, ...arrivals])
+    } else {
+      for (const message of messages) notifyQueueSettlement(message.onDiscarded)
+    }
+  }
+  const pending = drainCurrentRunMessageQueue(threadId, runToken)
+  const queued: CurrentRunQueuedMessage[] = []
+  for (let index = 0; index < pending.length; index++) {
+    const message = pending[index]
+    try {
+      const accepted = Boolean(message.content.trim()) && (message.beforeInject?.() ?? true)
+      if (accepted) queued.push(message)
+      else notifyQueueSettlement(message.onDiscarded)
+    } catch (error) {
+      restoreOrDiscard([...queued, ...pending.slice(index)])
+      throw error
+    }
+  }
   if (queued.length === 0) return undefined
 
   // The notifier durably persists these user turns before acknowledging them to
@@ -635,23 +693,23 @@ async function drainCurrentRunMessagesForInjection(
   } catch (error) {
     // The run can be replaced while durable persistence is in flight. Never
     // restore an old owner's messages into the replacement run's shared queue.
-    if (isCurrentRunMessageQueueOwner(threadId, runToken) &&
-      currentRunMessageQueueOwnerIdentities.get(threadId) === owner) {
-      const arrivalsDuringNotification = currentRunMessageQueues.get(threadId) ?? []
-      currentRunMessageQueues.set(threadId, [...queued, ...arrivalsDuringNotification])
-    }
+    restoreOrDiscard(queued)
     throw error
   }
 
   if (!owner || currentRunMessageQueueOwnerIdentities.get(threadId) !== owner ||
     !isCurrentRunMessageQueueOwner(threadId, runToken)) {
+    for (const message of queued) notifyQueueSettlement(message.onDiscarded)
     const error = new Error("Current-run injection owner changed during persistence")
     error.name = "AbortError"
     throw error
   }
 
   const injected = injectedMessageIds.get(threadId) ?? new Set<string>()
-  for (const message of queued) injected.add(message.id)
+  for (const message of queued) {
+    injected.add(message.id)
+    notifyQueueSettlement(message.onInjected)
+  }
   injectedMessageIds.set(threadId, injected)
   console.log(
     `[Runtime] Injected ${queued.length} queued current-run message(s) in ${phase} for thread ${threadId}`
@@ -664,13 +722,25 @@ async function drainCurrentRunMessagesForInjection(
         return new HumanMessage({
           id: message.id,
           content: message.content,
-          ...(visibleContent !== message.content
+          ...(message.peerFeedback
             ? {
                 additional_kwargs: {
-                  [VISIBLE_USER_MESSAGE_KEY]: visibleContent
+                  // The historical marker is shared by workflow/internal Human inputs.
+                  // Reuse its history, StopHook and compaction authority protections.
+                  cmb_internal_coordinator_notification: true,
+                  cmb_internal_bot_feedback: true,
+                  cmb_peer_feedback_source: message.peerFeedback
                 }
               }
-            : {})
+            : visibleContent !== message.content || message.botPreparedUserRequest !== undefined
+              ? {
+                additional_kwargs: {
+                  ...(visibleContent !== message.content ? { [VISIBLE_USER_MESSAGE_KEY]: visibleContent } : {}),
+                  ...(message.botPreparedUserRequest !== undefined
+                    ? { [BOT_PREPARED_USER_REQUEST_KEY]: message.botPreparedUserRequest } : {})
+                }
+              }
+              : {})
         })
       }
     ),
@@ -979,6 +1049,7 @@ function assignScopedGraphAssistantIdentity(
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
   ownerRunToken?: string,
+  onModelRequestState?: (active: boolean) => void,
   loadGraphProviderOccurrence?: GraphProviderOccurrenceLoader,
   prepareScopedProviderHistory?: (
     threadId: string, scopedTurn: boolean, signal: AbortSignal | undefined
@@ -991,7 +1062,7 @@ export function createCurrentRunMessageQueueMiddleware(
         typeof request.runtime?.configurable?.thread_id === "string"
           ? request.runtime.configurable.thread_id
           : undefined
-      const messages = request.state?.messages ?? request.messages
+      const messages = request.state?.messages ?? request.messages ?? []
       // Record before the handler can emit the first raw delta.
       if (threadId && ownerRunToken && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
         const scopedTurn = rememberScopedGraphProviderOccurrences(threadId, ownerRunToken, messages)
@@ -1004,41 +1075,46 @@ export function createCurrentRunMessageQueueMiddleware(
           }
         }
       }
-      const notificationIdentity =
-        threadId && ownerRunToken
-          ? registerNotificationModelExecution(threadId, ownerRunToken, messages)
-          : undefined
-      const response = await handler(request)
-      if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
-        if (notificationIdentity || canonicalAssistantCompletions.has(response)) {
-          const canonical = canonicalAssistantMessageForTranscript(response, threadId, ownerRunToken)
-          if (canonical) {
-            completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), canonical)
-            return response
+      onModelRequestState?.(true)
+      try {
+        const notificationIdentity =
+          threadId && ownerRunToken
+            ? registerNotificationModelExecution(threadId, ownerRunToken, messages)
+            : undefined
+        const response = await handler(request)
+        if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
+          if (notificationIdentity || canonicalAssistantCompletions.has(response)) {
+            const canonical = canonicalAssistantMessageForTranscript(response, threadId, ownerRunToken)
+            if (canonical) {
+              completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), canonical)
+              return response
+            }
+          }
+          if (notificationIdentity) {
+            response.id = notificationIdentity.stableId
+            response.additional_kwargs = {
+              ...response.additional_kwargs,
+              [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: notificationIdentity.providerSourceId,
+              [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: notificationIdentity.providerOccurrence
+            }
+          } else {
+            assignScopedGraphAssistantIdentity(
+              threadId,
+              ownerRunToken,
+              messages,
+              response,
+              loadGraphProviderOccurrence
+            )
+          }
+          const completed = completedAssistantMessageForTranscript(response)
+          if (completed) {
+            completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
           }
         }
-        if (notificationIdentity) {
-          response.id = notificationIdentity.stableId
-          response.additional_kwargs = {
-            ...response.additional_kwargs,
-            [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: notificationIdentity.providerSourceId,
-            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: notificationIdentity.providerOccurrence
-          }
-        } else {
-          assignScopedGraphAssistantIdentity(
-            threadId,
-            ownerRunToken,
-            messages,
-            response,
-            loadGraphProviderOccurrence
-          )
-        }
-        const completed = completedAssistantMessageForTranscript(response)
-        if (completed) {
-          completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
-        }
+        return response
+      } finally {
+        onModelRequestState?.(false)
       }
-      return response
     },
     beforeModel: async (state, runtime) => {
       const threadId =
@@ -1048,7 +1124,7 @@ export function createCurrentRunMessageQueueMiddleware(
       if (!threadId || !ownerRunToken) return undefined
 
       const messages = Array.isArray(state.messages) ? state.messages : []
-      const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-1))
+      const anchorMessage = currentRunInjectionAnchorForTail(messages, messages.length - 1)
       const injection = await drainCurrentRunMessagesForInjection(
         threadId,
         ownerRunToken,
@@ -1090,7 +1166,7 @@ export function createCurrentRunMessageQueueMiddleware(
           completedAssistantMessagesByRun.get(completedKey) ??
           completedAssistantMessageForTranscript(lastMessage)
         completedAssistantMessagesByRun.delete(completedKey)
-        const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-2))
+        const anchorMessage = currentRunInjectionAnchorForTail(messages, messages.length - 2)
 
         const injection = await drainCurrentRunMessagesForInjection(
           threadId,
@@ -1118,7 +1194,17 @@ export function createCurrentRunMessageQueueMiddleware(
             }
           }
         }
-        return injection ? { messages: injection.messages, jumpTo: "model" as const } : undefined
+        if (!injection) return undefined
+        // Persist a new object for the renamed reply. The checkpoint saver uses
+        // immutable message-prefix reuse; mutating its previous object alone
+        // keeps the old provider ID on disk and duplicates the reply on reload.
+        const completedSnapshot = completedAssistantMessage
+          ? new AIMessage({ ...lastMessage, content: lastMessage.content, id: lastMessage.id })
+          : undefined
+        return {
+          messages: completedSnapshot ? [completedSnapshot, ...injection.messages] : injection.messages,
+          jumpTo: "model" as const
+        }
       }
     }
   })

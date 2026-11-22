@@ -1,0 +1,1198 @@
+import { DatabaseSync } from "node:sqlite"
+import { createHash } from "node:crypto"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { BotStore } from "./store"
+import { LocalBotHost, type BotRunPort } from "./host"
+import { botTaskWorkFamily } from "../../shared/bots/contracts"
+import { formatSkillUseBlock } from "../../shared/skill-use-block"
+import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
+import { canonicalBotMessageInput } from "../../shared/bots/message-mentions"
+
+const databases: NativeSqliteAdapter[] = [],
+  hosts: LocalBotHost[] = []
+afterEach(async () => {
+  await Promise.all(hosts.splice(0).map((h) => h.stop()))
+  databases.splice(0).forEach((d) => d.close())
+})
+function fixture(readContext?: ConstructorParameters<typeof BotStore>[5]) {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  databases.push(db)
+  let time = 1000
+  const store = new BotStore(db, () => ++time, undefined, undefined, undefined, readContext)
+  const input = { name: "Owner", instructions: "Keep role", color: "#ea2845", modelRef: null }
+  const bot = store.create(input),
+    peer = store.create({ ...input, name: "Peer" })
+  const create = (operationId = "create") =>
+    store.createWork({ botId: bot.id, operationId, title: "Draft", goal: "Prepare a draft" })
+  return { db, store, bot, peer, create }
+}
+function finish(store: BotStore, id: string) {
+  store.transition(id, "running")
+  store.settle(id, "completed", null, "A draft")
+}
+function completedWorkFixture() {
+  const f = fixture()
+  const created = f.store.createWork(
+    { botId: f.bot.id, operationId: "original", title: "Draft", goal: "Prepare a draft" },
+    undefined,
+    { kind: "project", projectId: "project-1", projectName: "Project", path: "/fixture/project" }
+  )
+  finish(f.store, created.task.id)
+  const work = f.store.changeWork(
+    f.bot.id,
+    created.work.id,
+    f.store.getWork(f.bot.id, created.work.id).version,
+    "done",
+    "complete"
+  )
+  const source = f.store.enqueue({
+    botId: f.bot.id,
+    requestId: "revision-request",
+    message: "Revise the draft; retain its original directory."
+  })
+  f.store.transition(source.id, "running")
+  const command = { taskId: source.id, callId: "revise", key: "revise" }
+  return { ...f, work, source, command }
+}
+
+describe("durable local independent works", () => {
+  it("keeps a rewritten follow-up out of model activity previews while retaining the original desktop preview", () => {
+    const { store, bot, create } = fixture()
+    const { work, task } = create()
+    store.transition(task.id, "running")
+    store.recordPreparedInput(task.id, task.message)
+    store.settle(task.id, "completed", null, "Initial draft")
+
+    const raw = "Follow-up with material removed by the target Hook"
+    const approved = "Follow-up with approved material"
+    const followUp = store.enqueue({ botId: bot.id, workId: work.id, requestId: "follow-up", message: raw })
+    store.transition(followUp.id, "running")
+    store.beginInputPreparation(followUp.id)
+    store.recordPreparedInput(followUp.id, approved)
+
+    const desktopWork = store.getWork(bot.id, work.id)
+    expect(desktopWork.activity?.preview).toBe(raw)
+    expect(store.projectWorkForModel(desktopWork).activity?.preview).toBe("")
+    expect(store.listWorks(bot.id, undefined, "", "desktop", "model").items[0].activity?.preview).toBe("")
+    expect(store.inputProjections(bot.id, work.threadId, [followUp.requestId]).get(followUp.requestId)).toBe(approved)
+  })
+
+  it("binds an explicit desktop skill and its retained draft only to the selected work", () => {
+    const { store, bot, create } = fixture()
+    const existing = create().work
+    const selected = { name: "review", path: "/registered/review/SKILL.md" }
+    const attachment = store.retainInputFile(bot.id, {
+      filename: "draft.md", mimeType: "text/markdown", filePath: "/snapshot/draft.md",
+      content: "original bytes", size: 14, truncated: false
+    }, "/snapshot/draft.md")
+    const inputFileIds = [attachment.botInputId!]
+    const input = {
+      botId: bot.id, workId: existing.id, requestId: "selected-existing",
+      message: "Review the draft" + buildAttachmentMessageParts([attachment]).attachmentModelBlocks,
+      explicitSkill: selected, skillDraftFromMain: true as const, inputFileIds
+    }
+    const delivered = store.enqueue(input)
+    expect(delivered).toMatchObject({
+      threadId: existing.threadId, origin: { kind: "user", explicitSkill: selected, inputFileIds }
+    })
+    expect(store.enqueue(input).id).toBe(delivered.id)
+    expect(() => store.enqueue({ ...input, explicitSkill: { ...selected, name: "other" } })).toThrow(/请求标识/)
+    const messageHash = createHash("sha256").update(canonicalBotMessageInput(input.message, [], inputFileIds, selected)).digest("hex")
+    expect(store.requestReceipts(bot.id, [{ requestId: input.requestId, messageHash }], existing.id)[0].state).toBe("accepted")
+    expect(store.requestReceipts(bot.id, [{ requestId: input.requestId, messageHash }])[0].state).toBe("conflict")
+    expect(() => store.enqueue({ ...input, requestId: "untrusted" }, { kind: "schedule", scheduleId: "s" })).toThrow(/桌面用户/)
+    const ownedAttachment = store.retainInputFile(bot.id, attachment, "/snapshot/draft.md", existing.id)
+    const creation = { botId: bot.id, operationId: "selected-new", title: "Draft", goal: "Review", explicitSkill: selected, inputFileIds }
+    expect(() => store.createWork({ ...creation, inputFileIds: [ownedAttachment.botInputId!] })).toThrow(/附件不属于/)
+    const receipt = store.createWork(creation)
+    expect(receipt.task).toMatchObject({
+      threadId: receipt.work.threadId, origin: { kind: "user", explicitSkill: selected, inputFileIds }
+    })
+    expect(receipt.task.message).toContain("original bytes")
+    expect(store.createWork(creation)).toEqual(receipt)
+    expect(store.recentTasks().some(task => task.threadId === bot.threadId)).toBe(false)
+  })
+
+  it("binds skill creation to the selected identity even when two Bots share its name", () => {
+    const { store, bot, peer } = fixture()
+    const otherPeer = store.create({ ...peer, name: peer.name })
+    const explicitSkill = { name: "review", path: "/registered/review/SKILL.md" }
+    const mentions = [{ botId: peer.id, start: 0, end: 5, label: "Peer" }]
+    const input = { botId: bot.id, operationId: "skill-with-mention", title: "Draft",
+      goal: "@Peer Review the draft", explicitSkill, mentions }
+    const created = store.createWork(input)
+    expect(created.task.origin).toMatchObject({ kind: "user", explicitSkill, mentions })
+    expect(store.workCreationReceipt(input)).toEqual(created)
+    expect(store.createWork(input)).toEqual(created)
+    expect(() => store.createWork({ ...input, mentions: [{ ...mentions[0], botId: otherPeer.id }] }))
+      .toThrow("工作命令标识")
+    expect(() => store.createWork({
+      ...input, operationId: "unavailable-peer", mentions: [{ ...mentions[0], botId: "missing-peer" }]
+    })).toThrow()
+
+    const source = store.enqueue({ botId: bot.id, requestId: "source", message: "Create a task" })
+    store.transition(source.id, "running")
+    const toolSource = { taskId: source.id, callId: "create-work", key: "create-work" }
+    expect(() => store.createWork(input, toolSource)).toThrow("桌面用户明确选择")
+    expect(() => store.createWork({ ...input, explicitSkill: undefined }, toolSource))
+      .toThrow("桌面技能草稿")
+    expect(store.recentTasks().filter(task => task.workId)).toHaveLength(1)
+  })
+
+  it("replays a pre-upgrade skill creation without changing the accepted task or submitting twice", () => {
+    const { store, bot, peer } = fixture()
+    const input = { botId: bot.id, operationId: "old-skill", title: "Draft", goal: "@Peer Review the draft",
+      explicitSkill: { name: "review", path: "/registered/review/SKILL.md" } }
+    const legacy = store.createWork(input)
+    const retry = { ...input, mentions: [{ botId: peer.id, start: 0, end: 5, label: "Peer" }] }
+    expect(store.workCreationReceipt(retry)).toEqual(legacy)
+    expect(store.createWork(retry)).toEqual(legacy)
+    expect(store.getTask(legacy.task.id).origin).not.toHaveProperty("mentions")
+    expect(store.recentTasks().filter(task => task.workId)).toHaveLength(1)
+    expect(() => store.workCreationReceipt({ ...retry, title: "Different work" })).toThrow("工作命令标识")
+  })
+
+  it("atomically reopens completed work with one follow-up and replays its receipt without reopening again", () => {
+    const f = completedWorkFixture()
+    const sent = f.store.sendWork(f.command, f.work.id, "Revise the draft", f.work.version)
+    const resumed = f.store.getWork(f.bot.id, f.work.id)
+    expect(resumed.state).toBe("active")
+    expect(resumed.workspace).toEqual(f.work.workspace)
+    expect(resumed.threadId).toBe(f.work.threadId)
+    expect(sent).toMatchObject({
+      workId: f.work.id,
+      threadId: f.work.threadId,
+      state: "queued",
+      message: "Revise the draft",
+      origin: { kind: "work", sourceTaskId: f.source.id, dispatch: "follow_up" }
+    })
+    // A lost reply can be retried under another tool call without executing twice.
+    const replay = () =>
+      f.store.sendWork(
+        { ...f.command, callId: "retry" },
+        f.work.id,
+        "Revise the draft",
+        f.work.version
+      )
+    expect(replay()).toEqual(sent)
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(resumed)
+    expect(f.store.recentTasks().filter((t) => t.workId === f.work.id)).toHaveLength(2)
+    finish(f.store, sent.id)
+    const done = f.store.changeWork(f.bot.id, f.work.id, resumed.version, "done-again", "complete")
+    expect(replay()).toEqual(sent)
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(done)
+  })
+
+  it("requires the current completed-work version and preserves the old active-work send contract", () => {
+    const f = completedWorkFixture()
+    const before = f.store.revision()
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise")).toThrow()
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", f.work.version - 1)).toThrow(
+      "已变化"
+    )
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", 0)).toThrow("版本无效")
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(f.work)
+    expect(f.store.revision()).toBe(before)
+    f.store.changeWork(f.bot.id, f.work.id, f.work.version, "ui-resume", "continue")
+    const sent = f.store.sendWork(f.command, f.work.id, "Revise")
+    expect(
+      f.store.sendWork({ ...f.command, callId: "old-send-retry" }, f.work.id, "Revise")
+    ).toEqual(sent)
+  })
+
+  it("rolls back reopening when enqueue is full and permits the same operation after capacity returns", () => {
+    const f = completedWorkFixture()
+    const queued = Array.from({ length: 500 }, (_, i) =>
+      f.store.enqueue({
+        botId: f.peer.id,
+        requestId: `queue-${i}`,
+        message: "Unrelated work"
+      })
+    )
+    const revision = f.store.revision()
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", f.work.version)).toThrow(
+      "队列已满"
+    )
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(f.work)
+    expect(f.store.revision()).toBe(revision)
+    f.store.transition(queued[0].id, "cancelled")
+    const sent = f.store.sendWork(f.command, f.work.id, "Revise", f.work.version)
+    expect(sent.state).toBe("queued")
+    expect(f.store.getWork(f.bot.id, f.work.id).state).toBe("active")
+    expect(f.store.getTask(queued[1].id).state).toBe("queued")
+  })
+
+  it("does not reopen after source cancellation or resume another Bot's work", () => {
+    const f = completedWorkFixture()
+    const stranger = f.store.enqueue({
+      botId: f.peer.id,
+      requestId: "other-user",
+      message: "Revise"
+    })
+    f.store.transition(stranger.id, "running")
+    expect(() =>
+      f.store.sendWork({ ...f.command, taskId: stranger.id }, f.work.id, "Revise", f.work.version)
+    ).toThrow()
+    f.store.transition(f.source.id, "cancelled")
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", f.work.version)).toThrow(
+      "不能转达"
+    )
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(f.work)
+    expect(f.store.recentTasks().filter((t) => t.workId === f.work.id)).toHaveLength(1)
+  })
+
+  it("refuses to resume detached history and leaves its work state intact", () => {
+    const f = completedWorkFixture()
+    const linked = f.store.conversations.prepare({
+      botId: f.bot.id,
+      operationId: "link",
+      title: "Original",
+      goal: "Existing task",
+      conversation: {
+        kind: "local_thread",
+        threadId: "existing",
+        incarnation: { token: "original", legacyCreatedAt: 1 }
+      }
+    })
+    f.store.conversations.bound(f.bot.id, linked.id, linked.conversation!.ref)
+    f.store.conversations.beginDetach(
+      f.bot.id,
+      linked.id,
+      f.store.getWork(f.bot.id, linked.id).version
+    )
+    const detached = f.store.conversations.detached(f.bot.id, linked.id)
+    const revision = f.store.revision()
+    expect(() => f.store.sendWork(f.command, detached.id, "Revise", detached.version)).toThrow(
+      "已解除"
+    )
+    expect(f.store.getWork(f.bot.id, detached.id)).toEqual(detached)
+    expect(f.store.revision()).toBe(revision)
+  })
+
+  it("carries a composer skill beyond the input page limit and resolves it again after restart", () => {
+    const f = fixture()
+    const skill = { name: "需求 PRD", path: "/synthetic/skills/需求 & PRD/SKILL.md" }
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "slash-source",
+      message: "X".repeat(6000) + "\n" + formatSkillUseBlock(skill) })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "slash", title: "PRD", goal: "Write the PRD" },
+      { taskId: source.id, callId: "slash", key: "slash" }
+    )
+    const first = f.store.workInputContext(created.task.id)!
+    expect(first.messages[0].text).not.toContain("SKILL.md")
+    expect(first.explicitSkill).toEqual(skill)
+    expect(f.store.workInputContext(created.task.id, 0, 4000)?.explicitSkill).toEqual(skill)
+    expect(new BotStore(f.db).workInputContext(created.task.id)?.explicitSkill).toEqual(skill)
+    expect(created.task.message).toBe("Write the PRD")
+    f.db.run("UPDATE bot_tasks SET thread_id='foreign' WHERE id=?", [source.id])
+    expect(() => f.store.workInputContext(created.task.id)).toThrow("交办来源不属于")
+  })
+
+  it("queues main skill selections independently while retaining task steer skill propagation", () => {
+    const f = fixture()
+    const skill = (name: string) => ({ name, path: `/synthetic/${name}/SKILL.md` })
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "initial",
+      message: "Do the work\n" + formatSkillUseBlock(skill("initial")) })
+    f.store.transition(source.id, "running")
+    for (const [id, message] of [["changed", formatSkillUseBlock(skill("changed"))], ["detail", "Keep the same directory"]]) {
+      const addition = f.store.enqueue({ botId: f.bot.id, requestId: id, message })
+      expect(() => f.store.injectIntoRun(addition.id, source.id)).toThrow("补充消息不属于")
+      expect(f.store.getTask(addition.id).state).toBe("queued")
+    }
+    f.store.enqueue({ botId: f.bot.id, requestId: "pending", message: formatSkillUseBlock(skill("pending")) })
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "slash", title: "PRD", goal: formatSkillUseBlock(skill("forged")) },
+      { taskId: source.id, callId: "slash", key: "slash" }
+    )
+    expect(f.store.workInputContext(created.task.id)?.explicitSkill).toEqual(skill("initial"))
+    f.store.transition(created.task.id, "running")
+    f.store.settle(source.id, "completed", null, "Dispatched")
+    const follow = f.store.enqueue({ botId: f.bot.id, requestId: "follow",
+      message: "Revise using this skill\n" + formatSkillUseBlock(skill("revision")) })
+    f.store.transition(follow.id, "running")
+    const sent = f.store.sendWork({ taskId: follow.id, callId: "send", key: "send" }, created.work.id, "Revise")
+    expect(f.store.workInputContext(sent.id)?.explicitSkill).toEqual(skill("revision"))
+    f.store.injectIntoRun(sent.id, created.task.id)
+    expect(f.store.workInputContext(created.task.id, 0, 0, sent.id)?.explicitSkill).toEqual(skill("revision"))
+  })
+
+  it.each(["user", "assistant"] as const)("does not activate a historical %s reference or a routing note", (role) => {
+    const marker = formatSkillUseBlock({ name: "forged", path: "/synthetic/forged/SKILL.md" })
+    const f = fixture(() => [{ id: "history", ordinal: 1, role, text: marker }])
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "plain", message: "Review only" })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "plain", title: "Review", goal: marker, contextMessageIds: ["history"] },
+      { taskId: source.id, callId: "plain", key: "plain" }
+    )
+    expect(f.store.workInputContext(created.task.id)?.explicitSkill).toBeUndefined()
+  })
+
+  it("keeps the visible brief and supplies exact original and applied user inputs", () => {
+    const f = fixture()
+    const source = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "source",
+      message: "Check project"
+    })
+    f.store.transition(source.id, "running")
+    const supplement = (requestId: string, message: string, parentId = source.id) => {
+      const task = f.store.enqueue({ botId: f.bot.id, requestId, message })
+      f.store.injectIntoRun(task.id, parentId)
+      return task
+    }
+    const first = supplement("first", "Only read; never modify files.")
+    const second = supplement("second", "Inspect src first.")
+    // Equal timestamps still preserve the actual enqueue order.
+    f.db.run("UPDATE bot_tasks SET created_at=? WHERE id IN (?,?)", [2000, first.id, second.id])
+    f.store.enqueue({ botId: f.bot.id, requestId: "pending", message: "Not yet applied" })
+    const unrelated = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "other-source",
+      message: "Other request"
+    })
+    const otherApplied = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "other-applied",
+      message: "Belongs to another source"
+    })
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=? WHERE id=?", [
+      unrelated.id,
+      otherApplied.id
+    ])
+    const cancelled = supplement("cancelled", "Cancelled supplement")
+    f.store.transition(cancelled.id, "cancelled")
+    const notification = f.store.enqueue(
+      { botId: f.bot.id, requestId: "notification", message: "Not a user request" },
+      { kind: "notification", notificationKind: "command", key: "synthetic" }
+    )
+    // Verify the projection still excludes non-user rows with a source reference.
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=? WHERE id=?", [
+      source.id,
+      notification.id
+    ])
+    const otherBot = f.store.enqueue({
+      botId: f.peer.id,
+      requestId: "other-bot",
+      message: "Another Bot's request"
+    })
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=? WHERE id=?", [
+      source.id,
+      otherBot.id
+    ])
+    const otherThread = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "other-thread",
+      message: "Another thread's request"
+    })
+    f.db.run("UPDATE bot_tasks SET state='running',injected_into=?,thread_id=? WHERE id=?", [
+      source.id,
+      "other-thread",
+      otherThread.id
+    ])
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "all-supplements", title: "Review", goal: "Model summary" },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    const expected = [source.requestId, first.requestId, second.requestId]
+    expect(f.store.workInputContext(created.task.id)?.messages.map(m => m.text)).toEqual([
+      source.message, first.message, second.message
+    ])
+    expect(created.task.message).toBe("Model summary")
+    expect(created.task.origin).toMatchObject({ dispatch: "create", sourceMessageIds: expected })
+    finish(f.store, created.task.id)
+    const sent = f.store.sendWork(
+      { taskId: source.id, callId: "follow-up", key: "follow-up" },
+      created.work.id,
+      "Different model summary"
+    )
+    expect(f.store.workInputContext(sent.id)?.messages.map(m => m.text)).toEqual([
+      source.message, first.message, second.message
+    ])
+    expect(sent.message).toBe("Different model summary")
+    expect(sent.origin).toMatchObject({ dispatch: "follow_up", sourceMessageIds: expected })
+    expect(f.store.getTask(first.id).message).toBe(first.message)
+  })
+
+  it("forwards introduction supplements but not the greeting", () => {
+    const f = fixture(),
+      source = f.store.introduce(f.bot.id)!
+    f.store.transition(source.id, "running")
+    expect(() =>
+      f.store.createWork(
+        { botId: f.bot.id, operationId: "intro-without-user", title: "Review", goal: "Summary" },
+        { taskId: source.id, callId: "without-user", key: "without-user" }
+      )
+    ).toThrow("用户交办")
+    const messages = ["Review only; do not write.", "Keep the original files."]
+    messages.forEach((message, i) => {
+      const task = f.store.enqueue({ botId: f.bot.id, requestId: `intro-${i}`, message })
+      f.store.injectIntoRun(task.id, source.id)
+    })
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "intro-work", title: "Review", goal: "Summary" },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    expect(f.store.workInputContext(created.task.id)?.messages.map(m => m.text)).toEqual(messages)
+    expect(created.task.message).toBe("Summary")
+    expect(created.task.origin).toMatchObject({ sourceMessageIds: ["intro-0", "intro-1"] })
+    expect(created.task.message).not.toContain(source.message)
+    finish(f.store, created.task.id)
+    expect(
+      f.store.sendWork(
+        { taskId: source.id, callId: "send", key: "send" },
+        created.work.id,
+        "Summary"
+      ).message
+    ).toBe(created.task.message)
+  })
+
+  it("keeps long source messages and selected context as references, without inflating the assignment", () => {
+    const context = [{ id: "context", role: "user" as const, ordinal: 1, text: "C".repeat(8000) }]
+    const f = fixture(() => context)
+    const source = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-source",
+      message: "A".repeat(32_000)
+    })
+    f.store.transition(source.id, "running")
+    const child = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-child",
+      message: "B".repeat(32_000)
+    })
+    f.store.injectIntoRun(child.id, source.id)
+    const input = {
+      botId: f.bot.id,
+      operationId: "brief",
+      title: "Review",
+      goal: "Review src without editing files.",
+      contextMessageIds: ["context"]
+    }
+    const authority = { taskId: source.id, callId: "create", key: "create" }
+    const created = f.store.createWork(input, authority)
+    expect(created.task.message).toBe(input.goal)
+    expect(created.task.origin).toMatchObject({
+      sourceMessageIds: [source.requestId, child.requestId, "context"]
+    })
+    const firstPage = f.store.workInputContext(created.task.id)!
+    expect(firstPage.messages.map(m => m.kind)).toEqual(["request", "correction", "reference"])
+    expect(firstPage.messages.map(m => m.text.length)).toEqual([4000, 4000, 4000])
+    expect(firstPage.messages.every(m => m.nextOffset === 4000)).toBe(true)
+    expect(f.store.workInputContext(created.task.id, 2, 4000)?.messages[0].text).toBe("C".repeat(4000))
+    // Later source edits cannot expand the captured request or cross conversation scopes.
+    f.db.run("UPDATE bot_tasks SET thread_id='unrelated' WHERE id=?", [source.id])
+    expect(() => f.store.workInputContext(created.task.id)).toThrow("交办来源不属于")
+    f.db.run("UPDATE bot_tasks SET thread_id=? WHERE id=?", [created.work.parentThreadId, source.id])
+    expect(f.store.createWork(input, authority)).toEqual(created)
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+    expect(f.store.getTask(source.id).message).toBe(source.message)
+  })
+
+  it("rejects unavailable context references atomically", () => {
+    const f = fixture(() => [])
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "source", message: "Review" })
+    f.store.transition(source.id, "running")
+    const before = f.store.recentTasks()
+    expect(() =>
+      f.store.createWork(
+        {
+          botId: f.bot.id,
+          operationId: "missing",
+          title: "Review",
+          goal: "Review src",
+          contextMessageIds: ["foreign"]
+        },
+        { taskId: source.id, callId: "missing", key: "missing" }
+      )
+    ).toThrow("所选相关消息不可用")
+    expect(f.store.recentTasks()).toEqual(before)
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(0)
+  })
+
+  it("pages a long applied correction under its own assignment, without reading queued or unrelated work", () => {
+    const f = fixture()
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "initial", message: "Initial request" })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "initial", title: "Review", goal: "Review" },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    f.store.transition(created.task.id, "running")
+    f.store.settle(source.id, "completed", null, "Dispatched")
+    const correction = f.store.enqueue({ botId: f.bot.id, requestId: "correction", message: "X".repeat(6000) + "Do not modify source files." })
+    f.store.transition(correction.id, "running")
+    const sent = f.store.sendWork(
+      { taskId: correction.id, callId: "send", key: "send" }, created.work.id, "Apply the correction"
+    )
+    expect(() => f.store.workInputContext(created.task.id, 0, 4000, sent.id)).toThrow("尚未应用")
+    expect(f.store.injectIntoRun(sent.id, created.task.id)).toBe(true)
+    const page = f.store.workInputContext(created.task.id, 0, 4000, sent.id)!
+    expect(page.assignmentId).toBe(sent.id)
+    expect(page.messages[0].text).toBe(correction.message.slice(4000))
+    expect(f.store.workInputContext(created.task.id)?.messages[0].text).toBe(source.message)
+    const unrelated = f.create("other-work")
+    expect(() => f.store.workInputContext(created.task.id, 0, 0, unrelated.task.id)).toThrow("尚未应用")
+  })
+
+  it("rejects an oversized work follow-up without a receipt or task/version/activity change", () => {
+    const f = fixture(),
+      created = f.create()
+    finish(f.store, created.task.id)
+    const source = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-send",
+      message: "A".repeat(32_000)
+    })
+    f.store.transition(source.id, "running")
+    const child = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "large-send-child",
+      message: "B".repeat(32_000)
+    })
+    f.store.injectIntoRun(child.id, source.id)
+    const snapshot = () => ({
+      revision: f.store.revision(),
+      tasks: f.store.recentTasks(),
+      work: f.store.getWork(f.bot.id, created.work.id),
+      commands: f.db.exec("SELECT * FROM bot_work_commands"),
+      activity: f.store.activities()
+    })
+    const before = snapshot(),
+      authority = { taskId: source.id, callId: "send", key: "send" }
+    expect(() => f.store.sendWork(authority, created.work.id, "X".repeat(64_001))).toThrow(
+      "消息格式或长度无效"
+    )
+    expect(snapshot()).toEqual(before)
+    f.store.transition(child.id, "cancelled")
+    expect(f.store.sendWork(authority, created.work.id, "Summary").message).toBe("Summary")
+  })
+
+  it("persists the actual Bot instructions and their provenance through creation, revision and reload", () => {
+    const f = fixture()
+    const original = "在指定目录设计读书会计划，只要文字，不创建文件。"
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "original", message: original })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      {
+        botId: f.bot.id,
+        operationId: "create",
+        title: "读书会",
+        goal: "设计读书会计划，仅回复文字，不创建文件。"
+      },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    expect(created.task.message).toBe(created.work.goal)
+    expect(created.task.origin).toMatchObject({
+      dispatch: "create",
+      sourceTaskId: source.id,
+      sourceMessageIds: [source.requestId]
+    })
+    expect(created.work.goal).toBe("设计读书会计划，仅回复文字，不创建文件。")
+    f.store.settle(source.id, "completed", null, "已交办")
+    finish(f.store, created.task.id)
+    const revision = "改到四点，仍然只要文字，不写文件。"
+    const next = f.store.enqueue({ botId: f.bot.id, requestId: "revision", message: revision })
+    f.store.transition(next.id, "running")
+    const sent = f.store.sendWork(
+      { taskId: next.id, callId: "send", key: "send" },
+      created.work.id,
+      "将读书会时间改为四点，保持纯文字回复，不写文件。"
+    )
+    expect(sent.message).toBe("将读书会时间改为四点，保持纯文字回复，不写文件。")
+    expect(f.store.getTask(next.id).message).toBe(revision)
+    expect(sent.origin).toMatchObject({
+      kind: "work",
+      dispatch: "follow_up",
+      sourceTaskId: next.id,
+      sourceMessageIds: [next.requestId]
+    })
+    const reopened = new BotStore(f.db)
+    expect(reopened.getTask(sent.id).message).toBe(sent.message)
+    expect(
+      reopened.messageOrigins(f.bot.id, [sent.requestId], undefined, created.work.id)[0].origin
+    ).toEqual(sent.origin)
+    expect(reopened.messageOrigins(f.bot.id, [sent.requestId])).toEqual([])
+    expect(reopened.messageOrigins(f.peer.id, [sent.requestId])).toEqual([])
+    expect(sent.threadId).toBe(created.work.threadId)
+  })
+  it("keeps beta question receipts and batched work context as separate constructor ports", () => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    databases.push(db)
+    const questionResult = vi.fn()
+    const readContext = vi.fn(() => [
+      { id: "reply", ordinal: 2, role: "assistant" as const, text: "Verified reply" },
+      { id: "request", ordinal: 1, role: "user" as const, text: "Original request" }
+    ])
+    const store = new BotStore(db, Date.now, undefined, undefined, questionResult, readContext)
+    const bot = store.create({ name: "Owner", instructions: "", modelRef: null, color: "#123456" })
+    const work = store.createWork({
+      botId: bot.id,
+      operationId: "context",
+      title: "Follow up",
+      goal: "Continue",
+      contextMessageIds: ["reply", "request"]
+    })
+    expect(readContext).toHaveBeenCalledExactlyOnceWith(bot.threadId, ["reply", "request"])
+    expect(questionResult).not.toHaveBeenCalled()
+    expect(work.task.message.indexOf("Original request")).toBeLessThan(
+      work.task.message.indexOf("Verified reply")
+    )
+  })
+  it("keeps beta workflow instance deduplication within the exact independent work", () => {
+    const f = fixture(),
+      receipt = f.create()
+    finish(f.store, receipt.task.id)
+    const host = new LocalBotHost(f.store, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    for (const stamp of ["2026-10-22T01:00:00Z", "2026-10-22T01:00:00Z", "2026-10-22T02:00:00Z"])
+      host.enqueueNotification(
+        f.bot.id,
+        receipt.work.threadId,
+        "workflow",
+        "workflow",
+        "Actual result",
+        undefined,
+        stamp
+      )
+    const notifications = f.store
+      .recentTasks()
+      .filter((task) => task.origin.kind === "notification")
+    expect(notifications).toHaveLength(2)
+    expect(
+      notifications.every(
+        (task) => task.workId === receipt.work.id && task.threadId === receipt.work.threadId
+      )
+    ).toBe(true)
+    expect(new Set(notifications.map((task) => task.requestId)).size).toBe(2)
+  })
+  it("runs private chat and separate work alongside the same Bot's group conversation", () => {
+    const f = fixture()
+    const group = f.store.saveGroup({ name: "Room", memberIds: [f.bot.id, f.peer.id] })
+    f.store.sendGroup({
+      groupId: group.id,
+      requestId: "group",
+      text: "Review",
+      targetBotIds: [f.bot.id]
+    })
+    const groupTask = f.store.recentTasks().find((task) => task.origin.kind === "group")!
+    f.store.transition(groupTask.id, "running")
+    const main = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "private",
+      message: "Continue privately"
+    })
+    const work = f.create()
+    expect(f.store.nextQueued([])?.id).toBe(main.id)
+    f.store.transition(main.id, "running")
+    expect(f.store.nextQueued([])?.id).toBe(work.task.id)
+    f.store.transition(work.task.id, "running")
+    expect(f.store.nextQueued([])).toBeNull()
+    f.store.settle(groupTask.id, "completed", null, "Room reply")
+    expect(f.store.getTask(main.id).state).toBe("running")
+    expect(f.store.nextQueued([])).toBeNull()
+  })
+
+  it("rejects mixed group/work stop targets before changing either conversation", () => {
+    const f = fixture(),
+      group = f.store.saveGroup({ name: "Room", memberIds: [f.bot.id, f.peer.id] }),
+      work = f.create()
+    f.store.sendGroup({
+      groupId: group.id,
+      requestId: "mixed-stop-group",
+      text: "Review",
+      targetBotIds: [f.bot.id]
+    })
+    const before = f.store.recentTasks()
+    const stopGroup = vi.spyOn(f.store, "stopGroupDiscussion")
+    const cancelBackground = vi.fn()
+    const host = new LocalBotHost(f.store, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      cancelBackground
+    })
+    hosts.push(host)
+    expect(() => host.stopConversation(f.bot.id, group.id, work.work.id)).toThrow("不能混用")
+    expect(stopGroup).not.toHaveBeenCalled()
+    expect(cancelBackground).not.toHaveBeenCalled()
+    expect(f.store.recentTasks()).toEqual(before)
+  })
+
+  it("reopens the original receipt and rolls back native write refusal without creating another work", () => {
+    const dir = mkdtempSync(join(tmpdir(), "m05-work-store-")),
+      path = join(dir, "control.sqlite")
+    let db = new NativeSqliteAdapter(new DatabaseSync(path))
+    try {
+      let store = new BotStore(db)
+      const bot = store.create({
+        name: "A",
+        instructions: "Work",
+        color: "#123456",
+        modelRef: null
+      })
+      const input = {
+        botId: bot.id,
+        operationId: "create-original",
+        title: "Draft",
+        goal: "Prepare"
+      }
+      const receipt = store.createWork(input)
+      store.initializeWorkThread(bot.id, receipt.work.id)
+      db.close()
+      db = new NativeSqliteAdapter(new DatabaseSync(path))
+      store = new BotStore(db)
+      expect(store.createWork(input)).toEqual(receipt)
+      expect(store.getWork(bot.id, receipt.work.id).threadInitialized).toBe(true)
+      expect(store.recentTasks()).toHaveLength(1)
+      db.run("PRAGMA query_only=ON")
+      expect(() => store.createWork({ ...input, operationId: "write-refused" })).toThrow()
+      db.run("PRAGMA query_only=OFF")
+      expect(store.listWorks(bot.id).items).toHaveLength(1)
+      const accepted = store.createWork({ ...input, operationId: "write-refused" })
+      expect(store.createWork({ ...input, operationId: "write-refused" })).toEqual(accepted)
+      expect(store.recentTasks()).toHaveLength(2)
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it("creates one fixed conversation and initial execution, scopes replay and receipts, and keeps lifecycle explicit", () => {
+    const f = fixture(),
+      r = f.create()
+    expect(f.create()).toEqual(r)
+    expect(() =>
+      f.store.createWork({
+        botId: f.bot.id,
+        operationId: "create",
+        title: "Other",
+        goal: "Prepare a draft"
+      })
+    ).toThrow("不同内容")
+    expect(r.task.threadId).toBe(r.work.threadId)
+    expect(r.task.workId).toBe(r.work.id)
+    expect(f.store.getBot(f.bot.id).threadId).not.toBe(r.work.threadId)
+    expect(() => f.store.getWork(f.peer.id, r.work.id)).toThrow()
+    const hash = createHash("sha256").update(r.task.message).digest("hex")
+    expect(
+      f.store.requestReceipts(
+        f.bot.id,
+        [{ requestId: r.task.requestId, messageHash: hash }],
+        r.work.id
+      )[0].state
+    ).toBe("accepted")
+    expect(
+      f.store.requestReceipts(f.bot.id, [{ requestId: r.task.requestId, messageHash: hash }])[0]
+        .state
+    ).toBe("conflict")
+    expect(() =>
+      f.store.changeWork(f.bot.id, r.work.id, r.work.version, "complete-busy", "complete")
+    ).toThrow("待办")
+    finish(f.store, r.task.id)
+    const current = f.store.getWork(f.bot.id, r.work.id)
+    expect(current.state).toBe("active")
+    const done = f.store.changeWork(f.bot.id, r.work.id, current.version, "done", "complete")
+    expect(f.store.changeWork(f.bot.id, r.work.id, current.version, "done", "complete")).toEqual(
+      done
+    )
+    expect(() =>
+      f.store.enqueue({ botId: f.bot.id, workId: r.work.id, requestId: "late", message: "Edit" })
+    ).toThrow()
+    const resumed = f.store.changeWork(f.bot.id, r.work.id, done.version, "resume", "continue")
+    expect(resumed.threadId).toBe(r.work.threadId)
+    expect(f.store.recentTasks()).toHaveLength(1)
+    const edit = f.store.enqueue({
+      botId: f.bot.id,
+      workId: r.work.id,
+      requestId: "edit",
+      message: "Edit"
+    })
+    expect(edit.threadId).toBe(r.work.threadId)
+  })
+  it("aggregates activity ahead of newer queued supplements and gates completion on async collaborators/outbox", () => {
+    const f = fixture(),
+      r = f.create()
+    f.store.transition(r.task.id, "running")
+    f.store.transition(r.task.id, "waiting_user")
+    f.store.enqueue({
+      botId: f.bot.id,
+      workId: r.work.id,
+      requestId: "supplement",
+      message: "Extra"
+    })
+    expect(f.store.listWorks(f.bot.id).items[0].executionState).toBe("waiting_user")
+    const peer = f.store.delegate(r.task.id, f.peer.id, "Review", "review")
+    expect(peer.origin).toMatchObject({ rootWorkId: r.work.id, returnWorkId: r.work.id })
+    expect(f.store.listWorks(f.bot.id).items[0].pendingPeers).toBe(1)
+    f.store.settle(r.task.id, "completed", null)
+    const supplement = f.store.recentTasks().find((t) => t.requestId === "supplement")!
+    f.store.transition(supplement.id, "cancelled")
+    expect(() =>
+      f.store.changeWork(
+        f.bot.id,
+        r.work.id,
+        f.store.getWork(f.bot.id, r.work.id).version,
+        "busy-peer",
+        "complete"
+      )
+    ).toThrow()
+    finish(f.store, peer.id)
+    expect(() =>
+      f.store.changeWork(
+        f.bot.id,
+        r.work.id,
+        f.store.getWork(f.bot.id, r.work.id).version,
+        "busy-reply",
+        "complete"
+      )
+    ).toThrow()
+    f.store.flushReplies()
+    const reply = f.store.recentTasks().find((t) => t.requestId === `reply-${peer.id}`)!
+    expect(reply.workId).toBe(r.work.id)
+    expect(reply.threadId).toBe(r.work.threadId)
+    finish(f.store, reply.id)
+    expect(
+      f.store.changeWork(
+        f.bot.id,
+        r.work.id,
+        f.store.getWork(f.bot.id, r.work.id).version,
+        "done",
+        "complete"
+      ).state
+    ).toBe("completed")
+  })
+  it("retains late closed-route results while delivering unrelated outbox items", () => {
+    const f = fixture(),
+      r = f.create(),
+      other = f.create("other")
+    f.store.transition(r.task.id, "running")
+    f.store.transition(other.task.id, "running")
+    const one = f.store.delegate(r.task.id, f.peer.id, "Review one", "one")
+    const two = f.store.delegate(other.task.id, f.peer.id, "Review two", "two")
+    f.store.settle(r.task.id, "completed", null)
+    f.store.settle(other.task.id, "completed", null)
+    finish(f.store, one.id)
+    finish(f.store, two.id)
+    // Simulate a legacy/late closed route; the guarded public complete cannot produce this race.
+    f.db.run("UPDATE bot_work_items SET state='completed' WHERE id=?", [r.work.id])
+    f.store.flushReplies()
+    f.store.flushReplies()
+    expect(f.store.recentTasks().filter((t) => t.requestId === `reply-${one.id}`)).toHaveLength(0)
+    expect(f.store.recentTasks().filter((t) => t.requestId === `reply-${two.id}`)).toHaveLength(1)
+    expect(f.store.exchange(f.bot.id, one.id, undefined, r.work.id).reply).toMatchObject({
+      delivered: false,
+      message: "A draft"
+    })
+  })
+  it("keeps work-family waits visible and fences archive/deletion without orphaning peer execution", () => {
+    const f = fixture(),
+      r = f.create()
+    f.store.transition(r.task.id, "running")
+    const peer = f.store.delegate(r.task.id, f.peer.id, "Review", "peer")
+    f.store.settle(r.task.id, "completed", null)
+    f.store.transition(peer.id, "running")
+    f.store.transition(peer.id, "waiting_user")
+    expect(f.store.getWork(f.bot.id, r.work.id).executionState).toBe("waiting_user")
+    expect(f.store.getWork(f.bot.id, r.work.id).activity?.unread).toBe(true)
+    expect(() =>
+      f.store.update({ ...f.bot, expectedVersion: f.bot.version, archived: true })
+    ).toThrow("关联协作")
+    expect(() => f.store.beginDeletion(f.bot.id, f.bot.version)).toThrow("关联协作")
+    expect(f.store.getBot(f.bot.id).archived).toBe(false)
+    f.store.settle(peer.id, "cancelled", null)
+    const next = f.create("next")
+    f.store.transition(next.task.id, "running")
+    const queuedPeer = f.store.delegate(next.task.id, f.peer.id, "Another review", "another")
+    f.store.settle(next.task.id, "completed", null)
+    f.store.update({ ...f.bot, expectedVersion: f.bot.version, archived: true })
+    expect(f.store.getTask(queuedPeer.id).state).toBe("cancelled")
+    expect(f.store.nextQueued([])).toBeNull()
+    expect(() => f.store.flushReplies()).not.toThrow()
+  })
+  it("keeps paginated metadata and thread discovery after execution pruning", () => {
+    const f = fixture()
+    for (let i = 0; i < 45; i++) {
+      const r = f.create(`work-${i}`)
+      f.store.transition(r.task.id, "cancelled")
+    }
+    const first = f.store.listWorks(f.bot.id),
+      second = f.store.listWorks(f.bot.id, first.nextCursor!)
+    expect(first.items).toHaveLength(40)
+    expect(second.items).toHaveLength(5)
+    expect(new Set([...first.items, ...second.items].map((w) => w.id)).size).toBe(45)
+    expect(first.items[0]).not.toHaveProperty("goal")
+    expect(() => f.store.listWorks(f.peer.id, first.nextCursor!)).toThrow()
+    f.db.run("DELETE FROM bot_tasks")
+    const threads = first.items.map((w) => w.threadId)
+    expect(f.store.notificationThreadIds()).toEqual(expect.arrayContaining(threads))
+    expect(f.store.beginDeletion(f.bot.id, f.bot.version)).toEqual(expect.arrayContaining(threads))
+  })
+  it("surfaces an old active work ahead of 40 newer completed works and batches expanded metadata", () => {
+    const f = fixture(),
+      old = f.create("old")
+    f.store.transition(old.task.id, "running")
+    f.store.transition(old.task.id, "waiting_user")
+    for (let i = 0; i < 41; i++) {
+      const r = f.create(`new-${i}`)
+      finish(f.store, r.task.id)
+      f.store.changeWork(
+        f.bot.id,
+        r.work.id,
+        f.store.getWork(f.bot.id, r.work.id).version,
+        `done-${i}`,
+        "complete"
+      )
+    }
+    const page = f.store.listWorks(f.bot.id)
+    expect(page.items.some((w) => w.id === old.work.id)).toBe(false)
+    expect(page.priority).toMatchObject([{ id: old.work.id, executionState: "waiting_user" }])
+    expect(f.store.workSummaries(f.bot.id, [old.work.id])).toMatchObject([
+      { id: old.work.id, executionState: "waiting_user" }
+    ])
+    expect(() => f.store.workSummaries(f.peer.id, [old.work.id])).toThrow()
+    expect(() => f.store.workSummaries(f.bot.id, Array(41).fill(old.work.id))).toThrow()
+  })
+  it("clears the Bot overview dot through its own version while keeping individual tasks unread", () => {
+    const f = fixture()
+    const first = f.create("first")
+    finish(f.store, first.task.id)
+    const overview = () => f.store.workActivities().find(activity => activity.botId === f.bot.id)!
+    const firstVersion = overview().version
+    expect(overview().unread).toBe(true)
+    f.store.markRead("work-bot", f.bot.id, firstVersion)
+    expect(overview().unread).toBe(false)
+    expect(f.store.getWork(f.bot.id, first.work.id).activity!.unread).toBe(true)
+    expect(f.store.hasUnread()).toBe(false)
+
+    const second = f.create("second")
+    finish(f.store, second.task.id)
+    f.store.markRead("work-bot", f.bot.id, firstVersion)
+    expect(overview().unread).toBe(true)
+    expect(f.store.hasUnread()).toBe(true)
+    f.store.markRead("work", second.work.id, f.store.getWork(f.bot.id, second.work.id).activity!.version)
+    expect(overview().unread).toBe(false)
+    expect(f.store.getWork(f.bot.id, first.work.id).activity!.unread).toBe(true)
+  })
+
+  it("acknowledges only the displayed main/work boundary and preserves newer activity against late bulk reads", () => {
+    const f = fixture(),
+      a = f.create("a"),
+      b = f.create("b")
+    const main = f.store.enqueue({ botId: f.bot.id, requestId: "main", message: "Hello" })
+    finish(f.store, main.id)
+    finish(f.store, a.task.id)
+    finish(f.store, b.task.id)
+    const mainActivity = f.store.activities().find((x) => x.kind === "bot" && x.id === f.bot.id)!
+    const aActivity = f.store.getWork(f.bot.id, a.work.id).activity!
+    expect(aActivity.unread).toBe(true)
+    f.store.markRead("bot", f.bot.id, mainActivity.version)
+    expect(f.store.getWork(f.bot.id, a.work.id).activity!.unread).toBe(true)
+    expect(f.store.workActivities()[0].unread).toBe(true)
+    f.store.markUnread("bot", f.bot.id)
+    f.store.markRead("work", a.work.id, aActivity.version)
+    expect(f.store.activities().find((x) => x.kind === "bot" && x.id === f.bot.id)!.unread).toBe(
+      true
+    )
+    expect(f.store.getWork(f.bot.id, b.work.id).activity!.unread).toBe(true)
+    const boundary = f.store.workActivities()[0].version
+    const supplement = f.store.enqueue({
+      botId: f.bot.id,
+      workId: a.work.id,
+      requestId: "late-reply",
+      message: "Revise"
+    })
+    finish(f.store, supplement.id)
+    f.store.markWorksRead(f.bot.id, boundary)
+    expect(f.store.getWork(f.bot.id, a.work.id).activity!.unread).toBe(true)
+    expect(f.store.getWork(f.bot.id, b.work.id).activity!.unread).toBe(false)
+    // A switched-away acknowledgement cannot clear a later reply in the original work.
+    f.store.markRead("work", a.work.id, aActivity.version)
+    expect(f.store.getWork(f.bot.id, a.work.id).activity!.unread).toBe(true)
+    expect(f.store.activities().some((x) => x.kind === "work")).toBe(false)
+    f.store.markWorksRead(f.bot.id, f.store.workActivities()[0].version)
+    expect(f.store.workActivities()[0].unread).toBe(false)
+  })
+  it("blocks completion on original background managers and skips late notifications for a closed work", async () => {
+    const f = fixture(),
+      r = f.create()
+    finish(f.store, r.task.id)
+    let busy = true
+    const host = new LocalBotHost(f.store, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      hasPendingWork: async (threads) => {
+        expect(threads).toContain(r.work.threadId)
+        return busy
+      }
+    })
+    hosts.push(host)
+    const current = f.store.getWork(f.bot.id, r.work.id)
+    await expect(
+      host.changeWork(f.bot.id, r.work.id, current.version, "complete", "complete")
+    ).rejects.toThrow("后台")
+    busy = false
+    const done = await host.changeWork(f.bot.id, r.work.id, current.version, "complete", "complete")
+    expect(done.state).toBe("completed")
+    busy = true
+    expect(
+      await host.changeWork(f.bot.id, r.work.id, current.version, "complete", "complete")
+    ).toEqual(done)
+    expect(() =>
+      host.enqueueNotification(f.bot.id, r.work.threadId, "workflow", "late", "Late result")
+    ).not.toThrow()
+    expect(() =>
+      host.enqueueNotification(f.bot.id, r.work.threadId, "coordinator", "late", "Late result")
+    ).not.toThrow()
+    expect(f.store.recentTasks().filter((task) => task.workId === r.work.id)).toHaveLength(1)
+    expect(f.store.recentTasks().some((task) => task.origin.kind === "notification")).toBe(false)
+  })
+  it("does not claim a historical peer's later background work, and stops only source-bound peer commands", async () => {
+    const f = fixture(),
+      cancelledThreads: string[] = [],
+      cancelledCommands: string[][] = []
+    const host = new LocalBotHost(f.store, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      hasPendingWork: async (threads) => threads.includes(f.peer.threadId),
+      cancelBackground: (thread) => {
+        cancelledThreads.push(thread)
+      },
+      cancelBackgroundCommands: (ids) => {
+        cancelledCommands.push([...ids])
+      }
+    })
+    hosts.push(host)
+    const r = f.create()
+    f.store.transition(r.task.id, "running")
+    const peer = f.store.delegate(r.task.id, f.peer.id, "Review", "peer")
+    f.store.settle(r.task.id, "completed", null)
+    finish(f.store, peer.id)
+    f.store.flushReplies()
+    finish(f.store, f.store.recentTasks().find((t) => t.requestId === `reply-${peer.id}`)!.id)
+    const unrelated = f.store.enqueue({
+      botId: f.peer.id,
+      requestId: "unrelated",
+      message: "Other work"
+    })
+    f.store.transition(unrelated.id, "running")
+    f.store.acceptCommand(unrelated.id, {
+      id: "unrelated-command",
+      threadId: f.peer.threadId,
+      command: "unrelated",
+      cwd: "/fixture",
+      startedAt: 1
+    })
+    f.store.settle(unrelated.id, "completed", null)
+    expect(
+      (
+        await host.changeWork(
+          f.bot.id,
+          r.work.id,
+          f.store.getWork(f.bot.id, r.work.id).version,
+          "done",
+          "complete"
+        )
+      ).state
+    ).toBe("completed")
+    host.stopConversation(f.bot.id, undefined, r.work.id)
+    expect(cancelledThreads).toEqual([r.work.threadId])
+    expect(cancelledCommands).toEqual([])
+    const other = f.create("other")
+    f.store.transition(other.task.id, "running")
+    const linked = f.store.delegate(other.task.id, f.peer.id, "Review another", "another")
+    f.store.transition(linked.id, "running")
+    f.store.acceptCommand(linked.id, {
+      id: "linked-command",
+      threadId: f.peer.threadId,
+      command: "linked",
+      cwd: "/fixture",
+      startedAt: 2
+    })
+    f.store.settle(linked.id, "completed", null)
+    host.stopConversation(f.bot.id, undefined, other.work.id)
+    expect(cancelledThreads).toEqual([r.work.threadId, other.work.threadId])
+    expect(cancelledCommands).toEqual([["linked-command"]])
+    expect(
+      f.db.exec("SELECT suppressed FROM bot_commands WHERE id='unrelated-command'")[0].values[0][0]
+    ).toBe(0)
+  })
+  it.each([false, true])("unlimited admission isolates independent works (same Bot: %s)", async (sameBot) => {
+    const f = fixture()
+    const executions: Array<{ task: ReturnType<BotStore["getTask"]>; finish(): void }> = []
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async (signal, waiting) => {
+          waiting(true)
+          await new Promise<void>((resolve) => {
+            executions.push({ task, finish: resolve })
+            signal.addEventListener("abort", () => resolve(), { once: true })
+          })
+          return { state: "completed" }
+        }
+      })
+    }
+    const host = new LocalBotHost(f.store, runtime, Number.POSITIVE_INFINITY)
+    hosts.push(host)
+    const a = await host.createWork({ botId: f.bot.id, operationId: "a", title: "A", goal: "A" })
+    await vi.waitFor(() => expect(f.store.getTask(a.task.id).state).toBe("waiting_user"))
+    const b = await host.createWork({ botId: sameBot ? f.bot.id : f.peer.id, operationId: "b", title: "B", goal: "B" })
+    await vi.waitFor(() => expect(f.store.getTask(b.task.id).state).toBe("waiting_user"))
+    expect(a.work.threadId).not.toBe(b.work.threadId)
+    // Queue a follow-up through Store so it cannot be steered into the active run.
+    const followup = f.store.enqueue({ botId: b.work.botId, workId: b.work.id, requestId: "later", message: "Continue B" })
+    host.cancel(a.task.id)
+    await vi.waitFor(() => expect(f.store.getTask(a.task.id).state).toBe("cancelled"))
+    expect(f.store.getTask(b.task.id).state).toBe("waiting_user")
+    expect(f.store.getTask(followup.id).state).toBe("queued")
+    expect(executions.some(e => e.task.id === followup.id)).toBe(false)
+    expect(executions.filter(e => e.task.id === a.task.id)).toHaveLength(1)
+    executions.find(e => e.task.id === b.task.id)!.finish()
+    await vi.waitFor(() => expect(f.store.getTask(followup.id).state).toBe("waiting_user"))
+    expect(f.store.getTask(b.task.id).state).toBe("completed")
+    expect(executions.filter(e => e.task.id === b.task.id)).toHaveLength(1)
+  })
+  it("reserves one graph for main while a work or its peer waits; additional work stays queued", async () => {
+    const f = fixture(),
+      executions: Array<{ task: ReturnType<BotStore["getTask"]>; finish: () => void }> = []
+    const runtime: BotRunPort = {
+      onAvailable: () => () => {},
+      acquire: (_bot, task) => ({
+        release() {},
+        execute: async (signal, waiting) => {
+          waiting(true)
+          await new Promise<void>((resolve) => {
+            executions.push({ task, finish: resolve })
+            signal.addEventListener("abort", () => resolve(), { once: true })
+          })
+          return { state: "completed" }
+        }
+      })
+    }
+    const host = new LocalBotHost(f.store, runtime)
+    hosts.push(host)
+    const a = await host.createWork({ botId: f.bot.id, operationId: "a", title: "A", goal: "A" })
+    const b = await host.createWork({ botId: f.bot.id, operationId: "b", title: "B", goal: "B" })
+    await new Promise((r) => setTimeout(r, 20))
+    const peer = host.delegate(a.task.id, f.peer.id, "Review", "peer")
+    host.send({ botId: f.bot.id, requestId: "main", message: "Still there?" })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(executions).toHaveLength(2)
+    expect(executions.some((e) => e.task.requestId === "main")).toBe(true)
+    expect(f.store.getTask(peer.id).state).toBe("queued")
+    expect(f.store.getTask(b.task.id).state).toBe("queued")
+    host.cancel(b.task.id)
+    executions.find((e) => e.task.id === a.task.id)!.finish()
+    await new Promise((r) => setTimeout(r, 30))
+    expect(executions.filter((e) => botTaskWorkFamily(e.task))).toHaveLength(2)
+    expect(
+      f.store.recentTasks().filter((t) => ["running", "waiting_user"].includes(t.state))
+    ).toHaveLength(2)
+    expect(f.store.getTask(peer.id).state).toBe("waiting_user")
+  })
+})

@@ -1,4 +1,5 @@
 import { tool } from "langchain"
+import { z } from "zod"
 import { randomUUID } from "node:crypto"
 import {
   requestUserInputSchema,
@@ -9,26 +10,106 @@ import type { RuntimeInteractionWaitHooks } from "../runtime"
 import type { UserInputQuestion } from "../../types"
 import type { HarnessRequestUserInputConfig } from "../../../shared/harness-board-types"
 import { getModCallContext } from "../../mods/context"
+import { isFreeformUserInputOption } from "../../../shared/user-input-options"
+
+const optionSchema = z.object({
+  label: z.string().min(1).max(80).describe("User-facing label, 1-5 words."),
+  description: z
+    .string()
+    .min(1)
+    .max(240)
+    .describe("One short sentence explaining impact/tradeoff if selected.")
+})
+
+const questionSchema = z.object({
+  header: z
+    .string()
+    .min(1)
+    .max(12)
+    .describe("Short header label shown in the UI, 12 or fewer chars."),
+  id: z
+    .string()
+    .min(1)
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .describe("Stable identifier for mapping answers, snake_case."),
+  question: z.string().min(1).max(500).describe("Single-sentence prompt shown to the user."),
+  options: z
+    .array(optionSchema)
+    .min(2)
+    .max(5)
+    .describe(
+      "Provide 2-5 mutually exclusive choices. Put the recommended option first and suffix its label with '(Recommended)'. Do not include a free-form choice such as 'Other', 'I want to add more', or 'Custom answer'; the client adds a text entry automatically."
+    )
+})
+
+const questionsSchema = z.object({
+  questions: z
+    .array(questionSchema)
+    .min(1)
+    .max(10)
+    .describe("Questions to show the user. Prefer 1 and do not exceed 10.")
+})
+
+function validateQuestionIds(
+  input: { questions: Array<{ id: string }> },
+  ctx: z.RefinementCtx
+): void {
+  const seen = new Set<string>()
+  input.questions.forEach((question, index) => {
+    if (seen.has(question.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["questions", index, "id"],
+        message: `Duplicate question id: ${question.id}`
+      })
+    }
+    seen.add(question.id)
+  })
+}
+
+const botQuestionsSchema = questionsSchema.extend({
+  questions: z
+    .array(
+      questionSchema.extend({
+        options: z
+          .array(optionSchema.extend({ description: z.string().max(240).optional().default("") }))
+          .min(1)
+          .max(6)
+          .describe(
+            "Provide 1-6 choices. Choices are mutually exclusive unless allowMultiple is true. The client provides custom text entry; do not add a fake free-form option."
+          ),
+        allowMultiple: z
+          .boolean()
+          .optional()
+          .describe(
+            "Allow the user to toggle multiple choices and explicitly submit them together. Omit for a single choice."
+          )
+      })
+    )
+    .min(1)
+    .max(10)
+    .describe("Questions to show the user. Prefer 1 and do not exceed 10.")
+})
+
+const autoResolutionSchema = {
+  autoResolutionMs: z
+    .number()
+    .int()
+    .min(30_000)
+    .max(240_000)
+    .optional()
+    .describe(
+      "Automatically resolve after 30,000-240,000 milliseconds when the question is useful but non-blocking. Omit this when explicit user input is required."
+    )
+}
 
 const additionalTextDescription =
   "A submitted option answer may include additionalText, an optional user-entered clarification that supplements rather than replaces the selected option; the client provides this capability automatically, so do not add it to the question options."
 
-function isFreeformOption(label: string): boolean {
-  const normalized = label.trim().toLowerCase()
-  const compact = normalized.replace(/[\s\p{P}\p{S}]/gu, "")
-
-  return (
-    /^(其他|其它|other)(?:[\s:：,，、\-—_].+|[（(].+[）)])?$/iu.test(normalized) ||
-    /^(不对|不是这样).*(补充|说明|填写|自定义)/u.test(compact) ||
-    /^(我来)?(补充|自定义|填写).*/u.test(compact) ||
-    /^(以上都不|以上均不|都不是|无上述|没有合适)/u.test(compact)
-  )
-}
-
 export function removeFreeformOptions(questions: UserInputQuestion[]): UserInputQuestion[] {
   return questions.map((question) => ({
     ...question,
-    options: question.options.filter((option) => !isFreeformOption(option.label))
+    options: question.options.filter((option) => !isFreeformUserInputOption(option.label))
   }))
 }
 
@@ -40,13 +121,15 @@ export interface RequestUserInputToolContext {
   allowDeferredRenderer?: boolean
   interactionWaitHooks?: RuntimeInteractionWaitHooks
   requestUserInputConfig?: HarnessRequestUserInputConfig
+  enableBotQuestionOptions?: boolean
 }
 
 export function createRequestUserInputTool(context: RequestUserInputToolContext) {
   const allowAutoResolution = context.requestUserInputConfig?.allowAutoResolution !== false
-  const schema = allowAutoResolution
-    ? requestUserInputWithAutoResolutionSchema
-    : requestUserInputSchema
+  const schema = context.enableBotQuestionOptions
+    ? (allowAutoResolution ? botQuestionsSchema.extend(autoResolutionSchema) : botQuestionsSchema)
+        .superRefine(validateQuestionIds)
+    : allowAutoResolution ? requestUserInputWithAutoResolutionSchema : requestUserInputSchema
 
   return tool(
     async (input, config) => {

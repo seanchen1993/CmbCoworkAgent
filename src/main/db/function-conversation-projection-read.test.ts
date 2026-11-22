@@ -368,17 +368,23 @@ describe("fresh joined canonical read and exact private composition", () => {
     expect(appDb.upsertThreadMessages(f.threadId, [{ ...row, content: "ordinary edited input" }])).toBe(1)
   })
 
-  it("reads durable fork lineage without changing native projection or receipt fields", () => {
+  it("reads ordinary fork sidecars without changing native projection or receipt fields", () => {
     const f = fixture(), uuid = randomUUID()
     expect(appDb.upsertThreadMessages(f.threadId, [
       { id: uuid, role: "assistant", content: "ordinary saved reply", created_at: new Date(1) }
     ])).toBe(1)
     expect(appDb.captureThreadForkReplay(f.threadId, [uuid]))
       .toEqual([{ id: uuid, key: expect.any(String) }])
+    f.database.run(
+      "UPDATE thread_messages SET bot_input_projection = ?, bot_fork_reply_origin = ? WHERE thread_id = ? AND message_id = ?",
+      ["private Bot prompt", '{"id":"original","ordinal":0,"role":"user"}', f.threadId, uuid]
+    )
     const projected = readFunctionConversationRawProjection(f.database, f.threadId, uuid)
     expect(projected).toMatchObject({ message_id: uuid, function_row_json: null })
     expect(projected).not.toHaveProperty("fork_replay_key")
     expect(projected).not.toHaveProperty("fragment_generation")
+    expect(projected).not.toHaveProperty("bot_input_projection")
+    expect(projected).not.toHaveProperty("bot_fork_reply_origin")
     expect(() => assertStoredProjectionReceipt(f.database, f.input)).not.toThrow()
   })
 
@@ -387,7 +393,11 @@ describe("fresh joined canonical read and exact private composition", () => {
     ["fork_replay_key", "TEXT DEFAULT 'bad'"],
     ["fork_replay_key", "TEXT GENERATED ALWAYS AS (reasoning) VIRTUAL"],
     ["fragment_generation", "TEXT"],
-    ["fragment_generation", "TEXT NOT NULL DEFAULT 'bad'"]
+    ["fragment_generation", "TEXT NOT NULL DEFAULT 'bad'"],
+    ["bot_input_projection", "INTEGER"],
+    ["bot_input_projection", "TEXT NOT NULL DEFAULT ''"],
+    ["bot_fork_reply_origin", "TEXT DEFAULT 'bad'"],
+    ["bot_fork_reply_origin", "TEXT GENERATED ALWAYS AS (reasoning) VIRTUAL"]
   ])("rejects ordinary storage column %s with unsupported declaration %s", (name, declaration) => {
       const database = openNativeSqliteDatabase(join(directory, `${randomUUID()}.sqlite`),
         "actual invalid fork lineage").database

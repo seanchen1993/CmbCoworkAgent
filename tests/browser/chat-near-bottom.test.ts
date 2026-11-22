@@ -34,7 +34,7 @@ import {createChatScrollState,transitionChatScroll,isChatScrollDetached,shouldFo
 import {ChatBottomPresentationWait} from "./src/renderer/src/components/chat/chat-bottom-presentation-wait"
 import {isChatRowPresented} from "./src/renderer/src/components/chat/chat-row-presentation"
 const useCallback=fn=>fn, viewport=document.getElementById("viewport"), body=document.getElementById("body")
-let ownedViewport=viewport
+let ownedViewport=viewport,surface="default"
 const scrollParent=viewport, getViewport=()=>ownedViewport
 const CHAT_AT_BOTTOM_THRESHOLD_PX=32, CHAT_SCROLL_UP_DETACH_DELTA_PX=2,
   CHAT_BOTTOM_SETTLE_MAX_FRAMES=60, CHAT_FOLLOW_SETTLE_MAX_FRAMES=12
@@ -42,7 +42,7 @@ const chatScrollStateRef={current:null},pendingBottomScrollEffectRef={current:nu
   bottomSettleAttemptRef={current:0},bottomSettleEffectKeyRef={current:""},lastVisibleMessageIndexRef={current:1},
   lastVisibleMessageIdRef={current:null},contentMessageRefs={current:new Map()},
   messageVirtualizationEnabledRef={current:false},virtuosoRef={current:null},pendingDurableHistoryAnchorRef={current:null},
-  releaseHistoryAnchorRef={current:null},
+  correctHistoryAnchorLayoutRef={current:null},releaseHistoryAnchorRef={current:null},
   lastObservedScrollTopRef={current:0},upwardUserScrollIntentUntilRef={current:0},
   downwardUserScrollIntentUntilRef={current:Infinity},scrollbarUserIntentActiveRef={current:false}
 const bottomPresentationWait=new ChatBottomPresentationWait()
@@ -58,7 +58,11 @@ window.actualTailHint=()=>{
   contentMessageRefs.current.clear();lastVisibleMessageIdRef.current=null;
   messageVirtualizationEnabledRef.current=false;return values;
 }
+const nextFrame=sample=>new Promise((resolve,reject)=>requestAnimationFrame(()=>{
+  try{resolve(sample())}catch(error){reject(error)}
+}))
 window.actualNearBottom={async run(options={}){
+  surface=options.surface??"default"
   bottomPresentationWait.clear()
   if(bottomScrollFrameRef.current!==null)cancelAnimationFrame(bottomScrollFrameRef.current)
   bottomScrollFrameRef.current=null;pendingBottomScrollEffectRef.current=null
@@ -69,8 +73,8 @@ window.actualNearBottom={async run(options={}){
   upwardUserScrollIntentUntilRef.current=options.upward?Infinity:0
   downwardUserScrollIntentUntilRef.current=options.noDown?0:Infinity
   scrollbarUserIntentActiveRef.current=!!options.pointer
-  let sample
-  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+  await nextFrame(()=>undefined)
+  const sample=await nextFrame(()=>{
     body.style.height=(1200+(options.gap??3))+"px"
     if(options.stale){
       const captured={...chatScrollStateRef.current,mode:"following"}
@@ -79,21 +83,19 @@ window.actualNearBottom={async run(options={}){
       if(options.stale==="viewport")ownedViewport=document.createElement("div")
       if(options.stale==="disconnected")viewport.remove()
       scheduleBottomScrollEffect({type:"scroll-to-bottom",reason:"content-grown",generation:7},{state:captured,viewport})
-      sample={gap:viewport.scrollHeight-viewport.clientHeight-viewport.scrollTop,mode:chatScrollStateRef.current.mode,
+      const staleSample={gap:viewport.scrollHeight-viewport.clientHeight-viewport.scrollTop,mode:chatScrollStateRef.current.mode,
         pending:pendingBottomScrollEffectRef.current?.reason??null,frame:bottomScrollFrameRef.current!==null}
       runChatScrollTransition(applyChatScrollEvent({type:"USER_DETACH",source:"user-input"}))
       ownedViewport=viewport
       if(!viewport.isConnected)document.body.append(viewport)
-      resolve()
-      return
+      return staleSample
     }
     if(options.stronger)pendingBottomScrollEffectRef.current={type:"scroll-to-bottom",reason:"return-to-bottom",generation:7}
     confirmOrDetachFromScroll()
-    sample={gap:viewport.scrollHeight-viewport.clientHeight-viewport.scrollTop,mode:chatScrollStateRef.current.mode,
+    return {gap:viewport.scrollHeight-viewport.clientHeight-viewport.scrollTop,mode:chatScrollStateRef.current.mode,
       pending:pendingBottomScrollEffectRef.current?.reason??null,frame:bottomScrollFrameRef.current!==null}
-    resolve()
-  })))
-  const after=await new Promise(resolve=>requestAnimationFrame(()=>resolve({gap:viewport.scrollHeight-viewport.clientHeight-viewport.scrollTop,mode:chatScrollStateRef.current.mode})))
+  })
+  const after=await nextFrame(()=>({gap:viewport.scrollHeight-viewport.clientHeight-viewport.scrollTop,mode:chatScrollStateRef.current.mode}))
   return {sample,after}
 }}
 `
@@ -144,7 +146,8 @@ async function main() {
       { stronger: true },
       { stale: "detached" },
       { stale: "generation" },
-      { stale: "viewport" }
+      { stale: "viewport" },
+      { surface: "bot" }
     ]) {
       const result = await page.evaluate(
         (options) =>
@@ -170,6 +173,7 @@ async function main() {
     assert.equal(results[7].sample.pending, "return-to-bottom")
     assert.equal(results[7].sample.gap, 3)
     for (const i of [8, 9, 10]) assert.equal(results[i].sample.gap, 3)
+    assert.deepEqual(results[11], results[0], "Bot reattachment settles before the same paint")
     assert.deepEqual(errors, [])
     assert.deepEqual(consoleErrors, [])
   } finally {

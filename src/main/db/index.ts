@@ -61,6 +61,7 @@ import {
   validateFunctionConversationTranscriptStamp,
   type FunctionConversationTranscriptStamp
 } from "../../shared/mods/v2/conversation-transcript"
+import type { BotMessageReply } from "../../shared/bots/contracts"
 import { searchDurableThreadMessages } from "../thread-search/durable-message-search"
 import {
   decodeLegacyOverlapProofs, ensureLegacyCheckpointSourceIds, legacyCheckpointProviderIdentity, legacyPublicationSources,
@@ -912,6 +913,13 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
     db.run("ALTER TABLE thread_messages ADD COLUMN prompt_origin_json TEXT")
   if (!threadMessageColumns.some((row) => row[1] === "function_row_json"))
     db.run("ALTER TABLE thread_messages ADD COLUMN function_row_json TEXT")
+  if (!threadMessageColumns.some((row) => row[1] === "bot_input_projection")) {
+    // Private, sparse Fork metadata. Never accepted from renderer messages.
+    db.run("ALTER TABLE thread_messages ADD COLUMN bot_input_projection TEXT")
+  }
+  if (!threadMessageColumns.some((row) => row[1] === "bot_fork_reply_origin")) {
+    db.run("ALTER TABLE thread_messages ADD COLUMN bot_fork_reply_origin TEXT")
+  }
   const hasThreadMessageGoalId = threadMessageColumns.some((row) => row[1] === "goal_id")
   if (!hasThreadMessageGoalId) {
     db.run("ALTER TABLE thread_messages ADD COLUMN goal_id TEXT")
@@ -958,6 +966,10 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
 
   ensureLegacyMessageTimeArchive(db)
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_threads_feature_sessions ON threads(
+    json_extract(metadata, '$.harnessFeature.projectId'),
+    json_extract(metadata, '$.harnessFeature.slug'), updated_at DESC, thread_id
+  ) WHERE json_valid(metadata) AND json_extract(metadata, '$.harnessFeature.projectId') IS NOT NULL`)
   db.run(
     `CREATE INDEX IF NOT EXISTS ${THREAD_RUNTIME_SCOPE_INDEX}
      ON threads(thread_id, ${THREAD_RUNTIME_SCOPE_EXPRESSION})`
@@ -1046,6 +1058,8 @@ export type ThreadSummaryRow = Omit<ThreadRow, "thread_values">
 interface ThreadMessageRow {
   prompt_origin_json: string | null
   function_row_json: string | null
+  bot_input_projection?: string | null
+  bot_fork_reply_origin?: string | null
   thread_id: string
   message_id: string
   provider_source_id: string | null
@@ -2055,6 +2069,11 @@ export function isFirstThreadUserMessage(threadId: string, messageId?: string): 
   }
 }
 
+/** Exclusive durable ordinal boundary for an already copied transcript. */
+export function getThreadMessageOrdinalBoundary(threadId: string): number {
+  return getOrRepairThreadMessageBucket(getDb(), threadId).bucket.next_ordinal
+}
+
 /** Use the first durable reply to distinguish a recorded exchange from a cancelled input. */
 export function getFirstThreadRepliedUserMessageIdentity(
   threadId: string
@@ -2497,11 +2516,17 @@ function readThreadMessagesPage(database: ReturnType<typeof getDb>, threadId: st
 
 export function searchThreadMessages(
   threadId: string,
-  query: string,
-  options?: ThreadMessageSearchOptions
+  rawQuery: string,
+  options: ThreadMessageSearchOptions = {},
+  resolveVerifiedReplies?: (
+    messageIds: string[]
+  ) => ReadonlyMap<string, Pick<BotMessageReply, "id" | "ordinal" | "role">>,
+  resolveUserInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>
 ): ThreadMessageSearchPage {
   const database = getDb()
-  return database.withReadSnapshot(() => searchDurableThreadMessages(database, threadId, query, options))
+  return database.withReadSnapshot(() => searchDurableThreadMessages(
+    database, threadId, rawQuery, options, undefined, resolveVerifiedReplies, resolveUserInputProjections
+  ))
 }
 
 interface ThreadSubagentMessageRow {
@@ -4382,6 +4407,23 @@ function readThreadMessageProviderOccurrencesBeforeUser(
   if (hasPendingGoalTranscriptOrder(threadId)) return undefined
   const ordinal = getThreadTranscriptBoundaryOrdinal(threadId, userMessageId)
   if (ordinal === undefined) return undefined
+  return getThreadMessageProviderOccurrencesBeforeOrdinal(threadId, ordinal, providerSourceIds)
+}
+
+/** Internal notification prompts are deliberately absent from the visible transcript.
+ * Capture their boundary before streaming so each final snapshot sees the same history.
+ */
+export function captureThreadMessageProviderOccurrenceBoundary(threadId: string) {
+  const ordinal = getThreadMessageOrdinalBoundary(threadId)
+  return (providerSourceIds: readonly string[]) =>
+    getThreadMessageProviderOccurrencesBeforeOrdinal(threadId, ordinal, providerSourceIds)
+}
+
+function getThreadMessageProviderOccurrencesBeforeOrdinal(
+  threadId: string,
+  ordinal: number,
+  providerSourceIds: readonly string[]
+): Array<{ provider_source_id: string; role: Message["role"]; provider_occurrence: number }> {
   const database = getDb()
   const results = new Map<string, { provider_source_id: string; role: Message["role"]; provider_occurrence: number }>()
   const remember = (source: string, role: Message["role"], occurrence: number): void => {
@@ -6639,7 +6681,9 @@ export function replaceThreadMessageId(
         `UPDATE thread_messages
          SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
              is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
-             end_at = ?, ordinal = ?, recovery_integrity = ?, stream_authority = ?, fork_replay_key = ?
+             end_at = ?, ordinal = ?, recovery_integrity = ?, stream_authority = ?, fork_replay_key = ?,
+             bot_input_projection = COALESCE(bot_input_projection, ?),
+             bot_fork_reply_origin = COALESCE(bot_fork_reply_origin, ?)
          WHERE thread_id = ? AND message_id = ?`,
         [
           mergedProviderSourceId,
@@ -6676,6 +6720,12 @@ export function replaceThreadMessageId(
             : 0,
           sourceAuthority | targetAuthority,
           replayKey,
+          source.role === "user" && target.role === "user"
+            ? source.bot_input_projection ?? null
+            : null,
+          source.role === "user" && target.role === "user"
+            ? source.bot_fork_reply_origin ?? null
+            : null,
           threadId,
           toId
         ]
@@ -6844,6 +6894,25 @@ export function getPersistedThreadWorkspaceBindings(): PersistedThreadWorkspaceB
     stmt.free()
   }
   return bindings
+}
+
+/** List native Feature threads without loading messages or execution traces. */
+export function getFeatureThreadSummaries(projectId: string, slug: string) {
+  const stmt = getDb().prepare(`SELECT t.thread_id, t.created_at, t.updated_at, t.metadata,
+    t.status, t.title, g.state AS channelGrantState
+    FROM threads t LEFT JOIN im_thread_grants g ON g.thread_id=t.thread_id
+    WHERE json_valid(t.metadata)
+      AND json_extract(t.metadata, '$.harnessFeature.projectId')=?
+      AND json_extract(t.metadata, '$.harnessFeature.slug')=?
+    ORDER BY t.updated_at DESC, t.thread_id`)
+  const rows: (ThreadSummaryRow & { channelGrantState: string | null })[] = []
+  try {
+    stmt.bind([projectId, slug])
+    while (stmt.step()) rows.push(stmt.getAsObject() as unknown as (typeof rows)[number])
+    return rows
+  } finally {
+    stmt.free()
+  }
 }
 
 /** Bounded identity for operations that yield. Rows predating the trigger use the empty token. */

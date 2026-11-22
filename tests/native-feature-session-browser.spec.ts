@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
@@ -12,7 +12,7 @@ const entry = resolve(renderer, "components/harness-board/HarnessBoardView.tsx")
 async function main() {
   const output = resolve("output", `native-feature-session-browser-${Date.now()}`)
   mkdirSync(output, { recursive: true })
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -174,7 +174,7 @@ async function main() {
             native,
             entry
           })
-          await page.addScriptTag({ content: bundled.outputFiles[0].text })
+          await page.addScriptTag({ content: bundled })
           const add =
             entry === "sidebar"
               ? page.locator('#harness-sidebar-portal button[title="新增会话"]')

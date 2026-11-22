@@ -1,3 +1,5 @@
+import type { BotMessageReply } from "./bots/contracts"
+import { verifiedBotMessageReply } from "./bots/message-reply"
 import { appendChatSearchToolSummaries, createChatSearchPlan } from "./chat-search-plan"
 import type { ChatSearchPlan } from "./chat-search-types"
 import { projectCoordinatorTranscriptNoise } from "./internal-notification-turn"
@@ -23,7 +25,9 @@ export function createThreadSearchMessagePlan(
   fragments: readonly string[],
   toolCallsJson: string | null,
   reasoningSample: string | null = null,
-  reasoningOmitted = false
+  reasoningOmitted = false,
+  bodyOnly = false,
+  replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role">
 ): (ChatSearchPlan & { reasoningVisibilityUnverified?: boolean }) | null {
   // Completed tool details are folded and have no independent transcript row.
   if (role === "tool") return null
@@ -52,10 +56,13 @@ export function createThreadSearchMessagePlan(
 
   const stripThink =
     role === "assistant" &&
-    (reasoningOmitted || Boolean(normalizeVisibleReasoningText(reasoningSample ?? undefined)))
+    (bodyOnly || reasoningOmitted || Boolean(normalizeVisibleReasoningText(reasoningSample ?? undefined)))
+  const reply = role === "user" && typeof displayContent === "string"
+    ? verifiedBotMessageReply(displayContent, replyTo)
+    : null
   const plan = createChatSearchPlan(
     role,
-    visible.contentChanged ? visible.contentText : displayContent,
+    reply?.message ?? (visible.contentChanged ? visible.contentText : displayContent),
     { stripThink }
   )
   const reasoningVisibilityUnverified =
@@ -69,6 +76,6 @@ export function createThreadSearchMessagePlan(
     (toolCallsJson !== null && parsedTools === undefined)
   )
     plan.truncated = true
-  appendChatSearchToolSummaries(plan, visible.visibleToolCalls ?? [])
+  if (!bodyOnly) appendChatSearchToolSummaries(plan, visible.visibleToolCalls ?? [])
   return reasoningVisibilityUnverified ? { ...plan, reasoningVisibilityUnverified } : plan
 }

@@ -1,0 +1,10 @@
+{
+  "mode": "controlled-model-real-electron-local-ws",
+  "normalDispatchModelCalls": 1,
+  "budgetMainModelCalls": 6,
+  "openingDeliveries": 1,
+  "resultDeliveries": 1,
+  "realFailureDelivered": true,
+  "laterFindingDelivered": true,
+  "errors": []
+}

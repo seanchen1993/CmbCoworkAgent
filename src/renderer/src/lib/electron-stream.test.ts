@@ -345,7 +345,7 @@ describe("Electron stream snapshot regression", () => {
     expect(stream.messages[0]).not.toHaveProperty("function_row")
   })
   it.each(["custom-first", "queue-first"] as const)(
-    "keeps the accepted guide user only in the queue UI through %s cached completion",
+    "publishes the accepted guide exactly once through %s cached completion",
     async (order) => {
       let emit: ((event: IPCEvent) => void) | undefined
       let entered = 0
@@ -450,10 +450,9 @@ describe("Electron stream snapshot regression", () => {
             .map((message) => liveStreamMessageToStoreMessage(message))
         ).messages
         accumulated = []
-        const commitQueueUser = () => {
-          committed = [...committed, accepted]
-        }
-        if (order === "queue-first") commitQueueUser()
+        let queueAcknowledged = false
+        const acknowledgeQueueUser = (): void => { queueAcknowledged = true }
+        if (order === "queue-first") acknowledgeQueueUser()
         emit({
           type: "custom",
           data: {
@@ -468,8 +467,8 @@ describe("Electron stream snapshot regression", () => {
             expect.objectContaining({ type: "current_run_user_injected" })
           )
         )
-        expect(stream.messages.some((message) => message.id === accepted.id)).toBe(false)
-        if (order === "custom-first") commitQueueUser()
+        await vi.waitFor(() => expect(stream.messages.some(message => message.id === accepted.id)).toBe(true))
+        if (order === "custom-first") acknowledgeQueueUser()
         emit({
           type: "stream",
           mode: "messages",
@@ -518,8 +517,10 @@ describe("Electron stream snapshot regression", () => {
         expect(
           final.some((message) => message.id.includes("::cmb-same-role-duplicate:user:"))
         ).toBe(false)
+        expect(queueAcknowledged).toBe(true)
         for (const frame of frames) {
-          expect(frame.some((message) => message.id === accepted.id)).toBe(false)
+          const index = frame.findIndex(message => message.id === accepted.id)
+          if (index >= 0) expect(frame.slice(0, index).some(message => message.content === "BEFORE COMPLETE")).toBe(true)
         }
         expect(customEvents).toContainEqual(
           expect.objectContaining({
@@ -732,6 +733,102 @@ describe("Electron stream snapshot regression", () => {
     expect(oldWorker[0].function_row_invalid).toBeUndefined()
   })
 
+  it("renames an already streaming reply before publishing the steer boundary", async () => {
+    const { frames, stream } = await run([
+      chunk(ai("provider", "before")),
+      { event: "custom", data: { type: "message_id_alias", fromId: "provider", toId: "stable-first",
+        role: "assistant", currentRunCompleted: true, providerSourceId: "provider", providerOccurrence: 1 } },
+      { event: "custom", data: { type: "coordinator_ai_snapshot_message", assistantMessage: {
+        ...ai("stable-first", "before"), provider_source_id: "provider", provider_occurrence: 1
+      } } },
+      chunk({ id: "correction", type: "human", content: "change the plan" }),
+      chunk(ai("provider::cmb-same-role-duplicate:assistant:2", "after"))
+    ])
+    for (const frame of frames) {
+      expect(frame.filter(message => message.type === "ai" && message.content === "before").length).toBeLessThanOrEqual(1)
+    }
+    expect(stream.messages.map(message => message.content)).toEqual(["before", "change the plan", "after"])
+  })
+
+  it("keeps chunk buffers and distinct equal-text replies when rekeying a completed reply", async () => {
+    const { stream } = await run([
+      chunk(tool("tool-progress")),
+      chunk(ai("provider", "same reply")),
+      { event: "custom", data: { type: "message_id_alias", fromId: "provider", toId: "stable-first",
+        role: "assistant", currentRunCompleted: true, providerSourceId: "provider", providerOccurrence: 1 } },
+      chunk(ai("stable-first", ", done")),
+      chunk({ id: "correction", type: "human", content: "repeat it" }),
+      chunk(ai("provider::cmb-same-role-duplicate:assistant:2", "same reply, done")),
+      chunk({ ...tool("tool-progress"), content: " done" })
+    ])
+    expect(stream.messages.map(message => [message.id, message.content])).toEqual([
+      ["tool-progress", "tool-progress done"],
+      ["stable-first", "same reply, done"],
+      ["correction", "repeat it"],
+      ["provider::cmb-same-role-duplicate:assistant:2", "same reply, done"]
+    ])
+  })
+
+  it.each(["source", "target"])("does not rekey an assistant alias over another role's %s tuple", async collision => {
+    const { stream } = await run([
+      chunk(collision === "source" ? tool("provider") : ai("provider", "before")),
+      chunk(collision === "target" ? tool("stable") : ai("stable", "other reply")),
+      { event: "custom", data: { type: "message_id_alias", fromId: "provider", toId: "stable", role: "assistant" } }
+    ])
+    expect(stream.messages.map(message => message.id)).toEqual(["provider", "stable"])
+    expect(stream.messages.find(message => message.type === "tool")?.id).toBe(collision === "source" ? "provider" : "stable")
+  })
+
+  it("coalesces an already received stable snapshot and resets the renamed tuple before retry", async () => {
+    const { stream } = await run([
+      chunk(ai("provider", "draft")),
+      { event: "custom", data: { type: "coordinator_ai_snapshot_message", assistantMessage: ai("stable", "final") } },
+      { event: "custom", data: { type: "message_id_alias", fromId: "provider", toId: "stable", role: "assistant" } },
+      chunk(ai("stable", " reply"))
+    ])
+    expect(stream.messages.map(message => [message.id, message.content])).toEqual([["stable", "final reply"]])
+    // A new run may legitimately reuse the raw provider ID.
+    const retried = await run([
+      chunk(ai("provider", "discard")),
+      { event: "custom", data: { type: "message_id_alias", fromId: "provider", toId: "stable", role: "assistant" } },
+      { event: "custom", data: { type: "stream_retry_reset" } },
+      values([]),
+      chunk(ai("provider", "retry"))
+    ])
+    expect(retried.stream.messages.map(message => [message.id, message.content])).toEqual([["provider", "retry"]])
+  })
+
+  it.each(["normal", "coordinator", "workflow"])(
+    "publishes the completed assistant before two corrections even before provider chunks in %s",
+    async (mode) => {
+      const transport = new ElectronIPCTransport() as unknown as {
+        convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+      }
+      const convert = (data: unknown) => transport.convertToSDKEvents({ type: "custom", data }, "test", mode)
+      const events = [
+        ...convert({ type: "message_id_alias", fromId: "provider", toId: "stable-first",
+          role: "assistant", currentRunCompleted: true, providerSourceId: "provider", providerOccurrence: 1 }),
+        ...convert({ type: "current_run_user_injected", completedAssistantId: "stable-first",
+          completedAssistantContent: "before", completedAssistantProviderIdless: false,
+          messages: [{ id: "u1", content: "first correction" }, { id: "u2", content: "second correction" }] }),
+        ...convert({ type: "coordinator_ai_snapshot_message", assistantMessage: {
+          id: "stable-first", type: "ai", content: "before", provider_source_id: "provider", provider_occurrence: 1
+        } }),
+        ...convert({ type: "coordinator_ai_snapshot_message", assistantMessage: {
+          id: "provider::cmb-same-role-duplicate:assistant:2", type: "ai", content: "after",
+          provider_source_id: "provider", provider_occurrence: 2
+        } })
+      ]
+      const { stream, frames } = await run(events)
+      expect(stream.messages.map(message => message.content)).toEqual([
+        "before", "first correction", "second correction", "after"
+      ])
+      for (const frame of frames) {
+        const firstUser = frame.findIndex(message => message.id === "u1")
+        if (firstUser >= 0) expect(frame[0].content).toBe("before")
+      }
+    }
+  )
   it.each(["normal", "coordinator"])(
     "keeps mixed plain values identities in %s mode",
     async (mode) => {

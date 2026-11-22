@@ -3,7 +3,7 @@
  * Run: npm run test:chat-navigation:e2e
  */
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -223,10 +223,14 @@ async function main(): Promise<void> {
   }
   try {
     app = await _electron.launch({
-      executablePath:
-        process.platform === "win32" ? join(root, "tests/support/electron-launcher.cmd") : binary,
+      // The default launcher installs Playwright's readiness hook before Electron opens a window.
+      ...(process.platform === "win32"
+        ? { executablePath: join(root, "tests/support/electron-launcher.cmd") }
+        : {}),
       args: [
-        join(applicationRoot, "out/main/index.js"),
+        process.platform === "darwin" && existsSync(join(applicationRoot, "package.json"))
+          ? applicationRoot
+          : join(applicationRoot, "out/main/index.js"),
         `--user-data-dir=${join(isolated, "electron")}`
       ],
       cwd: applicationRoot,

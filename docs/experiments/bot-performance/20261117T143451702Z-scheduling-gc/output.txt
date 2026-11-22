@@ -1,0 +1,35 @@
+[82345:0x138008000]       28 ms: Scavenge 5.0 (5.4) -> 4.6 (6.4) MB, pooled: 0 MB, 0.29 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]       40 ms: Scavenge 5.4 (6.6) -> 5.4 (7.4) MB, pooled: 0 MB, 0.54 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]       44 ms: Scavenge 6.1 (7.9) -> 5.6 (10.6) MB, pooled: 0 MB, 0.46 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]       61 ms: Scavenge 8.1 (10.9) -> 6.6 (11.4) MB, pooled: 0 MB, 0.21 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]       89 ms: Scavenge 9.5 (12.5) -> 8.5 (13.2) MB, pooled: 0 MB, 0.42 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]      117 ms: Scavenge 12.3 (15.3) -> 10.2 (18.3) MB, pooled: 0 MB, 0.42 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]      144 ms: Scavenge 14.0 (19.0) -> 11.8 (20.3) MB, pooled: 0 MB, 0.25 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]      178 ms: Scavenge 14.9 (20.4) -> 13.0 (21.3) MB, pooled: 0 MB, 0.42 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]      212 ms: Scavenge 16.5 (21.6) -> 14.4 (30.9) MB, pooled: 0 MB, 0.67 / 0.00 ms  (average mu = 1.000, current mu = 1.000) allocation failure; 
+[82345:0x138008000]      216 ms: Mark-Compact 14.8 (30.9) -> 12.7 (30.8) MB, pooled: 0 MB, 0.92 / 0.00 ms  (+ 0.0 ms in 0 steps since start of marking, biggest step 0.0 ms, walltime since start of marking 4 ms) (average mu = 0.996, current mu = 0.996) finalize incremental marking via stack guard; GC in old space requested
+[82345:0x138008000]      293 ms: Scavenge 22.2 (31.6) -> 16.8 (31.6) MB, pooled: 0 MB, 0.58 / 0.00 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]      323 ms: Scavenge 22.9 (32.5) -> 18.8 (35.3) MB, pooled: 0 MB, 0.67 / 0.04 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]      356 ms: Scavenge 25.9 (35.3) -> 20.9 (52.8) MB, pooled: 0 MB, 1.04 / 0.00 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]      458 ms: Scavenge 36.6 (54.1) -> 26.4 (55.8) MB, pooled: 0 MB, 0.79 / 0.00 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]      520 ms: Scavenge 38.8 (56.2) -> 30.7 (60.1) MB, pooled: 0 MB, 1.00 / 0.00 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+(node:82345) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PERF_CASE {"name":"host_concurrency","works":8,"backgroundActive":8,"configuredExecutionLimit":null,"queued":0,"completed":8,"resultTurns":8,"peak":9,"admissionMs":7.213,"mainSchedulingMs":1.44,"duringAdmission":{"mainArrivedWith":8,"mainStartedWith":8,"timerArrivalMs":5.916,"mainSchedulingMs":1.897,"timerToMainStartMs":7.813,"eventLoopTicks":0,"maxTickGapMs":null},"completionAndResultDrainMs":25.416,"model":"fake held leases, then release every work and drain results; no LLM requests"}
+[82345:0x138008000]      698 ms: Scavenge 42.6 (61.8) -> 33.6 (65.8) MB, pooled: 0 MB, 3.54 / 2.58 ms  (average mu = 0.996, current mu = 0.996) task; 
+PERF_CASE {"name":"host_concurrency","works":32,"backgroundActive":32,"configuredExecutionLimit":null,"queued":0,"completed":32,"resultTurns":32,"peak":33,"admissionMs":27.544,"mainSchedulingMs":1.263,"duringAdmission":{"mainArrivedWith":24,"mainStartedWith":32,"timerArrivalMs":19.867,"mainSchedulingMs":6.759,"timerToMainStartMs":26.626,"eventLoopTicks":1,"maxTickGapMs":20.754},"completionAndResultDrainMs":97.535,"model":"fake held leases, then release every work and drain results; no LLM requests"}
+[82345:0x138008000]      992 ms: Scavenge 48.1 (66.8) -> 35.0 (68.3) MB, pooled: 0 MB, 9.88 / 8.92 ms  (average mu = 0.996, current mu = 0.996) task; 
+[82345:0x138008000]     1319 ms: Scavenge 51.8 (69.3) -> 36.4 (70.1) MB, pooled: 0 MB, 32.25 / 31.33 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+PERF_CASE {"name":"host_concurrency","works":100,"backgroundActive":100,"configuredExecutionLimit":null,"queued":0,"completed":100,"resultTurns":100,"peak":101,"admissionMs":92.314,"mainSchedulingMs":1.473,"duringAdmission":{"mainArrivedWith":22,"mainStartedWith":32,"timerArrivalMs":26.343,"mainSchedulingMs":9.519,"timerToMainStartMs":35.862,"eventLoopTicks":8,"maxTickGapMs":27.307},"completionAndResultDrainMs":346.928,"model":"fake held leases, then release every work and drain results; no LLM requests"}
+[82345:0x138008000]     1702 ms: Scavenge 53.3 (70.8) -> 37.8 (70.8) MB, pooled: 0 MB, 16.88 / 15.96 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]     2036 ms: Scavenge 54.6 (72.3) -> 39.1 (73.1) MB, pooled: 0 MB, 38.38 / 37.50 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]     2289 ms: Scavenge 53.0 (73.3) -> 40.8 (73.6) MB, pooled: 0 MB, 36.67 / 35.92 ms  (average mu = 0.996, current mu = 0.996) task; 
+[82345:0x138008000]     2502 ms: Scavenge 53.6 (73.8) -> 42.1 (75.1) MB, pooled: 0 MB, 29.71 / 28.88 ms  (average mu = 0.996, current mu = 0.996) task; 
+[82345:0x138008000]     2809 ms: Scavenge 58.3 (76.1) -> 43.6 (77.1) MB, pooled: 0 MB, 37.25 / 36.33 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]     3181 ms: Scavenge 60.6 (78.6) -> 45.3 (79.3) MB, pooled: 0 MB, 50.67 / 49.67 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]     3466 ms: Scavenge 62.7 (80.6) -> 47.3 (80.6) MB, pooled: 0 MB, 49.21 / 48.08 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]     3819 ms: Scavenge 64.2 (82.1) -> 48.8 (82.1) MB, pooled: 0 MB, 46.75 / 45.79 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]     4161 ms: Scavenge 65.7 (83.6) -> 50.3 (84.3) MB, pooled: 0 MB, 45.75 / 44.79 ms  (average mu = 0.996, current mu = 0.996) allocation failure; 
+[82345:0x138008000]     4284 ms: Mark-Compact 55.6 (84.6) -> 29.6 (79.3) MB, pooled: 5 MB, 35.25 / 33.62 ms  (+ 0.1 ms in 0 steps since start of marking, biggest step 0.0 ms, walltime since start of marking 40 ms) (average mu = 0.992, current mu = 0.991) finalize incremental marking via stack guard; GC in old space requested
+PERF_CASE {"name":"host_concurrency","works":500,"backgroundActive":500,"configuredExecutionLimit":null,"queued":0,"completed":500,"resultTurns":500,"peak":501,"admissionMs":476.095,"mainSchedulingMs":1.738,"duringAdmission":{"mainArrivedWith":23,"mainStartedWith":34,"timerArrivalMs":16.171,"mainSchedulingMs":8.956,"timerToMainStartMs":25.127,"eventLoopTicks":46,"maxTickGapMs":45.664},"completionAndResultDrainMs":1712.034,"model":"fake held leases, then release every work and drain results; no LLM requests"}
+PERF_COMPLETE {"status":"passed","cases":4}

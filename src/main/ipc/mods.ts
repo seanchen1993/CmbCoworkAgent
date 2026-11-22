@@ -185,6 +185,7 @@ import {
   setCreatorCompositionService
 } from "../mods/devtools/creator-composition"
 import { isDevelopmentThreadMetadata } from "../../shared/mods/development-scope"
+import { isBotThread, isLocalWorkConversation } from "../../shared/thread-search-scope"
 import { CreatorCompositionHistory } from "../mods/devtools/creator-composition-history"
 import { CreatorReuseService } from "../mods/devtools/creator-reuse"
 import { CreatorBusinessService, setCreatorBusinessService } from "../mods/devtools/creator-business"
@@ -2389,6 +2390,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
     if (
+      isBotThread({ metadata }) ||
+      isLocalWorkConversation({ metadata }) ||
       resolveAgentModeFromMetadata(metadata) !== "normal" ||
       metadata?.harnessProjectId ||
       metadata?.featureId ||

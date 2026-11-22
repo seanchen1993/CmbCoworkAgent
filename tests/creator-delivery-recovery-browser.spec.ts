@@ -2,14 +2,14 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 
 async function main() {
   const root = resolve(__dirname, "..")
   const output = resolve(root, "output/creator-delivery-recovery-browser", String(Date.now()))
   mkdirSync(output, { recursive: true })
-  const compiled = await build({
+  const compiled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -85,7 +85,7 @@ async function main() {
   const checks: string[] = []
   try {
     await page.setContent('<div id="root"></div>')
-    await page.addScriptTag({ content: compiled.outputFiles[0].text })
+    await page.addScriptTag({ content: compiled })
     const prepare = page.getByRole("button", { name: "保存插件", exact: true })
     await prepare.waitFor()
     assert.equal(await prepare.isDisabled(), true)

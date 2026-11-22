@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../../shared/checkpoint-transcript"
 import { COORDINATOR_NOTIFICATION_PROMPT } from "../../shared/internal-notification-turn"
@@ -22,6 +22,7 @@ import {
   onCoordinatorNotificationEnqueued
 } from "./coordinator-worker-manager"
 import { onWorkflowNotificationBroadcast, workflowRunManager } from "./workflow/run-manager"
+import { hasBotWorkflowCapability } from "./workflow/bot-capability"
 
 /**
  * The single place that decides whether a completed background task gets its
@@ -81,6 +82,7 @@ export type PendingNotificationSkipReason =
   | "thread-busy"
   | "suppressed-after-stop"
   | "summary-attempts-exhausted"
+  | "managed-queue"
 
 export interface PendingNotificationOutcome {
   started: boolean
@@ -111,7 +113,71 @@ const defaultDependencies: SchedulerDependencies = {
   log: (message, detail) => console.log(`[PendingNotification] ${message}`, detail)
 }
 
+export interface ManagedNotificationDispatch {
+  threadId: string
+  kind: "workflow" | "coordinator"
+  key: string
+  runStartedAt?: string
+  /** Only the managed owner observes this hold; a declined ordinary thread is unchanged. */
+  notBefore?: number
+}
+
+export type ManagedNotificationResult = boolean | {
+  notificationRunId: string
+  terminal: AgentRunTerminal
+  /** The exact pending result was durably consumed (including an intentional halt). */
+  acknowledged?: boolean
+}
+
 export class PendingNotificationScheduler {
+  private managedDispatcher?: (notice: ManagedNotificationDispatch) => Promise<ManagedNotificationResult>
+
+  /** Optional durable queue owner. False preserves ordinary desktop/IM behavior. */
+  setManagedDispatcher(
+    dispatcher: (notice: ManagedNotificationDispatch) => Promise<ManagedNotificationResult>
+  ): void {
+    this.managedDispatcher = dispatcher
+  }
+
+  private readonly managedRetryNotBefore = new Map<string, number>()
+
+  private async dispatchManaged(notice: ManagedNotificationDispatch): Promise<PendingNotificationOutcome | false> {
+    if (!this.managedDispatcher) return false
+    try {
+      const notBefore = this.managedRetryNotBefore.get(notice.threadId)
+      const result = await this.managedDispatcher({ ...notice, ...(notBefore ? { notBefore } : {}) })
+      if (result === false) return false
+      if (result === true) return { started: false, reason: "managed-queue" }
+      if (result.acknowledged) {
+        // The owner durably reported this outcome, including an interrupted summary.
+        // It owes no retry; preserve the real terminal in logs and drain independent results.
+        this.dependencies.log("managed summary outcome acknowledged", {
+          threadId: notice.threadId, kind: notice.kind, notificationRunId: result.notificationRunId,
+          outcome: result.terminal.outcome, code: result.terminal.code
+        })
+        this.managedRetryNotBefore.delete(notice.threadId)
+        this.clearFailureBudget(notice.threadId)
+        this.recheckRequested.add(notice.threadId)
+        return { started: true }
+      }
+      // Compute eligibility before settle installs the wake, so scheduling
+      // overhead cannot make the only timer arrive before its own gate opens.
+      if (this.isRetryable(result.terminal))
+        this.managedRetryNotBefore.set(notice.threadId, Date.now() + RETRY_AFTER_FAILURE_MS)
+      else this.managedRetryNotBefore.delete(notice.threadId)
+      return this.settle(notice.threadId, notice.kind, result.notificationRunId, result.terminal)
+    } catch (error) {
+      this.dependencies.log("managed queue unavailable", {
+        threadId: notice.threadId,
+        kind: notice.kind,
+        reason: String(error)
+      })
+      this.noteFailure(notice.threadId, notice.kind)
+      // Never fall through to an unscoped desktop run when a queue owner failed.
+      return { started: false, reason: "managed-queue" }
+    }
+  }
+
   private readonly dependencies: SchedulerDependencies
   private readonly runInHostContext: ReturnType<typeof AsyncLocalStorage.snapshot>
   /** Threads with a check in flight, so concurrent asks collapse into one. */
@@ -190,6 +256,7 @@ export class PendingNotificationScheduler {
     this.suppressedThreads.clear()
     this.failedAttempts.clear()
     this.budgetSpentUntil.clear()
+    this.managedRetryNotBefore.clear()
   }
 
   /**
@@ -363,6 +430,15 @@ export class PendingNotificationScheduler {
       return { started: false, reason: "no-pending-notification" }
     }
 
+    const managed = await this.dispatchManaged({
+        threadId,
+        kind: "coordinator",
+        key: createHash("sha256")
+          .update(JSON.stringify(coordinatorWorkerManager.peekNotifications(threadId)))
+          .digest("hex")
+      })
+    if (managed) return managed
+
     const existingLease = getLocalThreadRunLease(threadId)
     if (existingLease) {
       this.waitingForIdle.add(threadId)
@@ -438,6 +514,15 @@ export class PendingNotificationScheduler {
       code: terminal.code,
       retryable: this.isRetryable(terminal)
     })
+    // A checkpointed coordinator notification is delivered even if the model failed.
+    // Only failures before delivery may retry the same queued notification.
+    if (kind === "coordinator" && terminal.coordinatorNotificationDelivered) {
+      this.clearFailureBudget(threadId)
+      if (coordinatorWorkerManager.hasAutoRunnableNotifications(threadId, { owner: "desktop" })) {
+        this.recheckRequested.add(threadId)
+      }
+      return { started: true }
+    }
     if (this.isRetryable(terminal)) this.noteFailure(threadId, kind)
     else this.clearFailureBudget(threadId)
     return { started: false, reason: "thread-busy" }
@@ -534,7 +619,10 @@ export class PendingNotificationScheduler {
     if (this.isCoordinatorThread(metadata.metadata)) {
       return await this.checkCoordinator(threadId)
     }
-    if (metadata.agentMode !== "workflow" || !workspacePath) {
+    if (
+      (metadata.agentMode !== "workflow" && !hasBotWorkflowCapability(metadata.metadata)) ||
+      !workspacePath
+    ) {
       return { started: false, reason: "not-a-background-mode" }
     }
 
@@ -557,6 +645,14 @@ export class PendingNotificationScheduler {
       // desktop one used to hide it for good.
       return { started: false, reason: "no-pending-notification" }
     }
+
+    const managed = await this.dispatchManaged({
+        threadId,
+        kind: "workflow",
+        key: run.runId,
+        runStartedAt: run.startedAt
+      })
+    if (managed) return managed
 
     const existingLease = getLocalThreadRunLease(threadId)
     if (existingLease) {

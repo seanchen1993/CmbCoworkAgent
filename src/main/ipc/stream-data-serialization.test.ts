@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   createStreamDataSerializer,
   createSerializedValuesMessageAccumulator,
+  isStreamUserTurnBoundary,
   sanitizeCoordinatorWorkerStreamDataForRenderer,
   sanitizeStreamDataForRenderer,
   serializeStreamData
@@ -16,6 +17,21 @@ import {
 } from "../../shared/stream-message-wire-mode"
 
 describe("stream data serialization", () => {
+  it("only treats marked Bot feedback as internal across live and serialized messages", () => {
+    for (const marker of [undefined, false, true]) {
+      const message = new HumanMessage({
+        id: "input", content: "[Internal Bot feedback] quoted user text",
+        additional_kwargs: marker === undefined ? {} : { cmb_internal_bot_feedback: marker }
+      })
+      expect(isStreamUserTurnBoundary(message)).toBe(marker !== true)
+      expect(isStreamUserTurnBoundary(message.toJSON())).toBe(marker !== true)
+      expect(isStreamUserTurnBoundary({
+        type: "human", id: message.id, content: message.content,
+        additional_kwargs: message.additional_kwargs
+      })).toBe(marker !== true)
+    }
+  })
+
   it("projects long Team identities without changing wire IDs, chunk tags or source payloads", () => {
     const longId = "x".repeat(4095) + '😀"\\\ud840\u0000'
     const digest = createHash("sha256").update(JSON.stringify(longId)).digest("hex")

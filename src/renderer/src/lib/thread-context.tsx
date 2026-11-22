@@ -1,5 +1,6 @@
+import { isManagedLocalWorkConversation } from "./thread-classification"
+import { shouldClearCoordinatorNotificationError } from "./coordinator-notification-error"
 import type { ThreadMessagesPage } from "../../../main/types"
-import type { MentionedWorkspaceFile } from "@/features/mentions/atFileAttachments"
 import {
   createContext,
   memo,
@@ -29,6 +30,20 @@ import {
 } from "./stream-fallback-baselines"
 import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
 import {
+  pendingUserInputPatch,
+  userInputDraftPatch,
+  type UserInputDraft
+} from "./user-input-answer"
+import { rebaseGroupMentions } from "./bot-group-mentions"
+import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
+import {
+  LOCAL_BOT_HOST_ID,
+  type BotMessageMention,
+  type BotMessageReply
+} from "../../../shared/bots/contracts"
+import { isBotMessageReply } from "../../../shared/bots/message-reply"
+import type { MentionedWorkspaceFile } from "@/features/mentions/atFileAttachments"
+import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   parseContextCompactionLifecycleEvent,
   type ContextCompactionLifecycleEvent
@@ -44,7 +59,11 @@ import {
   type RoutingModeChangeTicket
 } from "./model-selection-intent"
 import { functionConversationNoticeForThread } from "./function-conversation-notice"
-import { isExplicitNormalModeMetadata, isWorkflowModeMetadata } from "./coordinator-mode-helpers"
+import type { FileAttachment } from "../../../shared/file-attachment"
+import {
+  isExplicitNormalModeMetadata,
+  hasWorkflowPanelCapability
+} from "./coordinator-mode-helpers"
 import {
   applyWorkflowProgressEvent,
   type WorkflowProgressEventView,
@@ -69,7 +88,6 @@ import type {
   Message,
   Todo,
   FileInfo,
-  FileAttachment,
   Subagent,
   HITLRequest,
   ToolCallState,
@@ -80,6 +98,7 @@ import type {
   GoalEvent,
   QueuedMessage
 } from "@/types"
+import type { BotSkillSelection } from "../../../shared/bots/skill-selection"
 import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
 import { createLatestRefreshCoordinator } from "./latest-refresh-coordinator"
 import { CurrentThreadMissingSource } from "./current-thread-missing-source"
@@ -268,7 +287,7 @@ import {
 import { mergeSubagentSnapshotWithHistory } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 import { queueStorageKey } from "./queued-message-content"
-import { normalizeQueuedMessage } from "./queued-message-restore"
+import { normalizeQueuedMessage as normalizeNativeQueuedMessage } from "./queued-message-restore"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -571,6 +590,7 @@ export interface ApiErrorFailoverAttempt {
  * gracefully when a field is unavailable.
  */
 export interface ApiErrorDetailState {
+  coordinatorNotificationRunId?: string
   code?: string
   status?: number
   statusLabel?: string
@@ -681,6 +701,9 @@ function createDefaultContextReminderState(): ContextReminderState {
 }
 
 // Per-thread state (persisted/restored from checkpoints)
+/** A saved Bot draft carries only the selected identity until the catalog confirms it. */
+export type ThreadDraftSkill = SkillMetadata | (BotSkillSelection & { restored: true })
+
 export interface ThreadState {
   /** Heavy fields were evicted; lightweight summaries stay valid until rehydration finishes. */
   dehydrated: boolean
@@ -735,6 +758,8 @@ export interface ThreadState {
   pendingApproval: HITLRequest | null
   approvalQueue: HITLRequest[]
   pendingUserInput: UserInputRequest | null
+  /** Retained only while its inbox request is pending; never persisted or replayed. */
+  userInputDraft?: UserInputDraft | null
   error: string | null
   errorDetail: ApiErrorDetailState | null
   hookInterruption: HookInterruptionState | null
@@ -747,15 +772,19 @@ export interface ThreadState {
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
   draftRevision: number
+  draftBotReplyTo?: BotMessageReply | null
+  draftBotMentions?: BotMessageMention[]
+  /** Managed Bot composer attachments survive navigation; no binary data is retained here. */
   draftAttachments: FileAttachment[]
-  draftMentionedFiles: MentionedWorkspaceFile[]
+  /** Selected workspace paths awaiting a Bot input snapshot at send time. */
+  draftMentionedWorkspaceFiles: MentionedWorkspaceFile[]
   harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
    * draftInput so the chip survives view switches (chat → customize → back),
    * matching how draftInput already behaves.
    */
-  draftSkill: SkillMetadata | null
+  draftSkill: ThreadDraftSkill | null
   /** Whether the built-in browser mode is selected for the next send. */
   draftBuiltinBrowser: boolean
   scheduledTaskLoading: boolean
@@ -810,9 +839,16 @@ function summarizeThreadState(
     scheduledTaskLoading: state.scheduledTaskLoading,
     workflowRunning: state.workflowRun?.status === "running",
     hasDraft:
-      previousSummary && previous?.draftInput === state.draftInput
+      previousSummary &&
+      previous?.draftInput === state.draftInput &&
+      previous?.draftAttachments === state.draftAttachments &&
+      previous?.draftMentionedWorkspaceFiles === state.draftMentionedWorkspaceFiles
         ? previousSummary.hasDraft
-        : Boolean(state.draftInput.trim()),
+        : Boolean(
+            state.draftInput.trim() ||
+            state.draftAttachments?.length ||
+            state.draftMentionedWorkspaceFiles?.length
+          ),
     hasPendingApproval: state.pendingApproval !== null,
     hasPendingUserInput: state.pendingUserInput !== null,
     hasContextReminder: state.contextReminder.pending,
@@ -950,11 +986,15 @@ export interface ThreadActions {
   restoreLatestMessageWindow: () => Promise<boolean>
   cancelMessageWindowLoad: () => void
   retryHistoryRestoration: () => void
-  addQueuedMessage: (message: QueuedMessage) => void
+  addQueuedMessage: (message: QueuedMessage, onPersist?: (error: string | null) => void) => void
   prependQueuedMessage: (message: QueuedMessage) => void
   getQueuedMessage: (messageId: string) => QueuedMessage | undefined
-  updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => void
-  deleteQueuedMessage: (messageId: string) => void
+  updateQueuedMessage: (
+    messageId: string,
+    updates: Partial<QueuedMessage>,
+    onPersist?: (error: string | null) => void
+  ) => void
+  deleteQueuedMessage: (messageId: string, onPersist?: (error: string | null) => void) => void
   reorderQueuedMessages: (orderedIds: string[]) => void
   promoteQueuedMessage: (messageId: string) => void
   setQueueAutoDrainSuppressed: (suppressed: boolean) => void
@@ -974,6 +1014,7 @@ export interface ThreadActions {
   enqueuePendingApproval: (request: HITLRequest) => void
   removePendingApproval: (requestId?: string) => void
   setPendingUserInput: (request: UserInputRequest | null) => void
+  setUserInputDraft: (requestId: string, update: (draft: UserInputDraft) => UserInputDraft) => void
   setError: (error: string | null) => void
   clearError: () => void
   clearHookInterruption: () => void
@@ -994,10 +1035,12 @@ export interface ThreadActions {
   setDraftInput: (input: string) => void
   readPromptDraft: () => { text: string; revision: number }
   applyPromptDraft: (expectedRevision: number, text: string) => boolean
+  setDraftBotInput: (input: string, mentions: BotMessageMention[]) => void
+  setDraftBotReplyTo: (reply: BotMessageReply | null) => void
   setDraftAttachments: (update: DraftFilesUpdate<FileAttachment>) => void
-  setDraftMentionedFiles: (update: DraftFilesUpdate<MentionedWorkspaceFile>) => void
+  setDraftMentionedWorkspaceFiles: (update: DraftFilesUpdate<MentionedWorkspaceFile>) => void
   setHarnessNextActionDialogTips: (tips: string | null) => void
-  setDraftSkill: (skill: SkillMetadata | null) => void
+  setDraftSkill: (skill: ThreadDraftSkill | null) => void
   setDraftBuiltinBrowser: (selected: boolean) => void
 }
 
@@ -1006,7 +1049,7 @@ interface ThreadContextValue {
   getThreadState: (threadId: string) => ThreadState
   subscribeToThreadState: (threadId: string, callback: () => void) => () => void
   getThreadActions: (threadId: string) => ThreadActions
-  initializeThread: (threadId: string) => void
+  initializeThread: (threadId: string, options?: { requireQueuedMessages?: boolean; sourceScope?: ThreadTranscriptSourceScope }) => void
   cleanupThread: (threadId: string) => void
   // Stream subscription
   subscribeToStream: (threadId: string, callback: () => void) => () => void
@@ -1036,27 +1079,83 @@ interface ThreadContextValue {
 // Best-effort: the in-memory ThreadState.queuedMessages is authoritative; this
 // only survives reloads/view-switches. Keyed by threadId.
 
-function loadQueuedMessages(threadId: string): QueuedMessage[] {
+function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
+  if (!raw || typeof raw !== "object") return null
+  const native = normalizeNativeQueuedMessage(raw)
+  if (!native) return null
+  const item = raw as Partial<QueuedMessage>
+  const createdAt = item.created_at ? new Date(item.created_at) : new Date()
+  const updatedAt = item.updated_at ? new Date(item.updated_at) : createdAt
+  const handoffRequestedAt = item.handoffRequestedAt ? new Date(item.handoffRequestedAt) : null
+  const skillTarget = item.botSkillTarget
+  const validSkillTarget = skillTarget && (
+    skillTarget.kind === "main" ||
+    (skillTarget.kind === "work" && typeof skillTarget.workId === "string") ||
+    (skillTarget.kind === "create" && typeof skillTarget.title === "string" && (
+      "projectId" in skillTarget
+        ? typeof skillTarget.projectId === "string" && skillTarget.projectId.trim().length > 0
+        : typeof skillTarget.path === "string"
+    ))
+  )
+  return {
+    ...native,
+    ...(isBotMessageReply(item.botReplyTo) ? { botReplyTo: item.botReplyTo } : {}),
+    // Legacy queued request identity is retained only for exact receipt reconciliation.
+    // The composer no longer creates or edits private mention bindings.
+    ...(item.botMentions !== undefined ? { botMentions: item.botMentions } : {}),
+    // Preserve the original request identity even when a restored reference is
+    // malformed; the Bot sender rejects it instead of silently dropping files.
+    ...(item.botInputFileIds !== undefined ? { botInputFileIds: item.botInputFileIds } : {}),
+    attachmentModelBlocks:
+      typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
+    attachmentDisplayPrefix:
+      typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
+    skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
+    skillName: typeof item.skillName === "string" ? item.skillName : undefined,
+    ...(item.botExplicitSkill && typeof item.botExplicitSkill.name === "string" &&
+      typeof item.botExplicitSkill.path === "string" ? { botExplicitSkill: item.botExplicitSkill } : {}),
+    ...(validSkillTarget ? { botSkillTarget: skillTarget } : {}),
+    builtinBrowser: item.builtinBrowser === true,
+    modelId: typeof item.modelId === "string" ? item.modelId : undefined,
+    parkedForConversationLink: item.parkedForConversationLink === true,
+    ...(item.botHandoffTarget && typeof item.botHandoffTarget.botId === "string" && typeof item.botHandoffTarget.workId === "string" ? {botHandoffTarget:item.botHandoffTarget}:{}),
+    handoffRequestedAt:
+      handoffRequestedAt && !Number.isNaN(handoffRequestedAt.getTime())
+        ? handoffRequestedAt
+        : undefined,
+    created_at: Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
+    updated_at: Number.isNaN(updatedAt.getTime()) ? new Date() : updatedAt
+  }
+}
+
+function loadQueuedMessages(threadId: string, required = false): QueuedMessage[] {
   try {
     const raw = window.localStorage.getItem(queueStorageKey(threadId))
-    if (!raw) return []
+    if (raw === null) return []
     const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.map(normalizeQueuedMessage).filter((item): item is QueuedMessage => Boolean(item))
+    if (!Array.isArray(parsed)) throw new Error("Invalid queue format")
+    const queue = parsed
+      .map(normalizeQueuedMessage)
+      .filter((item): item is QueuedMessage => Boolean(item))
+    if (required && queue.length !== parsed.length) throw new Error("Invalid queued message")
+    return queue
   } catch {
+    if (required) throw new Error("无法读取原会话的待发送消息，请检查草稿后重试。")
     return []
   }
 }
 
-function persistQueuedMessages(threadId: string, messages: QueuedMessage[]): void {
+function persistQueuedMessages(threadId: string, messages: QueuedMessage[]): string | null {
   try {
     if (messages.length === 0) {
       window.localStorage.removeItem(queueStorageKey(threadId))
-      return
+      return null
     }
     window.localStorage.setItem(queueStorageKey(threadId), JSON.stringify(messages))
+    return null
   } catch {
     // Queue persistence is best-effort; the in-memory queue remains authoritative.
+    return "消息未能保存到本机，请保留当前窗口并重试。"
   }
 }
 
@@ -1109,7 +1208,7 @@ const createDefaultThreadState = (): ThreadState => ({
   draftInput: "",
   draftRevision: 0,
   draftAttachments: [],
-  draftMentionedFiles: [],
+  draftMentionedWorkspaceFiles: [],
   harnessNextActionDialogTips: null,
   draftSkill: null,
   draftBuiltinBrowser: false,
@@ -1336,6 +1435,8 @@ function normalizeThreadState(state: ThreadState): ThreadState {
       (state.messages.some(isVisibleCheckpointTranscriptMessage) ? "nonempty" : "unknown"),
     historyLoadedMessageCount: state.historyLoadedMessageCount ?? state.messages.length,
     draftBuiltinBrowser: state.draftBuiltinBrowser ?? false,
+    draftAttachments: state.draftAttachments ?? [],
+    draftMentionedWorkspaceFiles: state.draftMentionedWorkspaceFiles ?? [],
     toolCallStates: state.toolCallStates || {},
     contextCompaction: state.contextCompaction ?? null,
     ...buildPendingApprovalState(pendingQueue)
@@ -1546,6 +1647,7 @@ if (import.meta.hot) import.meta.hot.data.devclawThreadContext = ThreadContext
 
 // Custom event types from the stream
 interface CustomEventData {
+  runId?: string
   type?: string
   userMessageId?: string
   text?: string
@@ -1981,9 +2083,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // restoration lifetimes. Reopening a completed main history must not replace
   // its selected window merely because the sidecar is still unavailable.
   const mainHistoryHydratedThreadIdsRef = useRef<Set<string>>(new Set())
-  const threadHistoryHydrationAttemptsRef = useRef<Record<string, ThreadHistoryHydrationAttempt>>(
-    {}
-  )
+  const threadHistoryHydrationAttemptsRef = useRef<Record<string, ThreadHistoryHydrationAttempt & {
+    botNotices?: Message[]
+  }>>({})
   const saveSubagentTranscriptsRef = useRef<
     (
       threadId: string,
@@ -4339,10 +4441,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      // This source id was generated only by the renderer for an id-less chunk.
-      // It cannot exist in durable storage, while the stable afterModel row is
-      // already persisted. Apply the alias synchronously so the immediately
-      // following stable event cannot render as a second message.
+      // The host has already persisted completed steer replies. Do not wait for
+      // another DB round trip before the immediately following stable snapshot.
+      if (!rendererOnlyAlias && completedProviderSourceId && completedProviderOccurrence) {
+        commitLocalAlias()
+        return
+      }
+      // Id-less chunks only exist in the renderer; normalize any delayed frames too.
       if (rendererOnlyAlias) {
         const aliases =
           rendererOnlyMessageIdAliasesRef.current[threadId] ??
@@ -4520,7 +4625,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           const current = streamDataRef.current[threadId] ?? defaultStreamData
-          const messageAttempts = advanceMessageAttempts(current.messageAttempts, discardedMessageIds)
+          const messageAttempts = advanceMessageAttempts(
+            current.messageAttempts,
+            discardedMessageIds
+          )
           streamDataRef.current[threadId] = {
             ...current,
             messages: stableMessages as StreamData["messages"],
@@ -4663,6 +4771,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (data.notification && !data.suppressNotificationAutoRun) {
             scheduleCoordinatorNotificationTurn(threadId)
           }
+          break
+        case "coordinator_notification_turn_started":
+          updateThreadState(threadId, (state) =>
+            shouldClearCoordinatorNotificationError(state.errorDetail, data.runId)
+              ? { error: null, errorDetail: null }
+              : {}
+          )
           break
         case "coordinator_notification_deferred":
           scheduleCoordinatorNotificationTurn(threadId)
@@ -5860,6 +5975,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                     : null,
                 historyPageWindows: pageWindows,
                 historyWindowGap: attachThreadMessageGapReload(windowResult.gap, pageWindows),
+                // This replaces the resident page. Its virtual row measurements and
+                // scroll target belong to a different set of messages.
+                historyWindowRevision: latest.historyWindowRevision + 1,
                 historyMessageTotal: page.total
               }
             })
@@ -5971,12 +6089,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             loadThreadHistoryRef.current(threadId)
           }
         },
-        addQueuedMessage: (message: QueuedMessage) => {
+        addQueuedMessage: (message: QueuedMessage, onPersist) => {
+          let error: string | null = "会话已关闭，消息未发送。"
           updateThreadState(threadId, (state) => {
             const next = [...state.queuedMessages, message]
-            persistQueuedMessages(threadId, next)
+            error = persistQueuedMessages(threadId, next)
             return { queuedMessages: next }
           })
+          onPersist?.(error)
         },
         prependQueuedMessage: (message: QueuedMessage) => {
           updateThreadState(threadId, (state) => {
@@ -5993,23 +6113,32 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             (message) => message.id === messageId
           )
         },
-        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => {
+        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>, onPersist) => {
+          let error: string | null = "会话已关闭，消息未发送。"
           updateThreadState(threadId, (state) => {
             const next = state.queuedMessages.map((message) =>
               message.id === messageId
-                ? { ...message, ...updates, id: message.id, updated_at: new Date() }
+                ? {
+                    ...message,
+                    ...updates,
+                    id: message.id,
+                    updated_at: new Date()
+                  }
                 : message
             )
-            persistQueuedMessages(threadId, next)
+            error = persistQueuedMessages(threadId, next)
             return { queuedMessages: next }
           })
+          onPersist?.(error)
         },
-        deleteQueuedMessage: (messageId: string) => {
+        deleteQueuedMessage: (messageId: string, onPersist) => {
+          let error: string | null = "会话已关闭。"
           updateThreadState(threadId, (state) => {
             const next = state.queuedMessages.filter((message) => message.id !== messageId)
-            persistQueuedMessages(threadId, next)
+            error = persistQueuedMessages(threadId, next)
             return { queuedMessages: next }
           })
+          onPersist?.(error)
         },
         reorderQueuedMessages: (orderedIds: string[]) => {
           updateThreadState(threadId, (state) => {
@@ -6117,10 +6246,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, () => buildPendingApprovalState([]))
         },
         setPendingUserInput: (request: UserInputRequest | null) => {
-          updateThreadState(threadId, () => ({ pendingUserInput: request }))
+          updateThreadState(threadId, (state) => pendingUserInputPatch(state, request))
+        },
+        setUserInputDraft: (requestId, update) => {
+          updateThreadState(threadId, (state) => userInputDraftPatch(state, requestId, update))
         },
         setError: (error: string | null) => {
-          updateThreadState(threadId, () => ({ error }))
+          updateThreadState(threadId, () => ({ error, errorDetail: null }))
         },
         clearError: () => {
           updateThreadState(threadId, () => ({ error: null, errorDetail: null }))
@@ -6210,7 +6342,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }))
         },
         setDraftInput: (input: string) => {
-          updateThreadState(threadId, () => ({ draftInput: input }))
+          updateThreadState(threadId, (state) => ({
+            draftInput: input,
+            ...(state.draftBotMentions?.length ? {
+              draftBotMentions: rebaseGroupMentions(state.draftInput, input, state.draftBotMentions)
+            } : {})
+          }))
+        },
+        setDraftBotInput: (input, mentions) => {
+          const selected = parseBotMessageMentions(input, mentions)
+          updateThreadState(threadId, () => ({ draftInput: input, draftBotMentions: selected }))
+        },
+        setDraftBotReplyTo: (draftBotReplyTo) => {
+          updateThreadState(threadId, () => ({ draftBotReplyTo }))
         },
         readPromptDraft: () => {
           const state = threadStatesRef.current[threadId]
@@ -6227,20 +6371,21 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftAttachments: (update) => {
           updateThreadState(threadId, (state) => ({
-            draftAttachments: typeof update === "function" ? update(state.draftAttachments) : update
+            draftAttachments:
+              typeof update === "function" ? update(state.draftAttachments ?? []) : update
           }))
         },
-        setDraftMentionedFiles: (update) => {
+        setDraftMentionedWorkspaceFiles: (update) => {
           updateThreadState(threadId, (state) => ({
-            draftMentionedFiles:
-              typeof update === "function" ? update(state.draftMentionedFiles) : update
+            draftMentionedWorkspaceFiles:
+              typeof update === "function" ? update(state.draftMentionedWorkspaceFiles) : update
           }))
         },
         setHarnessNextActionDialogTips: (tips: string | null) => {
           const normalizedTips = tips?.trim() || null
           updateThreadState(threadId, () => ({ harnessNextActionDialogTips: normalizedTips }))
         },
-        setDraftSkill: (skill: SkillMetadata | null) => {
+        setDraftSkill: (skill: ThreadDraftSkill | null) => {
           updateThreadState(threadId, () => ({ draftSkill: skill }))
         },
         setDraftBuiltinBrowser: (selected: boolean) => {
@@ -6352,10 +6497,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       threadHistoryLoadGenerationRef.current[threadId] = loadGeneration
       foregroundHydrationGeneration.transition(useAppStore.getState().currentThreadId)
       const foregroundToken = foregroundHydrationGeneration.capture(threadId)
-      threadHistoryHydrationAttemptsRef.current[threadId] = {
+      const hydrationAttempt: ThreadHistoryHydrationAttempt & { botNotices?: Message[] } = {
         loadGeneration,
         foregroundToken
       }
+      threadHistoryHydrationAttemptsRef.current[threadId] = hydrationAttempt
       const isCurrentLoad = (): boolean =>
         threadProviderMountedRef.current &&
         !isThreadRetired(threadId) &&
@@ -6368,6 +6514,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         isCurrentLoad() && messageWindowIntentCoordinator.isCurrent(transcriptHydrationIntent)
       const currentSource = captureResidentTranscriptCurrent(threadId)
       const actions = getThreadActions(threadId)
+      const preserveBotNotices = (messages: Message[]): Message[] => {
+        const restored = hydrationAttempt.botNotices?.length
+          ? mergePersistedMessagesIntoTranscript(messages, hydrationAttempt.botNotices)
+          : messages
+        // The first durable page can arrive after the worker's streaming reply.
+        // It cannot contain that uncommitted row yet. Keep only the live row.
+        const liveId = schedulerStreamingRef.current[threadId]?.currentMsgId
+        if (!liveId || (!threadId.startsWith("bot-work-") && !isManagedLocalWorkConversation(
+          useAppStore.getState().threads.find(thread => thread.thread_id === threadId)
+        ))) return restored
+        const live = threadStatesRef.current[threadId]?.messages.find(message => message.id === liveId && message.role === "assistant")
+        return live && !restored.some(message => message.id === liveId) ? [...restored, live] : restored
+      }
       let persistedMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimeOrder: MessageTimeEntry[] = []
@@ -6483,7 +6642,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null, undefined, persistedThreadMessages)]
               : []
           if (mainTranscriptPublished) {
-            actions.setMessages(visiblePersistedThreadMessages)
+            actions.setMessages(preserveBotNotices(visiblePersistedThreadMessages))
             firstTranscriptPublishedThreadIdsRef.current.add(threadId)
             publishedInitialPageWindows = pageWindows
           }
@@ -6769,14 +6928,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             isVisibleCheckpointTranscriptMessage
           )
           if (isCurrentTranscriptHydration()) {
-            actions.setMessages(
+            actions.setMessages(preserveBotNotices(
               mergeGoalUserEventsIntoDurablePage(
                 visiblePersistedThreadMessages,
                 threadStatesRef.current[threadId]?.goalTranscriptEvents ?? [],
                 persistedThreadMessages,
                 getGoalTranscriptPageRange(persistedThreadMessages, durableMessageHasMore)
               )
-            )
+            ))
             firstTranscriptPublishedThreadIdsRef.current.add(threadId)
             mainTranscriptPublished = true
             updateThreadState(threadId, () => ({
@@ -7166,10 +7325,21 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // The durable page may already be visible. Preserve any live/scheduler
       // rows committed after that early paint while enriching it with goal and
       // legacy-checkpoint restoration.
-      const hydratedTranscriptMessages = mergePersistedMessagesIntoTranscript(
-        restoredTranscriptMessages,
+      let hydratedTranscriptMessages = mergePersistedMessagesIntoTranscript(
+        preserveBotNotices(restoredTranscriptMessages),
         threadStatesRef.current[threadId]?.messages ?? []
       )
+      delete hydrationAttempt.botNotices
+      const botHistoryOrigins = new Map(visiblePersistedThreadMessages.flatMap(message =>
+        message.role === "user" && message.botHistoryInputOrigin ? [[message.id, message.botHistoryInputOrigin] as const] : []))
+      if (botHistoryOrigins.size) hydratedTranscriptMessages = hydratedTranscriptMessages.map(message =>
+        message.role === "user" && botHistoryOrigins.has(message.id)
+          ? { ...message, botHistoryInputOrigin: botHistoryOrigins.get(message.id) } : message)
+      const botHistoryDeliveries = new Map(visiblePersistedThreadMessages.flatMap(message =>
+        message.role === "assistant" && message.botHistoryDeliveryScope ? [[message.id, message.botHistoryDeliveryScope] as const] : []))
+      if (botHistoryDeliveries.size) hydratedTranscriptMessages = hydratedTranscriptMessages.map(message =>
+        message.role === "assistant" && botHistoryDeliveries.has(message.id)
+          ? { ...message, botHistoryDeliveryScope: botHistoryDeliveries.get(message.id) } : message)
       if (isCurrentTranscriptHydration()) {
         actions.setMessages(hydratedTranscriptMessages)
         firstTranscriptPublishedThreadIdsRef.current.add(threadId)
@@ -7393,6 +7563,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         finalizeRunningSubagentsForStoppedStream(threadId)
         updateThreadState(threadId, () => ({
           scheduledTaskLoading: false,
+          errorDetail: event.errorDetail && typeof event.errorDetail === "object" && !Array.isArray(event.errorDetail)
+            ? event.errorDetail as ApiErrorDetailState
+            : typeof event.coordinatorNotificationRunId === "string"
+              ? { coordinatorNotificationRunId: event.coordinatorNotificationRunId }
+              : null,
           error: (event.error as string) || "Scheduled task failed"
         }))
         // Remount only after persistence succeeded. A disk failure must leave
@@ -7493,6 +7668,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // Projected values snapshot for the current turn only. Unlike the
         // legacy full-messages event, this must never replace durable history.
         case "turn-messages": {
+          if (event.independentBotPublication === true) {
+            updateThreadState(threadId, state => ({
+              messages: mergeSchedulerTurnMessageSnapshot(state.messages,
+                event.messages as Parameters<typeof normalizeSchedulerMessageSnapshot>[0]).messages
+            }))
+            break
+          }
           const previousTurnLocation = schedulerTurnMessageLocationRef.current[threadId]
           clearSchedulerMainStreamingForThread(threadId)
           updateThreadState(threadId, (state) => {
@@ -7638,6 +7820,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               id,
               role: "assistant",
               content: finalContent,
+              ...(typeof event.provider_source_id === "string" &&
+              typeof event.provider_occurrence === "number"
+                ? {
+                    provider_source_id: event.provider_source_id,
+                    provider_occurrence: event.provider_occurrence
+                  }
+                : {}),
               ...(finalReasoning && { reasoning: finalReasoning }),
               ...(toolCalls?.length && { tool_calls: toolCalls }),
               created_at: now
@@ -7799,9 +7988,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const initializeThread = useCallback(
-    (threadId: string, sourceScope?: ThreadTranscriptSourceScope) => {
+    (threadId: string, options?: { requireQueuedMessages?: boolean; sourceScope?: ThreadTranscriptSourceScope }) => {
+      const sourceScope = options?.sourceScope
       currentMissingSource.clear(threadId)
-      if (isThreadDeletionPending(threadId)) return
+      const requireQueuedMessages = options?.requireQueuedMessages === true
+      if (isThreadDeletionPending(threadId) || (requireQueuedMessages && isThreadRetired(threadId))) {
+        if (requireQueuedMessages) throw new Error("原会话已关闭，无法核对草稿。")
+        return
+      }
+      const persistedQueue = requireQueuedMessages ? loadQueuedMessages(threadId, true) : undefined
+      const existingState = threadStatesRef.current[threadId]
+      const initialized = initializedThreadsRef.current.has(threadId)
+      // Background activity can create a partial state before queue restoration.
+      // A warm in-memory queue remains authoritative if an earlier write failed.
+      if (persistedQueue?.length && (initialized || existingState?.queuedMessages.length)) {
+        const inMemoryIds = new Set(existingState?.queuedMessages.map((message) => message.id))
+        if (persistedQueue.some((message) => !inMemoryIds.has(message.id)))
+          throw new Error("原会话的待发送消息尚未核对，请检查草稿后重试。")
+      }
       // activeThreadIds is also the stream-holder LRU. Touch an already
       // initialized thread when a consumer revisits it so an evicted idle
       // holder is mounted again with a fresh transport.
@@ -7815,7 +8019,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       foregroundHydrationGeneration.transition(useAppStore.getState().currentThreadId)
       const foregroundToken = foregroundHydrationGeneration.capture(threadId)
-      if (initializedThreadsRef.current.has(threadId)) {
+      if (initialized) {
         const state = threadStatesRef.current[threadId]
         const attempt = threadHistoryHydrationAttemptsRef.current[threadId]
         const attemptMatchesForeground = foregroundToken
@@ -7889,21 +8093,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         .find(thread => thread.thread_id === threadId))
       residentDirectoryScopesRef.current.set(threadId, directoryScope)
       residentTranscripts.enter(threadId, sourceScope ?? directoryScope)
-      const threadActions = getThreadActions(threadId)
       const listenerEpoch = {}
       threadListenerEpochRef.current[threadId] = listenerEpoch
       const isCurrentListenerEpoch = (): boolean =>
         initializedThreadsRef.current.has(threadId) &&
         threadListenerEpochRef.current[threadId] === listenerEpoch
 
-      if (!threadStatesRef.current[threadId]) {
+      if (!existingState || (persistedQueue?.length && !existingState.queuedMessages.length)) {
         commitThreadStateChanges([
           {
             threadId,
             state: {
-              ...createDefaultThreadState(),
-              queuedMessages: loadQueuedMessages(threadId),
-              historyLoading: true
+              ...(existingState ?? createDefaultThreadState()),
+              queuedMessages: persistedQueue ?? loadQueuedMessages(threadId),
+              historyLoading: existingState?.historyLoading ?? true
             }
           }
         ])
@@ -7962,14 +8165,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       // Hydrate the panel from disk (renderer reload / app restart) and pick up
       // a completion that finished while no renderer was listening — ONLY for
-      // workflow-mode threads, so normal/coordinator/goal threads pay no IPC.
+      // workflow-mode threads and local Bots; ordinary normal/coordinator/goal threads pay no IPC.
       // (The durable listener above is cheap to keep registered for all
       // threads, matching the coordinator-hook subscription pattern, so a
       // thread switched INTO workflow mode still receives live events.)
       const hydrateThread = useAppStore
         .getState()
         .threads.find((thread) => thread.thread_id === threadId)
-      if (isWorkflowModeMetadata(hydrateThread?.metadata)) {
+      if (hasWorkflowPanelCapability(hydrateThread?.metadata)) {
         void window.api.workflows
           .hydrate(threadId)
           .then((raw) => {
@@ -8098,55 +8301,26 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       if (noticeCleanup) conversationNoticeListenerCleanups.current[threadId] = noticeCleanup
 
-      // When the main process injects steered messages into the running turn,
-      // drop them from the draft queue and surface them as committed user turns
-      // (the model already received them; the transcript should match).
+      // Queue acknowledgements can overtake the async stream iterator. They only
+      // settle drafts and user-turn effects; the ordered stream boundary publishes
+      // the completed assistant and injected users. Inactive views hydrate the
+      // same durable transcript. Appending here corrupts both order and later saves.
       queueListenerCleanups.current[threadId] = window.api.agent.onQueuedMessagesInjected(
         threadId,
-        ({ messages, assistantIdAlias }) => {
+        ({ messages }) => {
           if (!isCurrentListenerEpoch()) return
           if (!Array.isArray(messages) || messages.length === 0) return
           const injectedIds = new Set(messages.map((message) => message.id))
-          const existingMessageIds = new Set(
-            threadStatesRef.current[threadId]?.messages.map((message) => message.id) ?? []
-          )
           updateThreadState(threadId, (state) => {
             const next = removeQueuedMessagesById(state.queuedMessages, injectedIds)
-            const sourceId = assistantIdAlias?.sourceId
-            const canonicalId = assistantIdAlias?.id
-            const sourceIndex =
-              sourceId && canonicalId
-                ? state.messages.findIndex((message) => message.id === sourceId)
-                : -1
-            const canonicalAlreadyPresent =
-              !!canonicalId && state.messages.some((message) => message.id === canonicalId)
-            const nextMessages =
-              sourceIndex < 0 || !canonicalId
-                ? state.messages
-                : canonicalAlreadyPresent
-                  ? state.messages.filter((message) => message.id !== sourceId)
-                  : state.messages.map((message, index) =>
-                      index === sourceIndex ? { ...message, id: canonicalId } : message
-                    )
-            if (next === state.queuedMessages && nextMessages === state.messages) return {}
-            if (next !== state.queuedMessages) persistQueuedMessages(threadId, next)
-            return {
-              ...(next !== state.queuedMessages ? { queuedMessages: next } : {}),
-              ...(nextMessages !== state.messages ? { messages: nextMessages } : {})
-            }
+            if (next === state.queuedMessages) return {}
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
           })
-          for (const message of messages) {
-            if (!message.id || existingMessageIds.has(message.id)) continue
-            // Reuse appendMessage so an injected turn has the same hook-log,
-            // coordinator-notification, and interruption-reset effects as a
-            // normal user submission.
-            threadActions.appendMessage({
-              id: message.id,
-              role: "user",
-              content: message.content,
-              created_at: new Date()
-            })
-          }
+          void window.api.workflows.suppressPendingNotification(threadId, false).catch(() => undefined)
+          const pending = pendingHookLogBucketOpensRef.current[threadId] ?? new Set<string>()
+          for (const id of injectedIds) pending.add(id)
+          pendingHookLogBucketOpensRef.current[threadId] = pending
         }
       )
 
@@ -8184,7 +8358,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const cleanupUserInput = window.api.userInput.onRequest(threadId, (request) => {
         console.log(`[ThreadProvider] User input request for thread ${threadId}:`, request)
         if (!isCurrentListenerEpoch()) return
-        updateThreadState(threadId, () => ({ pendingUserInput: request }))
+        updateThreadState(threadId, (state) => pendingUserInputPatch(state, request))
       })
       const cleanupUserInputCancel = window.api.userInput.onCancel(threadId, (data) => {
         console.log(
@@ -8193,7 +8367,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (!isCurrentListenerEpoch()) return
         updateThreadState(threadId, (state) => {
           if (state.pendingUserInput?.requestId !== data.requestId) return {}
-          return { pendingUserInput: null }
+          return pendingUserInputPatch(state, null)
         })
       })
       userInputListenerCleanups.current[threadId] = [cleanupUserInput, cleanupUserInputCancel]
@@ -8201,7 +8375,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         .getPending(threadId)
         .then((request) => {
           if (!request || !isCurrentListenerEpoch()) return
-          updateThreadState(threadId, () => ({ pendingUserInput: request }))
+          updateThreadState(threadId, (state) => pendingUserInputPatch(state, request))
         })
         .catch((error) => {
           console.warn(
@@ -8226,6 +8400,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       scheduleSubagentTranscriptsPersist
     ]
   )
+
+  useEffect(() => {
+    // Fixed reminders are already durable and have no Agent stream. Keep a
+    // resident transcript current even when its Bot conversation is unmounted.
+    return window.api.bots?.subscribe(({ hostId, reminder }) => {
+      if (hostId !== LOCAL_BOT_HOST_ID || !reminder) return
+      const { threadId, id, content, createdAt } = reminder
+      if (
+        // Unloaded shells restore this durable message from history on reopen.
+        !initializedThreadsRef.current.has(threadId) ||
+        !threadStatesRef.current[threadId] ||
+        isThreadDeletionPending(threadId) ||
+        knownDurableMessageIdsRef.current[threadId]?.has(id)
+      )
+        return
+
+      const message: Message = { id, role: "assistant", content, created_at: new Date(createdAt) }
+      const { historyLoading, historyPageLoading } = threadStatesRef.current[threadId]
+      const hydrationAttempt = threadHistoryHydrationAttemptsRef.current[threadId]
+      if (hydrationAttempt && (historyLoading || historyPageLoading) &&
+          isThreadHistoryHydrationAttemptActive(hydrationAttempt,
+            threadHistoryLoadGenerationRef.current[threadId], foregroundHydrationGeneration))
+        (hydrationAttempt.botNotices ??= []).push(message)
+      rememberDurableMessageIds(threadId, [message])
+      getThreadActions(threadId).appendMessage(message)
+    })
+  }, [foregroundHydrationGeneration, getThreadActions, rememberDurableMessageIds])
 
   useEffect(() => {
     return window.api.agent.onManagedAutoSendStreamStart((event) => {
@@ -8466,7 +8667,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     // already belong to a new running incarnation. Keep mounted subscriptions;
     // initialize allocates a new listener actor and stream-holder identity.
     cleanupThread(threadId, true)
-    if (hydrate) initializeThread(threadId, scope)
+    if (hydrate) initializeThread(threadId, { sourceScope: scope })
   }, [cleanupThread, initializeThread])
 
   useLayoutEffect(() => {
@@ -8535,7 +8736,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             rowPresent: row !== undefined,
             scope: rendererTranscriptSourceScope(row)
           })
-          if (restored) initializeThread(restored.threadId, restored)
+          if (restored) initializeThread(restored.threadId, { sourceScope: restored })
         }
         const initializedIds = [...initializedThreadsRef.current]
         const remaining = new Set(initializedIds)

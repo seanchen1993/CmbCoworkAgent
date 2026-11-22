@@ -1,0 +1,234 @@
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
+import { tool } from "langchain"
+import { z } from "zod"
+import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../../shared/checkpoint-transcript"
+import { botTaskGroupId, type BotTask } from "../../shared/bots/contracts"
+import { isBotGroupPass } from "../../shared/bots/group-discussion"
+import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
+import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
+import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
+import type { LocalBotHost } from "./host"
+import {
+  extractVisibleText,
+  readFinishSignal,
+  type TurnFinalDeliveryCheck
+} from "../agent/turn-completion-integrity"
+import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
+import { getHookAgentIdFromRequest } from "../hooks/execution-context"
+import { botTruncationReminder } from "./delivery-protocol"
+
+/** Grok's SendMessage boundary, using the existing local room and Runtime tool receipts. */
+export function createBotGroupMessageTool(
+  task: BotTask,
+  getHost: () => LocalBotHost,
+  signal: AbortSignal,
+  sent: (content: string) => void
+) {
+  const currentGroupId = botTaskGroupId(task)
+  const contentSchema = z.string().trim().min(1).max(60_000)
+  return tool(
+    async (input, config) => {
+      const { content } = input
+      signal.throwIfAborted()
+      try {
+        if (getHookAgentIdFromRequest(config))
+          throw new Error(
+            "Temporary task agents return results to their parent; only the parent Bot sends group messages."
+          )
+        // Grok filters SendMessage("(pass)") before it enters the public room.
+        // Every public member turn may abstain when it owes no contribution.
+        if (
+          (task.origin.kind === "group" ||
+            task.origin.kind === "discussion" ||
+            (task.origin.kind === "bot" && !task.origin.expectsReply)) &&
+          isBotGroupPass(content)
+        )
+          return JSON.stringify({
+            kind: "bot-group-pass",
+            taskId: task.id,
+            groupId: botTaskGroupId(task)
+          })
+        const targetGroupId = "groupId" in input && typeof input.groupId === "string" ? input.groupId : undefined
+        const receipt = !currentGroupId && "groupSource" in input && input.groupSource === "zhaohu"
+          ? getHost().publishGroupMessage(task.id, config.toolCall?.id ?? "", content, targetGroupId, "zhaohu")
+          : currentGroupId
+          ? getHost().publishGroupMessage(task.id, config.toolCall?.id ?? "", content)
+          : getHost().publishGroupMessage(
+              task.id,
+              config.toolCall?.id ?? "",
+              content,
+              targetGroupId
+            )
+        // A public post from private chat does not replace its private final reply.
+        if (currentGroupId) sent(content)
+        return JSON.stringify({ kind: "bot-group-message", taskId: task.id, ...receipt })
+      } catch (cause) {
+        signal.throwIfAborted()
+        const content = JSON.stringify({
+          ok: false,
+          error: cause instanceof Error ? cause.message : String(cause)
+        })
+        return new ToolMessage({
+          content,
+          status: "error",
+          name: "bot_send_message",
+          tool_call_id: config.toolCall?.id ?? ""
+        })
+      }
+    },
+    {
+      name: "bot_send_message",
+      metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
+      description: currentGroupId
+        ? "Send a real standalone text message to the current shared group. Ordinary assistant text and private collaboration results are not posted. Use this for concise replies, meaningful progress, and text-only results; an acknowledgement is not the result. For public handoffs, address @ followed by a current member's exact name in content; the host routes that mention to its recipient. Do not also privately delegate that same public handoff. Use bot_deliver_files for real attachments and request_user_input for decisions. Do not relay a peer result already visible in the room unless the user assigned you further analysis or integration. A successful receipt means this message was posted, not that the task's acceptance criteria passed."
+        : "Send the user-authorized brief to a group. Use the exact groupId and groupSource (app or zhaohu) from selected references or bot_list_groups; clarify same-name destinations. Only content is forwarded, never the private history. App groups receive this Bot's public message; @ a member's exact name for a public handoff, without also privately delegating it. Zhaohu groups use their bound service Bot and existing group context, with results and questions staying in that group. Its receipt means queued, not delivered or finished. Report the receipt privately. This tool sends text, not files.",
+      schema: currentGroupId
+        ? z.object({ content: contentSchema }).strict()
+        : z.object({ content: contentSchema, groupId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), groupSource: z.enum(["app", "zhaohu"]).optional() }).strict()
+    }
+  )
+}
+
+/** Metadata discovery for natural-language group requests; same-name destinations stay distinct. */
+export function createBotGroupListTool(
+  task: BotTask,
+  getHost: () => LocalBotHost,
+  signal: AbortSignal
+) {
+  return tool(
+    async () => {
+      signal.throwIfAborted()
+      return JSON.stringify(getHost().groupTargets(task.id))
+    },
+    {
+      name: "bot_list_groups",
+      description:
+        "List available App and Zhaohu group identities for a private-chat handoff. This reads metadata only. Use source + id with bot_send_message. If names are ambiguous, ask the user which source/group; never guess or forward private history.",
+      schema: z.object({}).strict()
+    }
+  )
+}
+
+/** Only actual tool receipts in the latest user boundary satisfy formal delivery. */
+export function createBotGroupDeliveryCheck(
+  task: BotTask,
+  peerDeliveryPosted = false,
+  peerResultOwner = false
+): TurnFinalDeliveryCheck {
+  const groupId = botTaskGroupId(task)
+  return (messages: readonly BaseMessage[]) => {
+    const final = messages.at(-1)
+    const truncation = botTruncationReminder(messages)
+    if (truncation) return truncation
+    const origin = task.origin
+    const privateCallback =
+      origin.kind === "bot" && !origin.expectsReply && !origin.upstreamTaskId
+    const textOnlyCallback = privateCallback && !origin.replyFiles?.length
+    const mayPass =
+      task.origin.kind === "group" ||
+      task.origin.kind === "discussion" ||
+      (privateCallback && (peerDeliveryPosted || textOnlyCallback))
+    let start = 0
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]
+      if (
+        HumanMessage.isInstance(message) &&
+        message.additional_kwargs.cmb_internal_bot_feedback !== true &&
+        // Gate recovery continues this turn; a workflow notification starts a
+        // new result turn and must not inherit an older delivery receipt.
+        !(typeof message.content === "string" &&
+          message.content.trimStart().startsWith(TURN_COMPLETION_GATE_MARKER_PREFIX))
+      ) {
+        start = i + 1
+        break
+      }
+    }
+    const calls = new Map<string, string>()
+    for (let i = start; i < messages.length; i++) {
+      const message = messages[i]
+      if (AIMessage.isInstance(message))
+        for (const call of message.tool_calls ?? []) if (call.id) {
+          calls.set(call.id, call.name)
+        }
+      if (
+        !ToolMessage.isInstance(message) ||
+        message.status === "error" ||
+        typeof message.content !== "string"
+      )
+        continue
+      const name = calls.get(message.tool_call_id)
+      if (name === "bot_deliver_files" && parseBotFileDelivery(message.content)) return undefined
+      if (name !== "bot_send_message" && name !== "bot_delegate") continue
+      try {
+        const receipt = JSON.parse(message.content)
+        if (
+          name === "bot_send_message" &&
+          mayPass &&
+          receipt.kind === "bot-group-pass" &&
+          receipt.taskId === task.id &&
+          receipt.groupId === groupId
+        )
+          return undefined
+        // A real asynchronous handoff owes its result on the existing return turn.
+        // Forcing this foreground turn to speak creates the redundant waiting acknowledgement.
+        if (
+          name === "bot_delegate" &&
+          typeof receipt.taskId === "string" &&
+          receipt.taskId &&
+          typeof receipt.botId === "string" &&
+          receipt.botId &&
+          receipt.state === "queued"
+        )
+          return undefined
+        if (
+          name === "bot_send_message" &&
+          receipt.kind === "bot-group-message" &&
+          receipt.taskId === task.id &&
+          receipt.groupId === groupId &&
+          typeof receipt.messageId === "string" &&
+          receipt.messageId
+        )
+          return undefined
+      } catch {
+        /* An invalid receipt is not a delivery. */
+      }
+    }
+    const body =
+      final && AIMessage.isInstance(final)
+        ? splitBotInlineReasoning(extractVisibleText(final.content)).body.trim()
+        : ""
+    // Internal work still owes its parent a useful result, not a forced public message.
+    if (
+      peerResultOwner || (task.origin.kind === "bot" &&
+      (task.origin.expectsReply || Boolean(task.origin.upstreamTaskId)))
+    )
+      return body && !isBotGroupPass(body)
+        ? undefined
+        : "Return a useful private result or concrete blocker to the delegating Bot using the existing results. Only use bot_send_message when a public room contribution is actually needed; do not repeat completed actions."
+    // Text-only callbacks are private scratch; ordinary room turns must explicitly
+    // post or stay silent. Without a pass marker, require a clean provider finish.
+    // Returned files and upstream results retain their delivery checks.
+    if (
+      mayPass &&
+      (isBotGroupPass(body) ||
+        ((body === "" || textOnlyCallback) &&
+          final &&
+          AIMessage.isInstance(final) &&
+          ["stop", "end_turn", "completed"].includes(readFinishSignal(final) ?? "")))
+    )
+      return undefined
+    if (
+      task.origin.kind === "notification" &&
+      (task.origin.notificationKind === "reaction" ||
+        (task.origin.notificationKind === "command" && task.origin.commandSucceeded === true)) &&
+      isBotRoutineSilent(body)
+    )
+      return undefined
+    return (
+      "Use bot_send_message to post the actual reply to this shared group, or bot_deliver_files for requested attachments. Plain assistant text is private and does not reach the room. Use verified existing results; do not redo completed actions." +
+      (mayPass
+        ? " If that private text was an answer, correction or assigned result, publish it now. If it only said you are waiting, have nothing new to add, or intend to act later, return exactly (pass). Do not skip assigned work, requested files, or reporting a blocker."
+        : " The host has not confirmed a public reply for this result; plain text and a pass marker do not satisfy delivery.")
+    )
+  }
+}

@@ -1,7 +1,12 @@
 import { windowPresentation } from "@/lib/window-presentation"
 import { claimVirtualizedChatScrollAnchor } from "@/lib/chat-scroll-anchor-owner"
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { startInitialChatPresentation, sampleInitialChatPresentation, isFirstLiveChatUserRow } from "@/lib/chat-initial-presentation"
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { ChatPresentationContext } from "./chat-presentation-context"
+import { botMessageDate } from "@/lib/bot-message-date"
+import { botMessageHasEntranceBody } from "@/lib/bot-message-entrance"
+import { useBotMessageEntrances } from "@/lib/use-bot-message-entrances"
+import { BotMessageEntrance } from "../bots/BotMessageEntrance"
 import { Loader2 } from "lucide-react"
 import {
   Virtuoso,
@@ -59,6 +64,16 @@ export interface ChatToolResultInfo {
 export const CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD = 100
 const DETACHED_HOOK_LOG_WINDOW_SIZE = 80
 const EMPTY_FUNCTION_NOTICES: readonly FunctionTurnNotice[] = []
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function getChatHistoryAnchorTop(row: HTMLElement): number {
+  // A prepended Bot page can remove the row's date separator. Anchor its bubble,
+  // not the display:contents entrance wrapper; workbench rows keep their original top.
+  const bubble = row.querySelector<HTMLElement>(
+    ":scope > .bot-message-entrance > [data-message-bubble]"
+  )
+  return (bubble ?? row).getBoundingClientRect().top
+}
 
 export type ChatMessageVirtualInitialLocation = FlatIndexLocationWithAlign | number
 
@@ -118,6 +133,9 @@ export function resolveChatScrollVirtualRangeSnapshot(
 export interface ChatMessageVirtualListProps {
   functionPlacedRows?: readonly FunctionPlacedEntry[]
   functionTurnNotices?: readonly FunctionTurnNotice[]
+  /** Bot-only entry presentation. Ordinary workbench rows retain their existing rendering. */
+  historyReady?: boolean
+  canAnimateMessages?: boolean
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
   projection: import("../../lib/chat-message-projection").ChatMessageProjectionSnapshot
@@ -145,9 +163,9 @@ export interface ChatMessageVirtualListProps {
   pendingApproval: HITLRequest | null
   autoApproveGitPush: boolean
   onApprovalDecision: (decision: ChatApprovalDecision) => void
-  onEditUserMessage: (message: Message) => void
-  onSetGoalFromMessage: (text: string) => void
-  onForkFromMessage: (message: Message) => void
+  onEditUserMessage?: (message: Message) => void
+  onSetGoalFromMessage?: (text: string) => void
+  onForkFromMessage?: (message: Message) => void
   forkingMessageId: string | null
   onOpenHookLogBucket: (turnId: string) => void
   threadId: string
@@ -172,6 +190,8 @@ export interface ChatMessageVirtualListProps {
 }
 
 interface ChatMessageRowProps {
+  entering: boolean
+  onEntered(id: string): void
   messageGeneration: number
   messageRevision: number
   searchLocation?: ChatSearchLocation
@@ -201,6 +221,8 @@ interface ChatMessageRowProps {
 }
 
 function ChatMessageRowImpl({
+  entering,
+  onEntered,
   messageGeneration,
   messageRevision,
   message,
@@ -228,6 +250,8 @@ function ChatMessageRowImpl({
   userSendTimeLabel,
   searchLocation
 }: ChatMessageRowProps): React.JSX.Element {
+  const presentation = useContext(ChatPresentationContext)
+  const dateSeparator = presentation === "bot" ? botMessageDate(message, previousMessage) : null
   const navigatorRef = useMemo(
     () => setMessageRef(message.id, message.role),
     [message.id, message.role, setMessageRef]
@@ -248,6 +272,33 @@ function ChatMessageRowImpl({
     if (hookLogBucket) onOpenHookLogBucket(hookLogBucket.turnId)
   }, [hookLogBucket, onOpenHookLogBucket])
 
+  const bubble = (
+    <MessageBubble
+      messageGeneration={messageGeneration}
+      messageRevision={messageRevision}
+      searchLocation={message.role === "assistant" && searchLocation?.kind === "body"
+        ? searchLocation : undefined}
+      message={message}
+      previousMessage={previousMessage}
+      isStreaming={isLastMessage && isLoading}
+      showAssistantMeta={showAssistantMeta}
+      toolResults={toolResults}
+      toolCallStates={toolCallStates}
+      pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
+      pendingApproval={pendingApproval}
+      autoApproveGitPush={autoApproveGitPush}
+      onApprovalDecision={onApprovalDecision}
+      onEditUserMessage={onEditUserMessage}
+      onSetGoalFromMessage={onSetGoalFromMessage}
+      onForkFromMessage={onForkFromMessage}
+      forkingMessageId={forkingMessageId}
+      threadId={threadId}
+      isLoading={isLoading}
+      hasUserAfterHead={hasUserAfterHead}
+      assistantDurationMs={assistantDurationMs}
+      userSendTimeLabel={userSendTimeLabel}
+    />
+  )
   return (
     <div
       ref={combinedRef}
@@ -255,31 +306,20 @@ function ChatMessageRowImpl({
       data-chat-message-id={message.id}
       data-message-role={message.role}
     >
-      <MessageBubble
-        messageGeneration={messageGeneration}
-        messageRevision={messageRevision}
-        searchLocation={message.role === "assistant" && searchLocation?.kind === "body"
-          ? searchLocation : undefined}
-        message={message}
-        previousMessage={previousMessage}
-        isStreaming={isLastMessage && isLoading}
-        showAssistantMeta={showAssistantMeta}
-        toolResults={toolResults}
-        toolCallStates={toolCallStates}
-        pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-        pendingApproval={pendingApproval}
-        autoApproveGitPush={autoApproveGitPush}
-        onApprovalDecision={onApprovalDecision}
-        onEditUserMessage={onEditUserMessage}
-        onSetGoalFromMessage={onSetGoalFromMessage}
-        onForkFromMessage={onForkFromMessage}
-        forkingMessageId={forkingMessageId}
-        threadId={threadId}
-        isLoading={isLoading}
-        hasUserAfterHead={hasUserAfterHead}
-        assistantDurationMs={assistantDurationMs}
-        userSendTimeLabel={userSendTimeLabel}
-      />
+      {dateSeparator && <time className="bot-message-date">{dateSeparator}</time>}
+      {presentation === "bot" ? (
+        <BotMessageEntrance
+          key={message.id}
+          id={message.id}
+          entering={entering}
+          active={botMessageHasEntranceBody(message)}
+          onEntered={onEntered}
+        >
+          {bubble}
+        </BotMessageEntrance>
+      ) : (
+        bubble
+      )}
       {(message.role !== "assistant" || searchLocation?.kind !== "body") &&
         <ChatSearchContext location={searchLocation} />}
       {hookLogBucket && hookLogBucket.entries.length > 0 && (
@@ -296,6 +336,8 @@ function areChatMessageRowPropsEqual(
   next: Readonly<ChatMessageRowProps>
 ): boolean {
   return (
+    previous.entering === next.entering &&
+    previous.onEntered === next.onEntered &&
     previous.messageGeneration === next.messageGeneration &&
     previous.messageRevision === next.messageRevision &&
     areMessageRenderFieldsEqual(previous.message, next.message) &&
@@ -382,6 +424,8 @@ const chatVirtualListComponents = {
 export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList({
   functionPlacedRows,
   functionTurnNotices = EMPTY_FUNCTION_NOTICES,
+  historyReady = true,
+  canAnimateMessages = true,
   messageAttempts,
   projection,
   visibleMessageIndexes,
@@ -449,6 +493,24 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     projectChatVirtualWindow(null, windowScope, virtualIdentities))
   const virtualWindow = projectChatVirtualWindow(previousVirtualWindow, windowScope, virtualIdentities)
   if (virtualWindow !== previousVirtualWindow) setVirtualWindow(virtualWindow)
+  const presentation = useContext(ChatPresentationContext)
+  const entranceIds = useMemo(
+    () =>
+      presentation === "bot"
+        ? visibleMessageIndexes.flatMap((index) => {
+            const message = messages[index]
+            return message && (message.role === "user" || message.role === "assistant")
+              ? [message.id]
+              : []
+          })
+        : [],
+    [presentation, visibleMessageIndexes, messages]
+  )
+  const { entering: enteringMessages, retire: retireMessage } = useBotMessageEntrances(
+    presentation === "bot" ? threadId : null,
+    entranceIds,
+    presentation === "bot" && historyReady && canAnimateMessages
+  )
   const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
   const turnNoticePlacements = useMemo(
     () =>
@@ -708,6 +770,8 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         <>
           {startsAfterReleasedHistory && releasedHistory}
           <ChatMessageRow
+            entering={enteringMessages.has(message.id)}
+            onEntered={retireMessage}
             messageGeneration={messageAttempts?.generations.get(message.id) ?? 0}
             messageRevision={messageAttempts?.revision ?? 0}
             searchLocation={searchReveal?.messageId === message.id ? searchReveal.location : undefined}
@@ -750,6 +814,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       autoApproveGitPush,
       contentMessageRefs,
       contentVersion,
+      enteringMessages,
       forkingMessageId,
       historyGapBeforeMessageId,
       hookLogBucketByTurnId,
@@ -766,6 +831,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       pendingApproval,
       pendingApprovalToolCallKeys,
       placedRows,
+      retireMessage,
       releasedHistory,
       setMessageRef,
       threadId,

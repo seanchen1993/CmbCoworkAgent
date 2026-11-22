@@ -1,8 +1,17 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { readFileSync, realpathSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { dirname, join } from "node:path"
 import type { ElectronApplication } from "playwright"
+
+export function hashProjectBuiltMain(entry: string): string {
+  const launcher = createHash("sha256").update(readFileSync(entry)).digest("hex")
+  const application = join(dirname(entry), "application.js")
+  if (!existsSync(application)) return launcher
+  const main = createHash("sha256").update(readFileSync(application)).digest("hex")
+  // Newer Electron builds load the actual Main bundle through a small launcher.
+  return createHash("sha256").update(`${launcher}:${main}`).digest("hex")
+}
 
 /** Explicit test-only alternative. A selected package can never silently fall back to a build. */
 export function projectBuiltPreview(
@@ -18,7 +27,7 @@ export function projectBuiltPreview(
   const assertCurrent = () => {
     if (!preview) return
     assert.match(expected ?? "", /^[a-f0-9]{64}$/, "PROJECT_PREVIEW_MAIN_SHA_REQUIRED")
-    assert.equal(createHash("sha256").update(readFileSync(entry)).digest("hex"), expected,
+    assert.equal(hashProjectBuiltMain(entry), expected,
       "PROJECT_PREVIEW_MAIN_CHANGED")
   }
   assertCurrent()

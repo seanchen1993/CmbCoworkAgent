@@ -1,3 +1,4 @@
+import { ImDeliveryOrder } from "./delivery-order"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import initSqlJs from "sql.js"
 import { ImConversationStateStore } from "./conversation-state"
@@ -219,6 +220,44 @@ describe("App-owned switch cards on the unchanged gateway contract", () => {
     await context.cards.stop()
     await context.makeCards().flush()
     expect(context.gateway.sendCard).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the switch card's original position across backoff while another private chat delivers", async () => {
+    const context = await fixture()
+    const gate = new ImDeliveryOrder((source, key) => {
+      if (source === "switch") return context.events.sessionLinks.headCardOrder(key)
+      if (source === "reply") return context.events.headDeliveryOrder(key)
+      return null
+    })
+    Object.assign(context.gateway, { deliveryOrder: gate })
+    let first = true
+    context.gateway.sendCard.mockImplementation(async (_payload, position?: number) => {
+      expect(position).toEqual(expect.any(Number))
+      const release = await gate.acquire("chat", "switch", position!)
+      try {
+        if (first) { first = false; throw new Error("temporary") }
+        context.order.push("card")
+        return { state: "accepted" }
+      } finally { release() }
+    })
+    context.prepare()
+    await context.enqueue()
+    await context.client.sendPending("chat")
+    await context.cards.flush()
+    expect(context.events.sessionLinks.getCard("reply-1")!.attempts).toBe(1)
+    await context.enqueue("later")
+    const later = context.client.sendPending("chat")
+    await context.events.enqueueProactiveReplies(buildImProactiveReplies({
+      deliveryId: "other", conversationKey: "other", text: "other chat"
+    }))
+    await context.client.sendPending("other")
+    expect(context.order).toEqual(["reply", "reply"])
+    context.advance()
+    await context.cards.flush("chat")
+    await later
+    expect(context.order).toEqual(["reply", "reply", "card", "reply"])
+    expect(context.gateway.submitReply.mock.calls.map(([reply]) => reply.deliveryId))
+      .toEqual(["reply-1", "other", "later"])
   })
 
   it("does not let a card overtake an unconfirmed final segment", async () => {

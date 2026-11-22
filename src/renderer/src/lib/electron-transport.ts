@@ -1899,7 +1899,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
     agentMode: TransportAgentMode = "normal"
   ): StreamEvent[] {
     const events: StreamEvent[] = []
-    let injectedUserEvents: { start: number; end: number } | undefined
 
     switch (event.type) {
       // Raw stream events from LangGraph - parse and convert
@@ -2070,42 +2069,46 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 }
               })
             }
-            if (
-              data.completedAssistantProviderIdless === true &&
-              completedAssistantContent
-            ) {
-              this.rememberMainAssistantProviderIdentity(messageIndex, {
-                providerSourceId: completedAssistantId,
-                providerOccurrence: 1
-              })
-              this.pendingIdlessCompletedAssistantRoute = {
-                stableId: completedAssistantId,
-                messageIndex,
-                content: completedAssistantContent
+            if (completedAssistantContent !== undefined) {
+              if (data.completedAssistantProviderIdless === true) {
+                this.rememberMainAssistantProviderIdentity(messageIndex, {
+                  providerSourceId: completedAssistantId,
+                  providerOccurrence: 1
+                })
+                this.pendingIdlessCompletedAssistantRoute = {
+                  stableId: completedAssistantId,
+                  messageIndex,
+                  content: completedAssistantContent
+                }
               }
+              const identity = this.mainAssistantProviderIdentityByIndex.get(messageIndex)
               this.mainAssistantTextByMessageId.set(
                 completedAssistantId,
                 completedAssistantContent
               )
               this.rememberEmittedMessage(completedAssistantId)
+              // The durable boundary can precede the provider's final stream chunk.
+              // Seed an authoritative snapshot (never a text delta) before users,
+              // including providers that reuse one id across several completions.
               events.push({
-                event: "messages",
-                data: [
-                  {
+                event: "custom",
+                data: {
+                  type: "coordinator_ai_snapshot_message",
+                  assistantMessage: {
                     id: completedAssistantId,
                     type: "ai",
                     content: completedAssistantContent,
-                    provider_source_id: completedAssistantId,
-                    provider_occurrence: 1
-                  },
-                  { langgraph_node: "agent" }
-                ]
+                    ...(identity ? {
+                      provider_source_id: identity.providerSourceId,
+                      provider_occurrence: identity.providerOccurrence
+                    } : {})
+                  }
+                }
               })
             }
           }
           this.sealCurrentRunCompletedAssistant(Boolean(completedAssistantId))
           const injectedMessages = Array.isArray(data.messages) ? data.messages : []
-          const injectedUserEventsStart = events.length
           for (const injectedMessage of injectedMessages) {
             if (
               !injectedMessage ||
@@ -2128,7 +2131,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
               ]
             })
           }
-          injectedUserEvents = { start: injectedUserEventsStart, end: events.length }
           events.push({ event: "custom", data })
           break
         }
@@ -2194,16 +2196,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     const resetRoleCollisionBaseline =
       event.type === "custom" && event.data?.type === "stream_retry_reset"
-    const normalizedEvents = this.normalizeMainMessageRoleCollisionEvents(
-      events,
-      resetRoleCollisionBaseline
-    )
-    const injectedRange = injectedUserEvents
-    return injectedRange
-      ? normalizedEvents.filter(
-          (_event, index) => index < injectedRange.start || index >= injectedRange.end
-        )
-      : normalizedEvents
+    return this.normalizeMainMessageRoleCollisionEvents(events, resetRoleCollisionBaseline)
   }
 
   private normalizeMainMessageRoleCollisionEvents(

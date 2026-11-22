@@ -25,6 +25,7 @@ export interface HookScopeSnapshot {
 }
 
 export interface HookScopeController {
+  readonly disabled?: boolean
   readonly activePluginIds: ReadonlySet<string>
   readonly activeSkillNames: ReadonlySet<string>
   readonly activeSkillPaths: ReadonlySet<string>
@@ -55,6 +56,7 @@ export interface HookScopeController {
 }
 
 export interface HookScopeOptions {
+  disabled?: boolean
   initialPersistentHookKeys?: readonly string[]
   onPersistentHookKeysChanged?: (keys: readonly string[]) => void
 }
@@ -144,6 +146,7 @@ export function createHookScope(options: HookScopeOptions = {}): HookScopeContro
   }
 
   return {
+    ...(options.disabled ? { disabled: true } : {}),
     activePluginIds,
     activeSkillNames,
     activeSkillPaths,
@@ -237,7 +240,7 @@ export function mergeHookScopeSnapshot(
  * parent or visible to sibling children.
  */
 export function createInheritedHookScope(parent: HookScopeController): HookScopeController {
-  const child = createHookScope()
+  const child = createHookScope({ disabled: parent.disabled })
   mergeHookScopeSnapshot(child, parent.snapshot())
   const binding = frozenDerivationBindings.get(parent)
   if (binding) frozenDerivationBindings.set(child, { ...binding })
@@ -332,6 +335,7 @@ export function filterScopedHooks(
   onSkipped?: ScopeSkipCallback,
   event?: HookEvent
 ): HookConfig[] {
+  if (scope?.disabled) return []
   const { baseHooks, pluginHooks, skillHooks } = candidates
   const binding = currentRuntimePluginSource()
   if (!scope) {
@@ -467,6 +471,7 @@ export function resolveEnabledHooksForRun(
   scope?: HookScopeController,
   onSkipped?: ScopeSkipCallback
 ): HookConfig[] {
+  if (scope?.disabled) return []
   return filterScopedHooks(
     {
       baseHooks: getEnabledHooks(workspacePath),

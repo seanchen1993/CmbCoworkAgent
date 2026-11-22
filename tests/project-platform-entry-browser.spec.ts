@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readdirSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium, type Browser, type Page } from "playwright"
 
 interface EntryFixtureWindow {
@@ -18,7 +18,7 @@ const output = resolve(root, "output/project-platform-20261012/browser-entry")
 mkdirSync(output, { recursive: true })
 const uiErrors: string[] = []
 async function fixture(browser: Browser, contents: string) {
-  const bundled = await build({
+  const bundled = await buildRendererBrowserFixture({
     write: false,
     bundle: true,
     platform: "browser",
@@ -60,7 +60,7 @@ async function fixture(browser: Browser, contents: string) {
     })
   )
   await page.goto("http://127.0.0.1:47778/")
-  await page.addScriptTag({ content: bundled.outputFiles[0].text })
+  await page.addScriptTag({ content: bundled })
   const assets = resolve(root, "out/renderer/assets")
   const css = existsSync(assets)
     ? readdirSync(assets).find((name) => /^index-.*\.css$/.test(name))

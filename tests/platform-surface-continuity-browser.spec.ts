@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
@@ -12,7 +12,7 @@ async function main() {
   const renderer = resolve("src/renderer/src")
   const output = resolve("output/platform-surface-continuity-browser")
   mkdirSync(output, { recursive: true })
-  const bundle = await build({
+  const bundle = await buildRendererBrowserFixture({
     stdin: {
       loader: "tsx",
       resolveDir: process.cwd(),
@@ -145,7 +145,7 @@ async function main() {
     )
     await page.goto("https://surface.test/")
     await page.addStyleTag({ content: css.build(candidates) })
-    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.addScriptTag({ content: bundle })
     await page.getByRole("button", { name: "确认并进入使用", exact: true }).click()
     const entrySection = page.locator('section[aria-label="插件界面入口"]')
     const find = entrySection.getByRole("button", { name: "查找插件界面", exact: true })

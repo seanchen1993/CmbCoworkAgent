@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
 import { chromium, type Locator } from "playwright"
@@ -9,7 +9,7 @@ import { chromium, type Locator } from "playwright"
 async function main() {
   const output = resolve("output/plugin-dependency-grouping-browser", `run-${Date.now()}`)
   mkdirSync(output, { recursive: true })
-  const script = await build({
+  const script = await buildRendererBrowserFixture({
     stdin: {
       resolveDir: process.cwd(),
       loader: "tsx",
@@ -132,7 +132,7 @@ async function main() {
     )
     await page.goto("http://localhost/grouping")
     await page.addStyleTag({ content: compiler.build(candidates) })
-    await page.addScriptTag({ content: script.outputFiles[0].text })
+    await page.addScriptTag({ content: script })
     await card("project-a").waitFor()
     assert.deepEqual(await rootIds(), ["project-a", "unrelated", "project-b"])
     assert.equal(await installed.locator("details[open]").count(), 0)

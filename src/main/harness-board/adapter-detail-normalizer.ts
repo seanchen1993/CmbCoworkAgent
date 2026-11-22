@@ -315,7 +315,7 @@ function normalizeProjectRun(
   defaultWorkflow: HarnessWorkflow
 ): HarnessFeatureSummary | null {
   if (!isObject(value)) return null
-  const slug = normalizeText(value.featureId) || normalizeText(value.featureName)
+  const slug = normalizeText(value.featureId).trim() || normalizeText(value.featureName).trim()
   if (!slug) return null
 
   const nodeIds = uniqueStringsInOrder(value.nodeIds)
@@ -487,16 +487,25 @@ export function normalizeHarnessAdapterDetailBatch(
   for (const input of projectInputs) {
     throwIfDetailCancelled(cancelFlag)
     const projectData = snapshot.projects[input.projectDir]
-    projects[input.projectDir] = isObject(projectData)
-      ? {
-          runs: normalizeProjectRuns(projectData, workflow),
-          watchRefs: normalizeWatchRefs(
-            input.project,
-            projectData.watchRefs,
-            input.fallbackWatchRefs
-          )
-        }
-      : null
+    if (!isObject(projectData)) {
+      projects[input.projectDir] = null
+      continue
+    }
+    const runs = normalizeProjectRuns(projectData, workflow)
+    const complete =
+      Array.isArray(projectData.runs) &&
+      runs.length === projectData.runs.length &&
+      !projectData.error &&
+      !projectData.partial &&
+      !projectData.truncated &&
+      !snapshot.error &&
+      !snapshot.partial &&
+      !snapshot.truncated
+    projects[input.projectDir] = {
+      runs,
+      watchRefs: normalizeWatchRefs(input.project, projectData.watchRefs, input.fallbackWatchRefs),
+      ...(!complete ? { incompleteRuns: true } : {})
+    }
   }
 
   const result = { workflow, projects }

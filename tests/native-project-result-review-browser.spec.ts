@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { build } from "esbuild"
+import { buildRendererBrowserFixture } from "./support/renderer-browser-fixture"
 import { chromium } from "playwright"
 
 async function main() {
@@ -15,7 +15,7 @@ async function main() {
     ProjectFunctionConsent: "import {useEffect} from 'react'; export function ProjectFunctionConsent({onReady}){useEffect(()=>onReady(true),[]);return null}",
     SparksDocumentationLink: "export function SparksDocumentationLink(){return null}"
   }
-  const result = await build({
+  const result = await buildRendererBrowserFixture({
     write: false, bundle: true, platform: "browser", format: "iife", jsx: "automatic",
     define: { "process.env.NODE_ENV": '"development"' },
     plugins: [{ name: "fixture", setup(builder) {
@@ -148,7 +148,7 @@ async function main() {
       contentType: "text/html", body: '<html><body><div id="root"></div></body></html>'
     }))
     await page.goto("http://127.0.0.1:47777/")
-    await page.addScriptTag({ content: result.outputFiles[0].text })
+    await page.addScriptTag({ content: result })
     const reset = async (mode: string) => {
       await page.evaluate(value =>
         (window as unknown as {fixture:{reset(mode:string):void}}).fixture.reset(value), mode)

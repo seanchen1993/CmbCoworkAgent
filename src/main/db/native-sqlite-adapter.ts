@@ -616,6 +616,12 @@ export class NativeSqliteAdapter {
     return this.native.isTransaction
   }
 
+  /** Main-process-only SQL callback, used by connection-local control-state observers. */
+  registerFunction(name: string, callback: () => string): void {
+    this.assertOpen()
+    this.native.function(name, callback)
+  }
+
   run(sql: string, bindings?: NativeSqliteBindings): this {
     this.assertOpen()
     if (bindings === undefined) {

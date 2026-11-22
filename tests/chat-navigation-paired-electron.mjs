@@ -282,6 +282,24 @@ async function runElectron(branch, directory, label, seed, run) {
     electron.process().stderr?.on("data", log)
     await electron.context().route(/^https?:/, (route) => {
       const url = new URL(route.request().url())
+      if (
+        url.protocol === "https:" &&
+        /^archguardservice\.paas\.[a-z0-9.-]+\.cn$/i.test(url.hostname) &&
+        url.pathname === "/cowork/login-info"
+      ) {
+        // The UAT shell refreshes its synthetic login during the first thread hydration.
+        return route.fulfill({
+          json: {
+            returnCode: "SUC0000",
+            body: { sapId: "localhost-fixture", userName: "Isolated performance fixture" }
+          },
+          headers: {
+            "access-control-allow-origin": "*",
+            "access-control-allow-headers": "ystrefreshtoken, ystcode",
+            "access-control-allow-methods": "GET, OPTIONS"
+          }
+        })
+      }
       blockedRequests.add(url.hostname + url.pathname)
       return route.abort()
     })

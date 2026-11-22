@@ -1,0 +1,453 @@
+{
+  "capturedAt": "2026-11-18T21:44:55+08:00",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "sourceCommit": "4c3feb12d67ee678647e695cee4109bd768825e3",
+  "merge": "2ca370e5e",
+  "firstParent": "534a80e49",
+  "environment": {
+    "platform": "macOS 15.4 arm64",
+    "node": "22.23.5",
+    "electron": "39.8.10",
+    "desktopModel": "localhost scripted model",
+    "providerCacheMetrics": null
+  },
+  "build": {
+    "builtAt": "2026-11-18T12:49:35.953Z",
+    "gitHeadDuringBuild": "fd5176760d86661a3cba5dcdf0e259168b470b08",
+    "dirtyAtBuild": true,
+    "recordedFilesMatchingCurrentSource": 22
+  },
+  "desktop": {
+    "suite": "tests/bots-local-work-app.spec.ts",
+    "options": {
+      "BOT_FEEDBACK_ONLY": "1"
+    },
+    "exit": 0,
+    "outcome": [
+      "PASS: silent dispatch emits one fallback; creation and same-work revision skip post-dispatch model calls; both files and results return"
+    ],
+    "sameMainBot": true,
+    "capture": "System hashes cover the serialized system-role messages. Tool hashes cover all serialized tool schemas. Counts use Unicode code points of system text. Tool choice is null when unset or omitted. No message bodies, credentials, or local paths are retained.",
+    "requests": [
+      {
+        "role": "introduction",
+        "systemHash": "322a4b50704f95983c4f12d1f8b3eac58e2a10b0d26469d397deb5dd786e9714",
+        "toolsHash": "62d14e9f1791884486a8163dcdbb46ce9e996d6cf2500f4cf70a38cfd27661fa",
+        "systemMessages": 1,
+        "systemCharacters": 16927,
+        "tools": 40,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": true,
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "user_request",
+        "systemHash": "322a4b50704f95983c4f12d1f8b3eac58e2a10b0d26469d397deb5dd786e9714",
+        "toolsHash": "62d14e9f1791884486a8163dcdbb46ce9e996d6cf2500f4cf70a38cfd27661fa",
+        "systemMessages": 1,
+        "systemCharacters": 16927,
+        "tools": 40,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": true,
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "user_request",
+        "systemHash": "322a4b50704f95983c4f12d1f8b3eac58e2a10b0d26469d397deb5dd786e9714",
+        "toolsHash": "62d14e9f1791884486a8163dcdbb46ce9e996d6cf2500f4cf70a38cfd27661fa",
+        "systemMessages": 1,
+        "systemCharacters": 16927,
+        "tools": 40,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": true,
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "executor",
+        "systemHash": "a8e8e37cfbccda12bf5ed51881d5fe0724165a9f155c5d474f0b823ce0444407",
+        "toolsHash": "281f44902b449b5738e6073dc9b7e0abd5647d4a39e0b6fcf07682fa267aeaca",
+        "systemMessages": 1,
+        "systemCharacters": 28005,
+        "tools": 25,
+        "toolChoice": null,
+        "communicationRole": false,
+        "clockInSystem": true,
+        "clockInEvent": false,
+        "hasBrowser": true,
+        "hasShell": true,
+        "commonNamesOldReportOnly": false,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "user_request",
+        "systemHash": "322a4b50704f95983c4f12d1f8b3eac58e2a10b0d26469d397deb5dd786e9714",
+        "toolsHash": "62d14e9f1791884486a8163dcdbb46ce9e996d6cf2500f4cf70a38cfd27661fa",
+        "systemMessages": 1,
+        "systemCharacters": 16927,
+        "tools": 40,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": true,
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "user_request",
+        "systemHash": "322a4b50704f95983c4f12d1f8b3eac58e2a10b0d26469d397deb5dd786e9714",
+        "toolsHash": "62d14e9f1791884486a8163dcdbb46ce9e996d6cf2500f4cf70a38cfd27661fa",
+        "systemMessages": 1,
+        "systemCharacters": 16927,
+        "tools": 40,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": true,
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "executor",
+        "systemHash": "a8e8e37cfbccda12bf5ed51881d5fe0724165a9f155c5d474f0b823ce0444407",
+        "toolsHash": "281f44902b449b5738e6073dc9b7e0abd5647d4a39e0b6fcf07682fa267aeaca",
+        "systemMessages": 1,
+        "systemCharacters": 28005,
+        "tools": 25,
+        "toolChoice": null,
+        "communicationRole": false,
+        "clockInSystem": true,
+        "clockInEvent": false,
+        "hasBrowser": true,
+        "hasShell": true,
+        "commonNamesOldReportOnly": false,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "executor",
+        "systemHash": "a8e8e37cfbccda12bf5ed51881d5fe0724165a9f155c5d474f0b823ce0444407",
+        "toolsHash": "281f44902b449b5738e6073dc9b7e0abd5647d4a39e0b6fcf07682fa267aeaca",
+        "systemMessages": 1,
+        "systemCharacters": 28005,
+        "tools": 25,
+        "toolChoice": null,
+        "communicationRole": false,
+        "clockInSystem": true,
+        "clockInEvent": false,
+        "hasBrowser": true,
+        "hasShell": true,
+        "commonNamesOldReportOnly": false,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "task_result_review",
+        "systemHash": "0837029d83bcd39f76a73423dfad85ab24d7d626654b80b315989e44344b3cdb",
+        "toolsHash": "7b659aac1759e882602663cd4bc8fe18c28426d0c77d899b431ac103517240ac",
+        "systemMessages": 1,
+        "systemCharacters": 12604,
+        "tools": 4,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": false,
+        "reviewTools": [
+          "bot_work_result_read",
+          "bot_work_result_select_files",
+          "bot_work_result_keep_service",
+          "bot_work_result_continue"
+        ],
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": true
+      },
+      {
+        "role": "user_request",
+        "systemHash": "322a4b50704f95983c4f12d1f8b3eac58e2a10b0d26469d397deb5dd786e9714",
+        "toolsHash": "62d14e9f1791884486a8163dcdbb46ce9e996d6cf2500f4cf70a38cfd27661fa",
+        "systemMessages": 1,
+        "systemCharacters": 16927,
+        "tools": 40,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": true,
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "executor",
+        "systemHash": "ea3487a20bc9983f0b8265cce941e95d8e5adec430fd60e535c8a634df429f6c",
+        "toolsHash": "281f44902b449b5738e6073dc9b7e0abd5647d4a39e0b6fcf07682fa267aeaca",
+        "systemMessages": 1,
+        "systemCharacters": 28008,
+        "tools": 25,
+        "toolChoice": null,
+        "communicationRole": false,
+        "clockInSystem": true,
+        "clockInEvent": false,
+        "hasBrowser": true,
+        "hasShell": true,
+        "commonNamesOldReportOnly": false,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "executor",
+        "systemHash": "ea3487a20bc9983f0b8265cce941e95d8e5adec430fd60e535c8a634df429f6c",
+        "toolsHash": "281f44902b449b5738e6073dc9b7e0abd5647d4a39e0b6fcf07682fa267aeaca",
+        "systemMessages": 1,
+        "systemCharacters": 28008,
+        "tools": 25,
+        "toolChoice": null,
+        "communicationRole": false,
+        "clockInSystem": true,
+        "clockInEvent": false,
+        "hasBrowser": true,
+        "hasShell": true,
+        "commonNamesOldReportOnly": false,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "executor",
+        "systemHash": "ea3487a20bc9983f0b8265cce941e95d8e5adec430fd60e535c8a634df429f6c",
+        "toolsHash": "281f44902b449b5738e6073dc9b7e0abd5647d4a39e0b6fcf07682fa267aeaca",
+        "systemMessages": 1,
+        "systemCharacters": 28008,
+        "tools": 25,
+        "toolChoice": null,
+        "communicationRole": false,
+        "clockInSystem": true,
+        "clockInEvent": false,
+        "hasBrowser": true,
+        "hasShell": true,
+        "commonNamesOldReportOnly": false,
+        "eventMentionsScopedContinuation": false
+      },
+      {
+        "role": "task_result_review",
+        "systemHash": "0837029d83bcd39f76a73423dfad85ab24d7d626654b80b315989e44344b3cdb",
+        "toolsHash": "7b659aac1759e882602663cd4bc8fe18c28426d0c77d899b431ac103517240ac",
+        "systemMessages": 1,
+        "systemCharacters": 12604,
+        "tools": 4,
+        "toolChoice": null,
+        "communicationRole": true,
+        "clockInSystem": false,
+        "clockInEvent": true,
+        "hasBrowser": false,
+        "hasShell": false,
+        "reviewTools": [
+          "bot_work_result_read",
+          "bot_work_result_select_files",
+          "bot_work_result_keep_service",
+          "bot_work_result_continue"
+        ],
+        "commonNamesOldReportOnly": true,
+        "eventMentionsScopedContinuation": true
+      }
+    ]
+  },
+  "workManagementToolBuilder": [
+    {
+      "role": "desktop",
+      "communication": true,
+      "botContextEqualToDesktop": true,
+      "workToolCount": 21,
+      "onlyOnDesktop": [],
+      "changedSharedToolDefinitions": [],
+      "timeAtTailChanged": true,
+      "hasDesktopLinkHint": true
+    },
+    {
+      "role": "personalIm",
+      "communication": true,
+      "botContextEqualToDesktop": false,
+      "workToolCount": 14,
+      "onlyOnDesktop": [
+        "bot_thread_list",
+        "bot_thread_read",
+        "bot_thread_rename",
+        "bot_thread_link",
+        "bot_work_unlink",
+        "bot_thread_delete",
+        "bot_work_delete"
+      ],
+      "changedSharedToolDefinitions": [
+        "bot_work_projects",
+        "bot_work_list"
+      ],
+      "timeAtTailChanged": true,
+      "hasDesktopLinkHint": false
+    },
+    {
+      "role": "pure",
+      "communication": true,
+      "botContextEqualToDesktop": true,
+      "workToolCount": 14,
+      "onlyOnDesktop": [
+        "bot_thread_list",
+        "bot_thread_read",
+        "bot_thread_rename",
+        "bot_thread_link",
+        "bot_work_unlink",
+        "bot_thread_delete",
+        "bot_work_delete"
+      ],
+      "changedSharedToolDefinitions": [
+        "bot_work_list"
+      ],
+      "timeAtTailChanged": true,
+      "hasDesktopLinkHint": true
+    },
+    {
+      "role": "review",
+      "communication": true,
+      "botContextEqualToDesktop": true,
+      "workToolCount": 4,
+      "onlyOnDesktop": [
+        "bot_feature_list",
+        "bot_feature_read",
+        "bot_feature_update",
+        "bot_thread_list",
+        "bot_thread_read",
+        "bot_thread_rename",
+        "bot_thread_link",
+        "bot_work_unlink",
+        "bot_thread_delete",
+        "bot_work_delete",
+        "bot_work_projects",
+        "bot_work_list",
+        "bot_work_search",
+        "bot_work_read",
+        "bot_skill_dispatch",
+        "bot_work_create",
+        "bot_work_send",
+        "bot_work_stop",
+        "bot_work_rename",
+        "bot_work_complete",
+        "bot_work_continue"
+      ],
+      "changedSharedToolDefinitions": [],
+      "timeAtTailChanged": true,
+      "hasDesktopLinkHint": true
+    }
+  ],
+  "defaultForegroundBudget": [
+    {
+      "name": "bot_thread_rename",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": false
+    },
+    {
+      "name": "bot_work_rename",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": false
+    },
+    {
+      "name": "bot_work_stop",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": false
+    },
+    {
+      "name": "bot_thread_delete",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": true
+    },
+    {
+      "name": "bot_work_delete",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": true
+    },
+    {
+      "name": "bot_work_list",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": true
+    },
+    {
+      "name": "bot_work_send",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": true
+    },
+    {
+      "name": "bot_list_groups",
+      "freshAllowed": true,
+      "afterFourReadsAllowed": true
+    }
+  ],
+  "initialVitestAttempt": {
+    "exit": 1,
+    "configLoader": "runner",
+    "testsStarted": false,
+    "error": "ReferenceError: __dirname is not defined"
+  },
+  "vitest": {
+    "exit": 0,
+    "options": [
+      "--no-cache",
+      "--maxWorkers",
+      "4",
+      "--reporter=json"
+    ],
+    "passed": 1007,
+    "failed": 0,
+    "skipped": 0,
+    "files": {
+      "src/main/agent/bot-communication-prompt.test.ts": 2,
+      "src/main/agent/bot-dispatch-feedback.test.ts": 8,
+      "src/main/agent/bot-skill-dispatch-model.test.ts": 1,
+      "src/main/agent/bot-skill-dispatch.test.ts": 7,
+      "src/main/agent/bot-turn-context.test.ts": 4,
+      "src/main/agent/foreground-work-budget.test.ts": 7,
+      "src/main/agent/standard-thread-turn.test.ts": 34,
+      "src/main/agent/system-prompt.test.ts": 4,
+      "src/main/bots/prompt.test.ts": 40,
+      "src/main/bots/runtime-adapter.test.ts": 470,
+      "src/main/bots/work-result-host.test.ts": 12,
+      "src/main/bots/work-result-publication.test.ts": 72,
+      "src/main/bots/work-result.test.ts": 197,
+      "src/main/bots/work-schedules.test.ts": 118,
+      "src/main/bots/work-tools.test.ts": 31
+    },
+    "rawSha256": "a3b606888e797083386f943eba1ef77da64448567661b660a6ffa34145f01817"
+  },
+  "finalSystemPromptHarness": {
+    "file": "tests/runtime-final-system-prompt.spec.ts",
+    "exit": 0,
+    "completions": [
+      "framework AGENTS final system prompt",
+      "plugin AGENTS final system prompt",
+      "Solo task-tool prompt exclusion",
+      "default completion and repetition contract",
+      "task subagent prompt mode matrix",
+      "concise output style contract",
+      "additional output style contracts",
+      "tool strategy final requests, tool schemas, and output-style matrix",
+      "managed foreground and ordinary background command routing",
+      "main-turn transport exclusion from default and explicit task subagent tools",
+      "Bot background handoff before spawn and shell-syntax boundaries",
+      "workflow tool strategy approval-mode matrix",
+      "restricted runtime prompts and tool descriptions remain standard",
+      "tool strategy per-role task subagent requests"
+    ]
+  }
+}

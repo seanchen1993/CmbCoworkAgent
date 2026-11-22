@@ -39,6 +39,8 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
+import { DEFAULT_STARTUP_VIEW, isStartupView, type StartupView } from "../shared/startup-view"
+import { isBotContextBudget, normalizeBotContextBudget } from "../shared/bots/context-budget"
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
@@ -390,16 +392,17 @@ function deleteIndexedCheckpointArtifacts(
   return hadIndexedArtifacts || removedLive
 }
 
+/** Resolve a history lookup without creating directories or registering a checkpoint. */
+export function peekThreadCheckpointPath(threadId: string): string {
+  assertSafeThreadCheckpointId(threadId)
+  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
+}
+
 export function getThreadCheckpointPath(threadId: string): string {
   assertSafeThreadCheckpointId(threadId)
   const directory = getThreadCheckpointDir()
   registerCheckpointThreadId(checkpointArtifactIndexForDirectory(directory), threadId)
   return threadCheckpointPath(directory, threadId)
-}
-
-/** Read-only discovery must not create directories or register a new durable artifact. */
-export function peekThreadCheckpointPath(threadId: string): string {
-  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
@@ -1628,7 +1631,7 @@ export interface CustomModelConfig {
   /** Assigned by the built-in registry; never accepted from custom model storage. */
   transport?: import("../shared/model-catalog").ModelTransport
   /** Bound to the built-in connection's URL and credential; not a user model override. */
-  idleModelEnvironment?: import("../shared/idle-model-service-window").IdleModelEnvironment
+  idleModelEnvironment?: import("../shared/model-catalog").IdleModelEnvironment
   notice?: string
   unavailableReason?: string
 }
@@ -2046,6 +2049,7 @@ export function setStoredDefaultModelId(modelId: string): void {
 }
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+const STARTUP_VIEW_KEY = "startupView"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
 const GIT_CHANGE_NOTICE_REVISION_KEY = "gitChangeNoticeRevision"
 const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
@@ -2140,9 +2144,39 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
   return normalized
 }
 
+export function getStartupView(): StartupView {
+  try {
+    const value = getSettingsStore().get(STARTUP_VIEW_KEY)
+    return isStartupView(value) ? value : DEFAULT_STARTUP_VIEW
+  } catch (error) {
+    console.warn("[Storage] Failed to load startup view:", error)
+    return DEFAULT_STARTUP_VIEW
+  }
+}
+
+export function setStartupView(view: unknown): StartupView {
+  if (!isStartupView(view)) throw new Error("Invalid startup view")
+  getSettingsStore().set(STARTUP_VIEW_KEY, view)
+  return view
+}
+
 const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"
 
 const AGENT_TOOL_STRATEGY_KEY = "agentToolStrategy"
+
+/** Hand-editable in the existing application-data settings.json; read for each Bot run. */
+export function getStoredBotContextBudget(): number {
+  try {
+    const value = getSettingsStore().get("botContextBudgetTokens")
+    if (value !== undefined && !isBotContextBudget(value)) {
+      console.warn("[Storage] Invalid botContextBudgetTokens in settings.json; using 500000.")
+    }
+    return normalizeBotContextBudget(value)
+  } catch {
+    console.warn("[Storage] Failed to read Bot context budget from settings.json; using 500000.")
+    return normalizeBotContextBudget(undefined)
+  }
+}
 
 export function getStoredAgentToolStrategy(): AgentToolStrategy {
   try {

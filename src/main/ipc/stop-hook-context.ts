@@ -1,4 +1,5 @@
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "../agent/agent-run-service"
 import { ToolCallCounter } from "../agent/skill-evolution/tool-call-counter"
 import type { StopHookContext } from "../agent/skill-lifecycle/completion-hooks"
 import { readPathsForToolCall } from "../agent/tool-call-read-paths"
@@ -40,10 +41,12 @@ function isCoordinatorInternalNotificationMessage(
   return additionalKwargs?.[COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY] === true
 }
 
-function getCoordinatorVisibleUserMessage(
+function getHookUserMessage(
   message: SerializedHookMessage | undefined
 ): string | undefined {
   const additionalKwargs = message?.additional_kwargs ?? message?.kwargs?.additional_kwargs
+  const prepared = additionalKwargs?.[BOT_PREPARED_USER_REQUEST_KEY]
+  if (typeof prepared === "string") return prepared.trim()
   const visible = additionalKwargs?.[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
   return typeof visible === "string" && visible.trim() ? visible : undefined
 }
@@ -150,13 +153,13 @@ export class StopHookContextCollector {
     const classId = Array.isArray(msgChunk.id) ? msgChunk.id : []
     const className = classId[classId.length - 1] || ""
     const role = stopContextRole(className, kwargs)
-    const visibleUserMessage = getCoordinatorVisibleUserMessage(msgChunk)
-    const text = visibleUserMessage ?? extractStopContextText(kwargs.content ?? msgChunk.content)
+    const hookUserMessage = getHookUserMessage(msgChunk)
+    const text = hookUserMessage ?? extractStopContextText(kwargs.content ?? msgChunk.content)
 
     if (role === "user") this.observeUserIdentity(kwargs.id)
     if (this.assistantText.processMessage(payload)) this.latestFinalAssistantResponse = undefined
 
-    if (role === "user" && text.trim() && !isStopHookRevisionPrompt(text)) {
+    if (role === "user" && (hookUserMessage === "" || (text.trim() && !isStopHookRevisionPrompt(text)))) {
       this.userMessage = text.trim()
     }
     if (role === "assistant") {
@@ -186,11 +189,11 @@ export class StopHookContextCollector {
       const classId = Array.isArray(msg?.id) ? msg.id : []
       const className = classId[classId.length - 1] || ""
       if (stopContextRole(className, kwargs) !== "user") continue
-      const visibleUserMessage = getCoordinatorVisibleUserMessage(msg)
+      const hookUserMessage = getHookUserMessage(msg)
       const text = (
-        visibleUserMessage ?? extractStopContextText(kwargs.content ?? msg.content)
+        hookUserMessage ?? extractStopContextText(kwargs.content ?? msg.content)
       ).trim()
-      if (text && !isStopHookRevisionPrompt(text)) {
+      if (hookUserMessage === "" || (text && !isStopHookRevisionPrompt(text))) {
         this.observeUserIdentity(kwargs.id)
         this.userMessage = text
         lastUserIndex = i

@@ -98,10 +98,16 @@ it.each(["initial", "failover", "handoff"])(
       creatorAccounting: undefined, threadId: "parent", workerInput, workspacePath: "/worker-worktree"
     })
     expect(workerAccounting).toBeUndefined()
+    const sessionAllowedSkillNames = Object.freeze(["project-knowledge"])
+    const parentOptions = { disableModsRuntime: true, capabilityService: {}, toolConcurrencyQueueId: "parent-queue" }
+    const sharedTaskContext = Object.freeze({ taskId: "parent-task" })
     const options = evaluate(calls[["initial", "failover", "handoff"].indexOf(stage)], {
       workerInput,
       workerHarnessContext: inherited,
       workspacePath: "/worker-worktree",
+      options: parentOptions,
+      sessionAllowedSkillNames,
+      sharedTaskContext,
       toolStrategy: "standard",
       workerActionStationarityTurnId: "turn",
       managedExecution: true,
@@ -134,6 +140,11 @@ it.each(["initial", "failover", "handoff"])(
     expect(options.disableSubagents).toBe(true)
     expect(options.autoBackgroundHandoff).toBe(false)
     expect(options.creatorAccounting).toBe(workerAccounting)
+    expect(options.allowedSkillNames).toBe(sessionAllowedSkillNames)
+    expect(options.disableModsRuntime).toBe(true)
+    expect(options.capabilityService).toBe(parentOptions.capabilityService)
+    expect(options.toolConcurrencyQueueId).toBe(parentOptions.toolConcurrencyQueueId)
+    expect(options.sharedTaskContext).toBe(sharedTaskContext)
     expect(options.filesystemAccess.workload).toBe(stage === "handoff" ? "read_only" : "verify")
   }
 )

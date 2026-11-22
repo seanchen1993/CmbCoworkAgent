@@ -1,4 +1,5 @@
 import { resolveAgentModeFromMetadata } from "../../agent-mode-metadata"
+import { isBotThread, isLocalWorkConversation } from "../../thread-search-scope"
 
 export function isOrdinaryFlowMetadata(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
@@ -36,6 +37,8 @@ export function isOrdinaryFlowMetadata(value: unknown): boolean {
     return false
   return (
     resolveAgentModeFromMetadata(metadata) === "normal" &&
+    !isBotThread({ metadata }) &&
+    !isLocalWorkConversation({ metadata }) &&
     ![
       "workflowRunId",
       "parentThreadId",
