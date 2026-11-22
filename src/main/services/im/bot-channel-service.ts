@@ -28,9 +28,11 @@ export type BotImGatewayClient = Pick<
   Partial<
     Pick<
       ImGatewayWsClient,
+      | "deliveryOrder"
       | "supportsMarkdownReplies"
       | "supportsBotCards"
       | "supportsBotFiles"
+      | "supportsParallelBotFiles"
       | "supportsBotFileReceipts"
       | "botFileCommand"
     >
@@ -45,14 +47,28 @@ export class BotImChannelService {
   private nextGroupSync = 0
   private readonly groupsToSync = new Set<string>()
   private syncing = false
-  private delivering = new Set<"text" | "file">()
+  private activeUploads = 0
   private checkingReceipts = false
   private epoch = 0
   private resolvedHost?: LocalBotHost
+  private unsubscribeOutbox?: () => void
+  private deliveryWake?: ReturnType<typeof setImmediate>
   private getHost(): LocalBotHost {
-    return (this.resolvedHost ??= this.resolveHost())
+    if (!this.resolvedHost) {
+      this.resolvedHost = this.resolveHost()
+      this.unsubscribeOutbox = this.resolvedHost.imChannel.onEnqueued(() => this.scheduleDelivery())
+    }
+    return this.resolvedHost
   }
-  private receiving: Promise<void> = Promise.resolve()
+  private scheduleDelivery(): void {
+    if (this.stopped || this.deliveryWake) return
+    // Coalesce a transaction's writes and claim only after its synchronous commit.
+    this.deliveryWake = setImmediate(() => {
+      this.deliveryWake = undefined
+      this.deliverPending()
+    })
+  }
+  private readonly receiving = new Map<string, Promise<void>>()
   constructor(
     private readonly client: BotImGatewayClient,
     private readonly realm: string,
@@ -71,6 +87,12 @@ export class BotImChannelService {
   }
   private readonly releaseTransport: () => void
 
+  headDeliveryOrder(conversationKey: string): number | null {
+    const principal = this.client.getStatus().principalId
+    if (this.stopped || !principal || !this.client.supportsBotChannel()) return null
+    return this.getHost().imChannel.headDeliveryOrder(botImScopeId(this.realm, principal, conversationKey))
+  }
+
   isRouteConfirmed(conversation: string, principal: string): boolean {
     return (
       !this.stopped &&
@@ -82,8 +104,7 @@ export class BotImChannelService {
       this.expirePermits()
       void this.pump()
       void this.syncBindings()
-      void this.deliver("text")
-      void this.deliver("file")
+      this.deliverPending()
       void this.checkFileReceipts()
     }, 1000)
     this.timer.unref?.()
@@ -312,10 +333,14 @@ export class BotImChannelService {
   }
   receive(payload: BotImEvent): Promise<void> {
     const epoch = this.epoch
-    const run = this.receiving.then(() =>
+    const key = payload.event.conversationKey
+    const previous = this.receiving.get(key) ?? Promise.resolve()
+    const run = previous.catch(() => {}).then(() =>
       epoch === this.epoch ? this.receiveNow(payload, epoch) : undefined
-    )
-    this.receiving = run.catch(() => {})
+    ).finally(() => {
+      if (this.receiving.get(key) === run) this.receiving.delete(key)
+    })
+    this.receiving.set(key, run)
     return run
   }
   private async receiveNow(payload: BotImEvent, epoch: number): Promise<void> {
@@ -574,15 +599,29 @@ export class BotImChannelService {
       this.pumping = false
     }
   }
-  private async deliver(lane: "text" | "file"): Promise<void> {
-    if (this.delivering.has(lane) || this.stopped || !this.client.supportsBotChannel()) return
-    this.delivering.add(lane)
-    const epoch = this.epoch
-    const host = this.getHost()
-    let reply: ReturnType<typeof host.beginImDelivery> = null
+  private deliverPending(): void {
+    if (this.stopped || !this.client.supportsBotChannel()) return
     try {
-      reply = host.beginImDelivery(lane)
-      if (!reply) return
+      const host = this.getHost()
+      // beginImDelivery atomically claims only the oldest active row of each conversation.
+      // Once claimed, the next iteration can launch a different recipient immediately.
+      while (true) {
+        // Older gateways retain a single partial upload per desktop socket.
+        const textOnly = this.activeUploads > 0 && !this.client.supportsParallelBotFiles?.()
+        const reply = host.beginImDelivery(textOnly ? "text" : undefined)
+        if (!reply) return
+        if (reply.fileDeliveryId) this.activeUploads++
+        void this.deliver(host, reply).catch(this.reportError)
+      }
+    } catch (error) {
+      this.reportError(error)
+    }
+  }
+
+  private async deliver(host: LocalBotHost, reply: NonNullable<ReturnType<LocalBotHost["beginImDelivery"]>>): Promise<void> {
+    const epoch = this.epoch
+    let release: (() => void) | undefined
+    try {
       console.info("[Bot IM] reply delivery started", {
         deliveryId: reply.id,
         fileCount: reply.files?.length ?? 0,
@@ -599,6 +638,11 @@ export class BotImChannelService {
       ) {
         host.settleImDelivery(reply.id, "blocked")
         return
+      }
+      if (this.client.deliveryOrder && reply.deliveryOrder !== undefined) {
+        release = await this.client.deliveryOrder.acquire(registered.binding.conversationKey, "bot", reply.deliveryOrder)
+        if (epoch !== this.epoch) throw new Error("IM 连接已变化")
+        if (!host.mayDeliverImReply(reply.id)) return
       }
       const workspace = reply.workId
         ? host.getWork(reply.botId, reply.workId).workspace?.path
@@ -642,7 +686,7 @@ export class BotImChannelService {
           registered.binding.conversationKey,
           file,
           () => {
-            if (this.stopped || epoch !== this.epoch || !host.mayDeliverImReply(reply!.id))
+            if (this.stopped || epoch !== this.epoch || !host.mayDeliverImReply(reply.id))
               throw new ImGatewayCommandError("附件发送已暂停，连接或绑定发生变化")
           },
           {
@@ -653,12 +697,12 @@ export class BotImChannelService {
                 : undefined,
             onReceipt: (result) => {
               if (result.version !== undefined)
-                host.updateImFileReceiptVersion(reply!.id, result.version)
+                host.updateImFileReceiptVersion(reply.id, result.version)
             },
             progress: (percent) => {
               if (percent === 100 || Date.now() - progressAt >= 250) {
                 progressAt = Date.now()
-                host.updateImFileProgress(reply!.id, percent)
+                host.updateImFileProgress(reply.id, percent)
               }
             }
           }
@@ -671,7 +715,7 @@ export class BotImChannelService {
       host.settleImDelivery(reply.id, "accepted")
     } catch (error) {
       if (
-        reply?.files?.length &&
+        reply.files?.length &&
         error instanceof ImGatewayCommandError &&
         error.permanent &&
         !this.stopped &&
@@ -688,22 +732,22 @@ export class BotImChannelService {
           for (const message of notice) await this.client.submitReply(message).catch(() => {})
         }
       }
-      if (reply)
-        host.settleImDelivery(
-          reply.id,
-          error instanceof ImGatewayCommandError && error.resultUnknown
-            ? "unknown"
-            : error instanceof ImGatewayCommandError && error.permanent
-              ? reply.fileDeliveryId
-                ? "failed"
-                : "blocked"
-              : "pending",
-          error instanceof ImGatewayCommandError ? error.reasonCode : undefined
-        )
+      host.settleImDelivery(
+        reply.id,
+        error instanceof ImGatewayCommandError && error.resultUnknown
+          ? "unknown"
+          : error instanceof ImGatewayCommandError && error.permanent
+            ? reply.fileDeliveryId
+              ? "failed"
+              : "blocked"
+            : "pending",
+        error instanceof ImGatewayCommandError ? error.reasonCode : undefined
+      )
       this.reportError(error)
     } finally {
-      this.delivering.delete(lane)
-      if (reply && !this.stopped) setImmediate(() => void this.deliver(lane))
+      release?.()
+      if (reply.fileDeliveryId) this.activeUploads--
+      this.scheduleDelivery()
     }
   }
   private async checkFileReceipts(): Promise<void> {
@@ -765,6 +809,8 @@ export class BotImChannelService {
   stop(): void {
     this.stopped = true
     this.releaseTransport()
+    this.unsubscribeOutbox?.()
+    if (this.deliveryWake) clearImmediate(this.deliveryWake)
     if (this.timer) clearInterval(this.timer)
     this.disconnected()
   }

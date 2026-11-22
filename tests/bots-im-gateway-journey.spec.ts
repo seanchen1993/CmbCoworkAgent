@@ -1,3 +1,4 @@
+import { ImDeliveryOrder } from "../src/main/services/im/delivery-order"
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises"
@@ -150,7 +151,8 @@ async function main() {
     2,
     (error) => errors.push(error)
   )
-  const client = new ImGatewayWsClient({
+  const client: ImGatewayWsClient = new ImGatewayWsClient({
+    deliveryOrder: new ImDeliveryOrder((source, key) => source === "bot" ? service.headDeliveryOrder(key) : null),
     url: () => base.replace("http:", "ws:") + "/ws/desktop",
     token: () => "local-test-identity-only",
     appVersion: "bot-im-journey",
@@ -181,6 +183,10 @@ async function main() {
     (error) => errors.push(error),
     () => false
   )
+  const waitForBotAcknowledgements = () => wait(() =>
+    host.imGateway.active().length === 0 &&
+    host.imGateway.pendingAcknowledgements("local-mysql-verification", client.getStatus().principalId!).length === 0,
+    "independent inbound execution and delivery acknowledgements")
   const bind = async (kind: "dm" | "group"): Promise<BotImBinding> => {
     const pending = await service.create(bot.id, kind, randomUUID())
     assert(pending.instruction)
@@ -358,6 +364,7 @@ async function main() {
       assert.equal((await mediaMessages()).length, beforeFailure)
       assert.equal(errors.length, 1)
       assert.equal((errors[0] as { reasonCode?: string }).reasonCode, "IMAGE_UPLOAD_FAILED")
+      await waitForBotAcknowledgements()
       const delivered = await mediaMessages()
       assert.equal(new Set(delivered.map((m) => m.requestId)).size, delivered.length)
       console.log(
@@ -593,6 +600,7 @@ async function main() {
       )
     }, "both robot identities reply independently")
     assert.deepEqual(legacy, ["original project work"])
+    await waitForBotAcknowledgements()
     await service.revoke(bot.id, dm.id, dm.version)
     const runCount = runs.length
     await post("dm", "revoked bot must prompt binding")

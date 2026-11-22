@@ -123,18 +123,35 @@ export class ImSessionLinkStore {
     )
   }
 
-  readyCards(updates = false): ImSessionSwitchCard[] {
-    return readAll(
-      this.persistence.getDatabase(),
-      updates
-        ? "SELECT * FROM im_session_switch_cards WHERE update_pending = 1 AND next_attempt_at <= ? ORDER BY created_at, delivery_id LIMIT 4"
-        : `SELECT card.* FROM im_session_switch_cards card
-         WHERE card.state = 'pending' AND card.next_attempt_at <= ?
-           AND EXISTS (SELECT 1 FROM im_reply_outbox reply WHERE reply.delivery_id = card.delivery_id)
-           AND NOT EXISTS (SELECT 1 FROM im_reply_outbox reply WHERE reply.delivery_id = card.delivery_id AND reply.state != 'sent')
-         ORDER BY card.created_at, card.delivery_id LIMIT 4`,
-      [this.persistence.now()]
-    )
+  readyCardConversations(): string[] {
+    return readAll<{ conversation_key: string }>(this.persistence.getDatabase(),
+      `SELECT DISTINCT link.conversation_key FROM im_session_switch_cards card
+       JOIN im_session_links link ON link.code=card.code
+       WHERE (card.state='pending' OR card.update_pending=1) AND card.next_attempt_at<=?`,
+      [this.persistence.now()]).map(row => row.conversation_key)
+  }
+
+  // The card's first attempt and retries occupy the position immediately after
+  // the last segment of its text, including when the two are created separately.
+  private readySwitchCards(key: string, limit: number): (ImSessionSwitchCard & { delivery_order: number })[] {
+    return readAll(this.persistence.getDatabase(),
+      `SELECT card.*, COALESCE(last.delivery_order,last.created_at*1024)+1 AS delivery_order
+       FROM im_session_links link JOIN im_session_switch_cards card ON card.code=link.code
+       JOIN im_reply_outbox last ON last.delivery_id=card.delivery_id AND last.segment_index=last.segment_count-1
+       WHERE link.conversation_key=? AND card.state='pending' AND last.state='sent'
+         AND NOT EXISTS (SELECT 1 FROM im_reply_outbox r WHERE r.delivery_id=card.delivery_id AND r.state!='sent')
+       ORDER BY delivery_order,card.rowid LIMIT ?`, [key, limit])
+  }
+
+  headCardOrder(key: string): number | null {
+    return this.readySwitchCards(key, 1)[0]?.delivery_order ?? null
+  }
+
+  readyCards(conversationKey: string, updates = false): (ImSessionSwitchCard & { delivery_order?: number })[] {
+    if (!updates) return this.readySwitchCards(conversationKey, 4)
+    return readAll(this.persistence.getDatabase(),
+      `SELECT card.* FROM im_session_switch_cards card JOIN im_session_links link ON link.code=card.code
+       WHERE link.conversation_key=? AND card.update_pending=1 ORDER BY card.rowid LIMIT 4`, [conversationKey])
   }
 
   async saveCard(card: ImSessionSwitchCard): Promise<void> {

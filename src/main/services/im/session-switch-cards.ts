@@ -27,7 +27,7 @@ interface Dependencies {
 /** Durable, App-only actions over the existing target_bind card protocol. */
 export class ImSessionSwitchCards {
   private readonly dependencies: Dependencies
-  private draining: Promise<void> | null = null
+  private readonly draining = new Map<string, Promise<void>>()
   private stopped = false
 
   constructor(dependencies: Partial<Dependencies> = {}) {
@@ -42,32 +42,45 @@ export class ImSessionSwitchCards {
     }
   }
 
-  schedule(): void {
-    void this.flush()
+  schedule(conversationKey?: string): void {
+    try {
+      this.startReady(conversationKey)
+    } catch (error) {
+      this.dependencies.warn("Session switch cards remain queued.", error)
+    }
   }
 
-  flush(): Promise<void> {
-    if (this.stopped) return Promise.resolve()
-    if (this.draining) return this.draining
-    const run = this.drain()
-      .catch((error) => this.dependencies.warn("Session switch cards remain queued.", error))
-      .finally(() => {
-        if (this.draining === run) this.draining = null
-      })
-    this.draining = run
-    return run
+  private startReady(conversationKey?: string): void {
+    if (this.stopped || !this.dependencies.gateway.isAuthenticated()) return
+    const keys = conversationKey ? [conversationKey] : this.dependencies.links.readyCardConversations()
+    for (const key of keys) {
+      if (this.draining.has(key)) continue
+      const run = this.drain(key)
+        .catch(error => this.dependencies.warn("Session switch cards remain queued.", error))
+        .finally(() => {
+          this.draining.delete(key)
+          this.dependencies.gateway.deliveryOrder?.changed(key)
+        })
+      this.draining.set(key, run)
+    }
+  }
+
+  async flush(conversationKey?: string): Promise<void> {
+    this.startReady(conversationKey)
+    if (conversationKey) await this.draining.get(conversationKey)
+    else await Promise.all(this.draining.values())
   }
 
   async stop(): Promise<void> {
     this.stopped = true
-    await this.draining
+    await Promise.all(this.draining.values())
   }
 
-  private async drain(): Promise<void> {
+  private async drain(key: string): Promise<void> {
     const { gateway, links, conversations } = this.dependencies
-    if (!gateway.isAuthenticated()) return
-    for (const card of links.readyCards(true)) {
+    for (const card of links.readyCards(key, true)) {
       if (this.stopped) return
+      if (card.next_attempt_at > this.dependencies.now()) break
       try {
         const link = links.get(card.code)
         if (!link) continue
@@ -92,10 +105,11 @@ export class ImSessionSwitchCards {
         await this.retry(card, true)
       }
     }
-    for (const candidate of links.readyCards()) {
+    for (const candidate of links.readyCards(key)) {
       if (this.stopped) return
       const card = links.getCard(candidate.delivery_id)!
       if (card.state !== "pending") continue
+      if (card.next_attempt_at > this.dependencies.now()) break
       try {
         const link = links.get(card.code)
         const conversation = link && conversations.getConversation(link.conversation_key)
@@ -125,7 +139,7 @@ export class ImSessionSwitchCards {
           })
         }
         assertRemoteImCardSendV1(payload)
-        const result = await gateway.sendCard(payload)
+        const result = await gateway.sendCard(payload, candidate.delivery_order)
         if (result.state === "accepted") this.reportDelivery("sent")
         // A fast click may already have consumed the action while its send ACK was in flight.
         const latest = links.getCard(card.delivery_id)!
@@ -133,7 +147,10 @@ export class ImSessionSwitchCards {
         if (result.state === "accepted") {
           latest.state = "sent"
           await links.saveCard(latest)
-        } else await this.retry(latest, false, result.resultUnknown ? "unknown" : "failed")
+        } else {
+          await this.retry(latest, false, result.resultUnknown ? "unknown" : "failed")
+          break
+        }
       } catch (error) {
         this.dependencies.warn(
           "Session switch card send deferred; session code remains usable.",
@@ -144,6 +161,7 @@ export class ImSessionSwitchCards {
           false,
           (error as { resultUnknown?: boolean } | null)?.resultUnknown ? "unknown" : "failed"
         )
+        break
       }
     }
   }
@@ -219,7 +237,7 @@ export class ImSessionSwitchCards {
     latest.attempts = 0
     latest.next_attempt_at = 0
     await links.saveCard(latest)
-    this.schedule()
+    this.schedule(link.conversation_key)
     return response
   }
 }

@@ -1,5 +1,6 @@
 /** Negotiated Bot-only attachment transport; no binary data in model messages. */
 export const BOT_IM_FILE_EXTENSION = "bot-files-v1"
+export const BOT_IM_FILE_PARALLEL_EXTENSION = "bot-files-parallel-v1"
 export const BOT_IM_FILE_RECEIPTS_EXTENSION = "bot-files-v2"
 export const BOT_IM_FILE_WINDOW = 4
 export const BOT_IM_FILE_MAX_BYTES = 50 * 1024 * 1024
