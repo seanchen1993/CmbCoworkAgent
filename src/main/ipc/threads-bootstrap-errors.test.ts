@@ -29,13 +29,17 @@ function bootstrapHandler(scope: object): (event: object, threadId: string) => P
 function fixture(sourceScope?: ThreadTranscriptSourceScope) {
   const cancelled = new Error("actual hydration read retired")
   const unavailable = new Error("worker unavailable")
-  const read = { assertCurrent: vi.fn(), dispose: vi.fn(), row: { metadata: "{}" },
+  const read = { assertCurrent: vi.fn(), dispose: vi.fn(), signal: new AbortController().signal,
+    row: { metadata: "{}" },
     incarnation: { token: "original-thread", legacyCreatedAt: 1 } }
   const runtimeTuple = { checkpoint: { id: "checkpoint", channel_values: { todos: [] } } }
   const stats = { checkpointId: "checkpoint", totalMessages: 1, migratedMessages: 0,
     batches: 0, payloadBytes: 0 }
   const canonical = vi.fn().mockResolvedValue({ runtimeTuple, stats })
+  const stock = vi.fn()
+  const finish = vi.fn()
   const legacy = vi.fn().mockResolvedValue({ runtimeTuple, stats })
+  const runtimeHead = vi.fn()
   const page = { messages: [{ id: "durable-message" }], total: 1, hasMore: false }
   const pages = vi.fn().mockResolvedValue(page)
   const warn = vi.fn()
@@ -49,16 +53,31 @@ function fixture(sourceScope?: ThreadTranscriptSourceScope) {
       throw Error(`Unexpected IPC fixture import: ${name}`)
     return { createLegacyTranscriptWriter: createWriter }
   })
+  let mutationLocked = false
   const handler = bootstrapHandler({
     require: loadWriter,
     captureThreadDisplayRead: () => read,
     captureThreadTranscriptSourceScope: captureScope,
+    captureStockLegacyTranscriptSource: stock,
+    canAuditStockLegacyTimes: () => false,
+    isThreadPublicationPending: () => false,
+    getThreadRowLifetime: () => 1,
+    AbortSignal,
+    beginCheckpointHydration: () => ({ controller: new AbortController(), workerKey: "test", finish }),
+    withThreadRunMutationLock: async (_threadId: string, operation: () => Promise<unknown>) => {
+      mutationLocked = true
+      try { return await operation() } finally { mutationLocked = false }
+    },
     verifyCanonicalThreadDisplayWitnesses: vi.fn(),
     assertValidCheckpointThreadId: (id: string) => id,
     nativeFunctionConversationWorkspace: () => "workspace",
     getModsManager: () => ({ workspaceKey: (workspace: string) => workspace }),
     readCanonicalCheckpointBootstrap: canonical,
     bootstrapLegacyCheckpointTranscriptInWorker: legacy,
+    readLatestCheckpointRuntimeTupleInWorker: (...args: unknown[]) => {
+      expect(mutationLocked).toBe(true)
+      return runtimeHead(...args)
+    },
     getThreadCheckpointPath: () => "checkpoint.sqlite",
     getDbPath: () => "messages.sqlite",
     readThreadMessagesPageInWorker: pages,
@@ -69,7 +88,7 @@ function fixture(sourceScope?: ThreadTranscriptSourceScope) {
   })
   const event = { sender: { id: 7 } }
   return { handler, event, read, canonical, legacy, pages, page, runtimeTuple, stats,
-    cancelled, unavailable, warn, captureScope, createWriter, loadWriter }
+    cancelled, unavailable, warn, captureScope, createWriter, loadWriter, stock, finish, runtimeHead }
 }
 
 describe("checkpoint bootstrap IPC outcome classification", () => {
@@ -131,6 +150,37 @@ describe("checkpoint bootstrap IPC outcome classification", () => {
     expect(f.createWriter).not.toHaveBeenCalled()
     expect(() => f.loadWriter("unrelated-service")).toThrow("Unexpected IPC fixture import")
     expect(f.read.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it("rechecks the ordinary source after paging and withholds retired history", async () => {
+    const f = fixture()
+    f.canonical.mockResolvedValue(null)
+    const stockSource = { authority: {}, assertCurrent: vi.fn(() => { throw f.cancelled }) }
+    f.stock.mockReturnValue(stockSource)
+    await expect(f.handler(f.event, "thread")).resolves.toBeNull()
+    expect(f.legacy.mock.calls[0][5]).toBeUndefined()
+    expect(f.legacy.mock.calls[0][7]).toBe(stockSource)
+    expect(f.pages).toHaveBeenCalledTimes(1)
+    expect(stockSource.assertCurrent).toHaveBeenCalledExactlyOnceWith()
+    expect(f.warn).not.toHaveBeenCalled()
+    expect(f.finish).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it("publishes the current bounded runtime head after restoring an older project reservation", async () => {
+    const f = fixture()
+    const stockSource = { authority: { projectReservation: { checkpointId: "checkpoint" } },
+      assertCurrent: vi.fn() }
+    const runtimeTuple = { checkpoint: { id: "newer", channel_values: { todos: [{ id: "current" }] } } }
+    f.canonical.mockResolvedValue(null)
+    f.stock.mockReturnValue(stockSource)
+    f.runtimeHead.mockResolvedValue(runtimeTuple)
+    await expect(f.handler(f.event, "thread")).resolves.toEqual({
+      checkpoint: runtimeTuple, page: f.page, migration: f.stats
+    })
+    expect(f.runtimeHead).toHaveBeenCalledExactlyOnceWith("checkpoint.sqlite", "thread", "", "test",
+      expect.any(AbortSignal))
+    expect(stockSource.assertCurrent).toHaveBeenCalledTimes(3)
+    expect(f.legacy.mock.invocationCallOrder[0]).toBeLessThan(f.runtimeHead.mock.invocationCallOrder[0])
   })
 
   it("restarts an unavailable page reader once without replaying bootstrap", async () => {

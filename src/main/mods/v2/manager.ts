@@ -155,6 +155,7 @@ import type {
 } from "../../../shared/mods/v2/ui"
 import {
   functionUiSite,
+  functionSiteProps,
   type FunctionUiSite,
   type FunctionSiteMountOutcome
 } from "../../../shared/mods/v2/sites"
@@ -188,6 +189,9 @@ import { FUNCTION_DISPLAY_PROTOCOL, HostDisplayRollout } from "./display-rollout
 import { functionMessageTextMode } from "../../../shared/mods/v2/host-message"
 import { FUNCTION_PASSIVE_DISPLAY_SITES } from "../../../shared/mods/v2/sites"
 import { FunctionDisplayRouting } from "./display-routing"
+import { staticUiRenderSiteHints } from "./static-ui-render-summary"
+import { captureFunctionMarkdownDisplay } from "./markdown-display-scope"
+import { WarmDisplayRuntime } from "./warm-display-runtime"
 import type { FunctionUserConfigView } from "../../../shared/mods/v2/user-config-view"
 import { onWorkspaceFilesChanged } from "../../services/workspace-change-events"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
@@ -620,6 +624,7 @@ export class FunctionModsManager {
   // Plugin catalog retirement is independent from native thread/policy authority.
   private readonly nativeEpochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
+  private readonly warmDisplayRuntime = new WarmDisplayRuntime<FunctionRuntimeClient>()
   private readonly platformHub: PlatformCapabilityHub
   private readonly runtimeReservations = new Map<string, RuntimeReservation>()
   private readonly pendingSessionBuilds = new Map<string, {
@@ -2335,7 +2340,24 @@ export class FunctionModsManager {
   }
 
   private runtimeOccupancy(): number {
-    return new Set([...this.sessions.keys(), ...this.runtimeReservations.keys()]).size
+    return new Set([...this.sessions.keys(), ...this.runtimeReservations.keys()]).size +
+      Number(this.warmDisplayRuntime.occupied)
+  }
+
+  private prepareDisplayRuntime(entry: SessionEntry, code: string): void {
+    if (!(entry.client instanceof FunctionRuntimeClient) || !captureFunctionMarkdownDisplay() ||
+      !staticUiRenderSiteHints(code).some(site => site === "AssistantMessage" || site === "UserMessage"))
+      return
+    const epoch = `${entry.epoch}:${this.pluginCatalogRevision}`
+    const prepared = this.warmDisplayRuntime.take(entry.workspace, epoch)
+    if (prepared) entry.client = prepared
+    // Leave room for one ordinary admission while the spare is idle.
+    if (this.warmDisplayRuntime.occupied || this.runtimeOccupancy() >= 5) return
+    const client = this.createClient()
+    if (!(client instanceof FunctionRuntimeClient)) return
+    // A source hint can only prepare an empty process. The original load admits the guest.
+    this.warmDisplayRuntime.start(entry.workspace, epoch, client,
+      () => client.prepareEmpty(), () => client.stopAndDrain())
   }
 
   private pureProbeBlocker(entry: SessionEntry): string | undefined {
@@ -2395,6 +2417,8 @@ export class FunctionModsManager {
   /** Admission owns the freed slot before any waiting request can observe it as available. */
   private async acquireRuntimeSlot(key: string): Promise<RuntimeReservation> {
     if (this.runtimeReservations.has(key)) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    if (!this.sessions.has(key) && this.warmDisplayRuntime.occupied && this.runtimeOccupancy() >= 6)
+      await this.warmDisplayRuntime.retireForAdmission()
     if (this.sessions.has(key) || this.runtimeOccupancy() < 6) return this.reserveRuntimeSlot(key)
     const pending = this.capacityReclaim
     if (pending) { await pending; return this.acquireRuntimeSlot(key) }
@@ -3176,6 +3200,24 @@ export class FunctionModsManager {
       : sources
   }
 
+  /** A synchronous proof for stored ordinary chat text while the source inventory is empty. */
+  canUseNativeChatHistory(workspace: string, threadId: string): boolean {
+    const key = JSON.stringify([workspace, threadId])
+    if (this.closed || this.runtimeReceiptError || currentRuntimePluginSource() ||
+      this.reloadControl.error(workspace, threadId) || this.sessions.has(key) ||
+      this.pendingSessionBuilds.has(key) || this.runtimeReservations.has(key) ||
+      this.development?.activeFor(workspace, threadId) ||
+      !this.host.plugins().every(plugin => plugin.enabled === false)) return false
+    this.assertEndAdmission(workspace, threadId)
+    const scope = this.host.captureDisplayScope?.(workspace, threadId)
+    const context = this.host.capabilityContext?.(workspace, threadId)
+    if (!scope || context?.usage !== "chat" || context.projectId) return false
+    const selection = this.clawSelection(workspace, threadId)
+    if (selection?.capabilities.length || selection?.builtins?.contextMeter) return false
+    scope.assertCurrent()
+    return true
+  }
+
   private hasSources(workspace: string, threadId: string, preferResident = false): boolean {
     if (this.runtimeReceiptError) return false
     if (this.development?.activeFor(workspace, threadId)) return true
@@ -3870,6 +3912,7 @@ export class FunctionModsManager {
   /** Known disabled or uninstalled sources cannot be new participants in a loaded session. */
   pluginsChanged(workspace: string, changedPluginIds?: readonly string[]): void {
     this.pluginCatalogRevision++
+    void this.warmDisplayRuntime.retire(workspace).catch(() => {})
     this.installedPluginInventory = undefined
     const plugins = this.host.plugins()
     const ids = new Set(changedPluginIds)
@@ -3904,6 +3947,7 @@ export class FunctionModsManager {
   }
 
   private invalidateCatalog(workspace: string): void {
+    void this.warmDisplayRuntime.retire(workspace).catch(() => {})
     this.displayProjection.invalidate(workspace)
     this.installedPluginInventory = undefined
     this.configurationSourceCache.clear()
@@ -3935,6 +3979,7 @@ export class FunctionModsManager {
 
   /** Stop every Function Mods session when the application-level switch changes. */
   invalidateAll(): void {
+    void this.warmDisplayRuntime.retire().catch(() => {})
     this.reloadControl.cancel()
     const workspaces = new Set([
       ...this.nativeEpochs.keys(),
@@ -4034,6 +4079,7 @@ export class FunctionModsManager {
   prepareEnd(reason: FunctionSessionEndReason, threadId?: string): FunctionSessionEndReceipt {
     const request: FunctionEndingRequest = { threadId, phase: "prepared" }
     this.endingRequests.add(request)
+    if (threadId === undefined) void this.warmDisplayRuntime.retire().catch(() => {})
     const endings: FunctionEndingEntry[] = []
     for (const [key, entry] of this.sessions) {
       if (threadId !== undefined && entry.threadId !== threadId) continue
@@ -4519,6 +4565,23 @@ export class FunctionModsManager {
     }
   }
 
+  private async waitForSharedSiteBuild<T>(work: Promise<T>, workspace: string, threadId: string,
+    owner: FunctionOperationScope | undefined, signal: AbortSignal | undefined): Promise<T> {
+    const operation = this.operations.getStore()
+    if (!signal || !owner || operation === owner || operation?.method !== "siteRead" ||
+      currentRuntimePluginSource()) return work
+    const context = this.host.capabilityContext?.(workspace, threadId)
+    if (context?.usage !== "chat" || context.projectId) return work
+    signal.throwIfAborted()
+    // This reader owns no mount or guest call yet. The construction owner
+    // still holds its operation, reservation and physical completion.
+    const cancelled = Promise.withResolvers<never>()
+    const abort = () => cancelled.reject(signal.reason)
+    signal.addEventListener("abort", abort, { once: true })
+    try { return await Promise.race([work, cancelled.promise]) }
+    finally { signal.removeEventListener("abort", abort) }
+  }
+
   private async session(workspace: string, threadId: string, registrationOnly = false,
     signal?: AbortSignal): Promise<SessionEntry> {
     if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE")
@@ -4539,7 +4602,10 @@ export class FunctionModsManager {
       if (currentRuntimePluginSource()?.mode === "host" && entry.runtimeSourceToken !== token)
         throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
       if (entry.probeRetirementError) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY", entry.probeRetirementError)
-      await entry.loading
+      if (!entry.loaded && !entry.hostSourceBound && !entry.runtimeSourceToken)
+        await this.waitForSharedSiteBuild(entry.loading, workspace, threadId, entry.constructionOwner, signal)
+      else await entry.loading
+      signal?.throwIfAborted()
       if (entry.session!.plugins.every((plugin) => !plugin.guest.stats.disposed)) {
         if (!registrationOnly) {
           try { await this.startEntry(entry) }
@@ -4573,16 +4639,21 @@ export class FunctionModsManager {
     if (pending && pending.epoch !== this.epoch(workspace)) {
       // Catalog changes cancel the previous generation. New callers await its physical
       // cleanup, but must never adopt its rejected initialization or replay its effects.
-      await pending.promise.catch(() => {})
+      await this.waitForSharedSiteBuild(pending.promise.catch(() => {}), workspace, threadId,
+        pending.owner, signal)
+      signal?.throwIfAborted()
       return this.session(workspace, threadId, registrationOnly, signal)
     }
+    const ownsBuild = !pending
     if (!pending) {
       pending = { epoch: this.epoch(workspace), owner: this.operations.getStore(),
         promise: this.buildEntry(workspace, threadId, registrationOnly) }
       this.pendingSessionBuilds.set(key, pending)
     }
     try {
-      const created = await pending.promise
+      const created = ownsBuild ? await pending.promise
+        : await this.waitForSharedSiteBuild(pending.promise, workspace, threadId, pending.owner, signal)
+      signal?.throwIfAborted()
       if (currentRuntimePluginSource()?.mode === "host" &&
         created.runtimeSourceToken !== captureRuntimePluginSourceToken())
         throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
@@ -4590,7 +4661,7 @@ export class FunctionModsManager {
       if (!registrationOnly) await this.startEntry(created)
       return created
     } finally {
-      if (this.pendingSessionBuilds.get(key) === pending) {
+      if (ownsBuild && this.pendingSessionBuilds.get(key) === pending) {
         this.pendingSessionBuilds.delete(key)
         this.reclaimIdleUiResources()
         this.publishConfigurationIdle(threadId)
@@ -4712,8 +4783,10 @@ export class FunctionModsManager {
     if (!privateBuild && !reservation) {
       admission = await this.acquireRuntimeSlot(key)
       reservation = admission
-    } else if (!previous && !reservation && this.runtimeOccupancy() >= 6)
-      throw new ModFunctionError("MODS_SESSION_CAPACITY")
+    } else if (!previous && !reservation && this.runtimeOccupancy() >= 6) {
+      if (this.warmDisplayRuntime.occupied) await this.warmDisplayRuntime.retireForAdmission()
+      if (this.runtimeOccupancy() >= 6) throw new ModFunctionError("MODS_SESSION_CAPACITY")
+    }
     let admitted: SessionEntry | undefined
     try {
       this.assertEndAdmission(workspace, threadId)
@@ -4878,9 +4951,18 @@ export class FunctionModsManager {
             if (!source.enabled) continue
             current.sourceDirectories.add(source.path)
             const original = prepared?.sourcePlugins.get(source.id)
+            let provedSource: CompiledFunctionPlugin | undefined
+            if (!original && !runtimeSource && !privateBuild && !localDevelopment &&
+              usage.usage === "chat" && !usage.projectId) {
+              try {
+                provedSource = this.statusSourceCache.peek(source.path)
+              } catch {
+                // An expired source proof falls back to the original fresh compilation.
+              }
+            }
             const compiled = original ? original.compiled : runtimeSource
               ? await this.configurationSourceCache.read(source.path)
-              : await compileFunctionPlugin(source.path)
+              : provedSource ?? await compileFunctionPlugin(source.path)
             // The reviewed trial replaces this package only in its own conversation.
             // It receives its own development authority, never the installed package's grant.
             if (developmentCompiled?.name === compiled.name) continue
@@ -4916,6 +4998,9 @@ export class FunctionModsManager {
               ? { options: structuredClone(original.configuredOptions!), revision: original.configuredRevision ?? 0 }
               : this.configuredOptions(workspace, compiled, projection.options)
             assertRuntimeSourceContent?.()
+            if (!current.snapshots.size && !privateBuild && !runtimeSource && !localDevelopment &&
+              !registrationOnly && usage.usage === "chat" && !usage.projectId)
+              this.prepareDisplayRuntime(current, projection.code)
             const guest = trackFunctionGuest(
               await current.client.load(projection.code, configured.options).then(guest =>
                 actionSource ? actionOnlyFunctionGuest(guest) : guest),
@@ -7758,10 +7843,25 @@ export class FunctionModsManager {
     }
     const readOwned = async ():
       Promise<import("../../../shared/mods/v2/sites").FunctionSiteReadOutcome> => {
-      const mountSignal = projectionEnabled &&
-        (component === "UserMessage" || component === "AssistantMessage") ? signal : undefined
-      const outcome = await this.siteMountOutcome(workspace, threadId, component, messageId,
-        expectedRequestId, ...(mountSignal ? [mountSignal] as const : []))
+      const qualifyNativeChrome = projectionEnabled &&
+        ["SessionMode", "PromptHint", "ChatHeader", "AbovePrompt"].includes(component)
+      let cancellableChrome = false
+      if (qualifyNativeChrome && signal && !currentRuntimePluginSource()) {
+        try {
+          const context = this.host.capabilityContext?.(workspace, threadId)
+          cancellableChrome = context?.usage === "chat" && !context.projectId
+        } catch {
+          // An unavailable classification keeps the existing independently guarded mount path.
+        }
+      }
+      const mountSignal = projectionEnabled && (cancellableChrome ||
+        component === "UserMessage" || component === "AssistantMessage") ? signal : undefined
+      const outcome = qualifyNativeChrome
+        ? await this.siteMountOutcome(
+            workspace, threadId, component, messageId, expectedRequestId, mountSignal, props
+          )
+        : await this.siteMountOutcome(workspace, threadId, component, messageId,
+            expectedRequestId, ...(mountSignal ? [mountSignal] as const : []))
       if (outcome.state !== "mounted") return outcome
       try {
         signal?.throwIfAborted()
@@ -7905,8 +8005,10 @@ export class FunctionModsManager {
       if (entry?.loaded && enabled && !stopped && !emptyHost) {
         entry.assertRuntimeSourceContent?.()
         for (const snapshot of entry.snapshots.values()) {
-          this.assertSnapshotContent(snapshot)
-          // Retained snapshots already run this exact synchronous content check above.
+          // Installed source membership is already fenced on both sides of this synchronous
+          // content check. Retained source callbacks keep their separate authority check.
+          if (snapshot.assertRuntimeSource || snapshot.assertRuntimeSourceContent)
+            this.assertSnapshotContent(snapshot)
           if (!snapshot.assertRuntimeSourceContent)
             assertConfigurationSourcesCurrent(snapshot.sourcePath ?? snapshot.compiled.root, snapshot.compiled)
         }
@@ -7927,11 +8029,12 @@ export class FunctionModsManager {
     component: FunctionUiSite,
     messageId?: string,
     expectedRequestId?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    nativeChromeProps?: ModObject
   ): Promise<FunctionSiteMountOutcome> {
-    if (signal) {
+    if (signal || nativeChromeProps) {
       return this.mountSite(workspace, threadId, component, messageId, expectedRequestId,
-        false, undefined, signal)
+        false, undefined, signal, nativeChromeProps)
     }
     return this.mountSite(workspace, threadId, component, messageId, expectedRequestId)
   }
@@ -7944,7 +8047,8 @@ export class FunctionModsManager {
     expectedRequestId?: string,
     legacyProtection = false,
     retained?: SessionEntry,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    nativeChromeProps?: ModObject
   ): Promise<FunctionSiteMountOutcome> {
     if (this.closed) return { state: "retired" }
     const key = JSON.stringify([workspace, threadId])
@@ -8063,8 +8167,9 @@ export class FunctionModsManager {
       }
       if (!hasFunctions) {
         if (!protects) return { state: "inactive", reason: "no-protection-or-functions" }
+        const chromeSignal = nativeChromeProps ? signal : undefined
         const owner = await this.hostOnlySites.mount(workspace, threadId, component,
-          messageId, expectedRequestId)
+          messageId, expectedRequestId, ...(chromeSignal ? [chromeSignal] as const : []))
         allocatedOwner = owner
         assertCurrent()
         delivered = true
@@ -8075,6 +8180,21 @@ export class FunctionModsManager {
       signal?.throwIfAborted()
       if (this.sessions.get(key) !== entry || entry.session!.plugins.length === 0)
         return { state: "retired" }
+      // Cold UI reads can arrive before registration completes. Reuse the live routing proof
+      // now that the original startup is complete, before allocating a drawing for stock chrome.
+      if (nativeChromeProps && protection === false && !retained && !entry.runtimeSourceToken &&
+        messageId === undefined && expectedRequestId === undefined) {
+        const context = this.host.capabilityContext?.(workspace, threadId)
+        if (context?.usage === "chat" && !context.projectId) {
+          const admission = this.captureNativeDisplayAdmission(workspace, threadId, component)
+          if (admission?.entry === entry && admission.native) {
+            functionSiteProps(component, nativeChromeProps)
+            admission.assertCurrent()
+            assertCurrent()
+            return { state: "inactive", reason: "no-protection-or-functions" }
+          }
+        }
+      }
       const owner = await entry.session!.sites.mount(component, messageId, expectedRequestId,
         ...(signal ? [signal] as const : []))
       allocatedOwner = owner
@@ -8546,6 +8666,7 @@ export class FunctionModsManager {
     for (const quota of this.uiResolveQuotas.values()) quota.close()
     this.uiResolveQuotas.clear()
     this.closed = true
+    void this.warmDisplayRuntime.retire().catch(() => {})
     for (const notifier of this.desktopNotifiers.values()) notifier.close()
     this.desktopNotifiers.clear()
     this.displayProjection.close()

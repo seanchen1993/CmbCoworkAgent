@@ -381,7 +381,7 @@ describe("desktop function panes through the production session", () => {
       await new Promise((resolve) => setTimeout(resolve, 100))
     }
     expect(generations.size).toBe(260)
-    expect(releases).toHaveBeenCalledTimes(260)
+    expect(releases.mock.calls).toEqual([...generations].slice(0, -1).map(id => [id]))
     expect(guest.stats).toMatchObject({ frames: 0, replies: 0, disposed: false })
   }, 45000)
 })
@@ -403,9 +403,42 @@ it("keeps explicit pane open identity across redraws but replaces it on reopen",
   expect(reopened.openRequestId).not.toBe(openedAgain.openRequestId)
 })
 
+it("skips undrawn generations and retires each drawing across same-ID reopen and close", async () => {
+  const { session, guest } = await fixture()
+  const releases = vi.spyOn(guest, "releaseUi")
+  session.panes.open("function-commands", { id: "undrawn", title: "Undrawn" })
+  await session.panes.closePane("function-commands", "undrawn")
+  const [first] = await session.panes.snapshot()
+  expect(releases).not.toHaveBeenCalled()
+
+  session.panes.open(first.plugin, { id: first.id, title: first.title })
+  const [replacement] = await session.panes.snapshot()
+  expect(releases.mock.calls).toEqual([[first.generation]])
+  await session.panes.closePane(replacement.plugin, replacement.id)
+  await session.panes.closePane(replacement.plugin, replacement.id)
+  expect(releases.mock.calls).toEqual([[first.generation], [replacement.generation]])
+})
+
+it("protects a transcript site's first drawing and releases its real generation on unmount", async () => {
+  const { session, guest } = await fixture(`
+    on("ui.render", {component:"AssistantMessage"}, async ($, e, next) => next(e));
+  `, async value => JSON.parse(JSON.stringify(value).replaceAll("private transcript", "protected transcript")))
+  const releases = vi.spyOn(guest, "releaseUi")
+  const owner = await session.sites.mount("AssistantMessage")
+  const first = await session.sites.render(owner, { text: "private transcript", isFirstOfReply: true })
+  expect(JSON.stringify(first.nativeContent)).toContain("protected transcript")
+  expect(JSON.stringify(first)).not.toContain("private transcript")
+  expect(releases).not.toHaveBeenCalled()
+
+  await session.sites.unmount(owner)
+  await session.sites.unmount(owner)
+  expect(releases.mock.calls).toEqual([[first.generation]])
+})
+
 it.each(["replace", "delete"])("rejects publication attempting to %s native pane open identity", async mode => {
-  const { session } = await fixture("", async value => {
-    if (!Array.isArray(value)) return value
+  let reject = true
+  const { session, guest } = await fixture("", async value => {
+    if (!reject || !Array.isArray(value)) return value
     return value.map(row => {
       if (!row || typeof row !== "object" || Array.isArray(row) || !("openRequestId" in row)) return row
       const copy = { ...row }
@@ -414,7 +447,19 @@ it.each(["replace", "delete"])("rejects publication attempting to %s native pane
       return copy
     })
   })
+  const invokes = vi.spyOn(guest, "invoke")
+  const releases = vi.spyOn(guest, "releaseUi")
   await expect(session.panes.snapshot()).rejects.toThrow(
     mode === "delete" ? "MODS_JSON_TYPE" : "MODS_UI_PUBLICATION"
   )
+  const failed = invokes.mock.calls.find((call) => call[3].event === "ui.render")?.[3].uiGeneration
+  expect(failed).toBeDefined()
+  expect(releases.mock.calls).toEqual([[failed]])
+
+  reject = false
+  const [retried] = await session.panes.snapshot()
+  expect(retried.generation).not.toBe(failed)
+  expect(releases.mock.calls).toEqual([[failed]])
+  await session.panes.closePane(retried.plugin, retried.id)
+  expect(releases.mock.calls).toEqual([[failed], [retried.generation]])
 })

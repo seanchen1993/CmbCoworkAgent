@@ -10,6 +10,7 @@ import { captureThreadIncarnation, matchesThreadIncarnation, type ThreadIncarnat
 import type { FunctionConversationRef, FunctionConversationRow } from "./function-conversation-store"
 import { FUNCTION_CONVERSATION_PROJECTION_COLUMNS, functionConversationProjectionIncarnation,
   functionConversationProjectionStamp, validateFunctionConversationRawProjection,
+  FUNCTION_CONVERSATION_PROJECTION_SCHEMA_QUERY, assertFunctionConversationProjectionSchema,
   type FunctionConversationProjectionColumns } from "./function-conversation-projection-receipt"
 import type { NativeSqliteAdapter, NativeSqliteReadOne, NativeSqliteValue }
   from "./native-sqlite-adapter"
@@ -64,15 +65,9 @@ const RECEIPT_FIELDS = Object.freeze(["thread_id", "incarnation", "uuid", "targe
   "projection_digest"])
 const KEEPER_FIELDS = Object.freeze(["conversation_id", "uuid", "sequence", "receipt_id",
   "branch_id", "input_digest", "door", "payload_json", "payload_digest", "created_at", "bytes"])
-const COLUMN_NAMES = FUNCTION_CONVERSATION_PROJECTION_COLUMNS.map(name => `'${name}'`).join(",")
-// Enumerate the schema once per fresh SQL statement. Both aggregates describe the same
-// current schema; this is query composition, never a cached schema version or permission.
-const SCHEMA_COLUMNS_QUERY = `SELECT COUNT(*) AS schema_count,
-  COALESCE(SUM(name NOT IN (${COLUMN_NAMES})),0) AS schema_extra
-  FROM pragma_table_info('thread_messages')`
 const SCHEMA_QUERY = `SELECT
   EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='${RECEIPTS}') AS receipt_schema,
-  schema.schema_count,schema.schema_extra FROM (${SCHEMA_COLUMNS_QUERY}) schema`
+  schema.* FROM (${FUNCTION_CONVERSATION_PROJECTION_SCHEMA_QUERY}) schema`
 const CONVERSATION = "CASE WHEN json_valid(r.target_json) THEN json_extract(r.target_json,'$.conversationId') END"
 const BRANCH = "CASE WHEN json_valid(r.target_json) THEN json_extract(r.target_json,'$.branchId') END"
 const READ_QUERY = `SELECT
@@ -91,9 +86,9 @@ const READ_QUERY = `SELECT
     AND f.message_id=w.uuid) AS fragments,
   EXISTS(SELECT 1 FROM thread_message_fragment_states f WHERE f.thread_id=w.thread_id
     AND f.message_id=w.uuid) AS fragment_states,
-  schema.schema_count,schema.schema_extra
+  schema.*
   FROM (SELECT ? AS thread_id,? AS incarnation,? AS uuid) w
-  CROSS JOIN (${SCHEMA_COLUMNS_QUERY}) schema
+  CROSS JOIN (${FUNCTION_CONVERSATION_PROJECTION_SCHEMA_QUERY}) schema
   LEFT JOIN threads pt ON pt.thread_id=w.thread_id
   LEFT JOIN ${RECEIPTS} r ON r.thread_id=w.thread_id AND r.incarnation=w.incarnation AND r.uuid=w.uuid
   LEFT JOIN thread_messages p ON p.thread_id=w.thread_id AND p.message_id=w.uuid
@@ -156,8 +151,7 @@ function readOne(db: NativeSqliteAdapter, sql: string, bindings: readonly string
 }
 function assertProjectionSchema(schema: SqlRow | undefined): void {
   if (!schema?.receipt_schema) fail("MODS_CONVERSATION_MIGRATION_REQUIRED")
-  if (schema.schema_count !== FUNCTION_CONVERSATION_PROJECTION_COLUMNS.length || schema.schema_extra !== 0)
-    fail("MODS_CONVERSATION_PROJECTION_SCHEMA")
+  assertFunctionConversationProjectionSchema(schema)
 }
 function fresh(db: NativeSqliteAdapter, bindings: readonly string[]): SqlRow {
   let row: SqlRow | undefined
@@ -338,8 +332,7 @@ function validate(raw: SqlRow, bindings: readonly string[], incarnation: ThreadI
   const [threadId, key, uuid] = bindings
   thread(raw, "physical", incarnation)
   if (raw.receipt_uuid === null) fail("MODS_CONVERSATION_MIGRATION_REQUIRED")
-  if (raw.schema_count !== FUNCTION_CONVERSATION_PROJECTION_COLUMNS.length || raw.schema_extra !== 0)
-    fail("MODS_CONVERSATION_PROJECTION_SCHEMA")
+  assertFunctionConversationProjectionSchema(raw)
   const selected = target(raw), row = canonical(raw, selected, uuid)
   const projected: SqlRow = Object.fromEntries(FUNCTION_CONVERSATION_PROJECTION_COLUMNS.map(name =>
     [name, raw[`projection_${name}`]]))

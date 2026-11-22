@@ -8,7 +8,7 @@ import {
   type VariableDeclaration
 } from "acorn"
 import type { FunctionRegistration } from "../../../shared/mods/v2/contracts"
-import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/site-vocabulary"
 import { analyzeUiCallback, type StaticNamedStateRead } from "./ui-render-purity"
 
 export type StaticNamedStateReads = Readonly<Record<string, readonly StaticNamedStateRead[]>>
@@ -71,6 +71,26 @@ var __async = (__this, __arguments, generator) => {
   });
 };`
 
+const LOWERED_SPREAD = `
+var __defProps = Object.defineProperties;
+var __getOwnPropDescs = Object.getOwnPropertyDescriptors;
+var __getOwnPropSymbols = Object.getOwnPropertySymbols;
+var __propIsEnum = Object.prototype.propertyIsEnumerable;
+var __defNormalProp = (obj, key, value) =>
+  key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __spreadValues = (a, b) => {
+  for (var prop in b || (b = {}))
+    if (__hasOwnProp.call(b, prop))
+      __defNormalProp(a, prop, b[prop]);
+  if (__getOwnPropSymbols)
+    for (var prop of __getOwnPropSymbols(b)) {
+      if (__propIsEnum.call(b, prop))
+        __defNormalProp(a, prop, b[prop]);
+    }
+  return a;
+};
+var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));`
+
 function shape(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(shape)
   if (!value || typeof value !== "object") return value
@@ -82,10 +102,19 @@ function shape(value: unknown): unknown {
 }
 
 const signature = (node: AnyNode): string => JSON.stringify(shape(node))
-const helperNodes = parse(SCAFFOLD, { ecmaVersion: "latest" }).body as VariableDeclaration[]
-const helpers = new Map(
-  helperNodes.map((node) => [named(node.declarations[0].id), signature(node)])
-)
+function helperSignatures(code: string): Map<string, string> {
+  const nodes = parse(code, { ecmaVersion: "latest" }).body as VariableDeclaration[]
+  return new Map(nodes.map((node) => [named(node.declarations[0].id), signature(node)]))
+}
+
+const helpers = helperSignatures(SCAFFOLD)
+let hintHelpers: ReadonlyMap<string, string> | undefined
+const spreadDependencies = new Map([
+  ["__spreadValues", [
+    "__defProp", "__hasOwnProp", "__defNormalProp", "__getOwnPropSymbols", "__propIsEnum"
+  ]],
+  ["__spreadProps", ["__defProps", "__getOwnPropDescs"]]
+])
 
 function identifier(node: AnyNode | null | undefined, name?: string): node is Identifier {
   return node?.type === "Identifier" && (name === undefined || node.name === name)
@@ -102,12 +131,22 @@ function scalar(
   )
 }
 
-function containsIdentifier(value: unknown, names: ReadonlySet<string>): boolean {
-  if (Array.isArray(value)) return value.some((item) => containsIdentifier(item, names))
+function containsIdentifier(
+  value: unknown,
+  names: Pick<ReadonlySet<string>, "has">,
+  allowedCallees?: ReadonlySet<string>
+): boolean {
+  const contains = (item: unknown) => containsIdentifier(item, names, allowedCallees)
+  if (Array.isArray(value)) return value.some(contains)
   if (!value || typeof value !== "object") return false
   const node = value as AnyNode
   if (node.type === "Identifier" && names.has(node.name)) return true
-  return Object.values(value).some((item) => containsIdentifier(item, names))
+  if (
+    node.type === "CallExpression" && !node.optional && node.arguments.length === 2 &&
+    identifier(node.callee) && allowedCallees?.has(node.callee.name)
+  )
+    return node.arguments.some(contains)
+  return Object.values(value).some(contains)
 }
 
 const matcherEscapeNames = new Set([
@@ -161,8 +200,9 @@ function named(node: AnyNode | null | undefined): string {
   return node!.name
 }
 
-function literalMatcher(node: AnyNode): string | undefined {
+function literalMatcher(node: AnyNode, siteHint: boolean): string | undefined {
   if (node.type !== "ObjectExpression") return fail("dynamic-matcher")
+  if (siteHint && node.properties.length !== 1) return fail("conditional-site-hint")
   const keys = new Set<string>()
   let component: string | undefined
   for (const property of node.properties as AnyNode[]) {
@@ -352,7 +392,8 @@ function directHookMetadata(
 function aggregateSummary(
   code: string,
   body: AnyNode[],
-  globalName: string
+  globalName: string,
+  siteHint: boolean
 ): StaticUiRenderSummary {
   if (globalName !== "__cmbFunctionMod" || body.length < 2 || body.length > 129)
     return fail("aggregate-shape")
@@ -365,7 +406,7 @@ function aggregateSummary(
     if (!/^__cmbComponent\d+$/.test(name) || names.includes(name))
       return fail("aggregate-module-name")
     names.push(name)
-    const part = analyzeStaticUiRenderSummary(code.slice(node.start, node.end), name)
+    const part = analyze(code.slice(node.start, node.end), name, siteHint)
     if (part.kind !== "static") return fail("aggregate-module-unknown")
     parts.push(part)
   }
@@ -492,6 +533,18 @@ export function analyzeStaticUiRenderSummary(
   code: string,
   globalName = "__cmbFunctionMod"
 ): StaticUiRenderSummary {
+  return analyze(code, globalName, false)
+}
+
+/** Advisory site names for allocating an empty host. They carry no registration authority. */
+export function staticUiRenderSiteHints(code: string): readonly string[] {
+  // Keep optional startup prediction bounded on the Main thread.
+  if (code.length > 16 * 1024) return []
+  const result = analyze(code, "__cmbFunctionMod", true)
+  return result.kind === "static" ? result.components : []
+}
+
+function analyze(code: string, globalName: string, siteHint: boolean): StaticUiRenderSummary {
   try {
     if (code.length > 2 * 1024 * 1024) return fail("source-limit")
     const program = parse(code, {
@@ -499,7 +552,7 @@ export function analyzeStaticUiRenderSummary(
       sourceType: "script"
     })
     if (program.body.length !== 1)
-      return aggregateSummary(code, program.body as AnyNode[], globalName)
+      return aggregateSummary(code, program.body as AnyNode[], globalName, siteHint)
     const statement = program.body[0] as AnyNode
     if (statement.type !== "VariableDeclaration" || statement.declarations.length !== 1)
       return fail("bundle-shape")
@@ -522,6 +575,10 @@ export function analyzeStaticUiRenderSummary(
     const body = factory.body.body as AnyNode[]
     const functions = new Map<string, FunctionDeclaration>()
     const bindings = new Set<string>()
+    const exactHelpers = new Set<string>()
+    const compilerHelpers = siteHint
+      ? (hintHelpers ??= new Map([...helpers, ...helperSignatures(LOWERED_SPREAD)]))
+      : helpers
     let exportsName: string | undefined
     let registerName: string | undefined
     let hookName: string | undefined
@@ -548,8 +605,9 @@ export function analyzeStaticUiRenderSummary(
         const variable = node.declarations[0]
         const name = named(variable.id)
         declare(name)
-        if (helpers.has(name)) {
-          if (signature(node) !== helpers.get(name)) return fail("compiler-helper-changed")
+        if (compilerHelpers.has(name)) {
+          if (signature(node) !== compilerHelpers.get(name)) return fail("compiler-helper-changed")
+          if (siteHint) exactHelpers.add(name)
         } else if (
           variable.init?.type === "ObjectExpression" &&
           !variable.init.properties.length &&
@@ -646,10 +704,15 @@ export function analyzeStaticUiRenderSummary(
     const blocked = new Set<string>()
     const stateReads: Record<string, StaticNamedStateRead[]> = {}
     const visited = new Set<string>()
+    const spreadCalls = siteHint
+      ? [...spreadDependencies]
+          .filter(([name, deps]) => exactHelpers.has(name) && deps.every((dep) => exactHelpers.has(dep)))
+          .map(([name]) => name)
+      : []
     const forbiddenCallbackNames = new Set([
       ...functions.keys(),
       ...(hookName ? [hookName] : []),
-      ...[...helpers.keys()].filter((name) => name !== "__async"),
+      ...[...compilerHelpers.keys()].filter((name) => name !== "__async"),
       globalName,
       exportsName!,
       "eval",
@@ -663,6 +726,9 @@ export function analyzeStaticUiRenderSummary(
       const onName = named(fn.params[0])
       const optionName = fn.params[1] ? named(fn.params[1]) : undefined
       const callbackForbidden = new Set([...forbiddenCallbackNames, onName])
+      const allowedSpreadCalls = spreadCalls.length
+        ? new Set(spreadCalls.filter((name) => name !== onName && name !== optionName))
+        : undefined
       const locals = new Set<string>([onName, ...(optionName ? [optionName] : [])])
       const statements = fn.body.body
       for (let index = 0; index < statements.length; index++) {
@@ -714,23 +780,27 @@ export function analyzeStaticUiRenderSummary(
           const handler = third ?? second
           if (
             !["ArrowFunctionExpression", "FunctionExpression"].includes(handler.type) ||
-            containsIdentifier(handler, callbackForbidden) ||
+            containsIdentifier(handler, callbackForbidden, allowedSpreadCalls) ||
             hasMatcherEscape(handler)
           )
             return fail("escaping-handler")
-          const component = third ? literalMatcher(second) : undefined
-          const callback = analyzeUiCallback(handler, {
-            compilerAsyncHelperVerified: bindings.has("__async"),
-            namedState: true,
-            render: event.value === "ui.render"
-          })
-          callbacksReusable &&= callback.environmentSafe
+          const component = third
+            ? literalMatcher(second, siteHint && event.value === "ui.render")
+            : undefined
+          // Recognize the registration without treating lowered object spread as a pure callback.
+          const callback = siteHint && containsIdentifier(handler, spreadDependencies) ? undefined :
+            analyzeUiCallback(handler, {
+              compilerAsyncHelperVerified: bindings.has("__async"),
+              namedState: true,
+              render: event.value === "ui.render"
+            })
+          callbacksReusable &&= callback?.environmentSafe === true
           if (event.value === "ui.render") {
             if (!component) return fail("unqualified-render")
             sites.add(component)
-            if (!callback.reusable) blocked.add(component)
+            if (!callback?.reusable) blocked.add(component)
             const refs = (stateReads[component] ??= [])
-            for (const ref of callback.readsNamedState)
+            for (const ref of callback?.readsNamedState ?? [])
               if (!refs.some((item) => JSON.stringify(item) === JSON.stringify(ref))) refs.push(ref)
           }
           if (rows.length >= 128) return fail("registration-limit")

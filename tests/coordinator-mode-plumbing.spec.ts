@@ -12,6 +12,9 @@
 import { readFile } from "fs/promises"
 import { join, resolve } from "path"
 import { isCoordinatorWorkerStreamChunk } from "../src/main/agent/main-turn-stream"
+import { isInternalNotificationMessage } from "../src/shared/checkpoint-transcript"
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../src/shared/graph-transcript-boundary"
+import { COORDINATOR_NOTIFICATION_PROMPT_PREFIX } from "../src/shared/internal-notification-turn"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -794,11 +797,20 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "environmentCoordinatorThreadIdsRef.current.has(threadId)",
     "thread context allows environment-forced coordinator notification turns without persisting metadata"
   )
-  assertIncludes(
+  assertMatches(
     threadContext,
-    "additionalKwargs?.cmb_internal_coordinator_notification === true",
-    "thread context hides persisted trusted internal notification prompts on history restore"
+    /if \(isInternalNotificationMessage\(msg\)\) \{\s*return \[\]\s*\}/,
+    "thread context filters hidden prompts before projecting checkpoint messages"
   )
+  for (const marker of ["cmb_internal_coordinator_notification", NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]) {
+    const metadata = { [marker]: true }
+    assert(isInternalNotificationMessage({ additional_kwargs: metadata }),
+      "live metadata hides the trusted internal prompt")
+    assert(isInternalNotificationMessage({ kwargs: { additional_kwargs: metadata } }),
+      "serialized metadata hides the trusted internal prompt")
+  }
+  assert(!isInternalNotificationMessage({ content: COORDINATOR_NOTIFICATION_PROMPT_PREFIX }),
+    "a user-entered marker string alone is not trusted notification metadata")
   assertIncludes(
     threadContext,
     "msg.additional_kwargs ?? msg.kwargs?.additional_kwargs",

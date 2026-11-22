@@ -35,8 +35,9 @@ function localModule(from: string, name: string): string | undefined {
 }
 
 /** Parse actual import/export edges, including literal dynamic imports and import types. */
-function imports(path: string): Edge[] {
-  const previous = parsed.get(path)
+function imports(path: string, staticOnly = false): Edge[] {
+  const cacheKey = `${staticOnly}:${path}`
+  const previous = parsed.get(cacheKey)
   if (previous) return previous
   const edges: Edge[] = []
   const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true)
@@ -64,7 +65,7 @@ function imports(path: string): Edge[] {
     ) {
       add(node.moduleSpecifier.text, node.isTypeOnly)
     } else if (
-      ts.isCallExpression(node) &&
+      !staticOnly && ts.isCallExpression(node) &&
       (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
         (ts.isIdentifier(node.expression) && node.expression.text === "require"))
     ) {
@@ -81,18 +82,18 @@ function imports(path: string): Edge[] {
     ts.forEachChild(node, visit)
   }
   visit(source)
-  parsed.set(path, edges)
+  parsed.set(cacheKey, edges)
   return edges
 }
 
-function graph(paths: string[], includeTypes = false): Edge[] {
+function graph(paths: string[], includeTypes = false, staticOnly = false): Edge[] {
   const pending = paths.map((path) => resolve(root, path)),
     seen = new Set<string>(),
     edges: Edge[] = []
   for (let path = pending.pop(); path; path = pending.pop()) {
     if (seen.has(path)) continue
     seen.add(path)
-    for (const edge of imports(path)) {
+    for (const edge of imports(path, staticOnly)) {
       if (!includeTypes && edge.typeOnly) continue
       edges.push(edge)
       pending.push(edge.to)
@@ -133,6 +134,20 @@ describe("display architectural dependency boundaries", () => {
     ).toEqual([])
     // Manager is an orchestrating facade; display internals must not import it back.
     expect(forbidden(edges, (path) => path === "src/main/mods/v2/manager.ts")).toEqual([])
+  })
+
+  it("keeps Main presentation validators out of the utility host dependency graph", () => {
+    const edges = graph(["src/main/mods/v2/host-entry.ts"], false, true)
+    expect(
+      edges.some((edge) => normalized(edge.to) === "src/shared/mods/v2/site-vocabulary.ts")
+    ).toBe(true)
+    const validators = new Set([
+      "src/shared/mods/v2/sites.ts",
+      "src/shared/mods/v2/ui.ts",
+      "src/shared/mods/v2/markdown.ts",
+      "src/shared/user-input-schema.ts"
+    ])
+    expect(forbidden(edges, (path) => validators.has(path))).toEqual([])
   })
 
   it("uses shared DTOs from renderer display modules without importing Main or preload", () => {

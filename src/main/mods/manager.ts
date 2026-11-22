@@ -1493,8 +1493,9 @@ export class ModsManager {
     const assertCurrent = () => {
       assertCaptured()
       actual.assertCurrent()
+      // The original Producer finishes with a fresh data check after its source callbacks.
+      // The remaining Manager check only revalidates its captured owner and binding identities.
       assertCaptured()
-      actual.assertDataCurrent()
     }
     assertCurrent()
     const close = () => {

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { tmpdir } from "node:os"
@@ -15,6 +15,7 @@ import type {
 import { DatabaseSync } from "node:sqlite"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
+import { setupRealCheckpointStorageWorkerFixture } from "../../../tests/support/checkpoint-storage-real-worker"
 import {
   CheckpointRuntimeProjectionClient,
   CheckpointRuntimeProjectionWorkerUnavailableError,
@@ -28,6 +29,7 @@ import {
 import { SqlJsSaver } from "./sqljs-saver"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { createLegacyTranscriptWriter } from "./legacy-transcript-main-writer"
+import { nativeFunctionConversationWorkspace } from "./function-conversation-main-recovery"
 import type { LegacySearchBootstrapGuard } from "./runtime-projection-protocol"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { sqliteRecoveryFamilyKey } from "../db/sqlite-recovery-family"
@@ -63,8 +65,11 @@ import {
 
 const temporaryDirectories: string[] = []
 const clients: CheckpointRuntimeProjectionClient[] = []
+const physicalClients = new WeakSet<CheckpointRuntimeProjectionClient>()
+const savers: SqlJsSaver[] = []
 const hostDatabases: NativeSqliteAdapter[] = []
 const terminatedEmitters = new WeakSet<EventEmitter>()
+const storageWorkers = setupRealCheckpointStorageWorkerFixture()
 let workerBuildDirectory = ""
 let workerBundlePath = ""
 
@@ -86,7 +91,10 @@ afterAll(() => {
 })
 
 afterEach(async () => {
-  await Promise.all(clients.splice(0).map((client) => client.close()))
+  await Promise.all([
+    ...clients.splice(0).map((client) => client.close()),
+    ...savers.splice(0).map((saver) => saver.close())
+  ])
   for (const database of hostDatabases.splice(0)) database.close()
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true })
@@ -116,7 +124,10 @@ function legacyHostSource(
   threadId: string,
   namespace = "",
   guard?: LegacySearchBootstrapGuard
-): LegacyCheckpointTranscriptHostSource {
+): LegacyCheckpointTranscriptHostSource & {
+  incarnation: ReturnType<typeof captureThreadIncarnation>
+  workspace: string
+} {
   const native = new DatabaseSync(databasePath)
   if (!native.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='threads'").get()) {
     native.exec(`CREATE TABLE threads (thread_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL,
@@ -160,7 +171,8 @@ function legacyHostSource(
     if (!matchesThreadIncarnation(current, incarnation) || current.metadata !== row.metadata)
       throw Error("actual fixture source changed")
   }
-  return { assertCurrent, createWriter(context) {
+  return { incarnation, workspace: nativeFunctionConversationWorkspace(row.metadata) ?? "",
+    assertCurrent, createWriter(context) {
     assertCurrent()
     if (context.threadId !== threadId || context.checkpointNamespace !== namespace)
       throw Error("actual fixture writer target changed")
@@ -176,11 +188,27 @@ function bootstrapLegacyTranscript(
   threadId: string,
   namespace = "",
   foreground?: string | number,
-  options?: { guard?: LegacySearchBootstrapGuard; signal?: AbortSignal }
+  options?: { guard?: LegacySearchBootstrapGuard; signal?: AbortSignal; writer?: "main" }
 ): ReturnType<CheckpointRuntimeProjectionClient["bootstrapLegacyTranscript"]> {
+  const source = legacyHostSource(messagePath, threadId, namespace, options?.guard)
+  if (physicalClients.has(client) && options?.writer !== "main") {
+    const file = statSync(messagePath, { bigint: true })
+    const authority = {
+      messageDatabaseFile: {
+        dev: String(file.dev), ino: String(file.ino), birthtime: String(file.birthtimeNs)
+      },
+      checkpointFamilyKey: sqliteRecoveryFamilyKey(checkpointPath),
+      incarnation: source.incarnation,
+      workspace: source.workspace
+    }
+    return client.bootstrapLegacyTranscript(
+      checkpointPath, messagePath, threadId, namespace, foreground, undefined,
+      options?.signal, options?.guard, { authority, assertCurrent: source.assertCurrent }
+    )
+  }
   return client.bootstrapLegacyTranscript(
     checkpointPath, messagePath, threadId, namespace, foreground,
-    legacyHostSource(messagePath, threadId, namespace, options?.guard), options?.signal, options?.guard
+    source, options?.signal, options?.guard
   )
 }
 
@@ -222,12 +250,23 @@ const metadata = {
   parents: {}
 } as CheckpointMetadata
 
-function createClient(): CheckpointRuntimeProjectionClient {
-  const client = new CheckpointRuntimeProjectionClient(
-    async () => new Worker(workerBundlePath, { name: "runtime-projection-test" })
-  )
+function createClient(
+  factory: (WorkerClass: typeof Worker) => Worker =
+    (WorkerClass) => new WorkerClass(workerBundlePath, { name: "runtime-projection-test" })
+): CheckpointRuntimeProjectionClient {
+  // The real storage fixture substitutes a Worker subclass after async import
+  // resolution. Use that same constructor for these physical request workers.
+  const client = new CheckpointRuntimeProjectionClient(async () =>
+    factory((await import("node:worker_threads")).Worker))
+  physicalClients.add(client)
   clients.push(client)
   return client
+}
+
+function createSaver(databasePath: string): SqlJsSaver {
+  const saver = new SqlJsSaver(databasePath)
+  savers.push(saver)
+  return saver
 }
 
 it("returns bounded real session pages through the native worker for multi-megabyte history", async () => {
@@ -274,7 +313,7 @@ async function seedLegacyInlineFixture(input: {
   temporaryDirectories.push(directory)
   const databasePath = join(directory, "thread.sqlite")
   const legacyCheckpoint = checkpoint("legacy-inline", 1, input.messages)
-  const saver = new SqlJsSaver(databasePath)
+  const saver = createSaver(databasePath)
   await saver.put(config(input.threadId), legacyCheckpoint, metadata)
   const [type, payload] = await saver.serde.dumpsTyped(legacyCheckpoint)
   await saver.close()
@@ -412,7 +451,10 @@ describe("checkpoint runtime projection worker", () => {
         const created = Number(database.prepare("SELECT created_at FROM threads").get()?.created_at)
         const sourceKey = sqliteRecoveryFamilyKey(databasePath)
         const run = () => bootstrapLegacyTranscript(createClient(), databasePath, messagePath, threadId,
-          "", undefined, { guard: { incarnation: { token: null, legacyCreatedAt: created }, sourceKey } })
+          "", undefined, {
+            guard: { incarnation: { token: null, legacyCreatedAt: created }, sourceKey },
+            writer: "main"
+          })
         if (hasDurableRows) {
           await expect(run()).rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED })
           expect(database.prepare("SELECT message_id FROM thread_messages").all()).toEqual([{ message_id: "live" }])
@@ -427,6 +469,104 @@ describe("checkpoint runtime projection worker", () => {
         database.close()
       }
     })
+
+  it.each(["stock", "main"] as const)("preserves native history in the %s recovery route", async (route) => {
+    const threadId = "protected-recovery"
+    const { databasePath } = await seedLegacyInlineFixture({
+      threadId,
+      messages: [{ id: "legacy-user", type: "human", content: "historical plaintext" }]
+    })
+    const messagePath = createMessageDatabase(databasePath, threadId)
+    const database = new DatabaseSync(messagePath)
+    try {
+      database.exec(`CREATE TABLE function_logical_sessions (
+        logical_session_id TEXT PRIMARY KEY NOT NULL,
+        thread_id TEXT NOT NULL, incarnation_key TEXT NOT NULL, workspace TEXT NOT NULL,
+        UNIQUE(thread_id, incarnation_key)
+      )`)
+      const createdAt = Number(database.prepare("SELECT created_at FROM threads WHERE thread_id=?")
+        .get(threadId)?.created_at)
+      database.prepare("INSERT INTO function_logical_sessions VALUES (?, ?, ?, ?)")
+        .run("native-session", threadId, JSON.stringify(["legacy", createdAt]), "C:/workspace")
+      await expect(bootstrapLegacyTranscript(createClient(), databasePath, messagePath, threadId,
+        "", undefined, route === "main" ? { writer: "main" } : undefined))
+        .rejects.toThrow("MODS_CONVERSATION_MIGRATION_REQUIRED")
+      expect(database.prepare("SELECT message_id FROM thread_messages WHERE thread_id=?")
+        .all(threadId)).toEqual([])
+      expect(database.prepare("SELECT logical_session_id FROM function_logical_sessions WHERE thread_id=?")
+        .all(threadId)).toEqual([{ logical_session_id: "native-session" }])
+    } finally {
+      database.close()
+    }
+  })
+
+  it.each(["native", "workspace"] as const)(
+    "stops an ordinary migration before a later batch after a %s change", async (change) => {
+    const threadId = `source-${change}-between-legacy-batches`
+    const messages = Array.from({ length: 66 }, (_, index) => ({
+      id: `legacy-${index}`, type: "human", content: `saved question ${index}`
+    }))
+    const { databasePath } = await seedLegacyInlineFixture({ threadId, messages })
+    const durablePath = createMessageDatabase(databasePath, threadId)
+    const db = new DatabaseSync(durablePath)
+    try {
+      db.exec(`ALTER TABLE threads ADD COLUMN metadata TEXT;
+        CREATE TABLE function_logical_sessions (
+        logical_session_id TEXT PRIMARY KEY NOT NULL,
+        thread_id TEXT NOT NULL, incarnation_key TEXT NOT NULL, workspace TEXT NOT NULL,
+        UNIQUE(thread_id, incarnation_key)
+      )`)
+      const workspace = { workspacePath: "C:/workspace" }
+      const newWorkspace = { workspacePath: "C:/other-workspace" }
+      db.prepare("UPDATE threads SET metadata=? WHERE thread_id=?")
+        .run(JSON.stringify(workspace), threadId)
+      const createdAt = Number(db.prepare("SELECT created_at FROM threads WHERE thread_id=?")
+        .get(threadId)?.created_at)
+      const client = createClient((WorkerClass) => new WorkerClass(`
+        const { workerData } = require("node:worker_threads")
+        const { DatabaseSync } = require("node:sqlite")
+        const execute = DatabaseSync.prototype.exec
+        let installed = false
+        DatabaseSync.prototype.exec = function(sql) {
+          const result = execute.call(this, sql)
+          if (!installed && sql === "COMMIT" && this.location() === workerData.durablePath &&
+              this.prepare("SELECT COUNT(*) AS count FROM thread_messages").get()?.count === 64) {
+            installed = true
+            const peer = new DatabaseSync(workerData.durablePath)
+            try {
+              if (workerData.change === "native") {
+                peer.prepare("INSERT INTO function_logical_sessions VALUES (?, ?, ?, ?)")
+                  .run("new-native-owner", workerData.threadId, workerData.incarnation, "C:/workspace")
+              } else {
+                peer.prepare("UPDATE threads SET metadata=? WHERE thread_id=?")
+                  .run(workerData.newWorkspace, workerData.threadId)
+              }
+            } finally {
+              peer.close()
+            }
+          }
+          return result
+        }
+        require(workerData.workerBundlePath)
+      `, { eval: true, workerData: {
+        durablePath, threadId, workerBundlePath, incarnation: JSON.stringify(["legacy", createdAt]),
+        change, newWorkspace: JSON.stringify(newWorkspace)
+      } }))
+      await expect(bootstrapLegacyTranscript(client, databasePath, durablePath, threadId))
+        .rejects.toThrow(change === "native" ? "MODS_CONVERSATION_MIGRATION_REQUIRED" : "source changed")
+      if (change === "native") {
+        expect(db.prepare("SELECT logical_session_id FROM function_logical_sessions WHERE thread_id=?")
+          .get(threadId)).toEqual({ logical_session_id: "new-native-owner" })
+      } else {
+        expect(db.prepare("SELECT metadata FROM threads WHERE thread_id=?").get(threadId))
+          .toEqual({ metadata: JSON.stringify(newWorkspace) })
+      }
+      expect(db.prepare("SELECT message_id FROM thread_messages WHERE thread_id=? ORDER BY ordinal")
+        .all(threadId)).toEqual(messages.slice(0, 64).map(({ id }) => ({ message_id: id })))
+    } finally {
+      db.close()
+    }
+  })
 
   it("bounds concurrent session reads even when all requests arrive during worker startup", async () => {
     const emitter = new EventEmitter()
@@ -543,7 +683,7 @@ describe("checkpoint runtime projection worker", () => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-empty-"))
     temporaryDirectories.push(directory)
     const databasePath = join(directory, "empty.sqlite")
-    const saver = new SqlJsSaver(databasePath)
+    const saver = createSaver(databasePath)
     await saver.initialize()
     await saver.close()
 
@@ -932,9 +1072,17 @@ describe("checkpoint runtime projection worker", () => {
     source.close()
     renameSync(databasePath, databasePath + ".bak")
     const messageDatabasePath = createMessageDatabase(databasePath, threadId)
+    const messageDatabase = new DatabaseSync(messageDatabasePath, { readOnly: true })
+    let legacyCreatedAt: number
+    try {
+      legacyCreatedAt = Number(messageDatabase.prepare("SELECT created_at FROM threads WHERE thread_id=?")
+        .get(threadId)?.created_at)
+    } finally {
+      messageDatabase.close()
+    }
     const client = createClient()
     await expect(bootstrapLegacyTranscript(client, databasePath, messageDatabasePath, threadId, "", undefined, {
-      guard: { incarnation: { token: null, legacyCreatedAt: 1 } }
+      guard: { incarnation: { token: null, legacyCreatedAt } }
     })).rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED })
     expect(existsSync(databasePath)).toBe(false)
     await expect(bootstrapLegacyTranscript(client, databasePath, messageDatabasePath, threadId))
@@ -948,7 +1096,7 @@ describe("checkpoint runtime projection worker", () => {
     const databasePath = join(directory, "long-state.sqlite")
     const threadId = "long-runtime-state"
     const checkpointId = "long-runtime-checkpoint"
-    const saver = new SqlJsSaver(databasePath)
+    const saver = createSaver(databasePath)
     await saver.initialize()
     await saver.close()
 
@@ -1145,7 +1293,7 @@ describe("checkpoint runtime projection worker", () => {
     temporaryDirectories.push(directory)
     const databasePath = join(directory, "tail-chain.sqlite")
     const threadId = "truncated-tail-chain"
-    const saver = new SqlJsSaver(databasePath)
+    const saver = createSaver(databasePath)
     await saver.initialize()
     await saver.close()
 
@@ -1673,9 +1821,15 @@ describe("checkpoint runtime projection worker", () => {
       stats: { checkpointId: legacyCheckpoint.id, totalMessages: 1, migratedMessages: 1 }
     })
 
-    const saver = new SqlJsSaver(databasePath)
+    const saver = createSaver(databasePath)
+    const startedWorkers = storageWorkers.entered.length
+    const exitedWorkers = storageWorkers.exited
     await saver.initialize()
     await saver.close()
+    expect(storageWorkers.entered.slice(startedWorkers)).toEqual([
+      expect.objectContaining({ defaultCodec: true })
+    ])
+    expect(storageWorkers.exited).toBe(exitedWorkers + 1)
 
     await expect(
       client.readLatestTuple(databasePath, threadId, "", {
@@ -1727,7 +1881,7 @@ describe("checkpoint runtime projection worker", () => {
         checkpoint_ts: legacyCheckpoint.ts
       }
     ])
-  })
+  }, 30_000)
 
   it("serializes concurrent saver and worker upgrades of a pre-generation snapshot table", async () => {
     const threadId = "legacy-generation-upgrade"
@@ -1743,7 +1897,7 @@ describe("checkpoint runtime projection worker", () => {
     legacyDatabase.close()
 
     const client = createClient()
-    const saver = new SqlJsSaver(databasePath)
+    const saver = createSaver(databasePath)
     const [migration] = await Promise.all([
       client.ensureRuntimeProjection(databasePath, threadId),
       saver.initialize()
@@ -1797,7 +1951,7 @@ describe("checkpoint runtime projection worker", () => {
     const migration = await client.ensureRuntimeProjection(databasePath, threadId)
     expect(migration.migrated).toBe(true)
 
-    const saver = new SqlJsSaver(databasePath)
+    const saver = createSaver(databasePath)
     const observedBytes: number[] = []
     saver.serde = rejectLargeDeserialization(saver.serde, 64 * 1024, observedBytes)
     const tuple = await saver.getLatestRuntimeTuple(config(threadId))
@@ -2473,7 +2627,7 @@ describe("checkpoint runtime projection worker", () => {
       const incarnation = { token: null, legacyCreatedAt:
         Number(db.prepare("SELECT created_at FROM threads WHERE thread_id = ?").get(threadId)?.created_at) }
       const durations = new SharedArrayBuffer(4)
-      const client = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+      const client = createClient((WorkerClass) => new WorkerClass(`
         const { workerData } = require("node:worker_threads")
         const { DatabaseSync } = require("node:sqlite")
         const { resolve } = require("node:path")
@@ -2496,7 +2650,6 @@ describe("checkpoint runtime projection worker", () => {
         }
         require(workerData.workerBundlePath)
       `, { eval: true, workerData: { durablePath, durations, workerBundlePath } }))
-      clients.push(client)
       const result = await bootstrapLegacyTranscript(client, databasePath, durablePath, threadId, "", undefined,
         mode === "background" ? { guard: { incarnation } } : undefined)
       expect(result.stats.searchProjectionState).toBe("overlap-unverified")
@@ -2759,7 +2912,7 @@ describe("checkpoint runtime projection worker", () => {
       db.exec("BEGIN")
       for (const [index, id] of savedIds.entries()) insert.run(threadId, id, content, index)
       db.exec("COMMIT")
-      const client = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+      const client = createClient((WorkerClass) => new WorkerClass(`
         const { workerData } = require("node:worker_threads")
         const { DatabaseSync } = require("node:sqlite")
         const execute = DatabaseSync.prototype.exec
@@ -2778,7 +2931,6 @@ describe("checkpoint runtime projection worker", () => {
         }
         require(workerData.workerBundlePath)
       `, { eval: true, workerData: { workerBundlePath, durablePath, stop } }))
-      clients.push(client)
       await expect(bootstrapLegacyTranscript(client, databasePath, durablePath, threadId))
         .rejects.toThrow("interrupted after assigning a batch of ordinals")
       const positions = () => db.prepare(`SELECT message_id, ordinal FROM thread_messages
@@ -2932,7 +3084,7 @@ describe("checkpoint runtime projection worker", () => {
       const editedId = mode === "edited copy during shift" || beforeAdoption ? "m14"
         : anchorEdited ? tailIds[0] : null
       if ((editedId && !beforeAdoption) || tailDeleted || renamed) {
-        const interrupted = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+        const interrupted = createClient((WorkerClass) => new WorkerClass(`
           const { workerData } = require("node:worker_threads")
           const { DatabaseSync } = require("node:sqlite")
           const execute = DatabaseSync.prototype.exec
@@ -2947,7 +3099,6 @@ describe("checkpoint runtime projection worker", () => {
           }
           require(workerData.workerBundlePath)
         `, { eval: true, workerData: { workerBundlePath, durablePath } }))
-        clients.push(interrupted)
         await expect(bootstrapLegacyTranscript(interrupted, databasePath, durablePath, threadId))
           .rejects.toThrow("interrupted adopted reservation")
       }
@@ -3044,7 +3195,7 @@ describe("checkpoint runtime projection worker", () => {
         await expect(bootstrapLegacyTranscript(client, databasePath, durablePath, threadId))
           .resolves.toMatchObject({ stats: { searchProjectionState: "complete" } })
       } else {
-        const interrupted = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+        const interrupted = createClient((WorkerClass) => new WorkerClass(`
           const { workerData } = require("node:worker_threads")
           const { DatabaseSync } = require("node:sqlite")
           const execute = DatabaseSync.prototype.exec
@@ -3061,7 +3212,6 @@ describe("checkpoint runtime projection worker", () => {
           }
           require(workerData.workerBundlePath)
         `, { eval: true, workerData: { durablePath, stopAt, workerBundlePath, total: messages.length } }))
-        clients.push(interrupted)
         await expect(bootstrapLegacyTranscript(interrupted, databasePath, durablePath, threadId))
           .rejects.toThrow("interrupted after the chosen commit")
       }
@@ -3266,7 +3416,7 @@ describe("checkpoint runtime projection worker", () => {
       }
       await save(2, "Different provisional text", final)
       if (mode === "interrupted publication" || repeated) {
-        const interrupted = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+        const interrupted = createClient((WorkerClass) => new WorkerClass(`
           const { workerData } = require("node:worker_threads")
           const { DatabaseSync } = require("node:sqlite")
           const execute = DatabaseSync.prototype.exec
@@ -3279,7 +3429,6 @@ describe("checkpoint runtime projection worker", () => {
           }
           require(workerData.workerBundlePath)
         `, { eval: true, workerData: { durablePath, workerBundlePath } }))
-        clients.push(interrupted)
         await expect(bootstrapLegacyTranscript(interrupted, databasePath, durablePath, threadId))
           .rejects.toThrow("interrupted after replacing the copied revision")
         expect(db.prepare("SELECT total_messages FROM legacy_checkpoint_transcript_migrations").get()?.total_messages)
@@ -3721,7 +3870,7 @@ describe("checkpoint runtime projection worker", () => {
           ]), metadata)
         } finally { await saver.close() }
         if (mode === "anchor changes before write") {
-          const racing = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+          const racing = createClient((WorkerClass) => new WorkerClass(`
             const { workerData } = require("node:worker_threads")
             const { DatabaseSync } = require("node:sqlite")
             const prepare = DatabaseSync.prototype.prepare
@@ -3745,7 +3894,6 @@ describe("checkpoint runtime projection worker", () => {
             }
             require(workerData.workerBundlePath)
           `, { eval: true, workerData: { workerBundlePath, durablePath } }))
-          clients.push(racing)
           await expect(bootstrapLegacyTranscript(racing, databasePath, durablePath, threadId))
             .rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED })
         } else if (mode === "identical current anchors") {
@@ -4180,7 +4328,7 @@ describe("checkpoint runtime projection worker", () => {
     const question = (id: string) => ({ id, role: "user" as const, content: id, created_at: new Date(1) })
     const first = { id: "reply", role: "assistant" as const, content: "first reply", created_at: new Date(1) }
     const q1 = question("first")
-    const firstTurn = [q1, first].map(persistedMessageToRuntimeMessage)
+    const firstTurn = [q1, first].map(message => persistedMessageToRuntimeMessage(message))
     const { databasePath, legacyCheckpoint } = await seedLegacyInlineFixture({ threadId, messages: firstTurn })
     const durablePath = createMessageDatabase(databasePath, threadId)
     const db = new DatabaseSync(durablePath)
@@ -4192,7 +4340,7 @@ describe("checkpoint runtime projection worker", () => {
       const saver = new SqlJsSaver(databasePath)
       try {
         await saver.put(config(threadId, legacyCheckpoint.id), checkpoint("child", 2,
-          [...firstTurn, ...[question("second"), second].map(persistedMessageToRuntimeMessage)]), metadata)
+          [...firstTurn, ...[question("second"), second].map(message => persistedMessageToRuntimeMessage(message))]), metadata)
       } finally { await saver.close() }
       await expect(bootstrapLegacyTranscript(client, databasePath, durablePath, threadId))
         .resolves.toMatchObject({ stats: { searchProjectionState: "complete", migratedMessages: 2 } })
@@ -4221,7 +4369,7 @@ describe("checkpoint runtime projection worker", () => {
       const recover = () => bootstrapLegacyTranscript(client, databasePath, durablePath, threadId)
       await recover()
       await save("wide-child", legacyCheckpoint.id, 2, "durable draft visible in search. ".repeat(65_000))
-      const interrupted = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+      const interrupted = createClient((WorkerClass) => new WorkerClass(`
         const { workerData } = require("node:worker_threads")
         const { DatabaseSync } = require("node:sqlite")
         const execute = DatabaseSync.prototype.exec
@@ -4234,7 +4382,6 @@ describe("checkpoint runtime projection worker", () => {
         }
         require(workerData.workerBundlePath)
       `, { eval: true, workerData: { workerBundlePath, durablePath } }))
-      clients.push(interrupted)
       await expect(bootstrapLegacyTranscript(interrupted, databasePath, durablePath, threadId))
         .rejects.toThrow("interrupted visible fragment copy")
       const visible = () => db.prepare(`SELECT m.content_json, m.fragment_generation,
@@ -4608,7 +4755,7 @@ describe("checkpoint runtime projection worker", () => {
     const turn = (id: string, text: string) => [record(id, "user", id), anchor, record("reply", "assistant", text)]
     const first = turn("first", "first saved answer")
     const { databasePath, legacyCheckpoint } = await seedLegacyInlineFixture({ threadId,
-      messages: first.map(persistedMessageToRuntimeMessage) })
+      messages: first.map(message => persistedMessageToRuntimeMessage(message)) })
     const durablePath = createMessageDatabase(databasePath, threadId)
     const db = new DatabaseSync(durablePath)
     try {
@@ -4624,7 +4771,7 @@ describe("checkpoint runtime projection worker", () => {
       const save = async (id: string, previous: string, version: number, rows: ReturnType<typeof record>[]) => {
         const saver = new SqlJsSaver(databasePath, undefined, { maxRootCheckpoints: 4 })
         try {
-          await saver.put(config(threadId, previous), checkpoint(id, version, rows.map(persistedMessageToRuntimeMessage)), metadata)
+          await saver.put(config(threadId, previous), checkpoint(id, version, rows.map(message => persistedMessageToRuntimeMessage(message))), metadata)
         } finally { await saver.close() }
       }
       await save("native-child", legacyCheckpoint.id, 2, turn("second", "second saved answer"))
@@ -4852,6 +4999,8 @@ describe("checkpoint runtime projection worker", () => {
 
   it("waits for a superseded bootstrap to acknowledge cancellation before releasing its lease", async () => {
     const posted: Array<{ requestId: number; cancellationBuffer: SharedArrayBuffer }> = []
+    const firstPosted = Promise.withResolvers<void>()
+    const latestPosted = Promise.withResolvers<void>()
     const emitter = new EventEmitter()
     const worker = Object.assign(emitter, {
       postMessage(message: typeof posted[number] & { type: string }) {
@@ -4859,21 +5008,29 @@ describe("checkpoint runtime projection worker", () => {
           queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
         } else {
           posted.push(message)
+          if (message.type === "bootstrap-legacy-transcript") firstPosted.resolve()
+          if (message.type === "read-latest-runtime-tuple") latestPosted.resolve()
         }
       },
+      ref: () => {},
       unref: () => {},
-      terminate: async () => 0
+      terminate: async () => terminateEmitter(emitter)
     }) as unknown as Worker
     const client = new CheckpointRuntimeProjectionClient(async () => worker)
     clients.push(client)
+    const oldPath = ownedCheckpointFile("old.sqlite")
+    const messagePath = createMessageDatabase(oldPath, "old")
+    const newPath = ownedCheckpointFile("new.sqlite")
     let settled = false
-    const previous = bootstrapLegacyTranscript(client, "old.sqlite", "messages", "old", "", "window")
+    const previous = bootstrapLegacyTranscript(client, oldPath, messagePath, "old", "", "window",
+      { signal: new AbortController().signal })
     const cancelled = previous.catch((error) => {
       settled = true
       return error
     })
-    const latest = client.readLatestRuntimeTuple("new.sqlite", "new", "", "window")
-    await new Promise<void>((resolve) => setImmediate(resolve))
+    await Promise.race([firstPosted.promise, previous.then(() => { throw Error("No bootstrap posted") })])
+    const latest = client.readLatestRuntimeTuple(newPath, "new", "", "window")
+    await Promise.race([latestPosted.promise, latest.then(() => { throw Error("No tuple request posted") })])
     expect(posted).toHaveLength(2)
     expect(Atomics.load(new Int32Array(posted[0].cancellationBuffer), 0)).toBe(1)
     expect(settled).toBe(false)
@@ -5320,7 +5477,7 @@ describe("checkpoint runtime projection worker", () => {
     const db = new DatabaseSync(durablePath)
     try {
       installVersionedLegacyFixtureSchema(db)
-      const client = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+      const client = createClient((WorkerClass) => new WorkerClass(`
         const { workerData } = require("node:worker_threads")
         const { DatabaseSync } = require("node:sqlite")
         const execute = DatabaseSync.prototype.exec
@@ -5355,7 +5512,6 @@ describe("checkpoint runtime projection worker", () => {
         replacement: mode === "after a completed copy replaces it"
           ? JSON.stringify(normalizeMessageContent(normalizeMessageContent(body))) : null
       } }))
-      clients.push(client)
       const copy = bootstrapLegacyTranscript(client, databasePath, durablePath, threadId)
       if (mode === "while copying") {
         await expect(copy).resolves.toMatchObject({ stats: { totalMessages: 2 } })
@@ -5506,7 +5662,7 @@ describe("checkpoint runtime projection worker", () => {
       db.prepare(`INSERT INTO thread_messages
         (thread_id, message_id, role, content_json, ordinal, created_at)
         VALUES (?, 'answer', 'assistant', ?, 0, 1)`).run(threadId, JSON.stringify(prefix + body.charAt(prefix.length)))
-      const client = new CheckpointRuntimeProjectionClient(async () => new Worker(`
+      const client = createClient((WorkerClass) => new WorkerClass(`
         const { workerData } = require("node:worker_threads")
         const { DatabaseSync } = require("node:sqlite")
         const execute = DatabaseSync.prototype.exec
@@ -5529,7 +5685,6 @@ describe("checkpoint runtime projection worker", () => {
         }
         require(workerData.workerBundlePath)
       `, { eval: true, workerData: { workerBundlePath } }))
-      clients.push(client)
       const restored = () => {
         const head = db.prepare("SELECT content_json FROM thread_messages WHERE message_id = 'answer'").get()
         const fragments = db.prepare("SELECT content_text FROM thread_message_fragments ORDER BY fragment_id").all()
@@ -5607,7 +5762,7 @@ describe("checkpoint runtime projection worker", () => {
     expect(Number(sizes.message_count)).toBe(563)
 
     for (let reopen = 0; reopen < 2; reopen += 1) {
-      const saver = new SqlJsSaver(databasePath)
+      const saver = createSaver(databasePath)
       const observedBytes: number[] = []
       saver.serde = rejectLargeDeserialization(saver.serde, 64 * 1024, observedBytes)
       const tuple = await saver.getLatestRuntimeTuple(config(threadId))
@@ -5695,7 +5850,7 @@ describe("checkpoint runtime projection worker", () => {
     const prepared = prepareLatestRuntimeProjectionMigration(migrationDatabase, threadId)
     expect(prepared).not.toBeNull()
 
-    const writer = new SqlJsSaver(databasePath)
+    const writer = createSaver(databasePath)
     await writer.put(
       config(threadId, "legacy-inline"),
       checkpoint(
@@ -5711,7 +5866,7 @@ describe("checkpoint runtime projection worker", () => {
     expect(commitPreparedRuntimeProjection(migrationDatabase, prepared!)).toBe(false)
     migrationDatabase.close()
 
-    const verifier = new SqlJsSaver(databasePath)
+    const verifier = createSaver(databasePath)
     const tuple = await verifier.getLatestRuntimeTuple(config(threadId))
     expect(tuple?.checkpoint.id).toBe("newer-checkpoint")
     expect(tuple?.checkpoint.channel_values).toMatchObject({

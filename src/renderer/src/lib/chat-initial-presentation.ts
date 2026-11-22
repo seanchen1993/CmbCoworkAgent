@@ -144,8 +144,11 @@ export function sampleInitialChatPresentation(
   for (const site of root.querySelectorAll<HTMLElement>(
     '[data-function-site="UserMessage"], [data-function-site="AssistantMessage"], [data-function-site="CommandOutput"]'
   )) {
+    if (site.querySelector("[data-function-site-pending]")) continue
     let box = site.getBoundingClientRect()
     if (box.width <= 0 || box.height <= 0) {
+      // display:contents needs a text range, but the hidden Virtuoso probe is not an anchor.
+      if (!isPresented(site)) continue
       const range = root.ownerDocument.createRange()
       range.selectNodeContents(site)
       box = range.getBoundingClientRect()
@@ -156,7 +159,7 @@ export function sampleInitialChatPresentation(
       continue
     // This hint is for scroll restoration, not permission to paint the list. Measure
     // one readable anchor; unrelated pending/overscan rows must not delay it.
-    if (site.querySelector("[data-function-site-pending]") || !isPresented(site)) continue
+    if (!isPresented(site)) continue
     geometry.push(box.x, box.y, box.width, box.height, site.dataset.functionSite)
     return { ready: true, geometry: JSON.stringify(geometry) }
   }

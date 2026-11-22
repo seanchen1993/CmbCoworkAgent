@@ -14,7 +14,7 @@ export class LegacyOptInIndex {
     return legacyIndexFilePresent(this.path)
   }
 
-  read(): ReadonlyMap<string, string> | undefined {
+  private readProjects(): ReadonlyMap<string, unknown> | undefined {
     try {
       if (!lstatSync(this.path, { throwIfNoEntry: false })?.isFile()) return undefined
       const db = new DatabaseSync(this.path, { readOnly: true, timeout: 0 })
@@ -22,17 +22,39 @@ export class LegacyOptInIndex {
         const row = db.prepare("SELECT data FROM opt_in_index WHERE id=1").get()
         const data = hostRecord(JSON.parse(String(row?.data)), ["version", "projects"])
         if (data.version !== 1 || !Array.isArray(data.projects)) return undefined
-        const projects = new Map<string, string>()
+        const projects = new Map<string, unknown>()
         for (const entry of data.projects) {
           if (!Array.isArray(entry) || entry.length !== 2) return undefined
           const id = hostText(entry[0])
           if (projects.has(id)) return undefined
-          projects.set(id, hostText(entry[1], 64))
+          projects.set(id, entry[1])
         }
         return projects
       } finally {
         db.close()
       }
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The complete index is required before publishing any changes. */
+  read(): ReadonlyMap<string, string> | undefined {
+    try {
+      const projects = this.readProjects()
+      return projects && new Map([...projects].map(([id, generation]) => [id, hostText(generation, 64)]))
+    } catch {
+      return undefined
+    }
+  }
+
+  /** null means known unbound; undefined means the project's evidence is unreadable. */
+  readGeneration(projectId: string): string | null | undefined {
+    const projects = this.readProjects()
+    if (!projects) return undefined
+    if (!projects.has(projectId)) return null
+    try {
+      return hostText(projects.get(projectId), 64)
     } catch {
       return undefined
     }

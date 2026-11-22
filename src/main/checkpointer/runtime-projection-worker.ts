@@ -125,7 +125,15 @@ workerPort.on(
       return
     }
     if (request.type === "bootstrap-legacy-transcript") {
-      const task = legacy.enqueue(request).then(
+      const authority = request.stockAuthority
+      const operation = authority
+        ? import("./legacy-stock-transcript-store").then(({ bootstrapStockLegacyCheckpointTranscript }) =>
+            bootstrapStockLegacyCheckpointTranscript(
+              request.databasePath, request.messageDatabasePath, request.threadId, request.checkpointNs,
+              request.cancellationBuffer, authority, request.searchGuard
+            ))
+        : legacy.enqueue(request)
+      const task = operation.then(
         (result) => {
           workerPort.postMessage({
             type: "bootstrap-legacy-transcript-result",

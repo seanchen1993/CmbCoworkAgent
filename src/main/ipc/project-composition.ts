@@ -16,7 +16,11 @@ import { captureProjectCapabilityContext } from "../mods/project-capability-cont
 import { runtimeDirectory, runtimeDigest } from "../harness-board/project-runtime/safe-files"
 import { resolveCompositionWorkflows } from "../harness-board/project-runtime/composition-workflow"
 import { ProjectCompositionService } from "../harness-board/project-runtime/composition-service"
-import { ProjectCompositionStore, type CompositionRun } from "../harness-board/project-runtime/composition-store"
+import {
+  guardUnopenedCompositionWorkspace,
+  ProjectCompositionStore,
+  type CompositionRun
+} from "../harness-board/project-runtime/composition-store"
 import { ProjectCompositionPreviews } from "../harness-board/project-runtime/composition-preview"
 import type { HostProjectService } from "../harness-board/project-runtime/host-service"
 import type { HostProjectOperation } from "../../shared/project-runtime/host-types"
@@ -194,19 +198,21 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
       .join("\n\n")
   }
   const databasePath = () => join(getOpenworkDir(), "project-compositions", "state.sqlite")
-  function compositionStore(options?: { failFastOnOpen: boolean }): ProjectCompositionStore {
-    return (store ??= new ProjectCompositionStore(
-      databasePath(), undefined, deps.assertWorkspaceIdle, options
-    ))
+  function compositionStore(): ProjectCompositionStore {
+    return (store ??= new ProjectCompositionStore(databasePath(), undefined, deps.assertWorkspaceIdle))
   }
 
-  function guardThreadRunAdmission<T>(workspace: string, work: () => T): T {
+  function guardWorkspace<T>(
+    workspace: string,
+    work: (release?: () => void) => T,
+    retain = false
+  ): T {
     try {
-      // Keep the same transaction and owner, without blocking the main thread on another writer.
-      return compositionStore({ failFastOnOpen: true })
-        .guardWorkspaceMutation(workspace, work, { failFastOnLock: true })
+      return store
+        ? store.guardWorkspaceAdmission(workspace, work, retain)
+        : guardUnopenedCompositionWorkspace(databasePath(), workspace, work, retain)
     } catch (error) {
-      if (error instanceof Error && "errcode" in error && typeof error.errcode === "number") {
+      if (retain && error instanceof Error && "errcode" in error && typeof error.errcode === "number") {
         // Extended SQLite result codes keep SQLITE_BUSY (5) or SQLITE_LOCKED (6) in the low byte.
         const primaryCode = error.errcode & 0xff
         if (primaryCode === 5 || primaryCode === 6) {
@@ -939,5 +945,5 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
       }
     }
   )
-  return { service: composition, store: compositionStore, guardThreadRunAdmission }
+  return { service: composition, store: compositionStore, guardWorkspace }
 }

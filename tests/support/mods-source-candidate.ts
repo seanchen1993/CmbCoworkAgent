@@ -101,6 +101,7 @@ export async function prepareModsSourceCandidate(repository: string, directory: 
   const sourceRoots = [
     "src",
     "package.json",
+    "scripts/vite-radix-scrollbar-wheel.ts",
     ...MODS_VIRTUOSO_PATCH_SOURCE_ROOTS,
     "resources/mods",
     "resources/native-compositions",

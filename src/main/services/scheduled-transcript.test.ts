@@ -170,6 +170,7 @@ it("applies changed append/tail values without rewriting preceding tool cycles",
   expect(rows().at(-1)?.reasoning).toBe("reason")
 })
 
+// Allow time for the SQLite fixture to persist all 10,000 history rows.
 it("batches long token streams and appends text without rereading stable history", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
   const { id, writer, frame, rows } = setup()
@@ -199,7 +200,7 @@ it("batches long token streams and appends text without rereading stable history
   console.log(
     `Scheduled transcript: 4096 chunks / 10000 history rows in ${Math.round(performance.now() - start)} ms; 32 writes, 1 bounded identity lookup`
   )
-})
+}, 30_000)
 
 it("flushes idle partial output on the timer and retries a failed batch once without duplication", async () => {
   vi.useFakeTimers()

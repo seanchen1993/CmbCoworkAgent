@@ -90,11 +90,12 @@ async function main() {
       const native=(path='')=>new Proxy(function(){},{get:(_,name)=>name==='then'?undefined:native(path+'.'+String(name)),
         apply:(_t,_o,args)=>{const name=path.split('.').at(-1);if(name.startsWith('on'))return noop;
           if(path.endsWith('.workspace.readFilePreview'))return fixture.delay('file',{success:true,text:'PRIVATE_FILE_CONTENT',content:'PRIVATE_FILE_CONTENT',hasMore:false,totalChars:20});
-          if(path.endsWith('.file.select'))return Promise.resolve({canceled:false,files:[{filePath:'C:/upload.txt',grant:'fixture-grant'}]});
-          if(path.endsWith('.file.parseSelected'))return Promise.resolve({success:true,attachment:{filename:'upload.txt',filePath:'C:/upload.txt',content:'UPLOAD_PAYLOAD',size:14,mimeType:'text/plain'}});
+          if(path.endsWith('.file.select'))return fixture.delay('picker',{canceled:false,files:[{filePath:'C:/upload.txt',grant:'fixture-grant'}]});
+          if(path.endsWith('.file.parseSelected'))return fixture.delay('parseSelected',{success:true,attachment:{filename:'upload.txt',filePath:'C:/upload.txt',content:'UPLOAD_PAYLOAD',size:14,mimeType:'text/plain'}});
+          if(path.endsWith('.file.parseBytes'))return fixture.delay('parseBytes',{success:true,attachment:{filename:'drop.txt',filePath:'drop.txt',content:'DROPPED_PAYLOAD',size:15,mimeType:'text/plain'}});
           if(path.endsWith('.skills.list'))return Promise.resolve([{name:'Fixture skill',path:'C:/skills/fixture/SKILL.md',description:'test'}]);
           if(path.endsWith('.skills.getDisabled'))return Promise.resolve([]);
-          if(path.endsWith('.mods.chatDisplayCapability'))return Promise.resolve(false);
+          if(path.endsWith('.mods.chatDisplayCapability')||path.endsWith('.mods.chatPresentationCapability'))return Promise.resolve(false);
           if(path.endsWith('.mods.commands'))return Promise.resolve([]);
           if(path.endsWith('.autoCommit.getWorkspaceCard')){fixture.cardReads=(fixture.cardReads??0)+1;return Promise.resolve({cardNumber:'CARD-1'})}
           if(path.endsWith('.workspace.getGitPanelDiffs')){fixture.diffReads=(fixture.diffReads??0)+1;return Promise.resolve({success:true,files:[],changedFiles:[],totals:{fileCount:0,additions:0,deletions:0},omittedFileCount:0})}
@@ -112,6 +113,7 @@ async function main() {
         fixture.activation=reservation.ready(new AbortController().signal).then(()=>{fixture.activated=reservation.activate()},()=>{fixture.cancelled=true})};
       fixture.returnParent=()=>releaseModsAgentInput(intent.id);
       window.fixture=fixture;fixture.mount=()=>root.render(<ChatContainer threadId='a'/>);
+      fixture.hideChat=()=>root.render(null);
       fixture.customize=value=>useAppStore.setState({showCustomizeView:value});
       if(window.restoreSessionFixture){
         const lease=chatScrollSessionStore.open('a').lease;
@@ -169,6 +171,8 @@ async function main() {
             historyConversationPresence:'empty',workspaceFiles:[{name:'proof.txt',path:'proof.txt',type:'file'}]}));
           const change=patch=>threadStore.setState(patch);
           actions=new Proxy({setDraftInput:text=>change({draftInput:text,draftRevision:threadStore.getState().draftRevision+1}),
+            setDraftAttachments:update=>change({draftAttachments:typeof update==='function'?update(threadStore.getState().draftAttachments):update}),
+            setDraftMentionedFiles:update=>change({draftMentionedFiles:typeof update==='function'?update(threadStore.getState().draftMentionedFiles):update}),
             readPromptDraft:()=>({text:threadStore.getState().draftInput,revision:threadStore.getState().draftRevision}),
             applyPromptDraft:(revision,text)=>{if(revision!==threadStore.getState().draftRevision)return false;actions.setDraftInput(text);return true},
             setDraftSkill:value=>change({draftSkill:value}),setDraftBuiltinBrowser:value=>change({draftBuiltinBrowser:value}),
@@ -293,6 +297,68 @@ async function main() {
       page.evaluate(
         () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
       )
+    const attachButton = page.getByRole("button", { name: "添加文件", exact: true })
+    const uploadChip = page.locator('[aria-label="移除附件 upload.txt"]')
+    const remountChat = async () => {
+      await page.evaluate("window.fixture.hideChat()")
+      await attachButton.waitFor({ state: "detached" })
+      await page.evaluate("window.fixture.mount()")
+      await attachButton.waitFor()
+    }
+    await reset()
+    await remountChat()
+    assert.equal(await uploadChip.count(), 1, "Completed attachment survives the file view round trip")
+    await uploadChip.click()
+    await page.evaluate("window.fixture.hold('parseSelected')")
+    await attachButton.click()
+    await page.waitForFunction("window.fixture.gates.get('parseSelected')?.length===1")
+    await remountChat()
+    await page.evaluate(`{
+      const old = window.fixture.gates.get('parseSelected');
+      window.fixture.gates.delete('parseSelected');
+      window.fixture.completeOldUpload=()=>old.forEach(resolve=>resolve());
+    }`)
+    await attachButton.click()
+    await uploadChip.waitFor()
+    await page.evaluate("window.fixture.completeOldUpload()")
+    await paint()
+    assert.equal(await uploadChip.count(), 1, "Retired parse must not append a second copy")
+    checks.push("a completed attachment persists, but a retired parse cannot write to the remounted draft")
+
+    for (const phase of ["picker", "dropBytes"] as const) {
+      await reset()
+      await uploadChip.click()
+      await page.evaluate((phase) => {
+        const f = (window as unknown as { fixture: { events: string[]; hold(name: string): void;
+          delay<T>(name: string, value: T): Promise<T> } }).fixture
+        f.events.length = 0
+        f.hold(phase)
+        if (phase === "dropBytes") {
+          const transfer = new DataTransfer()
+          const file = new File(["text"], "drop.txt", { type: "text/plain" })
+          Object.defineProperty(file, "arrayBuffer", { value: () => f.delay(phase, new ArrayBuffer(4)) })
+          transfer.items.add(file)
+          document.querySelector("textarea.composer-textarea")?.dispatchEvent(
+            new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer })
+          )
+        }
+      }, phase)
+      if (phase === "picker") await attachButton.click()
+      await page.waitForFunction(
+        ({ phase }) => (window as unknown as { fixture: { gates: Map<string, unknown[]> } })
+          .fixture.gates.get(phase)?.length === 1,
+        { phase }
+      )
+      await remountChat()
+      await page.evaluate((phase) =>
+        (window as unknown as { fixture: { release(name: string): void } }).fixture.release(phase), phase)
+      await paint()
+      assert.equal(await page.evaluate("window.fixture.state().draftAttachments.length"), 0)
+      assert.equal(await page.evaluate(`window.fixture.events.includes(${JSON.stringify(
+        phase === "picker" ? "parseSelected" : "parseBytes"
+      )})`), false, `Retired ${phase} must not start native parsing`)
+      checks.push(`retired ${phase} cannot start parsing in the remounted draft`)
+    }
     await reset(undefined, true)
     assert.deepEqual(
       await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
@@ -465,14 +531,36 @@ async function main() {
     await reset(undefined, "durable")
     await page.waitForFunction("window.fixture.indexCalls?.some(call=>call.index===12)")
     await paint()
+    assert.deepEqual(
+      await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
+      { index: 12, align: "center", behavior: "auto" },
+      "An unfinished durable reveal supplies the initial index of its own target"
+    )
+    assert(
+      await page.evaluate("window.fixture.indexCalls.every(call=>call.index===12)"),
+      "The older saved anchor cannot issue an index write while a durable reveal owns positioning"
+    )
+    assert.equal(
+      await page.evaluate("window.fixture.anchorOwners?.size??0"),
+      0,
+      "A pending durable reveal cannot acquire the older session's restore lease"
+    )
+    const durableCalls = await page.evaluate("window.fixture.indexCalls.length")
+    await page.evaluate(`{
+      const row=document.createElement('div');
+      row.dataset.chatMessageId='saved-12';
+      document.querySelector('[data-radix-scroll-area-viewport]').append(row);
+      window.fixture.listProps.contentMessageRefs.current.set('saved-12',row);
+      window.fixture.searchProps.onDurableRevealFinished('saved-12');
+      window.fixture.change({historyWindowRevision:window.fixture.state().historyWindowRevision+1});
+    }`)
+    await paint()
+    await paint()
     assert.equal(
       await page.evaluate("window.fixture.listProps.initialTopMostItemIndex"),
       undefined,
-      "A resumed durable search consumes the session seed only when its virtual handle is ready"
+      "A completed durable reveal cannot seed a subsequent virtual window"
     )
-    const durableCalls = await page.evaluate("window.fixture.indexCalls.length")
-    await paint()
-    await paint()
     assert.equal(await page.evaluate("window.fixture.indexCalls.length"), durableCalls)
     assert.equal(await page.evaluate("window.fixture.indexCalls.at(-1).index"), 12)
     await reset(undefined, true)

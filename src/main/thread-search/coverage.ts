@@ -1,6 +1,7 @@
 import { getDb } from "../db"
 import { getDbPath, getThreadCheckpointPath } from "../storage"
 import { createLegacyTranscriptWriter } from "../checkpointer/legacy-transcript-main-writer"
+import { captureStockLegacyTranscriptSource } from "../checkpointer/legacy-stock-transcript-admission"
 import { sqliteRecoveryFamilyKey } from "../db/sqlite-recovery-family"
 import {
   CheckpointRuntimeProjectionClient,
@@ -233,7 +234,8 @@ async function run() {
         const assertCurrent = () => {
           signal.throwIfAborted()
           const current = readBackfillState(threadId)
-          if (getDb() !== database || runGeneration !== generation || !current || current.oversized_token ||
+          if (getDb() !== database || runGeneration !== generation || !current ||
+            current.status === "busy" || current.oversized_token ||
             !matchesThreadIncarnationSnapshot({
               token: typeof current.token === "string" && current.token ? current.token : null,
               legacyCreatedAt: Number(current.created_at)
@@ -242,19 +244,22 @@ async function run() {
               name: "CHECKPOINT_RUNTIME_PROJECTION_CANCELLED"
             })
         }
+        const stock = captureStockLegacyTranscriptSource({ database, checkpointPath, threadId,
+          incarnation, assertCurrent })
         const migrated = await client.bootstrapLegacyTranscript(
           checkpointPath,
           getDbPath(),
           threadId,
           "",
           `thread-search-backfill:${threadId}`,
-          {
+          stock ? undefined : {
             assertCurrent,
             createWriter: (context) => createLegacyTranscriptWriter({ ...context,
               actualDatabase: database, incarnation, assertCurrent, searchSourceKey: sourceKey })
           },
           signal,
-          { ...guard, sourceKey }
+          { ...guard, sourceKey },
+          stock
         )
         const pendingCopy = row.migration_status && row.migration_status !== "complete"
         const projectionState = migrated.stats.searchProjectionState

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { build, preview } from "vite"
+import { radixScrollbarWheel } from "../../scripts/vite-radix-scrollbar-wheel"
 
 /** Actual production renderer with explicit fixture backends, without .env or out/ changes. */
 export async function startIsolatedAppRenderer(root: string, isolated: string) {
@@ -46,6 +47,7 @@ export async function startIsolatedAppRenderer(root: string, isolated: string) {
       }
     },
     plugins: [
+      radixScrollbarWheel(),
       {
         name: "isolated-optional-mmj-module",
         resolveId(source, importer) {

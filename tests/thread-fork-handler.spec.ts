@@ -6,6 +6,7 @@
  */
 
 import assert from "assert"
+import { EventEmitter } from "node:events"
 import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "fs/promises"
 import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages"
 import { tmpdir } from "os"
@@ -1189,14 +1190,28 @@ async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<
       /Thread changed while the request was queued/
     )
     let bootstrapSettled = false
-    const queuedBootstrap = Promise.resolve(bootstrap({ sender: { id: 129 } }, threadId)).then(
-      (result) => {
-        bootstrapSettled = true
-        return result
-      }
+    const makeSender = (id: number) => Object.assign(new EventEmitter(), {
+      id,
+      mainFrame: {},
+      isDestroyed: () => false
+    })
+    const sender = makeSender(129)
+    const queuedBootstrap = Promise.resolve(bootstrap({ sender }, threadId)).finally(() => {
+      bootstrapSettled = true
+    })
+    const bootstrapRejected = assert.rejects(
+      queuedBootstrap,
+      /MODS_CONVERSATION_THREAD_CHANGED/,
+      "An old bootstrap cannot hydrate a same-ID replacement"
     )
+    const navigatingSender = makeSender(130)
+    const cancelledBootstrap = Promise.resolve(bootstrap({ sender: navigatingSender }, threadId))
     await new Promise<void>((resolve) => setImmediate(resolve))
     assert.equal(bootstrapSettled, false, "Legacy migration waits on the original thread lease")
+    assert.equal(sender.listenerCount("destroyed"), 1, "The queued bootstrap retains its original renderer")
+    assert.equal(navigatingSender.listenerCount("did-start-navigation"), 1)
+    navigatingSender.mainFrame = {}
+    navigatingSender.emit("did-start-navigation")
 
     // Both handlers captured the original row before queuing on the mutation lock.
     // Recreate with the same id, timestamp and metadata before either can commit.
@@ -1218,8 +1233,11 @@ async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<
     await lockHolder
 
     assert.equal((await appendPromise).count, 0)
-    assert.equal(await queuedBootstrap, null, "An old bootstrap cannot hydrate a same-ID replacement")
+    assert.equal(await cancelledBootstrap, null, "Renderer navigation cancels the queued bootstrap")
+    assert.equal(sender.listenerCount("destroyed"), 0, "The stale hydration retires its renderer listener")
+    assert.equal(navigatingSender.listenerCount("did-start-navigation"), 0)
     await Promise.all([
+      bootstrapRejected,
       persistRejected,
       replaceRejected,
       updateRejected,

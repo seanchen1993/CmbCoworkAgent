@@ -3,32 +3,19 @@ import { MOD_COMMAND_HISTORY_LIMIT, type ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
 import { isFunctionPluginPromptOrigin } from "./plugin-prompt"
+import { FUNCTION_UI_SITES, type FunctionUiSite } from "./site-vocabulary"
 import { validateFunctionTree, type FunctionUiElement } from "./ui"
 
-export const FUNCTION_UI_SITES = [
-  "ChatHeader",
-  "AbovePrompt",
-  "PromptHint",
-  "InfoNotice",
-  "Spinner",
-  "TurnDuration",
-  "SessionMode",
-  "UserMessage",
-  "AssistantMessage",
-  "CommandOutput",
-  "ToolUse",
-  "ToolResult",
-  "ToolGroup",
-  "AskUserQuestion"
-] as const
-export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
+export {
+  FUNCTION_UI_SITES,
+  isFunctionUiRenderComponent,
+  type FunctionUiRenderComponent,
+  type FunctionUiSite
+} from "./site-vocabulary"
+
 /** Desktop docks live outside the transcript and have their own bounded scroll area. */
 export function isFunctionDockedSite(site: string): site is "AbovePrompt" | "ChatHeader" {
   return site === "AbovePrompt" || site === "ChatHeader"
-}
-export type FunctionUiRenderComponent = FunctionUiSite | "Pane" | "Placed"
-export function isFunctionUiRenderComponent(value: unknown): value is FunctionUiRenderComponent {
-  return value === "Pane" || value === "Placed" || FUNCTION_UI_SITES.some(site => site === value)
 }
 /** Passive presentation eligibility still requires a host source/purity/dependency proof. */
 export const FUNCTION_PASSIVE_DISPLAY_SITES: readonly FunctionUiSite[] = [
@@ -40,6 +27,11 @@ export type FunctionSiteMountOutcome =
   | { state: "inactive"; reason: "mods-disabled" | "no-protection-or-functions" }
   | { state: "retired" }
 /** A passive projection is deliberately distinct from a current interaction lease. */
+export interface ModsChatDisplayDecision {
+  enabled: boolean
+  nativeHistory: boolean
+}
+
 export type FunctionSiteReadOutcome =
   | { state: "projected"; snapshot: import("./display-snapshot").FunctionDisplaySnapshot }
   | { state: "mounted"; owner: string; snapshot: import("./ui").FunctionPaneSnapshot }

@@ -1,7 +1,7 @@
 import { useMemo, type ReactNode } from "react"
 import { FunctionSite } from "./FunctionSite"
 import { functionMessageTextMode } from "../../../../shared/mods/v2/host-message"
-import { useModsChatScope } from "../../lib/mods-chat-scope"
+import { useModsChatScope, useModsNativeHistory } from "../../lib/mods-chat-scope"
 import type { ModObject } from "../../../../shared/mods/types"
 
 /** Presentation only: the caller retains the stored text, copy action and model transcript. */
@@ -11,6 +11,7 @@ export function FunctionMessageText({
   presentationId = messageId,
   role,
   text,
+  isFirstText,
   isExpanded,
   isFirstOfReply,
   isHistory,
@@ -22,6 +23,7 @@ export function FunctionMessageText({
   presentationId?: string
   role: "user" | "assistant"
   text: string
+  isFirstText?: boolean
   isExpanded: boolean
   isFirstOfReply: boolean
   isHistory?: boolean
@@ -29,6 +31,7 @@ export function FunctionMessageText({
   renderText(text: string): ReactNode
 }): ReactNode {
   const enabled = useModsChatScope(threadId)
+  const nativeHistory = useModsNativeHistory(threadId)
   const facts = useMemo((): ModObject => {
     if (role === "user") return { text, origin: { kind: "unclassified" }, isExpanded }
     return { text, isFirstOfReply }
@@ -48,8 +51,10 @@ export function FunctionMessageText({
       component={role === "user" ? "UserMessage" : "AssistantMessage"}
       presentationId={presentationId}
       messageId={role === "user" ? messageId : undefined}
+      firstTextMessageId={isFirstText ? messageId : undefined}
       className="contents"
       allowUnboundHistory={isHistory}
+      nativeHistory={isHistory && nativeHistory && mode !== "host-message"}
       facts={facts}
       fallback={fallback}
       renderNative={(safe) => (typeof safe.text === "string" ? renderText(safe.text) : null)}

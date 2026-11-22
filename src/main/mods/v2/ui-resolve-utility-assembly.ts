@@ -7,7 +7,7 @@ import {
   type FunctionHostReply,
   type FunctionRegistration
 } from "../../../shared/mods/v2/contracts"
-import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/site-vocabulary"
 import type {
   FunctionUiResolveWireCredit,
   FunctionUiResolveWireParticipant,

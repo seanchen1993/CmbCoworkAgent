@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { join } from "node:path"
 import type { Page } from "playwright"
+import { openModsSettings } from "./mods-sidebar-navigation"
 
 /** Native app settings, with an ordinary installed plugin and no Autobiz example UI. */
 export async function verifyApplicationCompletionSettings(
@@ -11,12 +12,7 @@ export async function verifyApplicationCompletionSettings(
 ): Promise<void> {
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Mods settings E2E", { exact: true }).first().click()
-  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "基础功能", exact: true }) }).getByRole("button", { name: "插件", exact: true }).click()
-  await page
-    .getByRole("navigation", { name: "灵件工作区" })
-    .getByRole("button", { name: "我已添加", exact: true })
-    .click()
+  await openModsSettings(page)
   assert.equal(await page.locator("[data-mods-locked]").count(), 0)
   await page
     .getByRole("article", { name: "function-commands", exact: true })

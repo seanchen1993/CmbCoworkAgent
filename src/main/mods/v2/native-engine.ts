@@ -113,17 +113,14 @@ export class FunctionNativeDrawing {
     return { type: "engine", ref }
   }
 
-  /** Cache only the two publication passes of this snapshot, never a later policy decision. */
-  beginPublication(): void {
-    this.assertCurrent()
-    this.protectedInputs.clear()
-  }
-
   async protect(
     tree: FunctionUiElement,
-    publish: (value: ModJson) => Promise<ModJson>
+    publish: (value: ModJson) => Promise<ModJson>,
+    phase?: "begin"
   ): Promise<FunctionNativeContent> {
     this.assertCurrent()
+    // Cache only the passes of this publication, after checking the current authority.
+    if (phase === "begin") this.protectedInputs.clear()
     const refs = [
       ...new Set([
         0,

@@ -35,11 +35,13 @@ export interface ClaimLocalThreadRunLeaseInput {
 const activeLeases = new Map<string, LocalThreadRunLease>()
 const capturedLeaseGet = Map.prototype.get
 const releaseListeners = new Set<LocalThreadRunLeaseReleasedListener>()
-let admissionGuard: (<T>(threadId: string, work: () => T) => T) | undefined
+const admissionReleases = new WeakMap<LocalThreadRunLease, () => void>()
+type ThreadRunAdmissionGuard = <T>(threadId: string, work: (release?: () => void) => T) => T
+let admissionGuard: ThreadRunAdmissionGuard | undefined
 
-/** Main-only composition fence. Existing ownership and releases keep their original semantics. */
+/** Main-only composition fence. Admission may transfer a physical lock to the run lease. */
 export function registerLocalThreadRunAdmissionGuard(
-  guard: <T>(threadId: string, work: () => T) => T
+  guard: ThreadRunAdmissionGuard
 ): () => void {
   if (admissionGuard) throw Error("THREAD_RUN_ADMISSION_GUARD_REGISTERED")
   admissionGuard = guard
@@ -125,8 +127,10 @@ export function claimLocalThreadRunLease(
     runId,
     acquiredAt: input.acquiredAt ?? new Date().toISOString()
   }
-  const commit = (): LocalThreadRunLeaseClaim => {
+  const commit = (release?: () => void): LocalThreadRunLeaseClaim => {
+    if (release) admissionReleases.set(lease, release)
     activeLeases.set(threadId, lease)
+    if (current) releaseAdmission(current)
     return {
       acquired: true,
       lease: copyLease(lease),
@@ -144,8 +148,19 @@ export function releaseLocalThreadRunLease(
   const current = activeLeases.get(threadId)
   if (!current || current.owner !== owner || current.runId !== runId) return false
   activeLeases.delete(threadId)
+  releaseAdmission(current)
   notifyReleased(current)
   return true
+}
+
+function releaseAdmission(lease: LocalThreadRunLease): void {
+  const release = admissionReleases.get(lease)
+  admissionReleases.delete(lease)
+  try {
+    release?.()
+  } catch (error) {
+    console.error("[ThreadRunLease] Admission lock release failed:", error)
+  }
 }
 
 export function assertLocalThreadRunLease(

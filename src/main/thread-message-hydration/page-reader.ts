@@ -5,6 +5,8 @@ import { canonicalDisplayColumnsDigest, canonicalDisplayValueDigest,
   "../checkpointer/function-conversation-canonical-display-worker"
 import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
 import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
+import { hasPendingStockLegacyMessageTimes } from "../checkpointer/legacy-stock-message-times"
+import { stockLegacyHasNativeOwnership } from "../checkpointer/legacy-stock-transcript-authority"
 import {
   beginLegacyCheckpointRecoveryHash, legacyCheckpointReplayRowSql, NATIVE_DURABLE_CHECKPOINT_ID
 } from "../checkpointer/legacy-checkpoint-source"
@@ -881,11 +883,13 @@ function getLegacyCheckpointMigration(
     )
     .get()
   if (!hasMigrationTable) return null
-  const hasTimingSource = database.prepare("PRAGMA table_info(legacy_checkpoint_transcript_migrations)").all()
-    .some((column) => column.name === "timing_checkpoint_id")
+  const markerColumns = database.prepare("PRAGMA table_info(legacy_checkpoint_transcript_migrations)").all()
+  const hasTimingSource = markerColumns.some((column) => column.name === "timing_checkpoint_id")
+  const hasSourceKey = markerColumns.some((column) => column.name === "source_key")
   const row = database
     .prepare(
-      `SELECT checkpoint_id, total_messages, status, source_key,
+      `SELECT checkpoint_id, total_messages, status,
+         ${hasSourceKey ? "source_key" : "NULL"} AS source_key,
          ${hasTimingSource ? "timing_checkpoint_id" : "NULL"} AS timing_checkpoint_id
        FROM legacy_checkpoint_transcript_migrations
        WHERE thread_id = ?
@@ -987,6 +991,28 @@ function readResidentOrdinals(
   return result
 }
 
+function hasPendingPageLegacyTimes(
+  database: DatabaseSync,
+  request: ThreadMessageHydrationReadRequest,
+  migration: LegacyCheckpointMigrationBoundary | null
+): boolean {
+  if (migration?.status !== "complete") return false
+  const { threadId } = request
+  const { checkpointId, sourceKey } = migration
+  if (hasPendingLegacyMessageTimes(database, threadId, checkpointId)) return true
+  if (!request.options.includeVisibleMessagePresence || request.auditStockLegacyTimes !== true ||
+    !sourceKey) return false
+  // A source key alone is not a stock write receipt: the Main search writer
+  // publishes one too. Only the verified ordinary checkpoint has this ledger.
+  const hasStockLedger = database.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'legacy_checkpoint_transcript_sources'`).get() &&
+    database.prepare(`SELECT 1 FROM legacy_checkpoint_transcript_sources
+      WHERE thread_id = ? AND checkpoint_id = ?`).get(threadId, checkpointId)
+  return Boolean(hasStockLedger &&
+    hasPendingStockLegacyMessageTimes(database, threadId, checkpointId, sourceKey) &&
+    !stockLegacyHasNativeOwnership(database, threadId))
+}
+
 export function readThreadMessagesPage(
   database: DatabaseSync,
   request: ThreadMessageHydrationReadRequest
@@ -1020,13 +1046,9 @@ export function readThreadMessagesPage(
         ? "complete" : legacyCheckpointMigration?.status ?? null)
       : undefined
     const sourceNeedsVerification = legacySourceNeedsVerification(legacyCheckpointMigration, request)
-    const legacyMessageTimesPending =
-      legacyCheckpointMigration?.status === "complete" &&
-      hasPendingLegacyMessageTimes(
-        database,
-        request.threadId,
-        legacyCheckpointMigration.checkpointId
-      )
+    const legacyMessageTimesPending = hasPendingPageLegacyTimes(
+      database, request, legacyCheckpointMigration
+    )
     const { rows: candidates, verifiedAnchor } = readCandidates(
       database,
       request,

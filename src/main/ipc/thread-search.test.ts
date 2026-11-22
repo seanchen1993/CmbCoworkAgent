@@ -94,13 +94,19 @@ afterEach(async () => {
 describe("thread search window ownership", () => {
   it("keeps protected search snippets and newly protected target pages in Main", async () => {
     const { first, request } = fixture()
-    const hit = (threadId: string) => ({
+    const hit = (threadId: string): ThreadSearchResult => ({
       threadId, incarnation: { token: null, legacyCreatedAt: 1 },
       title: threadId, workspacePath: null, frozenUpdatedAt: 2,
       snippet: "raw-protected-content", snippetRanges: [],
       matchedBy: "message", navigation: "exact",
-      target: { kind: "durableMessage", messageId: threadId, ordinalHint: 0, structureEpoch: 0 }
-    }) as ThreadSearchResult
+      target: {
+        kind: "durableMessage", messageId: threadId, ordinalHint: 0, structureEpoch: 0,
+        location: {
+          kind: "body", blockIndex: 0, sourceStart: 0, sourceEnd: 3, revision: "1",
+          start: 0, end: 3, segmentOccurrence: 0, context: "raw", contextStart: 0, contextEnd: 3
+        }
+      }
+    })
     const ordinary = hit("ordinary")
     const protectedHit = hit("protected")
     results.push(ordinary, protectedHit)

@@ -1,4 +1,4 @@
-import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/site-vocabulary"
 
 /** Runs in the function VM. Only data trees and opaque callback handles leave this closure. */
 export const FUNCTION_UI_BOOTSTRAP = String.raw`

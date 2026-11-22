@@ -22,7 +22,7 @@ const state = vi.hoisted(() => ({
 vi.mock("../harness-board/service", () => ({
   getHarnessProjectAdapterSnapshot: async () => ({ id: "original", type: "plugin" })
 }))
-vi.mock("../db", () => ({ getThreadCore: () => state.thread }))
+vi.mock("../db", () => ({ getThreadRuntimeScope: () => state.thread }))
 vi.mock("../storage", () => ({
   getPlugins: () => state.plugins,
   getOpenworkDir: () => state.root,

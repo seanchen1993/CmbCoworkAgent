@@ -20,7 +20,9 @@ import {
 import { mergeCheckpointAuthorityTranscriptMessages } from "../../shared/checkpoint-transcript"
 import { normalizeVisibleReasoningText } from "../../renderer/src/lib/message-display-visibility"
 import { stripThinkBlocksForDisplay } from "../../shared/think-block-display"
-import { bootstrapLegacyCheckpointTranscript } from "../checkpointer/runtime-projection-store"
+import { captureStockLegacyTranscriptSource } from "../checkpointer/legacy-stock-transcript-admission"
+import { bootstrapStockLegacyCheckpointTranscript } from "../checkpointer/legacy-stock-transcript-store"
+import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { sqliteRecoveryFamilyKey } from "./sqlite-recovery-family"
 import type { Message } from "../types"
 import {
@@ -527,7 +529,7 @@ describe("durable thread reasoning", () => {
 
   it("must preserve reasoning when importing an old checkpoint into durable history", () => {
     const threadId = "legacy-think-thread"
-    db.createThread(threadId)
+    const thread = db.createThread(threadId)
     const checkpointPath = join(temporaryDirectory, "checkpoint.sqlite")
     const checkpointDb = new DatabaseSync(checkpointPath)
     checkpointDb.exec(`
@@ -577,13 +579,23 @@ describe("durable thread reasoning", () => {
       )
     checkpointDb.close()
     const sourceKey = sqliteRecoveryFamilyKey(checkpointPath)
-    const bootstrap = bootstrapLegacyCheckpointTranscript(
+    const source = captureStockLegacyTranscriptSource({
+      database: db.getDb(),
+      checkpointPath,
+      threadId,
+      incarnation: captureThreadIncarnation(thread),
+      assertCurrent() {}
+    })
+    if (!source) throw new Error("Expected the ordinary legacy transcript path")
+    const bootstrap = bootstrapStockLegacyCheckpointTranscript(
       checkpointPath,
       storageState.databasePath,
       threadId,
       "",
-      new SharedArrayBuffer(4)
+      new SharedArrayBuffer(4),
+      source.authority
     )
+    source.assertCurrent()
     const durable = db.getThreadMessages(threadId)
     expect(bootstrap.stats.migratedMessages).toBe(2)
     expect(sqliteRecoveryFamilyKey(checkpointPath)).toBe(sourceKey)

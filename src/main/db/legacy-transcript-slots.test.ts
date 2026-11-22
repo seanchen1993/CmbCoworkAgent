@@ -13,12 +13,16 @@ import {
 } from "../../shared/message-role-collision"
 import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
 import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "../checkpointer/runtime-projection-protocol"
-import { bootstrapLegacyCheckpointTranscript } from "../checkpointer/runtime-projection-store"
+import { bootstrapStockLegacyCheckpointTranscript } from "../checkpointer/legacy-stock-transcript-store"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
+import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { readThreadMessagesPage } from "../thread-message-hydration/page-reader"
 import {
   closeDatabase,
   createThread,
+  getDb,
+  getOpenDatabaseFile,
+  getThreadCore,
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessages,
   getThreadTranscriptBoundaryOrdinal,
@@ -32,6 +36,8 @@ import {
   withThreadMessageIdentitySnapshot
 } from "."
 import { NativeSqliteAdapter } from "./native-sqlite-adapter"
+import { ensureLegacyTranscriptSlots } from "./legacy-transcript-slots"
+import { sqliteRecoveryFamilyKey } from "./sqlite-recovery-family"
 
 const storage = vi.hoisted(() => ({ databasePath: "" }))
 vi.mock("../storage", async (importOriginal) => ({
@@ -105,12 +111,21 @@ function persist(nodes: Array<HumanMessage | AIMessage>): void {
 }
 
 function bootstrap(cancellation = new SharedArrayBuffer(4)) {
-  return bootstrapLegacyCheckpointTranscript(
+  const row = getThreadCore(threadId)
+  const messageDatabaseFile = getOpenDatabaseFile(getDb())
+  if (!row || !messageDatabaseFile) throw Error("Missing ordinary legacy fixture identity")
+  return bootstrapStockLegacyCheckpointTranscript(
     checkpointPath,
     storage.databasePath,
     threadId,
     "",
-    cancellation
+    cancellation,
+    {
+      messageDatabaseFile,
+      checkpointFamilyKey: sqliteRecoveryFamilyKey(checkpointPath),
+      incarnation: captureThreadIncarnation(row),
+      workspace: ""
+    }
   )
 }
 
@@ -150,6 +165,26 @@ const slots = () =>
     .all(threadId)
 
 describe("legacy checkpoint transcript slots", () => {
+  it("converts only the authorized thread inside the existing write transaction", () => {
+    const otherThread = "unrelated-legacy-thread"
+    createThread(otherThread)
+    const insert = observer.prepare(`INSERT INTO legacy_checkpoint_transcript_migrations
+      (thread_id, checkpoint_id, total_messages, next_index, reserved_ordinals_json, status, updated_at)
+      VALUES (?, ?, 2, 1, ?, 'migrating', 0)`)
+    insert.run(threadId, checkpointId, "[null,7]")
+    insert.run(otherThread, checkpointId, "[null,9]")
+
+    const database = new NativeSqliteAdapter(observer)
+    database.withImmediateWriteTransaction(() => ensureLegacyTranscriptSlots(database, threadId))
+
+    expect(slots()).toEqual([{ message_index: 1, ordinal: 7 }])
+    const unaffected = observer.prepare(`SELECT scoped_order, reserved_ordinals_json
+      FROM legacy_checkpoint_transcript_migrations WHERE thread_id=?`).get(otherThread)
+    expect(unaffected).toEqual({ scoped_order: null, reserved_ordinals_json: "[null,9]" })
+    expect(observer.prepare(`SELECT ordinal FROM legacy_checkpoint_transcript_slots
+      WHERE thread_id=?`).all(otherThread)).toEqual([])
+  })
+
   it.each([false, true])("preserves checkpoint fragment ownership across a stream rollback (descendant=%s)", async (descendant) => {
     const root = visibleUser("root")
     const large = assistant("wide", "prior ".repeat(360_000))

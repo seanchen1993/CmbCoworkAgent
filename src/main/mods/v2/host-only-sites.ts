@@ -148,7 +148,8 @@ export class FunctionHostOnlySites {
     threadId: string,
     component: FunctionUiSite,
     messageId?: string,
-    expectedRequestId?: string
+    expectedRequestId?: string,
+    signal?: AbortSignal
   ): Promise<string> {
     if (this.pending >= FUNCTION_HOST_ONLY_MOUNT_LIMIT)
       throw new ModFunctionError("MODS_UI_SITE_MOUNT_CAPACITY")
@@ -161,7 +162,8 @@ export class FunctionHostOnlySites {
     entry.pending++
     try {
       entry.assertLive()
-      const owner = await entry.sites.mount(component, messageId, expectedRequestId)
+      const owner = await entry.sites.mount(component, messageId, expectedRequestId,
+        ...(signal ? [signal] as const : []))
       entry.assertLive()
       // FunctionUiSites replaces its singleton slot. Retire that exact routing alias as well.
       if (!repeated.has(component))

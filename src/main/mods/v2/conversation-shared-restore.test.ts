@@ -983,7 +983,12 @@ describe("actual shared child checkpoint restore admission", () => {
       expect(checkpoint.channel_values.cmbFunctionConversation).toBeUndefined()
       const reference = checkpoint.channel_values.messages as Record<string, unknown> | undefined
       expect(reference?.__cmb_sqljs_external_messages_v1).toBe(true)
-      expect(Object.keys(reference ?? {}).sort()).toEqual(["__cmb_sqljs_external_messages_v1", "messageCount"])
+      expect(Object.keys(reference ?? {}).sort()).toEqual([
+        "__cmb_sqljs_external_messages_v1", "messageCount", "transcriptRevision"
+      ])
+      expect(reference?.transcriptRevision).toMatch(
+        /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
+      )
       expect(Number.isSafeInteger(reference?.messageCount)).toBe(true)
       expect(Number(reference?.messageCount)).toBeGreaterThan(0)
       expect(messageSnapshot).toBeDefined()

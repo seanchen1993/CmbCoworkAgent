@@ -15,6 +15,10 @@ import type { FunctionModsManager } from "../mods/v2/manager"
 import { configureProjectUseRuntime } from "../harness-board/project-use-authorization"
 import { ProjectCompositionStore } from "../harness-board/project-runtime/composition-store"
 import {
+  acquireCompositionAdmission,
+  compositionWorkspaceKey
+} from "../harness-board/project-runtime/composition-admission"
+import {
   claimLocalThreadRunLease,
   getLocalThreadRunLease,
   releaseLocalThreadRunLease
@@ -42,6 +46,7 @@ const state = vi.hoisted(() => ({
   registerComposition: undefined as RegisterComposition | undefined,
   composition: undefined as ReturnType<RegisterComposition> | undefined,
   closeAdmission: undefined as (() => void) | undefined,
+  closeComposition: undefined as (() => void) | undefined,
   hostStoreOpened: vi.fn(),
   openHostStore: undefined as ((path: string) => HostStore) | undefined
 }))
@@ -147,6 +152,9 @@ vi.mock("../mods/v2/platform-project-runtime-native", () => ({
 }))
 vi.mock("../harness-board/project-runtime/composition-legacy-production", () => ({ createLegacyCompositionDependencies: () => ({}) }))
 import { registerProjectRuntimeHandlers } from "./project-runtime"
+
+const { registerProjectCompositionHandlers } =
+  await vi.importActual<typeof import("./project-composition")>("./project-composition")
 
 it("rejects internal Host feature material fields from the standalone renderer create IPC", async () => {
   const localCreate = vi.fn()
@@ -278,8 +286,9 @@ beforeEach(() => {
 })
 afterEach(() => {
   state.closeAdmission?.()
-  state.composition?.store().close()
+  state.closeComposition?.()
   state.closeAdmission = undefined
+  state.closeComposition = undefined
   state.composition = undefined
   state.registerComposition = undefined
   state.threadWorkspaces = {}
@@ -309,9 +318,7 @@ it("admits ordinary chat with an existing composition store and an unreadable Ho
   mkdirSync(join(root, "local-projects"))
   writeFileSync(join(root, "local-projects", "state.sqlite"), "unreadable Host database")
   state.threadWorkspaces = { chat: workspace, unrelated }
-  state.registerComposition = (await vi.importActual<typeof import("./project-composition")>(
-    "./project-composition"
-  )).registerProjectCompositionHandlers
+  state.registerComposition = registerProjectCompositionHandlers
   const seed = new ProjectCompositionStore(join(root, "project-compositions", "state.sqlite"))
   try {
     nativeHandlers()
@@ -329,6 +336,7 @@ it("admits ordinary chat with an existing composition store and an unreadable Ho
     expect(() => claimLocalThreadRunLease({ threadId: "chat", owner: "desktop", runId: "leased" }))
       .toThrow("COMPOSITION_WORKSPACE_BUSY")
     const sharedStore = state.composition!.store()
+    state.closeComposition = () => sharedStore.close()
     expect(sharedStore.withWorkspaceOwner(run.id, () =>
       sharedStore.guardWorkspaceMutation(workspace, () =>
         claimLocalThreadRunLease({ threadId: "chat", owner: "mods", runId: "owned" })
@@ -345,46 +353,86 @@ it("admits ordinary chat with an existing composition store and an unreadable Ho
   }
 })
 
-it("returns a retryable admission error without waiting for a cold or warm composition writer", async () => {
+it("admits an unrelated chat while a cold or warm ledger writer holds another workspace", async () => {
   const root = mkdtempSync(join(canonicalTmpdir(), "composition-admission-contention-"))
   templateRoots.push(root)
   state.dataRoot = root
-  state.threadWorkspaces = { chat: root }
-  state.registerComposition = (await vi.importActual<typeof import("./project-composition")>(
-    "./project-composition"
-  )).registerProjectCompositionHandlers
+  const workspace = join(root, "composed")
+  const unrelated = join(root, "ordinary")
+  mkdirSync(workspace)
+  mkdirSync(unrelated)
+  state.threadWorkspaces = { chat: workspace, unrelated }
+  state.registerComposition = registerProjectCompositionHandlers
 
-  const directory = join(root, "project-compositions")
-  mkdirSync(directory)
-  const writer = new DatabaseSync(join(directory, "state.sqlite"))
-  const claim = () => claimLocalThreadRunLease({
-    threadId: "chat",
-    owner: "desktop",
-    runId: "run"
+  const path = join(root, "project-compositions", "state.sqlite")
+  const seeded = new ProjectCompositionStore(path)
+  const definition = (target: string) => ({
+    apiVersion: "devclaw.project-composition/v1",
+    parentProjectId: target === workspace ? "parent-a" : "parent-b",
+    workspace: target,
+    units: [{ id: "step", kind: "flow", inputs: [], outputs: [],
+      source: { pluginId: "plugin", capabilityId: "step", packageDigest: "a".repeat(64) } }]
   })
+  seeded.create(definition(workspace), "request")
+  const writer = new DatabaseSync(path)
+  const claim = (threadId: string) => claimLocalThreadRunLease({
+    threadId, owner: "desktop", runId: "run"
+  })
+
   function checkConcurrentWriter(): void {
     writer.exec("BEGIN IMMEDIATE")
     try {
-      const start = performance.now()
-      expect(claim).toThrow("COMPOSITION_ADMISSION_BUSY")
-      expect(performance.now() - start).toBeLessThan(1_000)
+      expect(claim("unrelated").acquired).toBe(true)
+      expect(() => claim("chat")).toThrow("COMPOSITION_WORKSPACE_BUSY")
       expect(getLocalThreadRunLease("chat")).toBeUndefined()
+      expect(releaseLocalThreadRunLease("unrelated", "desktop", "run")).toBe(true)
     } finally {
       writer.exec("ROLLBACK")
     }
-    expect(claim().acquired).toBe(true)
-    expect(releaseLocalThreadRunLease("chat", "desktop", "run")).toBe(true)
   }
 
   try {
     nativeHandlers()
-    // Lock the old journal mode before the store's first WAL/schema setup.
     checkConcurrentWriter()
-    // The shared store is now open in WAL mode. Race its outer BEGIN IMMEDIATE.
+    const store = state.composition!.store()
+    state.closeComposition = () => store.close()
     checkConcurrentWriter()
+    expect(claim("unrelated").acquired).toBe(true)
+    expect(() => seeded.create(definition(unrelated), "ordinary-conflict"))
+      .toThrow("COMPOSITION_WORKSPACE_BUSY")
+    expect(releaseLocalThreadRunLease("unrelated", "desktop", "run")).toBe(true)
+    expect(seeded.create(definition(unrelated), "ordinary-conflict").created).toBe(true)
   } finally {
     releaseLocalThreadRunLease("chat", "desktop", "run")
+    releaseLocalThreadRunLease("unrelated", "desktop", "run")
     writer.close()
+    seeded.close()
+  }
+})
+
+it("leaves unreadable composition ownership fenced and releases a failed admission lock", async () => {
+  const root = mkdtempSync(join(canonicalTmpdir(), "composition-admission-corrupt-"))
+  templateRoots.push(root)
+  state.dataRoot = root
+  state.threadWorkspaces = { chat: root }
+  state.registerComposition = registerProjectCompositionHandlers
+  const directory = join(root, "project-compositions")
+  mkdirSync(directory)
+  const path = join(directory, "state.sqlite")
+  writeFileSync(path, "unreadable composition database")
+  nativeHandlers()
+
+  const claim = () => claimLocalThreadRunLease({ threadId: "chat", owner: "desktop", runId: "run" })
+  expect(claim).toThrow()
+  expect(getLocalThreadRunLease("chat")).toBeUndefined()
+  acquireCompositionAdmission(path, compositionWorkspaceKey(root), "writer")()
+  rmSync(path)
+  const seed = new ProjectCompositionStore(path)
+  try {
+    expect(claim().acquired).toBe(true)
+  } finally {
+    releaseLocalThreadRunLease("chat", "desktop", "run")
+    seed.close()
   }
 })
 

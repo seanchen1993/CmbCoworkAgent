@@ -1,3 +1,5 @@
+import { statSync } from "node:fs"
+import type { CheckpointDatabaseFileIdentity } from "../checkpointer/checkpoint-database-identity"
 import { invalidateThreadTitleObservers } from "./thread-title-observer"
 import { startHostRuntimeTiming } from "../services/host-runtime-timing"
 import { ensureManagedRunSchedulesSchema } from "./managed-run-schedules"
@@ -51,8 +53,6 @@ import {
 } from "../../shared/message-role-collision"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
 import type { ForkDurableTailReference } from "../../shared/checkpoint-forkability"
-import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
-import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
 import { isFunctionPluginPromptOrigin, type FunctionPluginPromptOrigin } from
   "../../shared/mods/v2/plugin-prompt"
 import {
@@ -61,9 +61,6 @@ import {
   validateFunctionConversationTranscriptStamp,
   type FunctionConversationTranscriptStamp
 } from "../../shared/mods/v2/conversation-transcript"
-import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../shared/chat-search-plan"
-import { iterateChatSearchLocations, projectChatSearchPlan } from "../../shared/chat-search-index"
-import type { ChatSearchLocation } from "../../shared/chat-search-types"
 import { searchDurableThreadMessages } from "../thread-search/durable-message-search"
 import {
   decodeLegacyOverlapProofs, ensureLegacyCheckpointSourceIds, legacyCheckpointProviderIdentity, legacyPublicationSources,
@@ -128,6 +125,7 @@ import {
 import { ensureImServiceSchema } from "../services/im/schema"
 
 let db: NativeSqliteAdapter | null = null
+const databaseFiles = new WeakMap<NativeSqliteAdapter, CheckpointDatabaseFileIdentity>()
 type ThreadMessageRole = Message["role"]
 interface ThreadMessageIdAlias {
   toId: string
@@ -206,6 +204,10 @@ export function getDb(): NativeSqliteAdapter {
     throw new Error("Database not initialized. Call initializeDatabase() first.")
   }
   return db
+}
+
+export function getOpenDatabaseFile(database: NativeSqliteAdapter): CheckpointDatabaseFileIdentity | undefined {
+  return databaseFiles.get(database)
 }
 
 function parseThreadMetadata(value: unknown): Record<string, unknown> {
@@ -467,6 +469,16 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   threadMessageIdAliases.clear()
   const opened = openNativeSqliteDatabase(dbPath, "DB")
   db = opened.database
+  try {
+    const file = statSync(dbPath, { bigint: true, throwIfNoEntry: false })
+    if (file?.isFile() && file.nlink === 1n) {
+      databaseFiles.set(db, Object.freeze({
+        dev: String(file.dev), ino: String(file.ino), birthtime: String(file.birthtimeNs)
+      }))
+    }
+  } catch {
+    // Existing Main writers still own this connection when its file cannot be verified.
+  }
 
   // Create tables if they don't exist
   db.run(`
@@ -7239,7 +7251,7 @@ export function createThread(
   options?: { newDurableTranscript?: boolean }
 ): ThreadRow {
   const database = getDb()
-  const row = insertThread(database, threadId, metadata)
+  const row = insertThread(database, threadId, metadata, options)
   saveToDisk()
   return row
 }
@@ -7255,20 +7267,20 @@ export function createThreadInTransaction(
 }
 
 function insertThread(database: NativeSqliteAdapter, threadId: string,
-  metadata?: Record<string, unknown>): ThreadRow {
+  metadata?: Record<string, unknown>, options?: { newDurableTranscript?: boolean }): ThreadRow {
   const now = Date.now()
   const storedMetadata = attachFreshThreadIncarnation(metadata)
   const title = (storedMetadata.title as string) || null
   const serializedMetadata = JSON.stringify(storedMetadata)
 
-  const insertThread = () => database.run(
+  const insertRow = () => database.run(
     `INSERT INTO threads (thread_id, created_at, updated_at, metadata, status, title)
      VALUES (?, ?, ?, ?, ?, ?)`, [threadId, now, now, serializedMetadata, "idle", title]
   )
   if (options?.newDurableTranscript) {
     database.run("SAVEPOINT create_durable_thread")
     try {
-      insertThread()
+      insertRow()
       database.run(
         `INSERT INTO legacy_checkpoint_transcript_migrations
          (thread_id, checkpoint_id, total_messages, next_index, status, updated_at, search_projection_state)
@@ -7281,7 +7293,7 @@ function insertThread(database: NativeSqliteAdapter, threadId: string,
       throw error
     }
   } else {
-    insertThread()
+    insertRow()
   }
 
   return {

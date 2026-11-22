@@ -118,7 +118,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { ToggleThumb } from "@/components/ui/toggle-thumb"
-import { useAppStore } from "@/lib/store"
+import { isThreadDeletionPending, useAppStore } from "@/lib/store"
 import { GitChangeNotice } from "@/components/git/GitChangeNotice"
 import {
   consumePendingHarnessNextAction,
@@ -2815,6 +2815,20 @@ export function ChatContainer({
   const attachmentsRef = useRef(attachments)
   const mentionedFilesRef = useRef(mentionedFiles)
   const activeAtFilePreviewTokensRef = useRef(new Set<string>())
+  const attachmentInputOwnerRef = useRef<object | null>(null)
+
+  useLayoutEffect(() => {
+    attachmentInputOwnerRef.current = {}
+    return () => { attachmentInputOwnerRef.current = null }
+  }, [threadId, setAttachments])
+
+  const captureAttachmentInput = useCallback(() => {
+    const owner = attachmentInputOwnerRef.current
+    return () => owner !== null && attachmentInputOwnerRef.current === owner &&
+      !creatorNavigation.current.readOnly && !isThreadDeletionPending(threadId) &&
+      !modsAgentInputActive(threadId, useAppStore.getState().accountRevision) &&
+      threadContext.getThreadActions(threadId).setDraftAttachments === setAttachments
+  }, [setAttachments, threadContext, threadId])
 
   // Keep ref in sync with state
   useEffect(() => {
@@ -2857,8 +2871,8 @@ export function ChatContainer({
   const hasPendingFilePayload = totalPendingFileCount > 0
 
   const handleAttachmentInputs = useCallback(
-    async (inputs: PendingAttachmentInput[]) => {
-      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
+    async (inputs: PendingAttachmentInput[], isCurrent: () => boolean) => {
+      if (!isCurrent()) return
       if (inputs.length === 0 || attachmentLoading) return
       setAttachmentLoading(true)
       clearError()
@@ -2915,7 +2929,7 @@ export function ChatContainer({
                   bytes: input.bytes,
                   maxLength: remaining
                 })
-          if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
+          if (!isCurrent()) return
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
@@ -2937,28 +2951,31 @@ export function ChatContainer({
           }
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "文件处理异常")
+        if (isCurrent()) setError(err instanceof Error ? err.message : "文件处理异常")
       } finally {
         setAttachmentLoading(false)
       }
     },
-    [setError, clearError, attachmentLoading, setAttachments, threadId]
+    [setError, clearError, attachmentLoading, setAttachments]
   )
 
   const handleAttachClick = useCallback(async () => {
-    if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
+    const isCurrent = captureAttachmentInput()
+    if (!isCurrent()) return
     if (attachmentsRef.current.length + mentionedFilesRef.current.length >= MAX_ATTACHMENTS) {
       setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
       return
     }
     const result = await window.api.file.select()
+    if (!isCurrent()) return
     if (result.error) setError(result.error)
     if (!result.canceled && result.files.length > 0) {
       await handleAttachmentInputs(
-        result.files.map((file) => ({ kind: "selected" as const, ...file }))
+        result.files.map((file) => ({ kind: "selected" as const, ...file })),
+        isCurrent
       )
     }
-  }, [handleAttachmentInputs, setError, threadId])
+  }, [captureAttachmentInput, handleAttachmentInputs, setError])
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
@@ -2974,7 +2991,8 @@ export function ChatContainer({
       e.preventDefault()
       e.stopPropagation()
       setDragOver(false)
-      if (modsAgentInputActive(threadId, useAppStore.getState().accountRevision)) return
+      const isCurrent = captureAttachmentInput()
+      if (!isCurrent()) return
       if (attachmentLoading) return
       const files = e.dataTransfer.files
       if (files.length > 0) {
@@ -2994,14 +3012,16 @@ export function ChatContainer({
             setError(`文件"${file.name}"过大，单文件不超过 5MB`)
             continue
           }
-          inputs.push({ kind: "bytes", fileName: file.name, bytes: await file.arrayBuffer() })
+          const bytes = await file.arrayBuffer()
+          if (!isCurrent()) return
+          inputs.push({ kind: "bytes", fileName: file.name, bytes })
         }
         if (inputs.length > 0) {
-          await handleAttachmentInputs(inputs)
+          await handleAttachmentInputs(inputs, isCurrent)
         }
       }
     },
-    [handleAttachmentInputs, attachmentLoading, setError, threadId]
+    [captureAttachmentInput, handleAttachmentInputs, attachmentLoading, setError]
   )
 
   const handleDragOver = useCallback((e: React.DragEvent) => {

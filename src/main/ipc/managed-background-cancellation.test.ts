@@ -71,7 +71,7 @@ function loadWorkerCancel(
   const cancelManaged = vi.fn()
   const dismissNotifications = vi.fn()
   const cancelBackgroundTasks = vi.fn()
-  const cancelDetachedBackgroundTasks = vi.fn(() => options.desktopDetached ?? false)
+  const cancelDetachedBackgroundTasks = vi.fn(async () => options.desktopDetached ?? false)
   const execute = loadCancelCallback("src/main/ipc/agent.ts", "agent:cancel", {
     withThreadRunMutationLock: (_threadId: string, run: () => unknown) => run(),
     getLocalThreadRunLease: () => (options.foreignOwner ? { owner: "im" } : undefined),
@@ -84,7 +84,10 @@ function loadWorkerCancel(
       acknowledgeNotifications: dismissNotifications
     },
     handleAutoModeAgentCancelled: cancelManaged,
-    LocalSandbox: { cancelBackgroundTasks, cancelDetachedBackgroundTasks }
+    LocalSandbox: {
+      cancelBackgroundTasks,
+      cancelDetachedBackgroundTasksAndWait: cancelDetachedBackgroundTasks
+    }
   })
   return {
     execute,

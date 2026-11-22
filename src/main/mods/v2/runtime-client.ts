@@ -62,6 +62,7 @@ type RequestBody = FunctionRequest extends infer R
 export class FunctionRuntimeClient {
   private child?: UtilityProcess
   private physicalLifetime?: FunctionUiResolveHostLifetime
+  private unclaimedEmptyHost?: FunctionUiResolveHostLifetime
   private readonly retirements = new Set<Promise<void>>()
   private readonly lifecycleDiagnostics = new RuntimeLifecycleDiagnostics()
   private ready?: Promise<void>
@@ -106,7 +107,7 @@ export class FunctionRuntimeClient {
     }
   }
 
-  private start(): Promise<void> {
+  private start(prepareEmpty = false): Promise<void> {
     if (this.ready) return this.ready
     const env: Record<string, string> = {}
     for (const key of ["SystemRoot", "WINDIR", "TEMP", "TMP", "LANG"])
@@ -135,7 +136,7 @@ export class FunctionRuntimeClient {
       } catch { /* Terminal diagnostics cannot prevent physical retirement. */ }
     }
     try {
-      const child = utilityProcess.fork(this.entry, [], {
+      const child = utilityProcess.fork(this.entry, prepareEmpty ? ["--prepare-empty-function-host"] : [], {
         env,
         stdio: "pipe",
         serviceName: "CMB Function Mods"
@@ -188,6 +189,15 @@ export class FunctionRuntimeClient {
       this.stop("MODS_HOST_ERROR")
     }
     return ready
+  }
+
+  async prepareEmpty(): Promise<() => boolean> {
+    if (this.generation || this.child || this.ready)
+      throw new ModFunctionError("MODS_RUNTIME_ALREADY_STARTED")
+    await this.start(true)
+    const lifetime = this.captureUiResolvePhysicalLifetime()
+    this.unclaimedEmptyHost = lifetime
+    return () => this.unclaimedEmptyHost === lifetime && lifetime.owner === this.child
   }
 
   private recheckHeartbeat(): void {
@@ -548,6 +558,7 @@ export class FunctionRuntimeClient {
   async load(code: string, options: ModObject = {}): Promise<FunctionGuest> {
     await this.start()
     const physical = this.captureUiResolvePhysicalLifetime()
+    this.unclaimedEmptyHost = undefined
     const loadGeneration = this.generation
     const preparation = new FunctionDisplayPreparationChannel({ client: this, physical }, () => {
       physical.assertCurrent()
@@ -673,6 +684,7 @@ export class FunctionRuntimeClient {
   }
 
   stop(code = "MODS_HOST_STOPPED"): void {
+    this.unclaimedEmptyHost = undefined
     const child = this.child
     if (child && code !== "MODS_HOST_STOPPED") {
       try {

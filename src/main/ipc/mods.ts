@@ -3104,7 +3104,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   )
   ipcMain.handle("mods:chat-display-capability", (event,
-    input: { threadId: string; expectedWorkspace: string | null }) => {
+    input: { threadId: string; expectedWorkspace: string | null; includeNativeHistory?: boolean }) => {
     trusted(event)
     if (input?.expectedWorkspace === null) {
       if (deployment?.required !== false || getModsGlobalEnabledState() !== false)
@@ -3119,8 +3119,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (deployment?.required === false && getModsGlobalEnabledState() === false &&
       readThreadWorkspacePath(input.threadId) === input.expectedWorkspace) return false
     const expectedWorkspace = manager.workspaceKey(input.expectedWorkspace)
-    return readModsChatDisplayCapability(manager,
-      settingsScope(event, input.threadId, expectedWorkspace))
+    const access = settingsScope(event, input.threadId, expectedWorkspace)
+    return readModsChatDisplayCapability(manager, access, input.includeNativeHistory === true
+      ? () => functions.canUseNativeChatHistory(access.workspace, input.threadId) : undefined)
   })
   ipcMain.handle("mods:builtin-catalog", (event) => {
     trusted(event)

@@ -68,9 +68,9 @@ export function persistedMessageToRuntimeMessage(message: Message,
         [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: providerOccurrence
       }
     : undefined
-  const fields = { id: message.id, content, additional_kwargs: providerMetadata }
+  const messageFields = { id: message.id, content, additional_kwargs: providerMetadata }
   if (message.role === "user") {
-    return new HumanMessage(fields)
+    return new HumanMessage(messageFields)
   }
   if (message.role === "assistant") {
     const additionalKwargs = {
@@ -89,14 +89,14 @@ export function persistedMessageToRuntimeMessage(message: Message,
     })
   }
   if (message.role === "system") {
-    return new SystemMessage(fields)
+    return new SystemMessage(messageFields)
   }
   if (message.role === "tool") {
     if (!message.tool_call_id) return null
     const status =
       message.status === "success" || message.status === "error" ? message.status : undefined
     return new ToolMessage({
-      ...fields,
+      ...messageFields,
       tool_call_id: message.tool_call_id,
       ...(message.name ? { name: message.name } : {}),
       ...(status ? { status } : {}),

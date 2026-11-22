@@ -112,7 +112,7 @@ import { bindCreatorTraceUsage, readCreatorTraceId, bindRuntimeTraceContext } fr
 import { readInternalHarnessProject } from "../harness-board/internal-project-context"
 import { assertCreatorModelAccounting, bindCreatorModelAccounting, isCreatorBudgetError, type CreatorModelAccounting } from "../mods/devtools/creator-model-accounting"
 import { currentCompletionBudget } from "../mods/v2/completion-budget"
-import { getLocalThreadRunLease } from "./thread-run-lease"
+import { captureLocalThreadRunLease, getLocalThreadRunLease } from "./thread-run-lease"
 import {
   captureThreadMutationLease,
   isThreadMutationLeaseCurrent,
@@ -198,6 +198,7 @@ import {
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { wrapNativeLegacyHistory } from "../checkpointer/native-legacy-history"
 import { bootstrapLegacyCheckpointTranscriptInWorker } from "../checkpointer/runtime-projection-client"
+import { captureStockLegacyTranscriptSource } from "../checkpointer/legacy-stock-transcript-admission"
 import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
@@ -461,22 +462,63 @@ export function createPhysicalScopedGateRecoveryMessage(
 }
 
 /** Settle provisional transcript order before model deltas claim provider identities. */
-function prepareLegacyScopedProviderHistory(
+export function prepareLegacyScopedProviderHistory(
   threadId: string,
-  scopedTurn: boolean
+  scopedTurn: boolean,
+  runToken: string,
+  signal?: AbortSignal
 ): Promise<void> | undefined {
   const pending = () => hasPendingGoalTranscriptOrder(threadId) ||
     (scopedTurn && hasUnresolvedLegacyTranscriptSlots(threadId))
   if (!pending()) return undefined
-  return bootstrapLegacyCheckpointTranscriptInWorker(
-    getThreadCheckpointPath(threadId),
-    getDbPath(),
-    threadId
-  ).then(({ stats }) => {
-    // No checkpoint ID means there is no recoverable source. An orphaned
-    // ordinal-only marker alone should not keep future Goal turns blocked.
+  signal?.throwIfAborted()
+  const assertRunOwner = captureCurrentRunMessageQueueOwner(threadId, runToken)
+  const database = getDb()
+  const row = getThreadCore(threadId)
+  if (!row) throw Error("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+  const incarnation = captureThreadIncarnation(row)
+  const assertCurrent = () => {
+    signal?.throwIfAborted()
+    assertRunOwner()
+    const current = getThreadCore(threadId)
+    if (getDb() !== database || !matchesThreadIncarnation(current, incarnation) ||
+      current?.metadata !== row.metadata) throw Error("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+  }
+  const checkpointPath = getThreadCheckpointPath(threadId)
+  const databasePath = getDbPath()
+  // Only the stock writer can finish its interrupted ordinal reservation.
+  // Require the physical run lease as well as the queue owner's current identity.
+  const ownsRun = signal && hasPendingGoalTranscriptOrder(threadId) &&
+    getLocalThreadRunLease(threadId)?.runId === runToken && captureLocalThreadRunLease(threadId)
+  const stock = ownsRun ? captureStockLegacyTranscriptSource({ database, checkpointPath,
+    threadId, incarnation, resumeProjectReservation: true, assertCurrent() {
+      assertCurrent()
+      if (!ownsRun()) throw new DOMException("Superseded turn", "AbortError")
+    } }) : undefined
+  const recovery = stock
+    ? bootstrapLegacyCheckpointTranscriptInWorker(
+      checkpointPath, databasePath, threadId, "", undefined, undefined, signal, stock)
+    : import("../checkpointer/legacy-transcript-main-writer").then((writer) => {
+      assertCurrent()
+      return bootstrapLegacyCheckpointTranscriptInWorker(
+        checkpointPath, databasePath, threadId, "", undefined, {
+          assertCurrent,
+          createWriter(context) {
+            assertCurrent()
+            if (context.threadId !== threadId || context.checkpointNamespace !== "")
+              throw Error("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+            return writer.createLegacyTranscriptWriter({
+              ...context, incarnation, actualDatabase: database, assertCurrent
+            })
+          }
+        }, signal
+      )
+    })
+  return recovery.then(({ stats }) => {
+    assertCurrent()
+    // Without a checkpoint, an orphaned ordinal-only marker may be ignored.
     if (hasPendingGoalTranscriptOrder(threadId) || (stats.checkpointId !== null && pending())) {
-      throw new Error("会话历史仍在恢复，请稍后继续。")
+      throw Error("会话历史仍在恢复，请稍后继续。")
     }
   })
 }
@@ -2917,7 +2959,7 @@ function assembleDeepAgent(
   const shellMonitors = new WeakSet<object>()
   const shellTaskBackend = backend instanceof LocalSandbox ? backend : undefined
   const runtimeShellMonitorBlocked =
-    !shellTaskBackend ||
+    (!metadataOnly && !shellTaskBackend) ||
     mainBlockedToolNames.some(isShellTaskMonitorToolName) ||
     (filesystemAccess && blockedToolNamesForAccess(filesystemAccess).has("monitor"))
 
@@ -3077,7 +3119,9 @@ function assembleDeepAgent(
       ) as typeof mw.tools
     }
 
-    const monitorTools = shellTaskBackend ? createShellTaskMonitorTools(shellTaskBackend) : []
+    const monitorTools = shellTaskBackend
+      ? createShellTaskMonitorTools(shellTaskBackend)
+      : metadataOnly ? createShellTaskMonitorTools("metadata-only") : []
     for (const monitorTool of monitorTools) shellMonitors.add(monitorTool)
     const guardedTools = applyCoordinatorWorkerFilesystemAccess(
       [...(mw.tools || []), ...monitorTools],
@@ -3881,7 +3925,10 @@ function assembleDeepAgent(
             ? undefined
             : previous.find((entry) => entry.role === "assistant")?.provider_occurrence ?? 0
         },
-        prepareLegacyScopedProviderHistory
+        currentRunMessageQueueOwnerToken
+          ? (threadId, scopedTurn, signal) => prepareLegacyScopedProviderHistory(
+            threadId, scopedTurn, currentRunMessageQueueOwnerToken, signal)
+          : undefined
       ),
       mainSummarizationController.middleware,
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),

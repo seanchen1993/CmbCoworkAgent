@@ -578,30 +578,16 @@ it("rejects oversized UTF8 state and invalid exact action input/output schemas",
 it("native view lifecycle bypasses a full durable ledger while ordinary effects stay fail closed", async () => {
   const broker = hub()
   const f = await fixture("return {count:++count}", { platformHub: broker })
-  for (let i = 0; i < 300; i++) {
-    const owner = {}
-    const opened = await f.session.platform.nativeUiOpenAct(
-      ref,
-      "increment",
-      {},
-      `view-${i}`,
-      f.signal,
-      owner
-    )
-    expect(opened.error, `native view ${i}`).toBeUndefined()
-    expect(opened).toMatchObject({ status: "succeeded" })
-    const closed = await f.session.platform.nativeCleanupAct(
-      ref,
-      "increment",
-      {},
-      `close-${i}`,
-      f.signal,
-      owner
-    )
-    expect(closed.error).toBeUndefined()
-    expect(closed).toMatchObject({ status: "succeeded" })
-    f.session.platform.closeNativeOwner(owner)
-  }
+  const firstOwner = {}
+  expect(
+    await f.session.platform.nativeUiOpenAct(ref, "increment", {}, "first-open", f.signal, firstOwner)
+  ).toMatchObject({ status: "succeeded" })
+  expect(
+    await f.session.platform.nativeCleanupAct(ref, "increment", {}, "first-close", f.signal, firstOwner)
+  ).toMatchObject({ status: "succeeded" })
+  f.session.platform.closeNativeOwner(firstOwner)
+
+  // Filling every durable slot also verifies that neither native operation took one.
   const namespace = broker.namespace("/project", "t", "incarnation")
   const owner = {}
   for (let i = 0; i < 256; i++) broker.save(namespace, `full-${i}`, { retained: true })

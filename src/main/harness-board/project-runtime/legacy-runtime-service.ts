@@ -99,25 +99,44 @@ function assertExtensions(root: string, metadata: Record<string, unknown>): bool
 /** Explicit opt-in only. Original Python/Hooks own all business state and human decisions. */
 export class LegacyProjectRuntimeService {
   constructor(
-    private readonly store: LegacyOperationStore,
-    private readonly snapshots: HostPackageSnapshots,
+    private readonly storeSource: LegacyOperationStore |
+      ((create: boolean) => LegacyOperationStore | undefined),
+    private readonly snapshotSource: HostPackageSnapshots | (() => HostPackageSnapshots),
     private readonly deps: LegacyRuntimeDependencies
   ) {}
 
+  private openStore(create = false): LegacyOperationStore | undefined {
+    return typeof this.storeSource === "function" ? this.storeSource(create) : this.storeSource
+  }
+
+  private get store(): LegacyOperationStore {
+    return this.openStore() ?? hostStateError("LEGACY_BINDING_MISSING")
+  }
+
+  private get snapshots(): HostPackageSnapshots {
+    return typeof this.snapshotSource === "function" ? this.snapshotSource() : this.snapshotSource
+  }
+
   private getAdmissionBinding(projectId: string) {
+    let store: LegacyOperationStore | undefined
     try {
-      const binding = this.store.getBinding(projectId)
-      if (!binding && this.store.protectsProject(projectId)) throw Error("PROJECT_LEGACY_BINDING_MISSING")
+      store = this.openStore()
+      // The source returns no store only before any opt-in state exists.
+      if (!store) return undefined
+      const binding = store.getBinding(projectId)
+      if (!binding && store.protectsProject(projectId)) throw Error("PROJECT_LEGACY_BINDING_MISSING")
       return binding
     } catch (cause) {
       if (cause instanceof LegacyBindingGenerationError) throw cause
-      if (!this.store.protectsProject(projectId) && this.deps.isKnownUnbound?.(projectId))
+      if (!store?.protectsProject(projectId) && this.deps.isKnownUnbound?.(projectId))
         return undefined
       throw Error("PROJECT_LEGACY_RUNTIME_UNAVAILABLE", { cause })
     }
   }
 
   async enable(projectId: string, workspaceInput: string) {
+    const store = this.openStore(true)
+    if (!store) hostStateError("LEGACY_BINDING_MISSING")
     return withSnapshotRetention([this.snapshots.root], async () => {
       const workspace = runtimeDirectory(workspaceInput)
       const plugin = await this.deps.resolvePlugin(projectId, workspace)
@@ -154,7 +173,7 @@ export class LegacyProjectRuntimeService {
       this.deps.assertInstalledSourceCurrent?.(projectId, workspace, plugin.id)
       this.deps.assertProjectBindingCurrent?.(projectId, workspace, plugin.id)
       mods?.assertCurrent()
-      return this.store.enable({
+      return store.enable({
         projectId,
         workspace,
         installedPluginId: plugin.id,
@@ -169,9 +188,10 @@ export class LegacyProjectRuntimeService {
     return this.getAdmissionBinding(projectId)
   }
   listImportSources() {
-    return this.store.listBindings().map(source => ({ projectId: source.projectId,
+    const store = this.openStore()
+    return store?.listBindings().map(source => ({ projectId: source.projectId,
       packageId: source.packageId, workspace: source.workspace,
-      frozen: !!this.store.importFreeze(source.projectId) }))
+      frozen: !!store.importFreeze(source.projectId) })) ?? []
   }
   async reviewImportSource(projectId: string) {
     if (!this.deps.assertInstalledSourceCurrent || !this.deps.assertProjectBindingCurrent)
@@ -196,7 +216,7 @@ export class LegacyProjectRuntimeService {
     assertCurrent()
     return { source, snapshotRoot: snapshot.root, historyDigest, assertCurrent }
   }
-  importFreeze(projectId: string) { return this.store.importFreeze(projectId) }
+  importFreeze(projectId: string) { return this.openStore()?.importFreeze(projectId) }
   freezeForImport(projectId: string, reviewDigest: string, assertCurrent: () => void,
     review?: import("../../../shared/project-runtime/host-types").HostLegacyImportReview) {
     return this.store.freezeForImport(projectId, reviewDigest, assertCurrent, review)
@@ -258,20 +278,22 @@ export class LegacyProjectRuntimeService {
     })
   }
   disable(projectId: string): void {
-    const binding = this.store.getBinding(projectId)
+    const store = this.openStore()
+    if (!store) return
+    const binding = store.getBinding(projectId)
     if (!binding) {
-      this.store.refreshOptInIndex()
+      store.refreshOptInIndex()
       return
     }
     this.deps.assertProjectIdle(projectId, binding.workspace)
-    this.store.disable(projectId)
+    store.disable(projectId)
   }
   operations(projectId: string, limit = 50) {
-    return this.store.list(projectId, limit)
+    return this.openStore()?.list(projectId, limit) ?? []
   }
   /** Pure observation. In particular, a finished managed wrapper is not a business result proof. */
   inspect(operationId: string) {
-    return this.store.get(operationId)
+    return this.openStore()?.get(operationId)
   }
   async reconcile(raw: unknown, assertApprovalCurrent: () => void) {
     const input = readLegacyRecoveryInput(raw)
@@ -309,7 +331,7 @@ export class LegacyProjectRuntimeService {
     })
   }
   recoverInterrupted() {
-    return this.store.recoverInterrupted()
+    return this.openStore()?.recoverInterrupted() ?? []
   }
 
   register(): () => void {

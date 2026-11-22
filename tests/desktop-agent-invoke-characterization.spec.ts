@@ -386,16 +386,20 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
     "const APPROVAL_TIMEOUT_MS: number | null = null",
     "desktop approval waits"
   )
-  assertIncludes(runtime, "pendingApprovals.set(req.id", "Runtime registers approval ownership")
-  assertIncludes(
-    runtime,
-    "withNativeApprovalWait(threadId, options.abortSignal, async (approvalSignal) =>",
-    "native approvals retain the runtime thread and owning run signal"
+  const requestApproval = sliceBetween(
+    runtime, "const requestApproval = async (", "const approvalStore =",
+    "native approval adapter"
   )
-  assertIncludes(
-    runtime,
-    'approvalSignal?.addEventListener("abort", onAbort',
-    "stopping the run or Mods operation rejects its pending approval"
+  assertSourceOrder(
+    requestApproval,
+    [
+      "req: ApprovalRequest, signal = options.abortSignal",
+      "withNativeApprovalWait(threadId, signal, async (approvalSignal) =>",
+      "pendingApprovals.set(req.id",
+      "approvalDecisionBroker.register({",
+      'approvalSignal?.addEventListener("abort", onAbort'
+    ],
+    "native approval forwards the owning signal, defaults to the run signal, and registers cancellation"
   )
   assertIncludes(
     nativeApprovalWait,
@@ -418,7 +422,7 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
     "approvalDecisionBroker.unregister(req.id)",
     "approval:cancel:${approvalThreadId}"
   ]) {
-    assertIncludes(runtime, cleanup, "native approval cancellation retains broker and UI cleanup")
+    assertIncludes(requestApproval, cleanup, "native approval cancellation retains broker and UI cleanup")
   }
   assertIncludes(
     nativeApprovalWait,

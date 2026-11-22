@@ -5,9 +5,9 @@ import {
 } from "../mods/builtins/legacy-metrics"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
-import { mkdirSync } from "node:fs"
+import { lstatSync, mkdirSync, opendirSync } from "node:fs"
 import { join } from "node:path"
-import { getThreadCore } from "../db"
+import { getThreadRuntimeScope } from "../db"
 import { getOpenworkDir, getPlugins } from "../storage"
 import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { getLocalThreadRunLease, listLocalThreadRunLeases } from "../agent/thread-run-lease"
@@ -45,10 +45,10 @@ export function registerLegacyProjectRuntimeHandlers(
 ) {
   const root = join(getOpenworkDir(), "legacy-project-runtime")
   const ledgerPath = join(root, "operations.sqlite")
+  const packagesPath = join(root, "packages")
   const indexPath = join(getOpenworkDir(), "legacy-project-bindings.sqlite")
   const optInIndex = new LegacyOptInIndex(indexPath)
-  function readThread(threadId: string) {
-    const thread = getThreadCore(threadId)
+  function readThread(threadId: string, thread = getThreadRuntimeScope(threadId)) {
     if (!thread) return undefined
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
@@ -69,31 +69,37 @@ export function registerLegacyProjectRuntimeHandlers(
     }
   }
   let store: LegacyOperationStore | undefined
+  let snapshots: HostPackageSnapshots | undefined
   let service: LegacyProjectRuntimeService
-  const priorIndex = optInIndex.read()
-  let indexEstablished = priorIndex !== undefined
-  let wasFresh = false
+  const isKnownUnbound = (projectId: string) => optInIndex.readGeneration(projectId) === null
   const hasSidecar = () => ["-wal", "-shm", "-journal"].some((suffix) =>
     legacyIndexFilePresent(ledgerPath + suffix))
-  const readProtectedProjects = () => {
-    const latestIndex = optInIndex.read()
-    if (latestIndex) return latestIndex
+
+  function hasRetainedPackages(): boolean {
+    const stat = lstatSync(packagesPath, { throwIfNoEntry: false })
+    if (!stat) return false
+    if (!stat.isDirectory()) return true
+    const packages = opendirSync(packagesPath)
     try {
-      if (wasFresh && !legacyIndexFilePresent(indexPath) && !legacyIndexFilePresent(ledgerPath) &&
-          !hasSidecar()) return new Set<string>()
-    } catch { /* An unsafe or inaccessible path cannot prove that opt-in has never happened. */ }
-    return undefined
-  }
-  try {
-    const ledgerExists = legacyIndexFilePresent(ledgerPath)
-    if (!ledgerExists) {
-      // A missing ledger cannot erase an earlier positive marker or repair an unreadable index.
-      if (priorIndex?.size || (!priorIndex && legacyIndexFilePresent(indexPath)) || hasSidecar())
-        throw Error("PROJECT_LEGACY_RUNTIME_UNAVAILABLE")
-      wasFresh = true
+      return packages.readSync() !== null
+    } finally {
+      packages.closeSync()
     }
-    mkdirSync(root, { recursive: true })
-    store = new LegacyOperationStore(
+  }
+
+  function openStore(create: boolean): LegacyOperationStore | undefined {
+    if (store) return store
+    const rootStat = lstatSync(root, { throwIfNoEntry: false })
+    if (rootStat && !rootStat.isDirectory()) throw Error("PROJECT_LEGACY_RUNTIME_UNAVAILABLE")
+    if (!rootStat && !create && !optInIndex.exists()) return undefined
+    if (!legacyIndexFilePresent(ledgerPath)) {
+      // Missing files cannot erase evidence of earlier retained bindings or operations.
+      if (optInIndex.exists() || hasSidecar() || hasRetainedPackages())
+        throw Error("PROJECT_LEGACY_RUNTIME_UNAVAILABLE")
+      if (!create) return undefined
+      mkdirSync(root, { recursive: true })
+    }
+    const candidate = new LegacyOperationStore(
       ledgerPath,
       undefined,
       new ProjectWorkspaceModeGuard(
@@ -105,18 +111,29 @@ export function registerLegacyProjectRuntimeHandlers(
       optInIndex
     )
     try {
-      store.refreshOptInIndex()
-      indexEstablished = true
+      try {
+        candidate.refreshOptInIndex()
+      } catch (error) {
+        console.warn("[LegacyProjectRuntime] Could not initialize the opt-in index:", error)
+      }
+      candidate.recoverInterrupted()
+      store = candidate
+      return store
     } catch (error) {
-      console.warn("[LegacyProjectRuntime] Could not initialize the opt-in index:", error)
+      candidate.close()
+      throw error
     }
+  }
+
+  try {
+    openStore(false)
     service = new LegacyProjectRuntimeService(
-      store,
-      new HostPackageSnapshots(join(root, "packages")),
+      openStore,
+      () => snapshots ??= new HostPackageSnapshots(packagesPath),
       {
         resolveThread: readThread,
-        isKnownUnbound: (projectId) => indexEstablished && optInIndex.read()?.has(projectId) === false,
-        threadExists: (threadId) => Boolean(getThreadCore(threadId)),
+        isKnownUnbound,
+        threadExists: (threadId) => Boolean(getThreadRuntimeScope(threadId)),
         captureExecutionWorkspace: async (threadId, thread, workspace, managed) => {
           const workspaceChanged = () => {
             throw Error("PROJECT_HOST_LEGACY_EXECUTION_WORKSPACE_NOT_REGISTERED: 请核对项目特性或托管会话的工作区。")
@@ -183,8 +200,9 @@ export function registerLegacyProjectRuntimeHandlers(
         },
         assertProjectIdle: (projectId, workspace) => {
           for (const lease of listLocalThreadRunLeases()) {
-            const current = readThread(lease.threadId)
-            const raw = getThreadCore(lease.threadId)?.metadata
+            const thread = getThreadRuntimeScope(lease.threadId)
+            const current = readThread(lease.threadId, thread)
+            const raw = thread?.metadata
             const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
             if (
               current?.projectId === projectId ||
@@ -196,16 +214,15 @@ export function registerLegacyProjectRuntimeHandlers(
         }
       }
     )
-    service.recoverInterrupted()
     service.register()
   } catch {
     store?.close()
-    registerUnavailableLegacyRuntime((threadId) => readThread(threadId)?.projectId, readProtectedProjects)
+    registerUnavailableLegacyRuntime((threadId) => readThread(threadId)?.projectId, isKnownUnbound)
     ipc.handle("project-runtime:legacy-view", (event, projectId: string): LegacyProjectRuntimeView => {
       trusted(event)
       if (typeof projectId !== "string" || !projectId || projectId.length > 256)
         throw Error("PROJECT_INVALID_ID")
-      if (readProtectedProjects()?.has(projectId) === false)
+      if (isKnownUnbound(projectId))
         return { binding: null, operations: [], writeUnavailable: true }
       throw Error("PROJECT_LEGACY_RUNTIME_UNAVAILABLE")
     })
@@ -225,9 +242,7 @@ export function registerLegacyProjectRuntimeHandlers(
       !isSameWorkspacePath(thread.workspace, scope.workspace)
     )
       return { state: "unavailable" }
-    const raw = getThreadCore(scope.threadId)?.metadata
-    const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
-    const runId = metadata?.harnessFeature?.runId
+    const runId = thread.runId
     const managed =
       typeof runId === "string" && /^mr_[A-Za-z0-9_-]+$/.test(runId)
         ? (managedRunStore.getRun({
@@ -245,13 +260,20 @@ export function registerLegacyProjectRuntimeHandlers(
       managed
     )
   })
-  const view = (projectId: string): LegacyProjectRuntimeView => ({
-    binding: service.get(projectId) ?? null,
-    operations: service.operations(projectId, 20).map((operation) => ({
-      ...operation,
-      ...(operation.status === "unknown" ? { recoveryRevision: legacyRecoveryRevision(operation) } : {})
-    }))
-  })
+  const view = (projectId: string): LegacyProjectRuntimeView => {
+    const binding = service.get(projectId) ?? null
+    try {
+      const operations = service.operations(projectId, 20).map((operation) => ({
+        ...operation,
+        ...(operation.status === "unknown" ? { recoveryRevision: legacyRecoveryRevision(operation) } : {})
+      }))
+      return { binding, operations }
+    } catch (error) {
+      if (!binding && isKnownUnbound(projectId))
+        return { binding, operations: [], writeUnavailable: true }
+      throw error
+    }
+  }
   ipc.handle("project-runtime:legacy-view", (event, projectId: string) => {
     trusted(event)
     if (typeof projectId !== "string" || !projectId || projectId.length > 256)

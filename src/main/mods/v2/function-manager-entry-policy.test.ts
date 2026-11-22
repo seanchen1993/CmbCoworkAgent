@@ -20,6 +20,7 @@ it("preserves quiet discovery, immediate revoke and cleanup contracts", () => {
     "close",
     "closeThread",
     "invalidate",
+    "canUseNativeChatHistory",
     "setDisplayProjectionEnabled"
   ] as const)
     expect(FUNCTION_MANAGER_ENTRY_POLICIES[name]).toEqual({

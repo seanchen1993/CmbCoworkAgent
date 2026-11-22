@@ -38,6 +38,7 @@ async function main() {
     jsx: "automatic",
     define: { "import.meta.env": "{}" },
     alias: { "@": resolve("src/renderer/src") },
+    loader: { ".md": "text", ".png": "dataurl" },
     plugins: [
       {
         name: "expired-request-boundaries",
@@ -57,13 +58,27 @@ async function main() {
             },
             (args) => ({ path: args.path, namespace: "fixture" })
           )
+          builder.onResolve({ filter: /^@\/lib\/thread-context$/ }, (args) =>
+            args.importer.endsWith("ProjectPluginDevelopmentGuide.tsx")
+              ? { path: "project-plugin-shortcut-thread-context", namespace: "fixture" }
+              : undefined
+          )
+          builder.onLoad(
+            { filter: /^project-plugin-shortcut-thread-context$/, namespace: "fixture" },
+            () => ({
+              loader: "js",
+              contents: `export const useThreadContext = () => ({
+                getThreadActions() { throw Error("Shortcut launch is outside this fixture") }
+              });`
+            })
+          )
           builder.onLoad({ filter: /.*/, namespace: "fixture" }, (args) => ({
             resolveDir: process.cwd(),
             loader: "js",
             contents:
               args.path === "store"
                 ? `import {useSyncExternalStore} from 'react';
-              const listeners=new Set();let state={currentThreadId:null,threads:[],customizeInitialTab:'claw',pluginVersion:0,bumpPluginVersion(){},
+              const listeners=new Set();let state={accountRevision:0,currentThreadId:null,threads:[],customizeInitialTab:'claw',pluginVersion:0,bumpPluginVersion(){},
               setShowCustomizeView(show,tab){state={...state,customizeInitialTab:tab};listeners.forEach(fn=>fn())}};
               export const useAppStore=(selector=x=>x)=>selector(useSyncExternalStore(fn=>{listeners.add(fn);return()=>listeners.delete(fn)},()=>state));useAppStore.getState=()=>state;`
                 : args.path === "catalog"
@@ -75,14 +90,11 @@ async function main() {
                       ? "export const MarketPublishDialog=()=>null"
                       : "export const PluginFileEditorDialog=()=>null"
           }))
-          builder.onResolve({ filter: /^\.\// }, (args) => {
-            if (
-              args.importer.endsWith("CustomizeView.tsx") &&
-              !["./settings-return-focus", "./PluginsPanel"].includes(args.path)
-            ) {
-              return { path: args.path.slice(2), namespace: "panel" }
-            }
-          })
+          builder.onResolve({ filter: /^\.\/\w+Panel$/ }, (args) =>
+            args.importer.endsWith("CustomizeView.tsx") && args.path !== "./PluginsPanel"
+              ? { path: args.path.slice(2), namespace: "panel" }
+              : undefined
+          )
           builder.onLoad({ filter: /.*/, namespace: "panel" }, (args) => ({
             resolveDir: process.cwd(),
             loader: "tsx",
@@ -99,10 +111,10 @@ async function main() {
     headless: true,
     ...(existsSync(chromium.executablePath()) ? {} : { channel: "msedge" })
   })
+  const errors: string[] = []
   try {
     const page = await browser.newPage()
-    const errors: string[] = []
-    page.on("pageerror", (error) => errors.push(error.message))
+    page.on("pageerror", (error) => errors.push(error.stack ?? error.message))
     await page.route("http://localhost/settings", (route) =>
       route.fulfill({ contentType: "text/html", body: "<div id='root'></div>" })
     )
@@ -217,6 +229,9 @@ async function main() {
     console.log(
       "PASS expired settings requests resolve once, wait for catalog, cancel on close and preserve replacement requests (StrictMode)"
     )
+  } catch (error) {
+    if (!errors.length) throw error
+    throw new Error(`Plugin settings renderer failed\n${errors.join("\n")}`, { cause: error })
   } finally {
     await browser.close()
   }

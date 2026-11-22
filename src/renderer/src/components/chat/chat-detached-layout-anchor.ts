@@ -55,7 +55,6 @@ export function installChatDetachedLayoutAnchor({
   let scrollbarPointer: number | null = null
   let pointerX = 0
   let pointerY = 0
-  let wheelIntentUntil = 0
   let awaitingSizes = false
   let releaseScrollAnchor: (() => void) | undefined
   let gestureTimer: ReturnType<typeof setTimeout> | undefined
@@ -64,7 +63,7 @@ export function installChatDetachedLayoutAnchor({
     releaseScrollAnchor = undefined
   }
   const syncOwnership = (): void => {
-    if (anchor && performance.now() >= wheelIntentUntil) {
+    if (anchor && gestureTimer === undefined) {
       releaseScrollAnchor ??= acquireScrollAnchor?.()
     } else releaseOwnership()
   }
@@ -109,6 +108,7 @@ export function installChatDetachedLayoutAnchor({
       }
       return false
     }
+    if (gestureTimer !== undefined) return false
     // At the absolute head the history boundary owns the position. Anchoring a later
     // readable row while earlier protected rows expand would scroll that boundary away.
     const atHead = viewport.scrollTop <= 0.5
@@ -156,7 +156,7 @@ export function installChatDetachedLayoutAnchor({
     if (list) resize.observe(list)
   }
   const correct = (): void => {
-    if (!enabled() || captureRequested || performance.now() < wheelIntentUntil) return
+    if (!enabled() || captureRequested) return
     if (!anchor) {
       capture()
       return
@@ -219,7 +219,7 @@ export function installChatDetachedLayoutAnchor({
     }
   }
   const schedule = (): void => {
-    if (frame !== undefined) return
+    if (frame !== undefined || gestureTimer !== undefined) return
     frame = requestAnimationFrame(() => {
       frame = undefined
       if (captureRequested) {
@@ -233,7 +233,7 @@ export function installChatDetachedLayoutAnchor({
     schedule()
   }
   const onOwnerReleased = (): void => {
-    if (!enabled() || performance.now() < wheelIntentUntil || scrollbarPointer !== null) return
+    if (!enabled() || scrollbarPointer !== null) return
     // A queued capture must not replace this handoff with the next frame's changed geometry.
     // Keep the size transaction barrier: only this read transfers ownership synchronously.
     captureRequested = false
@@ -250,7 +250,7 @@ export function installChatDetachedLayoutAnchor({
   }
   const onScroll = (): void => {
     if (!enabled()) return
-    if (captureRequested || performance.now() < wheelIntentUntil) requestCapture()
+    if (captureRequested) requestCapture()
     else {
       correct()
       schedule()
@@ -295,19 +295,24 @@ export function installChatDetachedLayoutAnchor({
     requestCapture()
   }
   const onWheelOrTouch = (): void => {
-    wheelIntentUntil = performance.now() + 120
+    const startingGesture = gestureTimer === undefined
+    if (!startingGesture) clearTimeout(gestureTimer)
+    gestureTimer = setTimeout(() => {
+      gestureTimer = undefined
+      requestCapture()
+    }, 120)
+    if (!startingGesture) return
+    // Virtuoso owns range measurements while the user's gesture moves the viewport.
+    // Sample the final geometry once after the burst instead of reading each recycled row.
+    anchor = null
     releaseOwnership()
+    if (frame !== undefined) cancelAnimationFrame(frame)
+    frame = undefined
     if (!hasPendingAnchorLayout?.()) {
       releaseRowObservations()
       if (pendingList) resize.unobserve(pendingList)
       pendingList = null
     }
-    if (gestureTimer !== undefined) clearTimeout(gestureTimer)
-    gestureTimer = setTimeout(() => {
-      gestureTimer = undefined
-      requestCapture()
-    }, 120)
-    requestCapture()
   }
   const onWheel = (event: WheelEvent): void => {
     if (event.ctrlKey || event.deltaY === 0 || !canChatViewportConsumeScrollGesture(
@@ -355,6 +360,7 @@ export function installChatDetachedLayoutAnchor({
     }
   }
   const onMutation = (records: MutationRecord[]): void => {
+    if (gestureTimer !== undefined && !hasPendingAnchorLayout?.()) return
     if (!enabled()) {
       if (measurementFrame !== undefined) cancelAnimationFrame(measurementFrame)
       measurementFrame = undefined
@@ -419,6 +425,7 @@ export function installChatDetachedLayoutAnchor({
     attributeFilter: ["style", "class", "data-function-site-pending"]
   })
   const resize = new ResizeObserver(() => {
+    if (gestureTimer !== undefined && !hasPendingAnchorLayout?.()) return
     if (measurementFrame !== undefined) cancelAnimationFrame(measurementFrame)
     measurementFrame = undefined
     awaitingSizes = false

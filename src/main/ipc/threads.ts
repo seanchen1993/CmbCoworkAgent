@@ -2,6 +2,8 @@ import { inspectFunctionConversationForkAdmission } from "../agent/function-conv
 import { notifyRemoteThreadChanged } from "../agent/renderer-stream-mirror"
 import type { ThreadDirectoryChangeKind } from "../../shared/thread-directory-change"
 import { captureThreadTranscriptSourceScope } from "./thread-transcript-source-scope"
+import { canAuditStockLegacyTimes, captureStockLegacyTranscriptSource }
+  from "../checkpointer/legacy-stock-transcript-admission"
 import { cancelSearchBackfill, registerSearchBackfillBusyCheck } from "../thread-search/coverage"
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
@@ -3411,6 +3413,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         async (read) => {
           const sourceScope = captureThreadTranscriptSourceScope(threadId, read)
           const source = {
+            ...(options?.includeVisibleMessagePresence && canAuditStockLegacyTimes(threadId) &&
+              { auditStockLegacyTimes: true as const }),
             assertCurrent: read.assertCurrent,
             verify: (witnesses: readonly CanonicalThreadDisplayWitness[]) =>
               verifyCanonicalThreadDisplayWitnesses(threadId, witnesses, read.assertCurrent)
@@ -4590,11 +4594,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  // One-time bridge for old tasks whose transcript still lives only inside a
-  // checkpoint. The Worker prepares pages; the sole Main writer commits durable rows
-  // in bounded transactions. Only the small runtime tuple and a bounded first
-  // page cross worker -> main -> renderer; the full checkpoint array never
-  // enters Electron main or the renderer hydration path.
+  // Old checkpoints need a one-time migration before paging the durable transcript.
+  // Canonical and protected history keep their existing authority. Ordinary legacy
+  // history can use UAT's checkpoint migration under the same thread mutation lock.
   ipcMain.handle(
     "threads:bootstrap-legacy-checkpoint-transcript",
     async (event, threadId: string, options?: ThreadHydrationOptions) => {
@@ -4608,9 +4610,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         signal.throwIfAborted()
         read.assertCurrent()
       }
-      const source = { assertCurrent,
+      const source = {
+        ...(canAuditStockLegacyTimes(normalizedThreadId) && { auditStockLegacyTimes: true as const }),
+        assertCurrent,
         verify: (witnesses: readonly CanonicalThreadDisplayWitness[]) =>
-          verifyCanonicalThreadDisplayWitnesses(normalizedThreadId, witnesses, assertCurrent) }
+          verifyCanonicalThreadDisplayWitnesses(normalizedThreadId, witnesses, assertCurrent)
+      }
       try {
         const sourceScope = captureThreadTranscriptSourceScope(normalizedThreadId, read)
         const workspaceValue = nativeFunctionConversationWorkspace(read.row.metadata)
@@ -4620,13 +4625,31 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           workspace, incarnation: read.incarnation, assertCurrent, signal,
           foregroundKey: hydration.workerKey })
         let bootstrap = canonical
+        let assertStockSource: (() => void) | undefined
         if (!bootstrap) {
-          const writer = await import("../checkpointer/legacy-transcript-main-writer")
-          assertCurrent()
           bootstrap = await withThreadRunMutationLock(normalizedThreadId, async () => {
             assertCurrent()
+            const checkpointPath = getThreadCheckpointPath(normalizedThreadId)
+            const messageDatabasePath = getDbPath()
+            const stock = captureStockLegacyTranscriptSource({ database: read.database,
+              checkpointPath, threadId: normalizedThreadId, incarnation: read.incarnation,
+              resumeProjectReservation: true, assertCurrent })
+            if (stock) {
+              assertStockSource = stock.assertCurrent
+              const recovered = await bootstrapLegacyCheckpointTranscriptInWorker(checkpointPath, messageDatabasePath,
+                normalizedThreadId, "", hydration.workerKey, undefined, signal, stock)
+              if (!stock.authority.projectReservation) return recovered
+              stock.assertCurrent()
+              const runtimeTuple = await readLatestCheckpointRuntimeTupleInWorker(
+                checkpointPath, normalizedThreadId, "", hydration.workerKey, signal
+              )
+              stock.assertCurrent()
+              return { ...recovered, runtimeTuple }
+            }
+            const writer = await import("../checkpointer/legacy-transcript-main-writer")
+            assertCurrent()
             return bootstrapLegacyCheckpointTranscriptInWorker(
-              getThreadCheckpointPath(normalizedThreadId), getDbPath(), normalizedThreadId, "",
+              checkpointPath, messageDatabasePath, normalizedThreadId, "",
               hydration.workerKey, {
                 assertCurrent,
                 createWriter(context) {
@@ -4664,6 +4687,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           page = await readThreadMessagesPageInWorker(normalizedThreadId, pageOptions, undefined, source)
         }
         assertCurrent()
+        assertStockSource?.()
         return {
           checkpoint: bootstrap.runtimeTuple,
           page: { ...page, ...(sourceScope ? { sourceScope } : {}),

@@ -45,6 +45,7 @@ export interface FunctionUiDispatch {
 }
 interface Pane extends FunctionPaneSnapshot {
   pendingGeneration?: string
+  generationEnteredGuest: boolean
   dirty: boolean
   actionsInvalidated?: boolean
   focused: boolean
@@ -330,6 +331,7 @@ export class FunctionPanes {
       plugin,
       title: (input.title ?? input.id) as string,
       generation: prior?.generation ?? randomUUID(),
+      generationEnteredGuest: prior?.generationEnteredGuest ?? false,
       tree: prior?.tree ?? { type: "Box", props: {}, children: [] },
       closeOnEscape: input.closeOnEscape === true,
       holdToasts: input.holdToasts === true,
@@ -361,7 +363,7 @@ export class FunctionPanes {
     for (const [controller, key] of this.active)
       if (cancelActions && key === pane.key)
         controller.abort(new ModFunctionError("MODS_UI_PANE_CLOSED"))
-    await this.release(pane.generation)
+    await this.release(pane.generation, pane.generationEnteredGuest)
     this.paneDataChanged()
   }
 
@@ -457,7 +459,7 @@ export class FunctionPanes {
     return this.captureClientFault(key, generation)
   }
 
-  private async release(generation: string): Promise<void> {
+  private async release(generation: string, enteredGuest = true): Promise<void> {
     // Observations belong to a drawing, unlike user control intents. Retired drawings reject
     // their replays at admission, so scrolling must not consume the session's control budget.
     for (const [id, intent] of this.passiveIntents)
@@ -468,6 +470,9 @@ export class FunctionPanes {
       return
     }
     this.retired.delete(generation)
+    // Before its first drawing a Pane has a placeholder ID for host bookkeeping only.
+    // Local state still retires, but the utility has never received this generation.
+    if (!enteredGuest) return
     await Promise.allSettled(
       this.host.plugins.map((plugin) =>
         Promise.resolve().then(() => plugin.guest.releaseUi(generation))
@@ -495,6 +500,7 @@ export class FunctionPanes {
         stateEpoch: object
         generation: string
         previousGeneration: string
+        previousGenerationEnteredGuest?: boolean
         drawing: FunctionNativeDrawing
         constructorDrawing?: FunctionUiResolveDrawing
         tree: FunctionUiElement
@@ -587,9 +593,8 @@ export class FunctionPanes {
             candidate.callbackTree = candidate.tree
           } else candidate.drawing = pane.nativeDrawing!
           candidate.callbackTree ??= pane.callbackTree ?? candidate.tree
-          candidate.drawing.beginPublication()
           // Protect actual input even when the guest never called next or uses an unknown ref.
-          await candidate.drawing.protect(candidate.tree, (value) => this.host.publish(value, signal))
+          await candidate.drawing.protect(candidate.tree, (value) => this.host.publish(value, signal), "begin")
           assertCurrent(candidate)
         }
         const snapshots = candidates.map(({ pane, generation, tree, fresh }) =>
@@ -686,21 +691,28 @@ export class FunctionPanes {
         const markdownPlans = candidates.flatMap(candidate => candidate.markdownPlan
           ? [candidate.markdownPlan] : [])
         const markdownBatch = this.host.markdownLinks?.assertPrepared(markdownPlans)
-        for (const candidate of candidates) {
-          assertCurrent(candidate)
-          if (candidate.plan) this.host.clients!.assertReconcileCurrent(candidate.plan)
+        if (candidates.length > 1) {
+          for (const candidate of candidates) {
+            assertCurrent(candidate)
+            if (candidate.plan) this.host.clients!.assertReconcileCurrent(candidate.plan)
+          }
+        } else if (candidates.length === 1 && !candidates[0].plan) {
+          assertCurrent(candidates[0])
         }
+        // A single Client plan runs this drawing's guard inside its synchronous commit.
         for (const candidate of candidates)
           if (candidate.plan) this.host.clients!.commitReconcile(candidate.plan)
         for (const candidate of candidates) {
           const pane = candidate.pane
           if (candidate.fresh) {
+            candidate.previousGenerationEnteredGuest = pane.generationEnteredGuest
             this.cancelClientFaults(pane)
             this.focus.cancel(pane.key)
             this.scroll.cancel(pane.key)
           }
           pane.generation = candidate.generation
           if (candidate.fresh) {
+            pane.generationEnteredGuest = true
             pane.constructorDrawing?.close()
             pane.constructorDrawing = candidate.constructorDrawing
             pane.pendingConstructorDrawing = undefined
@@ -727,7 +739,9 @@ export class FunctionPanes {
           if (!candidate.markdownPlan) this.host.markdownLinks?.retire(candidate.pane)
         // Only now retire callbacks and redraw Clients. A VM's state is never rolled back.
         for (const candidate of candidates)
-          if (candidate.fresh) await this.release(candidate.previousGeneration)
+          if (candidate.fresh) await this.release(
+            candidate.previousGeneration, candidate.previousGenerationEnteredGuest === true
+          )
         const visible: FunctionPaneSnapshot[] = []
         for (const candidate of candidates) {
           if (candidate.plan)
@@ -941,6 +955,7 @@ export class FunctionPanes {
         this.active.set(controller, pane.key)
         this.retained.set(action.generation, (this.retained.get(action.generation) ?? 0) + 1)
         try {
+          pane.generationEnteredGuest = true
           const outcome = await this.host.dispatch(
             action.kind === "focus" ? "ui.focus" : "ui.scroll",
             {
@@ -1140,7 +1155,7 @@ export class FunctionPanes {
       pane.constructorDrawing?.close()
       pane.pendingConstructorDrawing?.close()
       this.host.clients?.closePane(pane.key)
-      void this.release(pane.generation)
+      void this.release(pane.generation, pane.generationEnteredGuest)
       if (pane.pendingGeneration) void this.release(pane.pendingGeneration)
     }
     this.focus.close()

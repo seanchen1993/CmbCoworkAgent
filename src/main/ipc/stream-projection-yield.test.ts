@@ -6,7 +6,7 @@ import { yieldBeforeStreamProjection } from "./stream-projection-yield"
 const source = readFileSync(new URL("./agent.ts", import.meta.url), "utf8")
 // Execute the actual three consumer cutpoints without bootstrapping Electron or a provider.
 const cutpoints = [...source.matchAll(
-  /if \(mode === "values" \|\| mode === "updates"\) \{\s+await yieldBeforeStreamProjection\(abortController.signal\)\s+(?:throwIfInvokeAborted\(\)|throwIfPhysicalStreamRunIsInactive\(threadId, runToken, abortController.signal\))\s+\}\s+const \{\s+data: serialized,\s+valuesMessageIndexOffset,\s+valuesSnapshotKind\s+\} = serializeForRun\(mode, data\)/g
+  /if \(mode === "values" \|\| mode === "updates"\) \{\s+await yieldBeforeStreamProjection\(abortController.signal\)\s+(?:throwIfInvokeAborted\(\)|throwIfPhysicalStreamRunIsInactive\(threadId, runToken, abortController.signal\))\s+\}\s+const frame = serializeForRun\(mode, data\)/g
 )].map((match) => match[0])
 
 describe("IPC snapshot projection scheduling", () => {

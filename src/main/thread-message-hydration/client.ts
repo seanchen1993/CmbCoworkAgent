@@ -30,6 +30,7 @@ interface PendingRequest {
 
 /** Supplied by the native IPC admission, never by request JSON. */
 export interface ThreadMessageHydrationNativeSource {
+  readonly auditStockLegacyTimes?: true
   assertCurrent(): void
   verify(witnesses: readonly CanonicalThreadDisplayWitness[]): void
 }
@@ -317,6 +318,8 @@ export class ThreadMessageHydrationClient {
             requestId,
             databasePath: this.databasePath(),
             checkpointDirectory: options.includeVisibleMessagePresence ? this.checkpointDirectory?.() : undefined,
+            ...(options.includeVisibleMessagePresence && source?.auditStockLegacyTimes === true &&
+              { auditStockLegacyTimes: true as const }),
             threadId,
             options: {
               beforeOrdinal: options.beforeOrdinal,

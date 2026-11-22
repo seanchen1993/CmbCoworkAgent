@@ -2,6 +2,10 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { sortBuiltinRobotThreadsByRemoteAccess } from "../src/renderer/src/lib/builtin-robot-thread-sort"
+import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "../src/renderer/src/lib/remote-thread-display"
+import { IM_DEFAULT_CHAT_TITLE } from "../src/shared/im-display"
+import { DEFAULT_IM_CHANNEL_ID } from "../src/shared/im-gateway-contract"
+import { getDisplayThreadTitle } from "../src/shared/thread-search-scope"
 import { isImRemoteControlTranscriptMessageId } from "../src/shared/im-remote-transcript"
 import type { Thread } from "../src/renderer/src/types"
 
@@ -79,7 +83,6 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   const sidebar = source("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
   const workspacePicker = source("src/renderer/src/components/chat/WorkspacePicker.tsx")
   const rightPanel = source("src/renderer/src/components/panels/RightPanel.tsx")
-  const remoteDisplay = source("src/renderer/src/lib/remote-thread-display.ts")
   const robotPanel = source("src/renderer/src/components/customize/BuiltinRobotPanel.tsx")
   const robotManager = source("src/main/services/im/manager.ts")
   const remoteAccessSwitcher = source(
@@ -104,7 +107,33 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(sidebar.includes('"远程会话"'))
   assert(!sidebar.includes('"远程 Feature"'))
   assert(sidebar.includes('"远程历史"'))
-  assert(remoteDisplay.includes('REMOTE_INBOX_WORKSPACE_NAME = IM_DEFAULT_CHAT_TITLE'))
+  assert.equal(REMOTE_INBOX_WORKSPACE_NAME, IM_DEFAULT_CHAT_TITLE)
+  const remote = {
+    ...thread("remote-thread", 100),
+    title: "Stored conversation name",
+    metadata: {
+      targetKind: "inbox",
+      imDeliveryContext: { provider: DEFAULT_IM_CHANNEL_ID, conversationKey: "inbox-conversation" }
+    }
+  }
+  const historical = { ...remote, metadata: { ...remote.metadata, remoteState: "historical" } }
+  for (const inbox of [remote, historical]) {
+    assert(isRemoteInboxThread(inbox))
+    assert.equal(getDisplayThreadTitle(inbox), IM_DEFAULT_CHAT_TITLE)
+  }
+  const feature = {
+    ...remote,
+    metadata: {
+      ...remote.metadata,
+      targetKind: "feature",
+      harnessFeature: { projectId: "project", slug: "feature" }
+    }
+  }
+  const local = { ...remote, metadata: { targetKind: "inbox" } }
+  for (const candidate of [feature, local]) {
+    assert(!isRemoteInboxThread(candidate))
+    assert.equal(getDisplayThreadTitle(candidate), candidate.title)
+  }
   assert(sidebar.includes("isManagedInbox"))
   assert(sidebar.includes("isManagedInbox ? REMOTE_INBOX_WORKSPACE_NAME"))
   assert(sidebar.includes("应用托管目录，路径已隐藏"))

@@ -240,14 +240,15 @@ describe("Harness process environment", () => {
         hookSourceType: "plugin" as const
       }))
     })
-    for (let i = 0; i < 10; i++) {
+    const executionTimes = [0, 30_000, 70_000, 90_000]
+    for (const time of executionTimes) {
+      now = time
       expect(
         (await sandbox.execute(write("code.ts")))
           .exitCode
       ).toBe(0)
-      now += 10_000
     }
-    expect(stageLookup).toHaveBeenCalledTimes(30)
+    expect(stageLookup).toHaveBeenCalledTimes(executionTimes.length * 3)
     expect(resolver).toHaveBeenCalledTimes(1)
     expect(markHarnessStageAttributionDirty).not.toHaveBeenCalled()
     expect((await readFile(join(root, "artifact.txt"), "utf8")).trim()).toBe("updated")

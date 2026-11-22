@@ -4,7 +4,8 @@ import type { RunnableConfig } from "@langchain/core/runnables"
 import ts from "typescript"
 import {
   checkpointHasInterrupt,
-  deriveCheckpointTranscriptIndex
+  deriveCheckpointTranscriptIndex,
+  describeCheckpointMessageForkTarget
 } from "../../shared/checkpoint-transcript"
 import type { SqlJsSaver, SqlJsSaverOptions } from "./sqljs-saver"
 
@@ -98,7 +99,12 @@ export async function markActualCompletedConversationBoundary(input: {
   const warnings: unknown[][] = []
   const source = sourceFile("../ipc/agent.ts")
   const producer = sourceFunction(source, "markLatestForkBoundary")
-  const code = ts.transpileModule(`(${producer.getText(source)})`, {
+  const tail = sourceFile("../ipc/thread-runtime-tail.ts")
+  const reply = sourceFunction(tail, "getForkableReplyId")
+  const code = ts.transpileModule(`(() => {
+    ${reply.getText(tail).replace(/^export /, "")}
+    return ${producer.getText(source)}
+  })()`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText
   const mark: (args: {
@@ -131,6 +137,7 @@ export async function markActualCompletedConversationBoundary(input: {
     },
     checkpointHasInterrupt,
     deriveCheckpointTranscriptIndex,
+    describeCheckpointMessageForkTarget,
     console: { warn: (...args: unknown[]) => { warnings.push(args) } }
   })
   try {
@@ -140,7 +147,9 @@ export async function markActualCompletedConversationBoundary(input: {
     activeRuns.delete(threadId)
   }
   assertCurrent()
-  if (warnings.length) throw new TypeError("Actual completion-marker producer failed")
+  if (warnings.length) throw new TypeError("Actual completion-marker producer failed", {
+    cause: warnings[0].at(-1)
+  })
   const after = await input.saver.getTuple(input.config)
   assertCurrent()
   const metadata = after?.metadata as Record<string, unknown> | undefined

@@ -14,6 +14,7 @@ export interface ThreadMessageHydrationReadRequest {
   requestId: number
   databasePath: string
   checkpointDirectory?: string
+  auditStockLegacyTimes?: true
   threadId: string
   options: Pick<
     ThreadMessagesPageOptions,

@@ -24,7 +24,7 @@ import type {
   RunAnalysisOptions,
   RunAnalysisSessionRequest
 } from "../../shared/project-run-analysis"
-import type { RunAnalysisScope } from "./project-run-analysis"
+import { runAnalysisAttributionFilters, type RunAnalysisScope } from "./project-run-analysis"
 import { matches } from "./es-aggregation-test-fixture"
 
 vi.mock("../services/event-reporter", () => ({ trackEvent: () => undefined }))
@@ -65,6 +65,7 @@ const names = [
   "fetchProjectModeMetricSortedPage",
   "fetchProjectModeProjectPage",
   "runAnalysisSnapshotFilters",
+  "runAnalysisProjectFilters",
   "runAnalysisDetailFilters",
   "fetchProjectRunAnalysis"
 ]
@@ -198,6 +199,7 @@ function fixture(featureCount = 1) {
     mapAwardBatches,
     compareProjectAttentionValues,
     isProjectAttentionSortKey,
+    runAnalysisAttributionFilters,
     esQuery,
     projectModePageCache: pageCache,
     projectAttentionRankingCache: new ProjectAttentionRankingCache(),

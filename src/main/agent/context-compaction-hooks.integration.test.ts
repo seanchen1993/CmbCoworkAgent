@@ -421,3 +421,45 @@ it("does not mistake a no-progress event upgrade for another compaction", async 
   expect(f.events).toEqual([])
   expect(f.modelCall).not.toHaveBeenCalled()
 })
+
+it.each([false, true])("honors PreCompact on inherited handoff-only recovery (blocked=%s)",
+  async (blocked) => {
+    const f = await fixture({ block: blocked })
+    const middleware = f.controller.middleware as unknown as {
+      wrapModelCall: (request: unknown, handler: () => Promise<AIMessage>) => Promise<unknown>
+    }
+    const messages = f.messages.slice(0, 2)
+    const inherited = new HumanMessage({
+      content: "Older handoff with a long inherited context. ".repeat(240),
+      additional_kwargs: { lc_source: "summarization" }
+    })
+    const handler = vi.fn<() => Promise<AIMessage>>()
+      .mockRejectedValueOnce(Object.assign(new Error("maximum context length exceeded"), {
+        status: 400, code: "context_length_exceeded"
+      }))
+      .mockResolvedValueOnce(new AIMessage("continued"))
+    const result = middleware.wrapModelCall({
+      messages,
+      state: {
+        messages,
+        _summarizationEvent: { cutoffIndex: 1, summaryMessage: inherited, filePath: null,
+          usageStartIndex: 1 }
+      },
+      tools: []
+    }, handler)
+    if (blocked) {
+      await expect(result).rejects.toThrow("Preserve the full conversation")
+      expect(f.modelCall).not.toHaveBeenCalled()
+      expect(handler).toHaveBeenCalledTimes(1)
+    } else {
+      const command = await result as Command
+      expect(command).toBeInstanceOf(Command)
+      expect(command.update).toMatchObject({
+        _summarizationEvent: { cutoffIndex: 1, compactionId: expect.any(String) }
+      })
+      expect(f.modelCall).toHaveBeenCalledTimes(1)
+      expect(handler).toHaveBeenCalledTimes(2)
+    }
+    expect(f.events.map(({ name }) => name)).toEqual(["PreCompact"])
+    expect(await readdir(f.archives)).toEqual([])
+  })

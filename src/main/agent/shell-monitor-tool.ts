@@ -4,6 +4,7 @@ import { z } from "zod"
 import { getCurrentHookAgentId, getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { toolFailureSignalFromAbort } from "../hooks/tool-failure"
 import { mergeUpdatedInput } from "../hooks/updated-input"
+import { ModError } from "../mods/errors"
 import { WorkspaceExecutionLockUnavailableError } from "./file-operation-lock"
 import type { LocalSandbox } from "./local-sandbox"
 import {
@@ -74,12 +75,13 @@ function formatTaskSnapshot(
   })
 }
 
-export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
+export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend | "metadata-only") {
   const runMonitor = async (
     toolName: (typeof SHELL_TASK_MONITOR_TOOL_NAMES)[number],
     input: z.infer<typeof monitorSchema>,
     config?: RunnableConfig
   ): Promise<string> => {
+    if (sandbox === "metadata-only") throw new ModError("MODS_TOOL_METADATA_ONLY")
     const ownerId = getShellTaskOwnerId(config)
     const legacy = toolName === SHELL_TASK_OUTPUT_TOOL_NAME
     const defaultTimeout = legacy ? DEFAULT_TASK_OUTPUT_WAIT_MS : undefined

@@ -1,5 +1,6 @@
 import React from "react"
 import type { VirtuosoHandle } from "react-virtuoso"
+import { FunctionSiteProbeContext } from "@/lib/mods-chat-scope"
 import { isChatRowPresented } from "./chat-row-presentation"
 import { hasChatViewportScrollOwner } from "./chat-viewport-scroll-owner"
 import { isChatScrollNavigationActive } from "./chat-scroll-navigation"
@@ -9,6 +10,9 @@ export interface ChatVirtualPrependLayoutContext {
   firstItemIndex: number
   scrollParent: HTMLElement | null
   virtuosoRef?: React.RefObject<VirtuosoHandle | null>
+  initialHistoryReadPending?: boolean
+  positionedHistoryTail?: { messageId: string }
+  checkInitialHistoryPosition?: () => void
 }
 
 interface Props extends React.ComponentPropsWithoutRef<"div"> {
@@ -113,6 +117,8 @@ export class ChatVirtualPrependLayout extends React.Component<Props> {
   }
 
   componentDidUpdate(previous: Props, _state: unknown, snapshot: Snapshot | null): void {
+    if (previous.style?.visibility !== this.props.style?.visibility)
+      this.props.context?.checkInitialHistoryPosition?.()
     if (previous.forwardedRef !== this.props.forwardedRef) {
       this.assignRef(previous.forwardedRef, null)
       this.assignRef(this.props.forwardedRef, this.root)
@@ -326,9 +332,18 @@ export class ChatVirtualPrependLayout extends React.Component<Props> {
   }
 
   render(): React.JSX.Element {
-    const { context: _context, forwardedRef: _forwardedRef, ...props } = this.props
-    void _context
+    const { context: _context, forwardedRef: _forwardedRef, children, ...props } = this.props
     void _forwardedRef
-    return <div {...props} ref={this.setRoot} />
+    // Virtuoso hides the positioning list until its initial item is located.
+    // Let it measure placeholders without mounting host-backed display sites.
+    return (
+      <div {...props} ref={this.setRoot}>
+        <FunctionSiteProbeContext.Provider value={props.style?.visibility === "hidden" ? "hidden"
+          : _context?.initialHistoryReadPending ? "position-pending"
+            : _context?.positionedHistoryTail ?? "ready"}>
+          {children}
+        </FunctionSiteProbeContext.Provider>
+      </div>
+    )
   }
 }

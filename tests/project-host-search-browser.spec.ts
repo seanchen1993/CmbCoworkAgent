@@ -109,6 +109,7 @@ async function main() {
             export const useAppStore=selector=>useSyncExternalStore(subscribe,()=>selector(state));
             useAppStore.getState=()=>state;useAppStore.subscribe=subscribe;
             export const isThreadDeletionPending=()=>false,isThreadRetired=()=>false;
+            export const adoptThreadSearchSummary=()=>{throw new Error('Thread search is outside this project search fixture')};
             window.fixtureAccount=()=>state.accountRevision;
             window.fixtureChangeAccount=()=>{state={...state,accountRevision:state.accountRevision+1};for(const listener of listeners)listener()};
             window.fixtureChangeSourceWorkspace=workspace=>{state={...state,threads:[{thread_id:'source-chat',metadata:{workspacePath:workspace,agentMode:'normal'}}]};for(const listener of listeners)listener()};

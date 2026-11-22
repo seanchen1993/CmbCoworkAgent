@@ -4,12 +4,14 @@ import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-
 type Priority = "ordinary" | "background" | "prefetch" | "visible" | "interactive"
 
 export function functionSitePriority(component: FunctionUiSite, visible: boolean,
-  prefetchHistory = false): Priority {
-  if (["ChatHeader", "AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"].includes(component))
-    return "interactive"
+  prefetchHistory = false, initialHistory = false): Priority {
+  if (["ChatHeader", "AbovePrompt", "PromptHint", "SessionMode"].includes(component))
+    return initialHistory ? "background" : "interactive"
+  if (component === "Spinner" || component === "AskUserQuestion") return "interactive"
   // Transcript text takes precedence over optional elapsed-time labels during scrolling.
   if (component !== "TurnDuration" && visible) return "visible"
-  return prefetchHistory && ["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
+  return prefetchHistory && !initialHistory &&
+    ["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
     ? "prefetch" : "background"
 }
 

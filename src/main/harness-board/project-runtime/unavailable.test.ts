@@ -28,7 +28,7 @@ describe("unavailable opt-in ledger isolation", () => {
   it("leaves unrelated projects and their original Skill preparation available with a trusted index", async () => {
     let index: ReadonlySet<string> | undefined = new Set(["retained"])
     const stop = registerUnavailableLegacyRuntime(id => id === "ordinary" ? undefined : id,
-      () => index)
+      projectId => index?.has(projectId) === false)
     try {
       const agent = (threadId: string) =>
         prepareAgentRunAdmission({ threadId, message: "hello" }, { source: "desktop" })

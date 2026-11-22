@@ -32,6 +32,8 @@ function loadThreadDeletionHandler({
     cancelLegacySubagentTranscriptMigration: noop,
     cancelSubagentTranscriptStartupRead: noop,
     cancelLegacyCheckpointTranscriptBootstrap: noop,
+    getModsManager: () => undefined,
+    getDb: () => ({}),
     checkpointHydrationOperations: new Map<string, Set<AbortController>>(),
     getAgentModeFromMetadata: () => "normal",
     assertThreadDeletionWorkspace,
@@ -360,10 +362,13 @@ describe("threads:get hydration contract", () => {
     expect(handler.indexOf("getThreadRowLifetime(normalizedThreadId)")).toBeLessThan(
       handler.indexOf("await withThreadRunMutationLock(normalizedThreadId")
     )
-    expect(handler.indexOf("if (!isCurrent()) return null")).toBeLessThan(
-      handler.indexOf("return bootstrapLegacyCheckpointTranscriptInWorker(")
+    const lock = handler.indexOf("await withThreadRunMutationLock(normalizedThreadId")
+    const admission = handler.indexOf("captureStockLegacyTranscriptSource(")
+    expect(admission).toBeGreaterThan(lock)
+    expect(handler.slice(lock, admission)).toContain("assertCurrent()")
+    expect(handler.indexOf("assertStockSource?.()")).toBeGreaterThan(
+      handler.lastIndexOf("readThreadMessagesPageInWorker(")
     )
-    expect(handler).toContain("getThreadRowLifetime(normalizedThreadId) === lifetime")
     expect(handler).not.toContain("withCheckpointer")
     expect(handler).not.toContain("readLatestCheckpointTupleInWorker")
     expect(handler).not.toContain("getLatestCheckpoint(")

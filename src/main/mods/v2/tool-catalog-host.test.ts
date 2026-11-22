@@ -129,6 +129,7 @@ it("lists actual cold builtins, task and eager MCP metadata with no runtime or e
     expect.arrayContaining([
       "read_file",
       "write_file",
+      "monitor",
       "task_output",
       "write_todos",
       "request_user_input",

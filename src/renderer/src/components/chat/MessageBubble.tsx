@@ -662,6 +662,7 @@ function MessageBubbleImpl({
         presentationId={JSON.stringify([message.id, index])}
         role={message.role}
         text={text}
+        isFirstText={index === firstTextIndex}
         isExpanded={userContentExpanded}
         isFirstOfReply={shouldShowMessageHead && index === firstTextIndex}
         isHistory={!isLoading && !isStreaming}

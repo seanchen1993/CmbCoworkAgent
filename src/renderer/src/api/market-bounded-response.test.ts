@@ -94,6 +94,7 @@ describe("legacy market skill catalog in Electron", () => {
     })
     const marketCatalog = vi.fn(() => catalog)
     const fetch = vi.fn()
+    vi.stubEnv("VITE_API_BASE_URL", "https://market.invalid.test")
     vi.stubGlobal("window", { api: { skills: { marketCatalog } } })
     vi.stubGlobal("fetch", fetch)
     try {
@@ -111,6 +112,24 @@ describe("legacy market skill catalog in Electron", () => {
       expect(fetch).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("preserves the missing-backend result before requesting the IPC catalog", async () => {
+    const marketCatalog = vi.fn()
+    vi.stubEnv("VITE_API_BASE_URL", "")
+    vi.stubGlobal("location", { protocol: "file:" })
+    vi.stubGlobal("window", { api: { skills: { marketCatalog } } })
+    try {
+      await expect(marketApi.getSkills()).resolves.toMatchObject({
+        success: false,
+        errorCode: "BACKEND_NOT_CONFIGURED"
+      })
+      expect(marketCatalog).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+      vi.unstubAllEnvs()
     }
   })
 })

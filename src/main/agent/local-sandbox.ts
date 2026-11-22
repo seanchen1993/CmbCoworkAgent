@@ -3413,8 +3413,8 @@ export class LocalSandbox
     context: HookContext,
     signal: ToolFailureSignal
   ): void {
-    const toolCallId = context.toolCallId ?? getModCallContext()?.identity.toolCallId ??
-      String(context.toolArgs?.tool_call_id ?? context.toolArgs?.tool_use_id ?? "")
+    // Tool arguments cannot name another call's failure receipt.
+    const toolCallId = context.toolCallId ?? getModCallContext()?.identity.toolCallId ?? ""
     if (typeof toolCallId === "string" && toolCallId && hasFailureFired(toolCallId)) return
     if (typeof toolCallId === "string" && toolCallId) markFailureFired(toolCallId)
 
@@ -7970,13 +7970,24 @@ export class LocalSandbox
 
   /** The desktop shell Stop control only affects detached desktop commands. */
   static cancelDetachedBackgroundTasks(threadId: string): boolean {
-    return (
-      LocalSandbox.cancelBackgroundTasksMatching({
-        threadId,
-        detachedPendingOnly: true,
-        threadRunOwner: "desktop"
-      }).length > 0
-    )
+    return LocalSandbox.cancelDetachedDesktopTaskCompletions(threadId).length > 0
+  }
+
+  /** Hold the idle native Stop receipt until the original desktop processes have settled. */
+  static async cancelDetachedBackgroundTasksAndWait(threadId: string): Promise<boolean> {
+    const pending = LocalSandbox.cancelDetachedDesktopTaskCompletions(threadId)
+    const settled = await Promise.allSettled(pending)
+    const failure = settled.find((result) => result.status === "rejected")
+    if (failure?.status === "rejected") throw failure.reason
+    return pending.length > 0
+  }
+
+  private static cancelDetachedDesktopTaskCompletions(threadId: string): Promise<void>[] {
+    return LocalSandbox.cancelBackgroundTasksMatching({
+      threadId,
+      detachedPendingOnly: true,
+      threadRunOwner: "desktop"
+    })
   }
 
   /** Deletion also considers child runtimes and tracked foreground shell invocations. */

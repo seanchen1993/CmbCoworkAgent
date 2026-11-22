@@ -381,6 +381,25 @@ describe("actual native occurrence projection capture and compare-and-adopt foun
     expect(f.counts().writes).toBe(0)
   })
 
+  it("rejects a changed published fragment generation even when both bodies match", async () => {
+    const f = fixture()
+    for (const generation of ["", "replacement"]) {
+      f.database.run(`INSERT INTO thread_message_fragments
+        (thread_id,message_id,content_text,created_at,generation) VALUES (?,?,?,100,?)`,
+      [f.threadId, f.uuid, "same", generation])
+    }
+    const before = appDb.getThreadMessages(f.threadId)[0].content
+    const receipt = await f.capture()
+    f.database.run("UPDATE thread_messages SET fragment_generation=? WHERE thread_id=? AND message_id=?",
+      ["replacement", f.threadId, f.uuid])
+    expect(appDb.getThreadMessages(f.threadId)[0].content).toBe(before)
+    expect(() => f.commit(receipt)).toThrow("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    expect(f.counts().writes).toBe(0)
+    expect(f.store.readRows(f.target)).toEqual([])
+    expect(f.database.exec("SELECT generation,content_text FROM thread_message_fragments WHERE thread_id=? ORDER BY fragment_id",
+      [f.threadId])[0].values).toEqual([["", "same"], ["replacement", "same"]])
+  })
+
   it.each(["entries", "map"])("pins the original private alias %s rather than accepting a clone", async kind => {
     const f = fixture(), receipt = await f.capture()
     if (kind === "entries") f.changeAlias()

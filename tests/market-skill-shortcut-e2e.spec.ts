@@ -6,7 +6,7 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { createRequire } from "node:module"
 import { dirname, join, resolve } from "node:path"
-import { _electron, type ElectronApplication } from "playwright"
+import { _electron, type ElectronApplication, type Page } from "playwright"
 
 const root = resolve(import.meta.dirname, "..")
 const requireLocal = createRequire(join(root, "package.json"))
@@ -113,6 +113,8 @@ async function main(): Promise<void> {
     }
   })
   let app: ElectronApplication | undefined
+  let observedPage: Page | undefined
+  const pageErrors: string[] = []
   try {
     await new Promise<void>((resolveServer) => server.listen(0, "127.0.0.1", resolveServer))
     const baseUrl = "http://127.0.0.1:" + (server.address() as { port: number }).port
@@ -147,17 +149,31 @@ async function main(): Promise<void> {
       env,
       timeout: 60_000
     })
-    await app.context().route(/^https?:/, (route) =>
-      route
-        .request()
-        .url()
-        .startsWith(baseUrl + "/")
-        ? route.continue()
-        : route.abort()
-    )
+    await app.context().route(/^https?:/, (route) => {
+      const url = new URL(route.request().url())
+      if (url.origin === baseUrl) return route.continue()
+      if (
+        url.hostname.startsWith("archguardservice.paas.") &&
+        url.pathname === "/cowork/login-info"
+      ) {
+        return route.fulfill({
+          headers: { "access-control-allow-origin": "*" },
+          json: { returnCode: "SUC0000", body: user }
+        })
+      }
+      return route.abort()
+    })
     const page = await app.firstWindow()
+    observedPage = page
+    page.on("pageerror", (error) => pageErrors.push(error.message))
     page.setDefaultTimeout(20_000)
-    await page.getByRole("button", { name: "自定义设置", exact: true }).waitFor()
+    const settingsButton = page.getByRole("button", { name: "自定义设置", exact: true })
+    const intro = page.getByRole("dialog", { name: "把助手变成适合你的工作台" })
+    await settingsButton.or(intro).first().waitFor()
+    if (await intro.isVisible()) {
+      await intro.getByRole("button", { name: "先自己试试", exact: true }).click()
+    }
+    await settingsButton.waitFor()
     await page.evaluate(
       async ({ title, workspace }) => {
         await window.api.workspace.set(undefined, workspace)
@@ -259,6 +275,15 @@ async function main(): Promise<void> {
       [true, true, true]
     )
     console.log("Name-only market shortcut E2E passed in built Electron")
+  } catch (error) {
+    console.error("Shortcut browser errors", pageErrors)
+    if (observedPage && !observedPage.isClosed()) {
+      const visible = await observedPage
+        .evaluate(() => document.body.innerText.slice(0, 1500))
+        .catch(() => "")
+      console.error("Shortcut browser view", visible)
+    }
+    throw error
   } finally {
     await app?.close()
     await new Promise<void>((resolveServer) => server.close(() => resolveServer()))

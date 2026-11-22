@@ -2,7 +2,7 @@ import { validateFunctionDisplaySnapshot, type FunctionDisplaySnapshot } from ".
 import { FunctionDisplayContent } from "./FunctionDisplayContent"
 import { functionMessageTextMode } from "../../../../shared/mods/v2/host-message"
 import { ModsChatScope, useModsChatScope, useModsChatReady, useModsChatLoadError, useModsChatCurrent,
-  useModsChatPresentationCache } from "../../lib/mods-chat-scope"
+  useModsChatPresentationCache, FunctionSiteProbeContext } from "../../lib/mods-chat-scope"
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { isModSiteChangeScope, modUiChangeAffects } from "../../../../shared/mods/types"
@@ -158,8 +158,9 @@ export function FunctionSiteContent({
 
 /** A mounted desktop slot. The main process issues its drawing owner token. */
 export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0] &
-  { allowUnboundHistory?: boolean }): React.JSX.Element {
+  { allowUnboundHistory?: boolean; nativeHistory?: boolean }): React.JSX.Element {
   const enabled = useModsChatScope(props.threadId)
+  const hiddenProbe = useContext(FunctionSiteProbeContext) === "hidden"
   const ready = useModsChatReady(props.threadId, props.allowUnboundHistory)
   const loadError = useModsChatLoadError(props.threadId)
   const isCurrent = useModsChatCurrent(props.threadId, props.allowUnboundHistory)
@@ -168,7 +169,8 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0] &
     event.preventDefault()
     event.stopPropagation()
   }
-  return !ready ? <section data-function-site={props.component} aria-busy={!loadError || undefined}
+  return !ready || (hiddenProbe && enabled && !props.nativeHistory)
+    ? <section data-function-site={props.component} aria-busy={!loadError || undefined}
     className={props.className ?? DEFAULT_SITE_CLASS_NAME}>
       {loadError && props.fallback == null ? null : loadError ? <p role="alert" className="text-destructive">
         {loadError.error}
@@ -177,7 +179,7 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0] &
       </p> : <FunctionSitePending component={props.component} quiet={
         ["UserMessage", "AssistantMessage"].includes(props.component) &&
         typeof props.facts.text === "string" && !props.facts.text.trim()} />}
-    </section> : enabled ? (
+    </section> : enabled && !props.nativeHistory ? (
     <FunctionSiteSurface key={JSON.stringify([props.threadId, props.component,
       props.messageId, props.expectedRequestId, props.presentationId])} {...props}
       retainInactiveHistory={props.allowUnboundHistory} />
@@ -190,7 +192,7 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0] &
       onKeyDownCapture={blockRevokedInteraction}
       onSubmitCapture={blockRevokedInteraction}
     >
-      {props.fallback}
+      {(!props.nativeHistory || isCurrent()) && props.fallback}
     </section>
   )
 }
@@ -207,6 +209,7 @@ function FunctionSiteSurface({
   component,
   messageId,
   presentationId,
+  firstTextMessageId,
   expectedRequestId,
   facts,
   fallback,
@@ -224,6 +227,7 @@ function FunctionSiteSurface({
   messageId?: string
   /** Stable renderer row identity; never submitted as a host message authority. */
   presentationId?: string
+  firstTextMessageId?: string
   expectedRequestId?: string
   facts: ModObject
   fallback?: ReactNode
@@ -239,11 +243,19 @@ function FunctionSiteSurface({
   const chatScope = useContext(ModsChatScope)
   const prefetchHistory = retainInactiveHistory === true && chatScope?.threadId === threadId &&
     chatScope.prefetchHistory === true
+  const initialHistory = chatScope?.threadId === threadId && chatScope.prioritizeInitialHistory === true
+  const probe = useContext(FunctionSiteProbeContext)
+  const positionedTailText = typeof probe === "object" && probe.messageId === firstTextMessageId
+  const holdInitialHistoryRead = probe === "position-pending" && retainInactiveHistory === true &&
+    (component === "UserMessage" || component === "AssistantMessage")
+  const holdInitialHistoryReadRef = useRef(holdInitialHistoryRead)
   const prefetchHistoryRef = useRef(prefetchHistory)
+  const initialHistoryRef = useRef(initialHistory)
   useLayoutEffect(() => {
     prefetchHistoryRef.current = prefetchHistory
+    initialHistoryRef.current = initialHistory
     functionSiteQueue.refresh()
-  }, [prefetchHistory])
+  }, [prefetchHistory, initialHistory])
   const [frame, setFrame] = useState<{
     snapshot: FunctionPaneSnapshot
     ticket: FunctionSiteTicket
@@ -474,7 +486,12 @@ function FunctionSiteSurface({
       bounds.height, current.presentationCurrent, bounds.width, current.snapshot.key,
       viewport)
   }, [presentationCache])
-  const refreshRef = useRef<() => void>(() => {})
+  const refreshRef = useRef<(coldVisible?: boolean) => void>(() => {})
+  useLayoutEffect(() => {
+    const wasHeld = holdInitialHistoryReadRef.current
+    holdInitialHistoryReadRef.current = holdInitialHistoryRead
+    if (wasHeld && !holdInitialHistoryRead) refreshRef.current(positionedTailText)
+  }, [holdInitialHistoryRead, positionedTailText])
   const inputRefreshRef = useRef<() => void>(() => {})
   const retryRef = useRef<() => void>(() => {})
   const live = useRef(false)
@@ -682,6 +699,8 @@ function FunctionSiteSurface({
     })
     const waitingForDurationVisibility = (): boolean =>
       deferInitialDurationRead && !firstReadStarted && !siteVisibility.visible()
+    const waitingForFirstRead = (): boolean =>
+      (!firstReadStarted && holdInitialHistoryReadRef.current) || waitingForDurationVisibility()
     lifetimeRef.current = lifetime
     let stopped = false
     let owner: string | null = null
@@ -728,18 +747,18 @@ function FunctionSiteSurface({
     const schedule = (delay = 0): void => {
       if (stopped || sourceRetiring) return
       queued = true
-      if (running || hidden() || timer !== undefined || waitingForDurationVisibility()) return
+      if (running || hidden() || timer !== undefined || waitingForFirstRead()) return
       const ticket = lifetime.capture()
       timer = setTimeout(() => {
         timer = undefined
-        if (!ticket.current() || stopped || hidden() || waitingForDurationVisibility()) return
+        if (!ticket.current() || stopped || hidden() || waitingForFirstRead()) return
         queued = false
         void refresh()
       }, delay)
     }
     const refresh = async (): Promise<void> => {
       if (stopped || hidden() || sourceRetiring) return
-      if (running) { queued = true; return }
+      if (running || waitingForFirstRead()) { queued = true; return }
       const attempt = {}
       running = attempt
       recovery.started(Date.now())
@@ -778,21 +797,22 @@ function FunctionSiteSurface({
         }
       }
       // Read geometry only for cold admission, never for each appended token/redraw.
-      const queuePriority = () => functionSitePriority(component, siteVisibility.visible(), prefetchHistoryRef.current)
+      const queuePriority = () => functionSitePriority(component, siteVisibility.visible(),
+        prefetchHistoryRef.current, initialHistoryRef.current)
       try {
         // Keep admission and its first drawing in one fair queue job. Requeueing a mounted
         // owner behind every other cold mount needlessly delayed the first readable message.
         // Both IPC calls retain their original host checks; stale mounts are still released.
-        const mayStart = deferInitialDurationRead ? () => {
+        const mayStart = () => {
           if (!current()) return false
-          if (!waitingForDurationVisibility()) return true
+          if (!waitingForFirstRead()) return true
           queued = true
           return false
-        } : current
+        }
         const drawing = await functionSiteQueue.run(mayStart, async () => {
-          if (deferInitialDurationRead && !firstReadStarted) {
+          if (!firstReadStarted) {
             firstReadStarted = true
-            setInitialDurationDeferred(false)
+            if (deferInitialDurationRead) setInitialDurationDeferred(false)
           }
           const hostMessage = ["UserMessage", "AssistantMessage"].includes(component) &&
             typeof capturedInput.text === "string" &&
@@ -973,6 +993,13 @@ function FunctionSiteSurface({
       }
     }
     const update = (): void => schedule(recovery.notificationDelay(Date.now()))
+    const startColdVisible = (): void => {
+      queueMicrotask(() => {
+        if (stopped || running || timer !== undefined) return
+        if (hidden()) update()
+        else void refresh()
+      })
+    }
     // Offscreen elapsed-time labels can wait without occupying the shared background slot.
     if (component === "TurnDuration") setInitialDurationDeferred(waitingForDurationVisibility())
     if (deferInitialDurationRead) wakeVisibleDuration = () => {
@@ -990,7 +1017,11 @@ function FunctionSiteSurface({
       setError("")
       update()
     }
-    refreshRef.current = update
+    refreshRef.current = (coldVisible) => {
+      // The confirmed tail's first block fills a normal slot before sibling timers.
+      if (coldVisible && !firstReadStarted) startColdVisible()
+      else update()
+    }
     inputRefreshRef.current = () => {
       // Progress may keep only the prior protected presentation, with all old-input
       // actions blocked. Replacements revoke it immediately. Both reuse the slot owner.
@@ -1132,13 +1163,9 @@ function FunctionSiteSurface({
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", visibility)
     // Start the cold read for on-screen text after this commit, before timers from
     // overscan rows. Keep the shared IPC queue, revocation and retry limits intact.
-    if (["UserMessage", "AssistantMessage", "CommandOutput"].includes(component) && siteVisibility.visible()) {
-      queueMicrotask(() => {
-        if (stopped || running || timer !== undefined) return
-        if (hidden()) update()
-        else void refresh()
-      })
-    } else update()
+    if (["UserMessage", "AssistantMessage", "CommandOutput"].includes(component) && siteVisibility.visible())
+      startColdVisible()
+    else update()
     return () => {
       stopped = true
       pendingReads.abort()
@@ -1285,13 +1312,11 @@ function FunctionSiteSurface({
           return
         void act(undefined, "focus", { focused: false })
       }}
-      onScroll={(event) => {
-        if (!isFunctionDockedSite(component)) return
+      onScroll={isFunctionDockedSite(component) ? (event) => {
         const offset = Math.max(0, Math.min(100000, Math.floor(event.currentTarget.scrollTop / 24)))
         setGeometry((old) => (old.offset === offset ? old : { ...old, offset }))
-      }}
-      onWheel={(event) => {
-        if (!isFunctionDockedSite(component)) return
+      } : undefined}
+      onWheel={isFunctionDockedSite(component) ? (event) => {
         const clamp = (n: number): number => Math.max(-100000, Math.min(100000, n))
         void act(undefined, "scroll", {
           deltaX: clamp(event.deltaX),
@@ -1299,7 +1324,7 @@ function FunctionSiteSurface({
           top: clamp(event.currentTarget.scrollTop),
           left: clamp(event.currentTarget.scrollLeft)
         })
-      }}
+      } : undefined}
     >
       {!(onHint && hint !== null) && !inlineMode && (
         <div className="contents" inert={Boolean(snapshot && frame?.inputRevision !== inputRevision)}

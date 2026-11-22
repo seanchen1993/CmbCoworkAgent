@@ -5,12 +5,11 @@ import { registerLegacyProjectEntryGate } from "./legacy-entry-gate"
 /** A damaged opt-in ledger must neither stop ordinary chat nor silently lose its source fence. */
 export function registerUnavailableLegacyRuntime(
   projectForThread: (threadId: string) => string | undefined,
-  readProtectedProjects?: () => Pick<ReadonlySet<string>, "has"> | undefined
+  isKnownUnbound?: (projectId: string) => boolean
 ) {
   const reject = () => { throw Error("PROJECT_LEGACY_RUNTIME_UNAVAILABLE") }
   const assertProject = (projectId: string) => {
-    const protectedProjects = readProtectedProjects?.()
-    if (!protectedProjects || protectedProjects.has(projectId)) reject()
+    if (!isKnownUnbound?.(projectId)) reject()
   }
   const assertThread = (threadId: string) => {
     const projectId = projectForThread(threadId)

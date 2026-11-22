@@ -6,7 +6,7 @@ import {
   ModFunctionError,
   type FunctionGuest
 } from "../../../shared/mods/v2/contracts"
-import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/site-vocabulary"
 import { namedStateAddress } from "./named-state"
 import { functionUiResolveRuntimeBinding } from "./ui-resolve-runtime-binding"
 import type { FunctionUiResolveHostLifetime } from "./ui-resolve-host-lifetime"

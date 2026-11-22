@@ -7,15 +7,21 @@ import { createContext, useContext, useEffect, useCallback, useMemo, useRef, use
 import { parseThreadDirectoryChange } from "../../../shared/thread-directory-change"
 import { sameThreadDirectoryScope, type ThreadDirectoryScope } from "./thread-directory-scope"
 
+export const FunctionSiteProbeContext = createContext<
+  "ready" | "hidden" | "position-pending" | { messageId: string }
+>("ready")
+
 export const ModsChatScope = createContext<{
   threadId: string
   enabled: boolean
+  nativeHistory?: boolean
   ready?: boolean
   error?: string
   retry?: () => void
   isCurrent?: () => boolean
   canShowUnboundHistory?: () => boolean
   prefetchHistory?: boolean
+  prioritizeInitialHistory?: boolean
   presentationCache?: FunctionSitePresentationCache | null
 } | null>(null)
 
@@ -31,7 +37,8 @@ export function useModsChatState(
   workspace: string | null | undefined,
   directoryScope?: ThreadDirectoryScope,
   unboundHistoryIncarnation?: string
-): { enabled: boolean; ready: boolean; error?: string; retry: () => void; isCurrent: () => boolean
+): { enabled: boolean; nativeHistory: boolean; ready: boolean; error?: string; retry: () => void
+  isCurrent: () => boolean
   canShowUnboundHistory?: () => boolean
   presentationCache?: FunctionSitePresentationCache | null } {
   const requestedWorkspace = workspace?.trim() ? workspace : unboundHistoryIncarnation ? null : undefined
@@ -39,7 +46,8 @@ export function useModsChatState(
   const [identity, setIdentity] = useState({ key, directoryScope })
   const [scopeLifetime] = useState(() => new FunctionSiteLifetime())
   const [snapshot, setSnapshot] = useState<{
-    identity: typeof identity; enabled?: boolean; error?: string; current: () => boolean
+    identity: typeof identity; enabled?: boolean; nativeHistory?: boolean
+    error?: string; current: () => boolean
     presentationCache?: FunctionSitePresentationCache
   }>()
   const presentationCache = useRef<FunctionSitePresentationCache | null>(null)
@@ -61,9 +69,12 @@ export function useModsChatState(
     }
     let live = true
     let generation = 0
+    let nativeHistoryPossible = false
     let retained: RetainedFunctionSiteCache | null = null
     const refresh = () => {
       const revision = ++generation
+      const readPresentation = window.api.mods.chatPresentationCapability
+      nativeHistoryPossible = typeof requestedWorkspace === "string" && typeof readPresentation === "function"
       retained?.revoke()
       retained?.release()
       retained = null
@@ -76,13 +87,20 @@ export function useModsChatState(
         (!retained || retained.current())
       requestRef.current = { identity, current }
       setSnapshot(undefined)
-      void (async () => window.api.mods.chatDisplayCapability(threadId, requestedWorkspace))().then(
-        (enabled) => {
+      void (async () => typeof requestedWorkspace === "string" && readPresentation
+        ? readPresentation(threadId, requestedWorkspace)
+        : window.api.mods.chatDisplayCapability(threadId, requestedWorkspace))().then(
+        (decision) => {
           if (!current()) return
           if (requestedWorkspace === null) {
-            if (enabled === false) setSnapshot({ identity, enabled, current })
+            if (decision === false) setSnapshot({ identity, enabled: false, current })
             return
           }
+          const enabled = typeof decision === "boolean" ? decision
+            : typeof decision?.nativeHistory === "boolean" ? decision.enabled : undefined
+          const nativeHistory = enabled === true && typeof decision === "object" &&
+            decision?.nativeHistory === true
+          nativeHistoryPossible = nativeHistory
           // A remounted view still awaits this fresh host decision. Only passive drawings,
           // kept under continuous invalidation subscriptions, can survive the previous view.
           if (enabled === true) retained = acquireRetainedFunctionSiteCache(threadId, requestedWorkspace, identity.directoryScope)
@@ -92,12 +110,15 @@ export function useModsChatState(
             (typeof window.api.mods.onCardsChanged === "function" && enabled === true
               ? new FunctionSitePresentationCache(current) : undefined)
           presentationCache.current = cache ?? null
-          setSnapshot(typeof enabled === "boolean" ? { identity, enabled, current, presentationCache: cache }
+          setSnapshot(typeof enabled === "boolean"
+            ? { identity, enabled, nativeHistory, current, presentationCache: cache }
             : { identity, current, error: "无法确认当前显示保护，请重新读取。" })
         },
         () => {
-          if (current()) setSnapshot({ identity, current,
-            error: "无法确认当前显示保护，请重新读取。" })
+          if (current()) {
+            nativeHistoryPossible = false
+            setSnapshot({ identity, current, error: "无法确认当前显示保护，请重新读取。" })
+          }
         }
       )
     }
@@ -117,6 +138,9 @@ export function useModsChatState(
         presentationCache.current?.invalidate()
     })
     const stopAccount = window.api.models?.onUserInfoChanged?.(refresh)
+    const stopDevelopment = window.api.mods.development?.onChanged?.((event) => {
+      if (nativeHistoryPossible && event.threadId === threadId) refresh()
+    })
     const stopThreads = window.api.threads?.onThreadsChanged?.(input => {
       const change = parseThreadDirectoryChange(input)
       if (change && change.threadId !== threadId) return
@@ -133,6 +157,7 @@ export function useModsChatState(
       stop()
       if (stopPresentations) stopPresentations()
       stopAccount?.()
+      stopDevelopment?.()
       stopThreads?.()
       if (retained) retained.release()
       else presentationCache.current?.invalidate()
@@ -155,6 +180,7 @@ export function useModsChatState(
     snapshot?.identity === identity && identity.key === key && snapshot.enabled === false &&
     snapshot.current(), [requestedWorkspace, snapshot, identity, key])
   const enabled = Boolean(workspace?.trim() && current && snapshot?.enabled)
+  const nativeHistory = enabled && snapshot?.nativeHistory === true
   const ready = Boolean(workspace?.trim() && current && typeof snapshot?.enabled === "boolean")
   const error = !workspace?.trim() ? "请先选择工作目录，再开始对话或创作。"
     : current ? snapshot?.error : undefined
@@ -164,13 +190,14 @@ export function useModsChatState(
   // decision's live ticket, so stable identity never revives an obsolete permission.
   return useMemo(() => ({
     enabled,
+    nativeHistory,
     ready,
     error,
     retry,
     isCurrent,
     canShowUnboundHistory,
     presentationCache: cache
-  }), [enabled, ready, error, retry, isCurrent, canShowUnboundHistory, cache])
+  }), [enabled, nativeHistory, ready, error, retry, isCurrent, canShowUnboundHistory, cache])
 }
 
 export function useModsChatReady(threadId: string, allowUnboundHistory?: boolean): boolean {
@@ -182,6 +209,11 @@ export function useModsChatReady(threadId: string, allowUnboundHistory?: boolean
 export function useModsChatScope(threadId: string): boolean {
   const scope = useContext(ModsChatScope)
   return Boolean(scope?.enabled && scope.threadId === threadId)
+}
+
+export function useModsNativeHistory(threadId: string): boolean {
+  const scope = useContext(ModsChatScope)
+  return scope?.threadId === threadId && scope.nativeHistory === true
 }
 
 export function useModsChatPresentationCache(threadId: string): FunctionSitePresentationCache | null {

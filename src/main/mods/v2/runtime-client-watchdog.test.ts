@@ -67,7 +67,7 @@ async function flush(): Promise<void> {
   for (let index = 0; index < 8; index++) await Promise.resolve()
 }
 
-function utility() {
+function utility(autoReady = true) {
   class Child extends EventEmitter {
     readonly messages: Request[] = []
     readonly kill = vi.fn(() => {})
@@ -77,7 +77,7 @@ function utility() {
   }
   const child = new Child()
   fork.mockImplementationOnce(() => {
-    queueMicrotask(() => child.emit("message", { type: "ready" }))
+    if (autoReady) queueMicrotask(() => child.emit("message", { type: "ready" }))
     return child
   })
   return child
@@ -133,6 +133,84 @@ function advanceQuietTicks(tick: () => void, target: number): void {
   now = target
   tick()
 }
+
+it("prepares an empty native utility and loads the first guest on the same physical child", async () => {
+  const child = utility(false)
+  const client = new FunctionRuntimeClient("fixture")
+  clients.push(client)
+  const preparing = client.prepareEmpty()
+  expect(fork).toHaveBeenCalledExactlyOnceWith("fixture", ["--prepare-empty-function-host"],
+    expect.objectContaining({ serviceName: "CMB Function Mods" }))
+  expect(child.messages).toEqual([])
+
+  child.emit("message", { type: "ready" })
+  const isEmpty = await preparing
+  const physical = client.captureUiResolvePhysicalLifetime()
+  expect(physical.owner).toBe(child)
+  expect(isEmpty()).toBe(true)
+  expect(child.messages).toEqual([])
+
+  const loading = client.load("fixture guest source", { fixture: "guest option" })
+  await flush()
+  expect(fork).toHaveBeenCalledTimes(1)
+  expect(client.captureUiResolvePhysicalLifetime()).toBe(physical)
+  expect(child.messages).toEqual([expect.objectContaining({
+    type: "load", code: "fixture guest source", options: { fixture: "guest option" }
+  })])
+  expect(isEmpty()).toBe(false)
+  finishLoad(child)
+  await expect(loading).resolves.toMatchObject({ registrations: [] })
+  // A load reply can precede both Main's module binding and the first nonempty heartbeat.
+  expect(isEmpty()).toBe(false)
+})
+
+it("keeps a prepared host claimed after the first guest load fails", async () => {
+  const child = utility()
+  const client = new FunctionRuntimeClient("fixture")
+  clients.push(client)
+  const isEmpty = await client.prepareEmpty()
+  expect(isEmpty()).toBe(true)
+
+  const loading = client.load("invalid fixture source")
+  const rejection = expect(loading).rejects.toMatchObject({ code: "MODS_GUEST_ERROR" })
+  await flush()
+  const request = child.messages.find((message) => message.type === "load")
+  if (!request) throw Error("ACTUAL_LOAD_REQUEST_REQUIRED")
+  child.emit("message", {
+    type: "error", id: request.id, runtimeId: request.runtimeId, guestLoadFailure: true,
+    error: { code: "MODS_GUEST_ERROR", message: "fixture guest load failed", downstream: false }
+  })
+  await rejection
+  expect(client.captureUiResolvePhysicalLifetime().owner).toBe(child)
+  expect(isEmpty()).toBe(false)
+})
+
+it.each(["exit", "stop"] as const)(
+  "revokes the empty predicate on %s and across physical replacement",
+  async (retirement) => {
+    const child = utility()
+    const client = new FunctionRuntimeClient("fixture")
+    clients.push(client)
+    const oldIsEmpty = await client.prepareEmpty()
+    expect(oldIsEmpty()).toBe(true)
+
+    if (retirement === "exit") child.emit("exit", 0)
+    else client.stop()
+    expect(oldIsEmpty()).toBe(false)
+
+    await expect(client.prepareEmpty()).rejects.toMatchObject({ code: "MODS_RUNTIME_ALREADY_STARTED" })
+    const replacement = utility()
+    const replacementLoad = client.load("replacement guest source")
+    await flush()
+    if (retirement === "stop") child.emit("exit", 0)
+    finishLoad(replacement)
+    await expect(replacementLoad).resolves.toMatchObject({ registrations: [] })
+    expect(oldIsEmpty()).toBe(false)
+    expect(client.captureUiResolvePhysicalLifetime().owner).toBe(replacement)
+    expect(child.messages).toEqual([])
+    expect(replacement.messages).toEqual([expect.objectContaining({ type: "load" })])
+  }
+)
 
 it.each(["legacy", "function"] as const)(
   "%s keeps the exact two-second boundary and terminates silence after one coalesced recheck",

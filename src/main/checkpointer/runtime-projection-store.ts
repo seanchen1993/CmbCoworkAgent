@@ -15,7 +15,7 @@ import { createLegacyDurableIdentityLookup, getLegacyTranscriptSlotIdentity,
   reserveLegacyTranscriptOrdinals } from "./legacy-transcript-order"
 import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } from "./message-snapshot-schema"
 import { hasPendingLegacyMessageTimes, migrateLegacyMessageTimes } from "./legacy-message-times"
-import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
+import { hasScopedGraphTranscriptBoundary } from "../../shared/graph-transcript-boundary"
 import { isLosslessTranscriptPayload } from "../../shared/transcript-recovery-integrity"
 import { createHash, randomUUID, type Hash } from "node:crypto"
 import {
@@ -71,13 +71,13 @@ import { createNativeCheckpointMessageDigest, preparedNativeSnapshotRowDigest,
   type CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
 import { formatSealedThreadMessageColumns } from "../thread-message-hydration/page-reader"
 
-const EXTERNAL_MESSAGES_MARKER = "__cmb_sqljs_external_messages_v1"
-const LEGACY_TRANSCRIPT_BATCH_LIMIT = 64
-const LEGACY_TRANSCRIPT_BATCH_BYTE_BUDGET = 1024 * 1024
-const LEGACY_TRANSCRIPT_FRAGMENT_CHAR_LIMIT = 16 * 1024
-const LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES = 512 * 1024
+export const EXTERNAL_MESSAGES_MARKER = "__cmb_sqljs_external_messages_v1"
+export const LEGACY_TRANSCRIPT_BATCH_LIMIT = 64
+export const LEGACY_TRANSCRIPT_BATCH_BYTE_BUDGET = 1024 * 1024
+export const LEGACY_TRANSCRIPT_FRAGMENT_CHAR_LIMIT = 16 * 1024
+export const LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES = 512 * 1024
 const CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET = 8 * 1024 * 1024
-const CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT = 4_096
+export const CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT = 4_096
 const CHECKPOINT_RUNTIME_SOURCE_FIELDS_CHAR_LIMIT = 4 * 1024 * 1024
 const CHECKPOINT_RUNTIME_PROJECTION_BYTE_LIMIT = 512 * 1024
 // checkpoint_ts was added after the original base table. Worker reads preserve
@@ -129,7 +129,7 @@ class CheckpointRuntimeProjectionCancelledError extends Error {
   }
 }
 
-function throwIfCancelled(cancellation?: Int32Array): void {
+export function throwIfCancelled(cancellation?: Int32Array): void {
   if (cancellation && Atomics.load(cancellation, 0) !== 0) {
     throw new CheckpointRuntimeProjectionCancelledError()
   }
@@ -142,7 +142,7 @@ class CheckpointRuntimeProjectionSchemaNotReadyError extends Error {
   }
 }
 
-interface CheckpointSchemaLayout {
+export interface CheckpointSchemaLayout {
   hasCheckpointTs: boolean
 }
 
@@ -190,7 +190,7 @@ function assertSchemaLayerIsPublished(published: boolean): void {
   if (!published) throw new CheckpointRuntimeProjectionSchemaNotReadyError()
 }
 
-function assertCheckpointSchemaIsPublished(database: DatabaseSync): CheckpointSchemaLayout {
+export function assertCheckpointSchemaIsPublished(database: DatabaseSync): CheckpointSchemaLayout {
   const layout = checkpointSchemaLayout(database)
   if (!layout) throw new CheckpointRuntimeProjectionSchemaNotReadyError()
   return layout
@@ -238,7 +238,7 @@ export interface PreparedRuntimeProjectionMigration {
   messageCount: number
 }
 
-function payloadBytes(payload: string | Uint8Array): number {
+export function payloadBytes(payload: string | Uint8Array): number {
   return typeof payload === "string" ? Buffer.byteLength(payload, "utf8") : payload.byteLength
 }
 
@@ -251,7 +251,7 @@ function parseJsonPayload(payload: string | Uint8Array, label: string): Record<s
   return parsed as Record<string, unknown>
 }
 
-function serializeJsonPayload(value: unknown): Uint8Array {
+export function serializeJsonPayload(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value))
 }
 
@@ -271,7 +271,7 @@ function checkpointTimestampExpression(
     : `${prefix}checkpoint_id`
 }
 
-function readStoredCheckpointRow(
+export function readStoredCheckpointRow(
   database: DatabaseSync,
   threadId: string,
   checkpointNs: string,
@@ -834,7 +834,7 @@ export function hasVisibleCheckpointTranscript(
   }
 }
 
-function exactSourceIsStillLatest(
+export function exactSourceIsStillLatest(
   database: DatabaseSync,
   prepared: Pick<PreparedRuntimeProjectionMigration, "row">,
   layout: CheckpointSchemaLayout = assertCheckpointSchemaIsPublished(database)
@@ -1086,7 +1086,7 @@ export function readLatestCheckpointRuntimeTuple(
   }
 }
 
-function parseTypedJson(type: string, payload: string | Uint8Array, label: string): unknown {
+export function parseTypedJson(type: string, payload: string | Uint8Array, label: string): unknown {
   if (type === "bytes") {
     return typeof payload === "string" ? new TextEncoder().encode(payload) : payload
   }
@@ -1097,7 +1097,7 @@ function parseTypedJson(type: string, payload: string | Uint8Array, label: strin
   return JSON.parse(text)
 }
 
-function hydrateRawCheckpointMessages(
+export function hydrateRawCheckpointMessages(
   database: DatabaseSync,
   row: StoredCheckpointRow,
   checkpoint: Record<string, unknown>,
@@ -1209,7 +1209,7 @@ export interface DurableLegacyCheckpointMessage extends LegacyTranscriptWriteRow
   readonly declaredProviderIdentity: ReturnType<typeof getMessageProviderTupleFromMetadata>
 }
 
-interface LegacyGraphBoundary {
+export interface LegacyGraphBoundary {
   checkpointIndex: number
   messageId: string
 }
@@ -1219,13 +1219,13 @@ export interface LegacyCheckpointTranscriptBootstrapResult {
   stats: LegacyCheckpointTranscriptMigrationStats
 }
 
-function objectRecord(value: unknown): Record<string, unknown> | null {
+export function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null
 }
 
-function serializedMessageRole(
+export function serializedMessageRole(
   message: Record<string, unknown>,
   kwargs: Record<string, unknown>
 ): DurableLegacyCheckpointMessage["role"] {
@@ -1242,7 +1242,7 @@ function serializedMessageRole(
   return "assistant"
 }
 
-function splitLegacyTranscriptText(value: string): string[] {
+export function splitLegacyTranscriptText(value: string): string[] {
   const fragments: string[] = []
   for (let start = 0; start < value.length; ) {
     let end = Math.min(value.length, start + LEGACY_TRANSCRIPT_FRAGMENT_CHAR_LIMIT)
@@ -1311,13 +1311,13 @@ function buildDurableLegacyCheckpointMessages(
     const visibleUserMessage = additionalKwargs.cmb_visible_user_message
     if (
       role === "user" &&
-      additionalKwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+      hasScopedGraphTranscriptBoundary(additionalKwargs) &&
       !(typeof visibleUserMessage === "string" && visibleUserMessage.trim())
     ) {
       graphBoundaries.push({ checkpointIndex: index, messageId: sourceId })
       continue
     }
-    if (isInternalNotificationMessage(raw)) continue
+    if (isInternalNotificationMessage(message)) continue
     const reasoning =
       role === "assistant"
         ? (normalizeTranscriptReasoning(
@@ -2054,7 +2054,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
   }
 }
 
-function checkpointTupleFromRaw(input: {
+export function checkpointTupleFromRaw(input: {
   row: Pick<
     StoredCheckpointRow,
     "threadId" | "checkpointNs" | "checkpointId" | "parentCheckpointId"
@@ -2372,8 +2372,12 @@ export function prepareLegacyCheckpointTranscriptSource(
  */
 export function bootstrapLegacyCheckpointTranscript(
   checkpointDatabasePath: string, messageDatabasePath: string, threadId: string,
-  checkpointNs: string, cancellationBuffer: SharedArrayBuffer
+  checkpointNs: string, cancellationBuffer: SharedArrayBuffer,
+  searchGuard?: LegacySearchBootstrapGuard
 ): LegacyCheckpointTranscriptBootstrapResult {
+  if (searchGuard) throw Object.assign(Error("Legacy search requires the authenticated Main writer"), {
+    name: CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED
+  })
   const cancellation = new Int32Array(cancellationBuffer)
   throwIfCancelled(cancellation)
   const source = prepareLegacyCheckpointTranscriptSource(checkpointDatabasePath, threadId, checkpointNs,
@@ -2395,9 +2399,9 @@ const CHECKPOINT_TRANSFER_DEFAULT_MESSAGE_LIMIT = 500
 const CHECKPOINT_TRANSFER_MAX_MESSAGE_LIMIT = 1_000
 const CHECKPOINT_TRANSFER_DEFAULT_BYTE_BUDGET = 1024 * 1024
 const CHECKPOINT_TRANSFER_MAX_BYTE_BUDGET = 4 * 1024 * 1024
-const CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT = 120_000
-const CHECKPOINT_TRANSFER_CONTENT_BLOCK_LIMIT = 80
-const CHECKPOINT_TRANSFER_BLOCK_TEXT_LIMIT = 20_000
+export const CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT = 120_000
+export const CHECKPOINT_TRANSFER_CONTENT_BLOCK_LIMIT = 80
+export const CHECKPOINT_TRANSFER_BLOCK_TEXT_LIMIT = 20_000
 const CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT = 50
 // A JSON string token uses at most six bytes per UTF-16 code unit, plus its quotes.
 const CHECKPOINT_TRANSFER_IDENTITY_TOKEN_BYTE_LIMIT = MAX_BOUNDED_TRANSCRIPT_ID_LENGTH * 6 + 2
@@ -2501,7 +2505,7 @@ function projectCheckpointIdentity(
   return typeof hash === "string" ? formatDisplayMessageIdHash(hash, kind) : undefined
 }
 
-function boundedTransferToolCalls(
+export function boundedTransferToolCalls(
   value: unknown,
   projectId = boundedTransferIdentity
 ): unknown[] | undefined {

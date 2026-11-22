@@ -1,49 +1,40 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { canReadThreadSearchContent } from "./thread-search-display"
 
-const mocks = vi.hoisted(() => ({
-  thread: vi.fn(),
-  database: vi.fn(),
-  manager: vi.fn(),
-  protects: vi.fn()
+const mocks = vi.hoisted(() => ({ database: vi.fn(), protects: vi.fn() }))
+vi.mock("../db", () => ({
+  getDb: mocks.database,
+  getThreadRuntimeScope: () => ({ metadata: '{"workspacePath":"workspace"}' })
 }))
+vi.mock("../mods/manager", () => ({ getModsManager: () => ({ protects: mocks.protects }) }))
 
-vi.mock("../db", () => ({ getDb: mocks.database, getThreadRuntimeScope: mocks.thread }))
-vi.mock("../mods/manager", () => ({ getModsManager: mocks.manager }))
-
-describe("search transcript publication", () => {
+describe("raw thread search eligibility", () => {
   let sqlite: DatabaseSync
 
   beforeEach(() => {
     sqlite = new DatabaseSync(":memory:")
-    mocks.database.mockReturnValue({
-      prepareReadOne: (sql: string) => (parameters: SQLInputValue[]) =>
-        sqlite.prepare(sql).get(...parameters)
-    })
-    mocks.thread.mockReturnValue({ metadata: '{"workspacePath":"/ordinary"}' })
-    mocks.protects.mockReturnValue(false)
-    mocks.manager.mockReturnValue({ protects: mocks.protects })
+    sqlite.exec(`CREATE TABLE thread_messages (thread_id TEXT, function_row_json TEXT);
+      INSERT INTO thread_messages VALUES ('legacy', NULL), ('native', 'invalid stamp')`)
+    mocks.database.mockReturnValue(new NativeSqliteAdapter(sqlite))
+    mocks.protects.mockReset().mockReturnValue(false)
   })
 
-  afterEach(() => {
-    sqlite.close()
-    vi.resetAllMocks()
-  })
+  afterEach(() => sqlite.close())
 
-  it("uses the current stored workspace policy and fails closed when it is unavailable", () => {
-    expect(canReadThreadSearchContent("ordinary")).toBe(true)
-    expect(mocks.protects).toHaveBeenCalledWith("/ordinary")
-    mocks.protects.mockReturnValue(true)
-    expect(canReadThreadSearchContent("ordinary")).toBe(false)
-    mocks.manager.mockImplementation(() => { throw Error("policy unavailable") })
-    expect(canReadThreadSearchContent("ordinary")).toBe(false)
-  })
-
-  it("requires the transcript publication path when the thread has native row receipts", () => {
-    sqlite.exec("CREATE TABLE function_conversation_projection_receipts (thread_id TEXT)")
-    sqlite.prepare("INSERT INTO function_conversation_projection_receipts VALUES (?)").run("native")
-    expect(canReadThreadSearchContent("ordinary")).toBe(true)
+  it("denies unverified native rows even when their receipt is missing", () => {
+    expect(canReadThreadSearchContent("legacy")).toBe(true)
     expect(canReadThreadSearchContent("native")).toBe(false)
+  })
+
+  it("denies receipt-owned and policy-protected text", () => {
+    sqlite.exec(`CREATE TABLE function_conversation_projection_receipts (thread_id TEXT);
+      INSERT INTO function_conversation_projection_receipts VALUES ('legacy')`)
+    expect(canReadThreadSearchContent("legacy")).toBe(false)
+    sqlite.exec("DELETE FROM function_conversation_projection_receipts")
+    mocks.protects.mockReturnValue(true)
+    expect(canReadThreadSearchContent("legacy")).toBe(false)
+    expect(mocks.protects).toHaveBeenCalledWith("workspace")
   })
 })

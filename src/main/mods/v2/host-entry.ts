@@ -6,7 +6,7 @@ import type { ModJson } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { ModFunctionError, functionInvocationTimeoutMs, type FunctionHostReply } from "../../../shared/mods/v2/contracts"
 import type { FunctionRequest, FunctionResponse } from "../../../shared/mods/v2/protocol"
-import { FunctionGuestRuntime } from "./guest-runtime"
+import { FunctionGuestRuntime, prepareEmptyFunctionGuestEnvironment } from "./guest-runtime"
 import { withPlatformQuery } from "./platform-query-scope"
 import { fromWireError, wireError } from "./wire"
 import { functionGuestLoad, isFunctionGuestLoadFailure } from "./client-load-failure"
@@ -354,4 +354,7 @@ setInterval(() => {
     replies: replies.size
   })
 }, 250).unref()
-port.postMessage({ type: "ready" })
+const sendReady = (): void => port.postMessage({ type: "ready" })
+if (process.argv.includes("--prepare-empty-function-host")) {
+  void prepareEmptyFunctionGuestEnvironment().then(sendReady, () => process.exit(1))
+} else sendReady()

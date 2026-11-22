@@ -32,7 +32,7 @@ import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../shared/mods/v2/resource-bud
 
 const limits = FUNCTION_MOD_RESOURCE_BUDGETS.legacyTranscriptBridgeWriter
 type Request = Pick<
-  LegacyCheckpointTranscriptBootstrapRequest,
+  Extract<LegacyCheckpointTranscriptBootstrapRequest, { legacyWriter: LegacyTranscriptWriterData }>,
   "requestId" | "databasePath" | "threadId" | "checkpointNs" | "cancellationBuffer" | "legacyWriter" | "searchGuard"
 >
 interface LegacyJob {
@@ -502,9 +502,16 @@ export class LegacyTranscriptWorkerDriver {
             index += limits.rowsPerBatch
           ) {
             const end = Math.min(index + limits.rowsPerBatch, totalMessages)
-            const entries = Array.from({ length: end - index }, (_, offset) =>
-              timingEntry(index + offset)
-            )
+            const entries = Array.from({ length: end - index }, (_, offset) => {
+              const entry = timingEntry(index + offset)
+              const message = source.messages[index + offset]
+              const declared = message.declaredProviderIdentity
+              return declared && (entry.startAt !== null || entry.endAt !== null) ? {
+                ...entry, providerIdentity: { sourceId: declared.provider_source_id,
+                  occurrence: declared.provider_occurrence, role: message.role,
+                  toolCallId: message.toolCallId }
+              } : entry
+            })
             const result = await this.command(job, {
               kind: "timing-page",
               checkpointId: source.checkpointId,

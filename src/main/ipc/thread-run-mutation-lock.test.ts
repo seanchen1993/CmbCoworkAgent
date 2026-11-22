@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
+import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 
 const dbState = vi.hoisted(() => ({
@@ -86,8 +87,24 @@ describe("thread mutation incarnation lease", () => {
     expect(mark).toBeGreaterThan(flush)
     expect(release).toBeGreaterThan(mark)
     expect(settlement.slice(mark, release)).toContain('source: "agent_run_interrupted"')
-    for (const kind of ["invoke", "resume", "interrupt"]) {
-      expect(agent).toMatch(new RegExp(`kind: "${kind}",[\\s\\S]{0,220}interruptedForkBoundary,`))
+    const source = ts.createSourceFile("agent.ts", agent, ts.ScriptTarget.Latest, true)
+    const covered = new Set<string>()
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+        node.expression.text === "settlePhysicalAgentRun") {
+        const input = node.arguments[0]
+        if (input && ts.isObjectLiteralExpression(input) && input.properties.some((property) =>
+          ts.isShorthandPropertyAssignment(property) && property.name.text === "interruptedForkBoundary"
+        )) {
+          for (const property of input.properties) {
+            if (ts.isPropertyAssignment(property) && property.name.getText(source) === "kind" &&
+              ts.isStringLiteral(property.initializer)) covered.add(property.initializer.text)
+          }
+        }
+      }
+      ts.forEachChild(node, visit)
     }
+    visit(source)
+    expect([...covered].sort()).toEqual(["interrupt", "invoke", "resume"])
   })
 })

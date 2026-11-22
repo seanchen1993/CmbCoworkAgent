@@ -2,7 +2,6 @@ import { randomUUID } from "crypto"
 
 import {
   THREAD_INCARNATION_METADATA_KEY,
-  matchesThreadIncarnationSnapshot,
   type ThreadIncarnationSnapshot
 } from "../../shared/thread-incarnation"
 

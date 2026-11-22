@@ -169,6 +169,7 @@ async function fixture(check: (view: ActualView) => void, afterSource?: () => vo
     if (failed?.status === "rejected") throw failed.reason
   }
   return { start, close, parent, closeOwner, manager, store, signal: controller.signal,
+    cancel: () => controller.abort(),
     modelCalls: () => modelCalls }
 }
 
@@ -278,10 +279,10 @@ describe("actual shared native joined data scope", () => {
     finally { observingSource = false; observation.close(); await f.close() }
   })
 
-  it("takes one fresh Producer JOIN per real Manager policy tail without reducing full or protects", async () => {
+  it("shares the Producer postflight with the Manager and keeps separate policy tails", async () => {
     const observation = observeDataQueries()
     let observingSource = false, sources = 0, checked = false
-    const f = await fixture(({ authority }) => {
+    const f = await fixture(({ authority, producer }) => {
       const runtime = f.manager.captureFunctionNativeConversationRuntime(authority)
       if (!runtime) throw Error("ACTUAL_SHARED_MANAGER_RUNTIME_REQUIRED")
       const policy = runtime.capturePolicy()
@@ -294,9 +295,16 @@ describe("actual shared native joined data scope", () => {
       const data = observation.finish(); observingSource = false
       expect(data).toEqual({ joins: 2, threads: 0 })
       expect(sources).toBe(0)
-      sources = 0; observingSource = true
+      observation.start(); sources = 0; observingSource = true
+      producer.assertCurrent()
+      const producerReads = observation.finish(), producerSources = sources
+      observation.start(); sources = 0
       runtime.assertCurrent()
+      const runtimeReads = observation.finish()
       const originalSources = sources
+      expect(producerReads.joins).toBeGreaterThan(0)
+      expect(runtimeReads).toEqual(producerReads)
+      expect(originalSources).toBe(producerSources)
       sources = 0
       const originalProtects = f.manager.protects.bind(f.manager)
       let protects = 0
@@ -700,18 +708,20 @@ describe("actual shared native joined data scope", () => {
     finally { await f.close() }
   })
 
-  it.each(["checkpoint", "destination", "mapping", "lease", "owner", "authority"] as const)(
-    "rejects %s revocation at the last original full Source callback", async attack => {
+  it.each(["checkpoint", "destination", "mapping", "lease", "owner", "authority", "cancel"] as const)(
+    "rejects %s revocation in the Manager guard's last original Source callback", async attack => {
       let phase: "idle" | "count" | "attack" = "idle", calls = 0, finalCall = 0
       let current: ActualView | undefined, attacked = false, rejected = false
       const f = await fixture(view => {
         current = view
+        const runtime = f.manager.captureFunctionNativeConversationRuntime(view.authority)
+        if (!runtime) throw Error("ACTUAL_SHARED_MANAGER_RUNTIME_REQUIRED")
         phase = "count"
-        view.producer.assertCurrent()
+        runtime.assertCurrent()
         finalCall = calls
         expect(finalCall).toBeGreaterThan(0)
         calls = 0; phase = "attack"
-        expect(() => view.producer.assertCurrent()).toThrow()
+        expect(() => runtime.assertCurrent()).toThrow()
         rejected = true; phase = "idle"
         throw Error("ACTUAL_LAST_SOURCE_REVOKED")
       }, () => {
@@ -730,7 +740,8 @@ describe("actual shared native joined data scope", () => {
         else if (attack === "lease") releaseLocalThreadRunLease(
           destination.checkpointThreadId, "desktop", f.parent.authority.turnId)
         else if (attack === "owner") f.closeOwner()
-        else f.parent.release()
+        else if (attack === "authority") f.parent.release()
+        else f.cancel()
       })
       try {
         await expect(f.start()).rejects.toThrow()

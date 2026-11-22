@@ -24,15 +24,48 @@ function fixture() {
     }))
   }
   const notifications: Array<() => void> = []
-  class Observer {
-    constructor(callback: () => void) {
-      notifications.push(callback)
+  class ResizeObserverStub {
+    private readonly targets = new Set<Element>()
+
+    constructor(callback: (entries: Array<{ target: Element }>) => void) {
+      notifications.push(() => {
+        if (this.targets.size > 0) callback([...this.targets].map(target => ({ target })))
+      })
     }
-    observe = vi.fn()
-    disconnect = vi.fn()
+
+    observe(target: Element): void {
+      this.targets.add(target)
+    }
+
+    unobserve(target: Element): void {
+      this.targets.delete(target)
+    }
+
+    disconnect(): void {
+      this.targets.clear()
+    }
   }
-  vi.stubGlobal("ResizeObserver", Observer)
-  vi.stubGlobal("MutationObserver", Observer)
+
+  class MutationObserverStub {
+    private active = false
+
+    constructor(callback: () => void) {
+      notifications.push(() => {
+        if (this.active) callback()
+      })
+    }
+
+    observe(): void {
+      this.active = true
+    }
+
+    disconnect(): void {
+      this.active = false
+    }
+  }
+
+  vi.stubGlobal("ResizeObserver", ResizeObserverStub)
+  vi.stubGlobal("MutationObserver", MutationObserverStub)
   const node = () =>
     ({ ownerDocument: document, isConnected: true, parentElement: {}, closest: vi.fn(() => null) }) as unknown as HTMLElement
   return {

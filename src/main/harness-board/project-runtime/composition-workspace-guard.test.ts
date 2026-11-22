@@ -1,8 +1,9 @@
 import { afterEach, expect, it } from "vitest"
-import { mkdtempSync, rmSync, mkdirSync, symlinkSync } from "node:fs"
+import { mkdtempSync, rmSync, mkdirSync, renameSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { ProjectCompositionStore } from "./composition-store"
+import { guardUnopenedCompositionWorkspace, ProjectCompositionStore } from "./composition-store"
+import { acquireCompositionAdmission, compositionWorkspaceKeys } from "./composition-admission"
 import { HostProjectStore } from "./host-store"
 import { LegacyOperationStore } from "./legacy-operation-store"
 import { hostProjectFixture, prepareFixture } from "./host-fixtures.test-helper"
@@ -118,7 +119,7 @@ it("leaves unconfigured and unrelated original paths alone while rejecting lease
   mkdirSync(workspace)
   const alias = join(root, "alias")
   symlinkSync(workspace, alias, process.platform === "win32" ? "junction" : "dir")
-  store.create(
+  const { run } = store.create(
     {
       apiVersion: "devclaw.project-composition/v1",
       parentProjectId: "parent",
@@ -139,4 +140,46 @@ it("leaves unconfigured and unrelated original paths alone while rejecting lease
     "old-path"
   )
   expect(() => store.guardWorkspaceMutation(alias, () => "bypass")).toThrow("WORKSPACE_BUSY")
+  expect(store.withWorkspaceOwner(run.id, () =>
+    store.guardWorkspaceMutation(alias, () => "owned through alias")
+  )).toBe("owned through alias")
+
+  // The persisted lexical lease must not disappear when its path is redirected to B.
+  const unrelated = join(root, "unrelated")
+  mkdirSync(unrelated)
+  renameSync(workspace, join(root, "retained"))
+  symlinkSync(unrelated, workspace, process.platform === "win32" ? "junction" : "dir")
+  expect(() => store.guardWorkspaceMutation(workspace, () => "bypass")).toThrow("WORKSPACE_BUSY")
+  expect(() => guardUnopenedCompositionWorkspace(
+    join(root, "composition.sqlite"), workspace, () => "cold bypass"
+  )).toThrow("WORKSPACE_BUSY")
+  expect(() => store.withWorkspaceOwner(run.id, () =>
+    store.guardWorkspaceMutation(workspace, () => "move old authority")
+  )).toThrow("COMPOSITION_WORKSPACE_OWNER_CHANGED")
+  expect(store.guardWorkspaceMutation(unrelated, () => "original")).toBe("original")
+
+  store.cancel(run.id)
+  expect(store.guardWorkspaceMutation(workspace, () => "released")).toBe("released")
+})
+
+it("releases the lexical lock if a different physical lock cannot be acquired", () => {
+  const root = mkdtempSync(join(tmpdir(), "composition-partial-guard-"))
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+  const path = join(root, "composition.sqlite")
+  const store = new ProjectCompositionStore(path)
+  cleanup.push(() => store.close())
+  const physical = join(root, "physical")
+  const alias = join(root, "alias")
+  mkdirSync(physical)
+  symlinkSync(physical, alias, process.platform === "win32" ? "junction" : "dir")
+  const [lexicalKey, physicalKey] = compositionWorkspaceKeys(alias)
+  expect(physicalKey).toBeDefined()
+  const releasePhysical = acquireCompositionAdmission(path, physicalKey!, "writer")
+  try {
+    expect(() => store.guardWorkspaceMutation(alias, () => "bypass")).toThrow("WORKSPACE_BUSY")
+    acquireCompositionAdmission(path, lexicalKey, "writer")()
+  } finally {
+    releasePhysical()
+  }
+  expect(store.guardWorkspaceMutation(alias, () => "released")).toBe("released")
 })

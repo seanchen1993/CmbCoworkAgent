@@ -88,6 +88,12 @@ export type LegacyTranscriptWriteCommand =
         readonly messageId: string
         readonly startAt: number | null
         readonly endAt: number | null
+        readonly providerIdentity?: {
+          readonly sourceId: string
+          readonly occurrence: number
+          readonly role: LegacyTranscriptWriteRow["role"]
+          readonly toolCallId: string | null
+        }
       }[]
     }
 

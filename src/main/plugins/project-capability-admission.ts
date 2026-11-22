@@ -1,7 +1,7 @@
 import { getHarnessProjectAdapterSnapshot } from "../harness-board/service"
 import { randomUUID } from "node:crypto"
 import { join } from "node:path"
-import { getThreadCore } from "../db"
+import { getThreadRuntimeScope } from "../db"
 import { getOpenworkDir, getPlugins } from "../storage"
 import { captureProjectCapabilityContext } from "../mods/project-capability-context"
 import { registerProjectCapabilityRunAdmission } from "../agent/agent-run-admission"
@@ -18,7 +18,7 @@ import { readRuntimeScopedFile } from "../harness-board/project-runtime/safe-fil
 /** The original parent-chat gateway; no renderer flags can issue source capabilities. */
 export function registerProjectCapabilityRuntimeAdmission(): () => void {
   return registerProjectCapabilityRunAdmission(async (request, context) => {
-    const thread = getThreadCore(request.threadId)
+    const thread = getThreadRuntimeScope(request.threadId)
     if (!thread) return undefined
     let metadata: Record<string, unknown>
     try {
@@ -80,7 +80,7 @@ export function registerProjectCapabilityRuntimeAdmission(): () => void {
     const assertCurrent = () => {
       scope.assertCurrent()
       if (
-        !matchesThreadIncarnation(getThreadCore(request.threadId), incarnation) ||
+        !matchesThreadIncarnation(getThreadRuntimeScope(request.threadId), incarnation) ||
         readProjectCapabilitySelection(scope.projectId, metadata.workspacePath as string)
           .revision !== selection.revision ||
         JSON.stringify(sourceIds.map((id) => getPlugins().find((plugin) => plugin.id === id))) !==

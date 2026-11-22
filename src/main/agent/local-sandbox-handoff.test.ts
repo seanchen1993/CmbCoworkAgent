@@ -272,13 +272,26 @@ public static class BreakawayProbe {
             'setTimeout(() => fs.writeFileSync("late-write", "still running"), 1800)'
           ].join("\n")
         )
+        await writeFile(
+          path.join(root, "wait-for-file.cjs"),
+          [
+            'const fs = require("node:fs")',
+            "const deadline = Date.now() + 10_000",
+            "const timer = setInterval(() => {",
+            "  if (fs.existsSync(process.argv[2])) clearInterval(timer)",
+            "  else if (Date.now() >= deadline) process.exit(1)",
+            "}, 20)"
+          ].join("\n")
+        )
         const shellCommand =
-          "sleep 1; node detached.cjs </dev/null >/dev/null 2>&1 & " +
-          "while [ ! -f child-pid ]; do sleep 0.05; done; echo started"
+          "node wait-for-file.cjs release-shell || exit $?; " +
+          "node detached.cjs </dev/null >/dev/null 2>&1 & " +
+          "node wait-for-file.cjs child-pid || exit $?; echo started"
         const task = await sandbox.executeForTool(shellCommand, undefined, {
           backgroundAfterMs: 80
         })
         if (task.status !== "background") throw new Error(task.result.output)
+        await writeFile(path.join(root, "release-shell"), "")
 
         await expect(
           sandbox.waitForTaskOutput(task.taskId, { timeoutMs: 10_000 })

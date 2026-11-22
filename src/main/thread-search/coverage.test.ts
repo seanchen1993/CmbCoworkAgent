@@ -12,6 +12,10 @@ const bootstrap = vi.hoisted(() => vi.fn())
 const close = vi.hoisted(() => vi.fn())
 const backfillState = vi.hoisted(() => vi.fn())
 const recordCoverage = vi.hoisted(() => vi.fn())
+const captureStockSource = vi.hoisted(() => vi.fn())
+vi.mock("../checkpointer/legacy-stock-transcript-admission", () => ({
+  captureStockLegacyTranscriptSource: captureStockSource
+}))
 vi.mock("../checkpointer/runtime-projection-client", () => ({
   CheckpointRuntimeProjectionClient: class {
     bootstrapLegacyTranscript = bootstrap
@@ -50,6 +54,7 @@ describe("search backfill scheduling", () => {
     bootstrap.mockResolvedValue({ stats: { totalMessages: 0 } })
     backfillState.mockReset()
     recordCoverage.mockReset()
+    captureStockSource.mockReset()
     backfillState.mockReturnValue({ created_at: 1, status: "idle" })
     close.mockReset()
     close.mockResolvedValue(undefined)
@@ -74,6 +79,16 @@ describe("search backfill scheduling", () => {
     await withThreadRunMutationLock("idle", async () => {})
     await vi.advanceTimersByTimeAsync(251)
     expect(bootstrap).toHaveBeenCalledTimes(1)
+  })
+
+  it("passes ordinary-history authority without creating a Main writer", async () => {
+    const source = { authority: {}, assertCurrent: vi.fn() }
+    captureStockSource.mockReturnValue(source)
+    queue("ordinary")
+    await vi.advanceTimersByTimeAsync(251)
+    expect(bootstrap).toHaveBeenCalledTimes(1)
+    expect(bootstrap.mock.calls[0][5]).toBeUndefined()
+    expect(bootstrap.mock.calls[0][8]).toBe(source)
   })
 
   it("treats completion as proof for the audited legacy checkpoint source only", async () => {
@@ -110,7 +125,7 @@ describe("search backfill scheduling", () => {
   it("retries an interrupted backfill after a normal mutation releases the lock", async () => {
     const failed = new Error("cancelled")
     bootstrap.mockImplementationOnce((...request) => new Promise((_resolve, reject) => {
-      request[5].signal.addEventListener("abort", () => reject(failed), { once: true })
+      request[6].addEventListener("abort", () => reject(failed), { once: true })
     }))
     queue("idle")
     await vi.advanceTimersByTimeAsync(251)
@@ -189,7 +204,7 @@ describe("search backfill scheduling", () => {
     })
     try {
       await Promise.resolve()
-      expect(bootstrap.mock.calls[0][5].signal.aborted).toBe(true)
+      expect(bootstrap.mock.calls[0][6].aborted).toBe(true)
       expect(released).toBe(false)
     } finally {
       resolve({ stats: { totalMessages: 0 } })

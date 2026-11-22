@@ -14,7 +14,7 @@ export function ensureThreadGraphTranscriptBoundaries(database: NativeSqliteAdap
 }
 
 /** Persist unused ordinals so the importer and live transcript move the same slots. */
-export function ensureLegacyTranscriptSlots(database: NativeSqliteAdapter): void {
+export function ensureLegacyTranscriptSlots(database: NativeSqliteAdapter, threadId?: string): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS legacy_checkpoint_transcript_slots (
       thread_id TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
@@ -65,24 +65,28 @@ export function ensureLegacyTranscriptSlots(database: NativeSqliteAdapter): void
       ON legacy_checkpoint_transcript_migrations(thread_id)
       WHERE ${pendingLegacyMigration}
   `)
+  const scopedMigration = threadId === undefined
+    ? pendingLegacyMigration
+    : `${pendingLegacyMigration} AND thread_id = ?`
+  const binding = threadId === undefined ? undefined : [threadId]
   const pending = database.exec(`
-    SELECT 1 FROM legacy_checkpoint_transcript_migrations WHERE ${pendingLegacyMigration} LIMIT 1
-  `)
+    SELECT 1 FROM legacy_checkpoint_transcript_migrations WHERE ${scopedMigration} LIMIT 1
+  `, binding)
   if (!pending[0]?.values.length) return
 
-  database.withImmediateWriteTransaction(() => {
-    database.exec(`
+  const migrate = () => {
+    database.run(`
       INSERT INTO legacy_checkpoint_transcript_slots (thread_id, checkpoint_id, message_index, ordinal)
       SELECT thread_id, checkpoint_id, CAST(slot.key AS INTEGER), slot.value
       FROM legacy_checkpoint_transcript_migrations, json_each(reserved_ordinals_json) AS slot
-      WHERE ${pendingLegacyMigration} AND slot.value IS NOT NULL
+      WHERE ${scopedMigration} AND slot.value IS NOT NULL
         AND CAST(slot.key AS INTEGER) >= next_index
-    `)
-    database.exec(`
+    `, binding)
+    database.run(`
       WITH RECURSIVE pending(thread_id, checkpoint_id, message_index, total_messages) AS (
         SELECT thread_id, checkpoint_id, next_index, total_messages
         FROM legacy_checkpoint_transcript_migrations
-        WHERE ${pendingLegacyMigration} AND reserved_ordinals_json IS NULL
+        WHERE ${scopedMigration} AND reserved_ordinals_json IS NULL
           AND next_index < total_messages
         UNION ALL
         SELECT thread_id, checkpoint_id, message_index + 1, total_messages FROM pending
@@ -90,11 +94,13 @@ export function ensureLegacyTranscriptSlots(database: NativeSqliteAdapter): void
       )
       INSERT INTO legacy_checkpoint_transcript_slots (thread_id, checkpoint_id, message_index, ordinal)
       SELECT thread_id, checkpoint_id, message_index, message_index FROM pending
-    `)
-    database.exec(`
+    `, binding)
+    database.run(`
       UPDATE legacy_checkpoint_transcript_migrations
       SET scoped_order = (reserved_ordinals_json IS NOT NULL), reserved_ordinals_json = NULL
-      WHERE ${pendingLegacyMigration}
-    `)
-  })
+      WHERE ${scopedMigration}
+    `, binding)
+  }
+  if (database.inTransaction) migrate()
+  else database.withImmediateWriteTransaction(migrate)
 }

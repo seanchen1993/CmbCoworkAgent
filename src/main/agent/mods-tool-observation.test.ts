@@ -70,31 +70,41 @@ it.each([false, true])(
   }
 )
 
-it("native result failure uses host call identity, never tool arguments for deduplication", async () => {
-  hooks.mockResolvedValue(null)
-  const sandbox = new LocalSandbox({
-    rootDir: process.cwd(),
-    runId: "thread",
-    windowsSandbox: "none"
-  })
-  const observe = sandbox as unknown as {
-    maybeFirePostToolUseFailureFromResult(context: HookContext): void
+it.each(["real-id", undefined])(
+  "uses only the host call identity for native result failures (%s)",
+  async (toolCallId) => {
+    hooks.mockResolvedValue(null)
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "thread",
+      windowsSandbox: "none"
+    })
+    const observe = sandbox as unknown as {
+      runHooks(event: "PostToolUse", context: HookContext): Promise<unknown>
+    }
+    markFailureFired("attacker-id")
+    const context: HookContext = {
+      sessionId: "thread",
+      workspacePath: process.cwd(),
+      toolName: "execute",
+      toolCallId,
+      toolArgs: { tool_call_id: "attacker-id", tool_use_id: "attacker-id" },
+      toolResult: JSON.stringify({ exitCode: 1, error: "native failure" })
+    }
+    await observe.runHooks("PostToolUse", context)
+    await observe.runHooks("PostToolUse", context)
+
+    const failures = hooks.mock.calls.filter(([, event]) => event === "PostToolUseFailure")
+    expect(failures).toHaveLength(toolCallId ? 1 : 2)
+    for (const [, , failure] of failures) {
+      expect(failure.toolCallId).toBe(toolCallId)
+      expect(JSON.parse(failure.toolResult)).toMatchObject({
+        error: "native failure",
+        tool_use_id: toolCallId ?? ""
+      })
+    }
   }
-  markFailureFired("attacker-id")
-  const context: HookContext = {
-    sessionId: "thread",
-    workspacePath: process.cwd(),
-    toolName: "execute",
-    toolCallId: "real-id",
-    toolArgs: { tool_call_id: "attacker-id", tool_use_id: "attacker-id" },
-    toolResult: JSON.stringify({ exitCode: 1, error: "native failure" })
-  }
-  observe.maybeFirePostToolUseFailureFromResult(context)
-  observe.maybeFirePostToolUseFailureFromResult(context)
-  expect(hooks).toHaveBeenCalledTimes(1)
-  expect(hooks.mock.calls[0][2].toolCallId).toBe("real-id")
-  expect(JSON.parse(hooks.mock.calls[0][2].toolResult).tool_use_id).toBe("real-id")
-})
+)
 
 it.each([false, true])(
   "settles the live MCP failure observer before returning only when Mods are enabled (%s)",

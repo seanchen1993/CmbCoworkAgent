@@ -1,4 +1,5 @@
 import { ModError } from "../mods/errors"
+import type { ModsChatDisplayDecision } from "../../shared/mods/v2/sites"
 
 /** A workspace-free display decision only applies to an existing unbound transcript. */
 export function assertUnboundModsChatHistory(
@@ -21,12 +22,31 @@ export function assertUnboundModsChatHistory(
 export function readModsChatDisplayCapability(
   manager: { isEnabled(workspace: string): boolean; protects(workspace: string): boolean },
   access: { workspace: string; assertCurrent(): void }
-): boolean {
+): boolean
+export function readModsChatDisplayCapability(
+  manager: { isEnabled(workspace: string): boolean; protects(workspace: string): boolean },
+  access: { workspace: string; assertCurrent(): void },
+  nativeHistory: (() => boolean) | undefined
+): boolean | ModsChatDisplayDecision
+export function readModsChatDisplayCapability(
+  manager: { isEnabled(workspace: string): boolean; protects(workspace: string): boolean },
+  access: { workspace: string; assertCurrent(): void },
+  nativeHistory?: () => boolean
+): boolean | ModsChatDisplayDecision {
   access.assertCurrent()
   const enabled = manager.isEnabled(access.workspace)
   const protectedOutput = manager.protects(access.workspace)
-  access.assertCurrent()
   if (typeof enabled !== "boolean" || typeof protectedOutput !== "boolean")
     throw new ModError("MODS_UI_SITE_PROTECTION_REQUIRED")
-  return enabled || protectedOutput
+  const decision = enabled || protectedOutput
+  let useNativeHistory = false
+  if (nativeHistory && enabled && !protectedOutput) {
+    try {
+      useNativeHistory = nativeHistory() === true
+    } catch {
+      // A failed proof leaves the existing per-site checks in charge.
+    }
+  }
+  access.assertCurrent()
+  return nativeHistory ? { enabled: decision, nativeHistory: useNativeHistory } : decision
 }

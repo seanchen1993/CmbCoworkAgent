@@ -45,6 +45,7 @@ vi.mock("react", async importOriginal => {
   })
 })
 import { useModsChatState } from "./mods-chat-scope"
+import type { ModsChatDisplayDecision } from "../../../shared/mods/v2/sites"
 import type { ThreadDirectoryScope } from "./thread-directory-scope"
 const readState = useModsChatState // Explicit hook harness; no mounted React component.
 
@@ -54,18 +55,24 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
-function setup(withCards = false, directoryScope?: ThreadDirectoryScope) {
+function setup(withCards = false, directoryScope?: ThreadDirectoryScope, withPresentation = false) {
   const cards = new Set<(event: { threadId: string; scope?: string }) => void>()
-  const requests: ReturnType<typeof deferred<boolean>>[] = []
+  const requests: ReturnType<typeof deferred<boolean | ModsChatDisplayDecision>>[] = []
   const notifications = new Set<() => void>()
   const directory = new Set<(change?: unknown) => void>()
+  const development = new Set<(change: { threadId: string }) => void>()
   const read = vi.fn(() => {
-    const request = deferred<boolean>()
+    const request = deferred<boolean | ModsChatDisplayDecision>()
     requests.push(request)
     return request.promise
   })
   vi.stubGlobal("window", Object.assign(new EventTarget(), { api: { mods: {
     chatDisplayCapability: read,
+    ...(withPresentation ? { chatPresentationCapability: read,
+      development: { onChanged: (notify: (change: { threadId: string }) => void) => {
+        development.add(notify)
+        return () => { development.delete(notify) }
+      } } } : {}),
     ...(withCards ? { onCardsChanged: (notify: (event: { threadId: string; scope?: string }) => void) => {
       cards.add(notify)
       return () => { cards.delete(notify) }
@@ -95,6 +102,9 @@ function setup(withCards = false, directoryScope?: ThreadDirectoryScope) {
     return state
   }
   return { requests, read, render, notify: () => { for (const notify of notifications) notify() },
+    notifyDevelopment: (threadId: string) => {
+      for (const notify of development) notify({ threadId })
+    },
     notifyDirectory: (change?: unknown) => { for (const notify of directory) notify(change) },
     notifyCards: (scope: string, threadId = "thread") => {
       for (const notify of cards) notify({ threadId, scope })
@@ -108,6 +118,25 @@ afterEach(() => {
   hooks.rollbacks.length = 0
   hooks.index = 0
   vi.unstubAllGlobals()
+})
+
+it("revokes native history across creation and policy changes without disabling other Mods surfaces", async () => {
+  const f = setup(false, undefined, true)
+  f.render()
+  f.requests[0].resolve({ enabled: true, nativeHistory: true })
+  await settle()
+  const empty = f.render()
+  expect(empty).toMatchObject({ enabled: true, ready: true, nativeHistory: true })
+  f.notifyDevelopment("other")
+  expect(empty.isCurrent()).toBe(true)
+  f.notifyDevelopment("thread")
+  expect(empty.isCurrent()).toBe(false)
+  expect(f.render().nativeHistory).toBe(false)
+  f.notify()
+  f.requests[1].resolve({ enabled: true, nativeHistory: true })
+  f.requests[2].resolve({ enabled: true, nativeHistory: false })
+  await settle()
+  expect(f.render()).toMatchObject({ enabled: true, ready: true, nativeHistory: false })
 })
 
 it("revokes unknown active capability synchronously, while unrelated and exact transcript hints preserve it", async () => {
@@ -318,16 +347,23 @@ it("the real ChatContainer provider carries revocation, error and retry contract
   const loadThreads = vi.fn(async () => {})
   const context = { threadId: "thread", modsChatState, hasCurrentThread: true,
     currentForkWorkspacePath: "workspace", reloadMissingThread: () => { void loadThreads() },
-    surface: "default", readOnly: false,
+    surface: "default", readOnly: false, initialTranscriptPending: true,
     currentThread: { metadata: { agentMode: "normal" } as Record<string, unknown> },
     isDevelopmentThreadMetadata }
   const read = () => runInNewContext(ts.transpileModule(`(${callback})()`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
-  }).outputText, context) as typeof modsChatState & { prefetchHistory: boolean }
+  }).outputText, context) as typeof modsChatState & {
+    prefetchHistory: boolean; prioritizeInitialHistory: boolean
+  }
   expect(read()).toMatchObject(modsChatState)
   expect(read().prefetchHistory).toBe(true)
+  expect(read().prioritizeInitialHistory).toBe(true)
+  context.initialTranscriptPending = false
+  expect(read().prioritizeInitialHistory).toBe(false)
+  context.initialTranscriptPending = true
   context.readOnly = true
   expect(read().prefetchHistory).toBe(false)
+  expect(read().prioritizeInitialHistory).toBe(false)
   context.readOnly = false
   context.surface = "harness-project"
   expect(read().prefetchHistory).toBe(false)

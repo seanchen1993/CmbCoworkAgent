@@ -1,7 +1,8 @@
 import { types as nodeTypes } from "node:util"
 import { validateFunctionConversationTranscriptStamp } from "../../shared/mods/v2/conversation-transcript"
 import type { LegacySearchBootstrapGuard } from "./runtime-projection-protocol"
-import type { Worker } from "node:worker_threads"
+import { Worker } from "node:worker_threads"
+import type { StockLegacyTranscriptAuthority } from "./legacy-stock-transcript-authority"
 import type { LegacyTranscriptWriter } from "./legacy-transcript-main-writer"
 import type { LegacyTranscriptWriteMessage } from "./legacy-transcript-write-protocol"
 import type { CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
@@ -43,7 +44,7 @@ import {
 
 type RuntimeProjectionWorkerFactory = () => Promise<Worker>
 type RequestInput<T> = T extends { requestId: number }
-  ? Omit<T, "requestId" | "cancellationBuffer" | "legacyWriter">
+  ? Omit<T, "requestId" | "cancellationBuffer" | "legacyWriter" | "stockAuthority">
   : never
 type ProjectionRequestInput = RequestInput<CheckpointRuntimeProjectionWorkerRequest>
 
@@ -58,6 +59,11 @@ export interface LegacyTranscriptWriterRequestContext {
 export interface LegacyCheckpointTranscriptHostSource {
   readonly assertCurrent: () => void
   readonly createWriter: (context: LegacyTranscriptWriterRequestContext) => LegacyTranscriptWriter
+}
+
+export interface StockLegacyTranscriptHostSource {
+  readonly authority: StockLegacyTranscriptAuthority
+  readonly assertCurrent: () => void
 }
 
 /** Captured by a ready native Saver before releasing its first short read lease. */
@@ -114,6 +120,7 @@ interface ProjectionRequestOptions {
   verifyDisplay?: (tuple: unknown) => unknown
   checkpointSource?: CheckpointRuntimeProjectionSource
   legacySource?: LegacyCheckpointTranscriptHostSource
+  stockSource?: StockLegacyTranscriptHostSource
   readPreparedSource?: () => PreparedNativeDataSource
   awaitPhysical?: boolean
 }
@@ -675,10 +682,20 @@ export class CheckpointRuntimeProjectionClient {
           createWriter: options.legacySource.createWriter
         })
       : undefined
-    if (request.type === "bootstrap-legacy-transcript" && !legacy)
+    const stock = options.stockSource
+      ? Object.freeze({
+          authority: Object.freeze({
+            ...options.stockSource.authority,
+            messageDatabaseFile: Object.freeze({ ...options.stockSource.authority.messageDatabaseFile }),
+            incarnation: Object.freeze({ ...options.stockSource.authority.incarnation })
+          }),
+          assertCurrent: options.stockSource.assertCurrent
+        })
+      : undefined
+    if (request.type === "bootstrap-legacy-transcript" && Boolean(legacy) === Boolean(stock))
       throw Error("LEGACY_TRANSCRIPT_SOURCE_CHANGED")
     const assertLegacyCurrent = () => {
-      if (legacy && legacy.assertCurrent() !== undefined)
+      if ((legacy ?? stock)?.assertCurrent() !== undefined)
         throw Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
     }
     assertLegacyCurrent()
@@ -766,20 +783,21 @@ export class CheckpointRuntimeProjectionClient {
           source?.identity ??
           (await resolveCheckpointDatabaseIdentity(request.databasePath, { createParent: false }))
         const file = source?.file ?? identity.capturedFile
-        if (!file) throw Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
+        if (!file && !stock) throw Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
         record.admission.signal.throwIfAborted()
         const worker = await this.getWorker()
+        if (stock && !(worker instanceof Worker)) throw Error("LEGACY_TRANSCRIPT_SOURCE_CHANGED")
         record.worker = worker
         record.workerGeneration = this.workerGeneration
         const pending = this.pending.get(requestId)
         if (pending) {
           pending.worker = worker
-          pending.verifyFile = async () => {
+          if (file && !stock) pending.verifyFile = async () => {
             await assertCheckpointDatabasePathCurrent(identity)
             await assertCheckpointDatabaseFileIdentity(identity.path, file)
           }
         }
-        if (record.preparedSource) record.verifyPreparedFile = async () => {
+        if (record.preparedSource && file) record.verifyPreparedFile = async () => {
           await assertCheckpointDatabasePathCurrent(identity)
           await assertCheckpointDatabaseFileIdentity(identity.path, file)
         }
@@ -811,7 +829,7 @@ export class CheckpointRuntimeProjectionClient {
             record.writer = actor
           }
           await assertCheckpointDatabasePathCurrent(identity)
-          await assertCheckpointDatabaseFileIdentity(identity.path, file)
+          if (file) await assertCheckpointDatabaseFileIdentity(identity.path, file)
           if (options.assertSource && options.assertSource() !== undefined)
             throw Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
           if (request.type !== "prepared-native-data") source?.assertCurrent()
@@ -828,7 +846,8 @@ export class CheckpointRuntimeProjectionClient {
               databasePath: identity.path,
               requestId,
               cancellationBuffer: record.cancellation.buffer,
-              ...(record.writer ? { legacyWriter: record.writer.workerData } : {})
+              ...(record.writer ? { legacyWriter: record.writer.workerData } : {}),
+              ...(stock ? { stockAuthority: stock.authority } : {})
             })
           } catch (error) {
             this.failWorker(worker, error instanceof Error ? error : Error(String(error)))
@@ -855,9 +874,7 @@ export class CheckpointRuntimeProjectionClient {
   }
 
   private cancelledError(): Error {
-    const error = Error("Checkpoint runtime projection request cancelled")
-    error.name = CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
-    return error
+    return checkpointProjectionCancelled()
   }
 
   /** Saver callback lifetime includes actual final/exit, not merely logical cancellation. */
@@ -1027,7 +1044,8 @@ export class CheckpointRuntimeProjectionClient {
     foregroundKey?: string | number,
     source?: LegacyCheckpointTranscriptHostSource,
     signal?: AbortSignal,
-    guard?: LegacySearchBootstrapGuard
+    guard?: LegacySearchBootstrapGuard,
+    stockSource?: StockLegacyTranscriptHostSource
   ): Promise<LegacyCheckpointTranscriptBootstrapResult> {
     return this.request(
       {
@@ -1040,9 +1058,10 @@ export class CheckpointRuntimeProjectionClient {
       },
       {
         cancellable: true,
-        awaitPhysical: true,
+        awaitPhysical: signal !== undefined || guard !== undefined || stockSource !== undefined,
         bootstrapThreadId: threadId,
         legacySource: source,
+        stockSource,
         signal,
         ...(foregroundKey === undefined ? {} : { foregroundKey: String(foregroundKey) })
       }
@@ -1213,7 +1232,8 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
   checkpointNs = "",
   foregroundKey?: string | number,
   source?: LegacyCheckpointTranscriptHostSource,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  stockSource?: StockLegacyTranscriptHostSource
 ): Promise<LegacyCheckpointTranscriptBootstrapResult> {
   if (!existsSync(databasePath) && !hasSqliteRecoverySidecar(databasePath)) {
     return Promise.resolve(emptyLegacyCheckpointBootstrapResult())
@@ -1225,7 +1245,9 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
     checkpointNs,
     foregroundKey,
     source,
-    signal
+    signal,
+    undefined,
+    stockSource
   )
 }
 

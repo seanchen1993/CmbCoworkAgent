@@ -505,8 +505,7 @@ export class FunctionNativeDisplayProjection {
         const drawing = new FunctionNativeDrawing(received, assertRow)
         const tree = drawing.keep(received)
         validateFunctionSiteTree(tree)
-        drawing.beginPublication()
-        await drawing.protect(tree, publish)
+        await drawing.protect(tree, publish, "begin")
         // Publish the output tree too: native input protection alone is not output protection.
         const output = await publish({ tree })
         if (!isModObject(output) || Object.keys(output).some((key) => key !== "tree"))

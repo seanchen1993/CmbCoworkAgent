@@ -163,6 +163,7 @@ const entryPolicies = {
   act: { operation: "retain", catalog: "guard" },
   siteMount: { operation: "retain", catalog: "guard" },
   siteRead: { operation: "retain", catalog: "guard" },
+  canUseNativeChatHistory: { operation: "direct", catalog: "direct" },
   setDisplayProjectionEnabled: { operation: "direct", catalog: "direct" },
   siteMountOutcome: { operation: "retain", catalog: "guard" },
   siteRender: { operation: "retain", catalog: "guard" },

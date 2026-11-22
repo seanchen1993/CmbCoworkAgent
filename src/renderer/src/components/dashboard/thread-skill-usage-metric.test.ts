@@ -44,6 +44,7 @@ describe("Skill metrics without an ancestor TooltipProvider", () => {
         createElement(TraceExplorer, {
           traces: [trace],
           viewMode,
+          completeThreadId: viewMode === "thread" ? trace.threadId : undefined,
           showCodeStats: false,
           allowFullscreen: false
         })

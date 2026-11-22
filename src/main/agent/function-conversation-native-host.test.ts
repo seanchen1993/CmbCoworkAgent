@@ -47,6 +47,7 @@ import { assertFunctionConversationNativeHostInstallation,
 import { captureFunctionConversationNativeInput } from "./function-conversation-native-input"
 import { wrapFunctionConversationNativeInvocation } from "./function-conversation-native-invocation"
 import { wrapFunctionConversationInvocation } from "./mods-conversation-invocation"
+import { createRuntimeConversationGraph, selectRuntimeCompletionRevisionInput } from "./native-graph-adapter"
 import { createFunctionConversationNativeInputRetention } from "./function-conversation-native-input-retention"
 import { createNativeConversationStreamProjection } from "./native-conversation-stream-projection"
 import * as nativeStreamProjection from "./native-conversation-stream-projection"
@@ -940,18 +941,13 @@ describe("actual native host factory through graph, resident Hook, protector and
         const binding = Object.freeze({ ...runtime.binding, target: runtime.target.ref,
           assertCurrent: runtime.assertCurrent.bind(runtime) })
         const delivery = new FunctionConversationDeliveryBridge(f.store, () => binding)
-        const graph = createAgent({ model, middleware: [host.middleware,
+        const options = { model, tools: [], middleware: [host.middleware,
           createFunctionConversationMiddleware({ store: f.store,
             capture: task => captureFunctionConversationTaskBinding(task, binding) })],
-          checkpointer: delivery.wrap(f.saver) })
-        host.install(graph.graph)
-        // Match the production factory: prove and rebind checkpoint history before
-        // the native output wrapper accepts values owned by a replacement runtime.
-        const conversation = wrapFunctionConversationInvocation(graph, { store: f.store,
-          binding, history: { saver: f.saver,
-            assertCurrent: runtime.assertCurrent.bind(runtime), register: host.registerHistorical },
-          onIntakeNotes: host.registerIntake })
-        return wrapFunctionConversationNativeInvocation(conversation, host, runtime)
+          checkpointer: delivery.wrap(f.saver) }
+        return createRuntimeConversationGraph(options as unknown as
+          Parameters<typeof createRuntimeConversationGraph>[0], { kind: "native", host, runtime,
+          conversation: { store: f.store, binding }, historySaver: f.saver })
       }
       let current = { host: f.host, runtime: f.runtime }
       let wrapped = createNativeAgent(current.host, current.runtime)
@@ -990,10 +986,14 @@ describe("actual native host factory through graph, resident Hook, protector and
         runRevision: async (_prompt, signal, input) => {
           expect(input).toBeDefined()
           revision = input
+          const admitted = selectRuntimeCompletionRevisionInput(wrapped, input, () => {
+            throw Error("ACTUAL_NATIVE_REVISION_FELL_BACK_TO_PLAIN_INPUT")
+          })
+          expect(admitted).toBe(input)
           if (trigger === "Resume") {
-            const stream = await wrapped.stream(input!, { ...config, signal, streamMode: "values" })
+            const stream = await wrapped.stream(admitted, { ...config, signal, streamMode: "values" })
             for await (const value of stream) expect(value).toBeDefined()
-          } else await wrapped.invoke(input!, { ...config, signal })
+          } else await wrapped.invoke(admitted, { ...config, signal })
         }
       })
       expect(outcome).toBe("passed")
@@ -2383,11 +2383,13 @@ describe("actual native host factory through graph, resident Hook, protector and
 // Exercise the production debounce/targeted-flush bodies against the original app database.
 // Electron startup is excluded; canonical writes remain the real host/keeper/store path.
 import { captureCurrentRunMessageQueueOwner, clearCurrentRunMessageQueue,
-  isCurrentRunMessageQueueOwner, setCurrentRunMessageQueueOwner } from "./current-run-message-queue"
+  isCurrentRunMessageQueueOwner, mergeCurrentRunGraphProviderOccurrences,
+  setCurrentRunMessageQueueOwner } from "./current-run-message-queue"
 import { captureLocalThreadRunLease, getLocalThreadRunLease } from "./thread-run-lease"
 import { getMessageProviderOccurrence, getMessageProviderSourceId } from
   "../../shared/message-role-collision"
-import { bindNativePartialQueuedMessage, reconcileNativePartialQueuedMessages } from
+import { bindNativePartialQueuedMessage, hasNativePartialPersistenceReceipt,
+  reconcileNativePartialQueuedMessages } from
   "./native-partial-persistence"
 import { forgetFunctionPlacedCursor, rememberFunctionPlacedMessage } from
   "../mods/v2/placed-anchor-host"
@@ -2398,12 +2400,16 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
     ts.ScriptTarget.Latest, true)
   const names = ["pendingStreamTranscriptKey", "flushPendingStreamTranscriptMessages",
     "captureNativeConversationTranscriptFlush", "queueStreamTranscriptMessage",
-    "isPhysicalStreamRunActive", "throwIfPhysicalStreamRunIsInactive"]
-  const declarations = source.statements.filter(node => ts.isFunctionDeclaration(node) &&
+    "persistStreamTranscriptChunk",
+    "isPhysicalStreamRunActive", "throwIfPhysicalStreamRunIsInactive",
+    "loadPreviousRunProviderOccurrences", "StreamTranscriptSnapshotRequiredError"]
+  const declarations = source.statements.filter(node =>
+    (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
     node.name && names.includes(node.name.text))
   if (declarations.length !== names.length) throw Error("ACTUAL_FLUSH_SOURCE_MISSING")
   const code = ts.transpileModule(`${declarations.map(node => node.getText(source)).join("\n")}
-    ({captureNativeConversationTranscriptFlush,flushPendingStreamTranscriptMessages,queueStreamTranscriptMessage})`,
+    ({captureNativeConversationTranscriptFlush,flushPendingStreamTranscriptMessages,
+      queueStreamTranscriptMessage,persistStreamTranscriptChunk})`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
   const pending = new Map<string, { messages: QueuedStreamTranscriptMessage[];
     timer?: ReturnType<typeof setTimeout> }>()
@@ -2416,14 +2422,25 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
   const api = runInNewContext(code, { exports: {}, console, setTimeout, clearTimeout,
     STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS: 250, pendingStreamTranscriptMessages: pending,
     streamTranscriptAssistantIdentities: new Map(), latestStreamAssistantCandidate: new Map(),
+    streamTranscriptBoundaries: new Map(),
     streamTranscriptAttempts: new Map(), ThreadMessageStreamAttempt: appDb.ThreadMessageStreamAttempt,
     streamAssistantRevision: 0, getMessageProviderSourceId, getMessageProviderOccurrence,
     captureLocalThreadRunLease, captureThreadIncarnation, matchesThreadIncarnation,
     getLocalThreadRunLease, captureCurrentRunMessageQueueOwner, isCurrentRunMessageQueueOwner,
     resolveStreamTranscriptFlush, reconcileNativePartialQueuedMessages, rememberFunctionPlacedMessage,
+    shouldSkipMainTranscriptStreamPayload: () => false,
+    readNativeConversationStreamProjection: nativeStreamProjection.readNativeConversationStreamProjection,
+    hasNativePartialPersistenceReceipt, bindNativePartialQueuedMessage, persistedMessageFromStreamPayload,
+    getSerializedMessageRole: () => { throw Error("NATIVE_PARTIAL_ON_ORDINARY_NOTIFICATION_LANE") },
+    routeCurrentRunCompletedAssistantMessage: () => { throw Error("NATIVE_PARTIAL_ON_ORDINARY_COMPLETION_LANE") },
+    hydrateStreamTranscriptToolCalls: () => {},
     getDb: appDb.getDb, getThreadCore: appDb.getThreadCore,
     getThreadRuntimeScope: appDb.getThreadRuntimeScope,
     getThreadMessageIdentityContext: appDb.getThreadMessageIdentityContext,
+    getThreadTranscriptBoundaryOrdinal: appDb.getThreadTranscriptBoundaryOrdinal,
+    getThreadMessageProviderOccurrencesBeforeUser: appDb.getThreadMessageProviderOccurrencesBeforeUser,
+    mergeCurrentRunGraphProviderOccurrences,
+    withThreadMessageIdentitySnapshot: appDb.withThreadMessageIdentitySnapshot,
     partitionCanonicalThreadMessageEchoes: appDb.partitionCanonicalThreadMessageEchoes,
     appendThreadMessageTextDelta: appDb.appendThreadMessageTextDelta,
     upsertThreadMessages: appDb.upsertThreadMessages }) as {
@@ -2431,6 +2448,8 @@ function actualPartialDebounce(f: Awaited<ReturnType<typeof fixture>>) {
         signal: AbortSignal): (uuid: string) => void
       queueStreamTranscriptMessage(threadId: string, runId: string,
         message: QueuedStreamTranscriptMessage): void
+      persistStreamTranscriptChunk(threadId: string, runId: string, mode: string,
+        payload: unknown, options?: { deferFlush?: boolean }): string | null
       flushPendingStreamTranscriptMessages(threadId: string, runId: string,
         options?: { throwOnError?: boolean }): void
     }
@@ -2470,6 +2489,13 @@ describe("actual native partial debounce and canonical commit race", () => {
     expect(payload).toBeDefined()
     const message = persistedMessageFromStreamPayload(payload)!
     expect(message).toBeDefined()
+    if (scenario === "bounded identity") {
+      const consumer = actualPartialDebounce(f)
+      expect(consumer.api.persistStreamTranscriptChunk(f.threadId, f.physicalRunId, "messages",
+        payload, { deferFlush: true })).toBe(message.id)
+      consumer.api.flushPendingStreamTranscriptMessages(f.threadId, f.physicalRunId, { throwOnError: true })
+      expect(consumer.pending.size).toBe(0)
+    }
     const originalMetadata = appDb.getThreadCore(f.threadId)!.metadata!
     const metadata = JSON.parse(originalMetadata)
     const raw = JSON.stringify({ ...metadata, llmFileHistory: "x".repeat(1024 * 1024) })

@@ -17,10 +17,8 @@ import {
   conflictingFunctionConversationTranscriptStamps,
   functionConversationTranscriptFields,
   hasInvalidFunctionConversationTranscriptStamp,
-  isFunctionConversationHiddenNote,
   isFunctionConversationNotice,
   mergeFunctionConversationTranscriptStamp,
-  readFunctionConversationTranscriptStamp,
   type FunctionConversationTranscriptStamp
 } from "./mods/v2/conversation-transcript"
 import { isInternalGoalPrompt, isVisibleTranscriptMessage } from "./transcript-visibility"

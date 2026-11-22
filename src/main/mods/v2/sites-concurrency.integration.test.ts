@@ -219,6 +219,20 @@ it("skips a cancelled text mount at its real queue turn without cancelling the n
   }
 })
 
+it("keeps an existing singleton owner when a queued replacement is cancelled", async () => {
+  const f = await fixture()
+  const sites = f.session.sites
+  const owner = await sites.mount("AbovePrompt")
+  const controller = new AbortController(), reason = Error("cancel queued singleton mount")
+  const replacement = sites.mount("AbovePrompt", undefined, undefined, controller.signal)
+  controller.abort(reason)
+  await expect(replacement).rejects.toBe(reason)
+  expect((await sites.render(owner, { ...above, isWorking: false })).id).toBe(owner)
+  const next = await sites.mount("AbovePrompt")
+  await expect(sites.render(owner, { ...above, isWorking: false })).rejects.toThrow("MODS_UI_SITE_CLOSED")
+  await sites.unmount(next)
+})
+
 it("bounds pending owner work and drops only physically settled exact queue tails", async () => {
   const f = await fixture()
   const owner = await f.session.sites.mount("AbovePrompt")

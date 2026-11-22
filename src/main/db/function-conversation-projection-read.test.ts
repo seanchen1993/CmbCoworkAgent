@@ -368,6 +368,44 @@ describe("fresh joined canonical read and exact private composition", () => {
     expect(appDb.upsertThreadMessages(f.threadId, [{ ...row, content: "ordinary edited input" }])).toBe(1)
   })
 
+  it("reads durable fork lineage without changing native projection or receipt fields", () => {
+    const f = fixture(), uuid = randomUUID()
+    expect(appDb.upsertThreadMessages(f.threadId, [
+      { id: uuid, role: "assistant", content: "ordinary saved reply", created_at: new Date(1) }
+    ])).toBe(1)
+    expect(appDb.captureThreadForkReplay(f.threadId, [uuid]))
+      .toEqual([{ id: uuid, key: expect.any(String) }])
+    const projected = readFunctionConversationRawProjection(f.database, f.threadId, uuid)
+    expect(projected).toMatchObject({ message_id: uuid, function_row_json: null })
+    expect(projected).not.toHaveProperty("fork_replay_key")
+    expect(projected).not.toHaveProperty("fragment_generation")
+    expect(() => assertStoredProjectionReceipt(f.database, f.input)).not.toThrow()
+  })
+
+  it.each([
+    ["fork_replay_key", "INTEGER"],
+    ["fork_replay_key", "TEXT DEFAULT 'bad'"],
+    ["fork_replay_key", "TEXT GENERATED ALWAYS AS (reasoning) VIRTUAL"],
+    ["fragment_generation", "TEXT"],
+    ["fragment_generation", "TEXT NOT NULL DEFAULT 'bad'"]
+  ])("rejects ordinary storage column %s with unsupported declaration %s", (name, declaration) => {
+      const database = openNativeSqliteDatabase(join(directory, `${randomUUID()}.sqlite`),
+        "actual invalid fork lineage").database
+      try {
+        const columns = FUNCTION_CONVERSATION_PROJECTION_COLUMNS.map(name => `${name} TEXT`)
+        database.run("CREATE TABLE function_conversation_projection_receipts(thread_id TEXT)")
+        database.run(`CREATE TABLE thread_messages(${columns.join(",")},
+          ${name} ${declaration})`)
+        expect(() => readFunctionConversationRawProjection(database, "thread", "message"))
+          .toThrow("MODS_CONVERSATION_PROJECTION_SCHEMA")
+        expect(() => assertStoredProjectionReceipt(database, {
+          threadId: "thread", messageId: "message",
+          incarnation: { token: "owned-token", legacyCreatedAt: 1 }, assertCurrent: () => undefined
+        })).toThrow("MODS_CONVERSATION_PROJECTION_SCHEMA")
+      } finally { database.close({ checkpoint: false }) }
+    }
+  )
+
   it.each(["absent", "missing-column", "same-count-wrong-column"])(
     "rejects a fresh %s projection schema before reading a seal", kind => {
       const database = openNativeSqliteDatabase(join(directory, `${randomUUID()}.sqlite`),

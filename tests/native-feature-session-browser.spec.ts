@@ -92,6 +92,7 @@ async function main() {
               export const useAppStore=selector=>useSyncExternalStore(subscribe,()=>selector(state));
               useAppStore.getState=()=>state;useAppStore.subscribe=subscribe;
               export const isThreadDeletionPending=()=>false,isThreadRetired=()=>false;
+              export const adoptThreadSearchSummary=()=>{throw Error("Unexpected cross-thread search in feature session fixture")};
             `
           }))
         }

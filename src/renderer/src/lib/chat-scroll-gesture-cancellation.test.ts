@@ -30,6 +30,7 @@ const names = [
   "clearHistoryRestore",
   "runChatScrollTransition",
   "dispatchChatScrollEvent",
+  "cancelActiveSearchNavigation",
   "cancelPendingHistoryAnchorFromUserGesture",
   "recordDirectionalScrollGesture",
   "detachFromExplicitWheel",
@@ -85,7 +86,7 @@ class ScrollElement {
   }
 }
 
-function fixture(top: number) {
+function fixture(top: number, searchThreadId = "chat") {
   const state = {
     current: transitionChatScroll(createChatScrollState("chat"), {
       type: "DATA_READY",
@@ -108,6 +109,7 @@ function fixture(top: number) {
   const durableAnchor = { current: null as { generation: number } | null }
   const clearPresentationWait = vi.fn()
   const invalidateReveal = vi.fn()
+  const finishSearchNavigation = vi.fn()
   const cancelNativePosition = vi.fn(),
     releaseSessionAnchor = vi.fn()
   const callbacks = runInNewContext(compiled, {
@@ -130,6 +132,9 @@ function fixture(top: number) {
     scrollParent: viewport,
     bottomPresentationWait: { clear: clearPresentationWait },
     invalidateDurableMessageReveal: invalidateReveal,
+    threadId: "chat",
+    useThreadSearch: { getState: () => ({ navigation: { id: 1, result: { threadId: searchThreadId } } }) },
+    finishThreadSearchNavigation: finishSearchNavigation,
     window: {
       cancelAnimationFrame: (id: number) => queued.delete(id),
       getComputedStyle: (target: ScrollElement) => target
@@ -169,6 +174,7 @@ function fixture(top: number) {
     pending,
     sessionAnchor,
     clearPresentationWait,
+    finishSearchNavigation,
     cancelNativePosition,
     releaseSessionAnchor,
     flushFrames: () => {
@@ -191,6 +197,7 @@ describe("user input during pending chat positioning", () => {
       expect(f.sessionAnchor.current).toBeNull()
       expect(f.clearPresentationWait).toHaveBeenCalled()
       expect(f.cancelNativePosition).toHaveBeenCalledOnce()
+      expect(f.finishSearchNavigation).toHaveBeenCalledExactlyOnceWith(1)
       expect(f.releaseSessionAnchor).toHaveBeenCalledOnce()
       const growth = transitionChatScroll(f.state.current, { type: "CONTENT_GROWN" })
       expect(growth.effects).toEqual([])
@@ -212,7 +219,7 @@ describe("user input during pending chat positioning", () => {
   it.each(["wheel", "touch", "key"] as const)(
     "%s leaves a nested scrollable pane in control",
     (kind) => {
-      const f = fixture(2000)
+      const f = fixture(2000, "other-chat")
       const nested = new ScrollElement()
       nested.scrollTop = 1000
       for (const deltaY of [-1050, 1050]) {
@@ -229,6 +236,7 @@ describe("user input during pending chat positioning", () => {
       f.gesture(kind, -1050, nested)
       expect(f.pending.current).toBeNull()
       expect(f.state.current.mode).toBe("detached")
+      expect(f.finishSearchNavigation).not.toHaveBeenCalled()
     }
   )
 })

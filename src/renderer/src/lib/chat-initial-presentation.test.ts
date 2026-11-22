@@ -355,6 +355,41 @@ describe("initial chat presentation barrier", () => {
     sites = [site(30, true), site(600, true)]
     expect(sample().ready).toBe(false)
   })
+  it("skips measuring pending sites and skips text ranges for the hidden virtual probe", () => {
+    const viewport = {
+      scrollTop: 0,
+      clientHeight: 400,
+      getBoundingClientRect: () => ({ top: 0, bottom: 400 })
+    }
+    const pendingRect = vi.fn()
+    const pending = { querySelector: () => ({}), getBoundingClientRect: pendingRect }
+    const probe = { visibility: "hidden", parentElement: viewport }
+    const hidden = {
+      querySelector: () => null,
+      getBoundingClientRect: () => ({ width: 0, height: 0 }),
+      parentElement: probe
+    }
+    const createRange = vi.fn()
+    const root = {
+      ownerDocument: {
+        createRange,
+        defaultView: {
+          getComputedStyle: (node: { visibility?: string }) => ({
+            visibility: node.visibility ?? "visible",
+            display: "block"
+          })
+        }
+      },
+      querySelectorAll: (selector: string) =>
+        selector === "[data-item-index]" ? [] : [pending, hidden]
+    }
+    expect(sampleInitialChatPresentation(
+      root as unknown as HTMLElement, viewport as unknown as HTMLElement
+    ).ready).toBe(false)
+    expect(pendingRect).not.toHaveBeenCalled()
+    expect(createRange).not.toHaveBeenCalled()
+  })
+
   it("accepts visible native system rows without sites but not an unmounted empty list", () => {
     const viewport = {
       scrollTop: 0,

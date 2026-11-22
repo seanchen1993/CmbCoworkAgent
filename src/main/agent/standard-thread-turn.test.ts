@@ -134,7 +134,9 @@ describe("prepareStandardThreadRuntimeFactory shell policy", () => {
             workspacePath,
             modelId,
             abortSignal,
-            autoBackgroundHandoff: owner === "desktop"
+            autoBackgroundHandoff: owner === "desktop",
+            modTurnRunId: runId,
+            onModelBoundary: expect.any(Function)
           })
         }
       } finally {

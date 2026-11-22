@@ -8,6 +8,7 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   realpath,
   rm,
@@ -19,6 +20,7 @@ import { cpus, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { parseArgs } from "node:util"
+import AdmZip from "adm-zip"
 import { _electron } from "playwright"
 
 const driverRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
@@ -28,6 +30,8 @@ const { values: options } = parseArgs({
     baseline: { type: "string" },
     mods: { type: "string" },
     electron: { type: "string" },
+    mode: { type: "string", default: "no-match" },
+    calibration: { type: "string" },
     output: { type: "string" },
     pairs: { type: "string", default: "8" },
     directory: { type: "string", default: "500" },
@@ -38,7 +42,13 @@ const { values: options } = parseArgs({
     "trace-ipc": { type: "boolean", default: false }
   }
 })
-assert(options.baseline && options.mods && options.output, "Pass --baseline, --mods, and --output")
+assert(["aa", "off", "no-match", "active"].includes(options.mode), "Invalid --mode")
+assert(options.baseline && options.output && (options.mode === "aa" || options.mods),
+  "Pass --baseline and --output, and --mods for candidate comparisons")
+assert(options.mode !== "aa" || !options.mods, "A/A measures the exact baseline in both arms")
+assert(!options.protect || ["no-match", "active"].includes(options.mode),
+  "Protection requires an enabled candidate")
+assert(!options.calibration || options.mode !== "aa", "A/A produces its own calibration")
 const pairedRuns = Number(options.pairs)
 const directoryCount = Number(options.directory)
 const rowCount = Number(options.rows)
@@ -56,7 +66,7 @@ const runtimePath = join(runOutput, "runtime.txt")
 await writeFile(runtimePath, runtime + "\n")
 const applications = {
   baseline: { root: resolve(options.baseline) },
-  mods: { root: resolve(options.mods) }
+  mods: { root: resolve(options.mode === "aa" ? options.baseline : options.mods) }
 }
 const wait = (ms) => new Promise((done) => setTimeout(done, ms))
 const git = (root, ...args) =>
@@ -73,6 +83,31 @@ const sha = async (path) => {
 }
 const wheelDeltas = [-540, -540, 540, -540, 540, -540, -540, 540, -540, 540, -540, 540]
 const wheelIntervalMs = 72
+const protectedCanary = "Bearer FIXTURE_PUBLICATION_CANARY_1234567890"
+const activeMarker = "PAIRED_ACTIVE_DECORATION "
+const activePluginName = "paired-display-electron"
+const activePluginSource = `export function register(on) {
+  on("ui.render", {component: "AssistantMessage"}, ($, event, next) => next({
+    ...event, props: { ...event.props, text: ${JSON.stringify(activeMarker)} + event.props.text }
+  }))
+}`
+function activePluginZip() {
+  const zip = new AdmZip()
+  zip.addFile("plugin.json", Buffer.from(JSON.stringify({ name: activePluginName, version: "1.0.0" })))
+  zip.addFile("mods/manifest.json", Buffer.from(JSON.stringify({
+    apiVersion: "cmb.mods/v2", id: activePluginName, entry: "main.ts"
+  })))
+  zip.addFile("mods/main.ts", Buffer.from(activePluginSource))
+  return [...zip.toBuffer()]
+}
+
+// These experience limits are set before the candidate is measured. A/A checks
+// that the machine can resolve the strictest budget; it never expands a budget.
+const budgets = {
+  off: { coldMs: 20, warmP95Ms: 20, framesP95Ms: 3, wheelP95Ms: 2, blankMs: 0 },
+  "no-match": { coldMs: 35, warmP95Ms: 30, framesP95Ms: 4, wheelP95Ms: 2, blankMs: 0 },
+  active: { coldMs: 100, warmP95Ms: 50, framesP95Ms: 8, wheelP95Ms: 4, blankMs: 100 }
+}
 const targets = ["A", "B"].map((name) => ({
   name,
   title: `Paired Electron transcript ${name}`,
@@ -83,10 +118,15 @@ const manifest = {
   playwright: require("playwright/package.json").version,
   rowCount,
   directoryCount,
+  driverSha256: await sha(fileURLToPath(import.meta.url)),
+  launcherSha256: await sha(join(driverRoot, "tests/support/electron-launcher.cmd")),
   rowMetadataBytes: 512 * 1024,
   wheelDeltas,
   wheelIntervalMs,
-  modsPolicy: options.protect ? "enabled-with-protection" : "enabled-no-installed-mods",
+  mode: options.mode,
+  protected: options.protect,
+  activeSourceSha256: options.mode === "active" ? createHash("sha256").update(activePluginSource).digest("hex") : null,
+  budgets,
   gpu: "normal",
   runtime,
   branches: {}
@@ -145,6 +185,26 @@ assert.equal(
   manifest.branches.mods.electronSha256,
   "Both branches must use the same Electron binary"
 )
+const calibrationFingerprint = {
+  driverSha256: manifest.driverSha256,
+  launcherSha256: manifest.launcherSha256,
+  node: manifest.node,
+  playwright: manifest.playwright,
+  rowCount,
+  directoryCount,
+  pairs: pairedRuns,
+  wheelDeltas,
+  wheelIntervalMs,
+  baseline: manifest.branches.baseline
+}
+if (options.calibration) {
+  assert(options.idle && !options["trace-ipc"], "Calibrated measurements require --idle and no tracing")
+  const calibrated = JSON.parse(await readFile(resolve(options.calibration), "utf8"))
+  assert.equal(calibrated.mode, "aa", "Calibration must compare the baseline against itself")
+  assert.equal(calibrated.status, "passed", "Calibration failed to resolve the experience budget")
+  assert.deepEqual(calibrated.fingerprint, calibrationFingerprint, "Baseline or driver changed since calibration")
+  manifest.calibration = resolve(options.calibration)
+}
 await writeFile(join(runOutput, "manifest.json"), JSON.stringify(manifest, null, 2))
 console.log(
   JSON.stringify({
@@ -200,6 +260,7 @@ async function runElectron(branch, directory, label, seed, run) {
   const app = applications[branch]
   const env = await profile(directory, app, seed)
   const errors = []
+  const modsErrors = new Set()
   const blockedRequests = new Set()
   const launcher = join(driverRoot, "tests/support/electron-launcher.cmd")
   const startedAt = Date.now()
@@ -227,8 +288,13 @@ async function runElectron(branch, directory, label, seed, run) {
     page = await electron.firstWindow({ timeout: 60_000 })
     page.setDefaultTimeout(15_000)
     page.on("pageerror", (error) => errors.push({ message: error.message, stack: error.stack }))
+    page.on("console", (message) => {
+      for (const code of message.text().match(/MODS_(?:UI_SITE_LIMIT|RUNTIME_SESSION_BUSY)/g) ?? [])
+        modsErrors.add(code)
+    })
     await page.waitForFunction(() => Boolean(window.api?.threads && window.api?.workspace))
     await page.getByText("Initializing...", { exact: true }).waitFor({ state: "hidden" })
+    const applicationReadyMs = Date.now() - startedAt
     await electron.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
       window.setSize(1260, 820)
@@ -281,6 +347,8 @@ async function runElectron(branch, directory, label, seed, run) {
       bootErrors,
       blockedRequests: [...blockedRequests],
       errors,
+      modsErrors: [...modsErrors],
+      applicationReadyMs,
       startedAt,
       endedAt: Date.now()
     }
@@ -302,11 +370,13 @@ async function runElectron(branch, directory, label, seed, run) {
 
 async function seedBranch(branch) {
   const directory = join(runtime, `seed-${branch}`)
+  const mode = branch === "baseline" || options.mode === "aa" ? "native" : options.mode
   const result = await runElectron(branch, directory, `seed-${branch}`, undefined, (page) =>
     page.evaluate(
-      async ({ workspace, directoryCount, rowCount, targets, version, protect, branch }) => {
+      async ({ workspace, directoryCount, rowCount, targets, version, protect, mode,
+        protectedCanary, activePluginName, pluginZip }) => {
         const api = window.api
-        if ((branch === "mods") !== Boolean(api.mods?.configureGlobal))
+        if ((mode !== "native") !== Boolean(api.mods?.configureGlobal))
           throw new Error("Incorrect application surface for paired measurement")
         for (const guide of [
           { guideId: "application-controls-walkthrough", revision: 2, maxShowCount: 1 },
@@ -319,7 +389,11 @@ async function seedBranch(branch) {
         ]) {
           if (api.uiGuides?.acknowledge) await api.uiGuides.acknowledge(guide)
         }
-        if (branch === "mods") await api.mods.configureGlobal(true)
+        if (mode !== "native") {
+          const enabled = mode !== "off"
+          await api.mods.configureGlobal(enabled)
+          if (await api.mods.globalEnabled() !== enabled) throw Error("Global Mods setting did not persist")
+        }
         for (let index = 0; index < directoryCount - targets.length - 1; index++) {
           await api.threads.create({
             title: `Paired directory ${String(index).padStart(4, "0")}`,
@@ -338,20 +412,23 @@ async function seedBranch(branch) {
           const id = thread.thread_id ?? thread.id
           if (!id) throw new Error("Missing seed thread ID")
           await api.workspace.set(id, workspace)
-          if (branch === "mods") {
+          if (mode === "no-match" || mode === "active") {
             const status = await api.mods.status(id)
             await api.mods.configure(id, true, protect, status.workspace)
+            if (mode === "no-match" && (await api.mods.clawView(id)).active)
+              throw Error("Unselected Mods profile unexpectedly active")
           }
           const messages = Array.from({ length: rowCount }, (_, index) => {
             const marker = `PAIRED_BODY_${target.name}_${index}`
+            const role = index % 2 || index === rowCount - 1 ? "assistant" : "user"
             const content =
               index % 7 === 0 && index !== rowCount - 1
                 ? `${marker}\n\n### Reference\n\n${"Paragraph with **bold** and `code`.\n\n".repeat(8)}`
-                : `${marker} — ${index % 2 ? "Persisted **assistant response**." : "Persisted user question."}`
+                : `${marker} — ${role === "assistant" ? "Persisted **assistant response**." : "Persisted user question."}`
             return {
               id: `paired-${target.name}-${index}`,
-              role: index % 2 ? "assistant" : "user",
-              content,
+              role,
+              content: index === rowCount - 1 || index % 17 === 0 ? `${content} ${protectedCanary}` : content,
               created_at: new Date(1_700_000_000_000 + index * 3_000)
             }
           })
@@ -359,13 +436,38 @@ async function seedBranch(branch) {
           if (persisted.count !== messages.length) throw new Error("Incomplete seed history")
           seeded.push({ ...target, id, marker: `PAIRED_BODY_${target.name}_${rowCount - 1}` })
         }
+        let activePlugin = null
+        if (mode === "active") {
+          const installed = await api.plugins.install(new Uint8Array(pluginZip).buffer,
+            `${activePluginName}.zip`, "local", undefined, true)
+          if (!installed.success) throw Error(installed.error)
+          const id = seeded[0].id
+          const status = await api.mods.status(id)
+          const plugin = status.functionMods?.find(row => row.name === activePluginName)
+          if (!plugin?.digest) throw Error("Missing installed display Mod identity")
+          await api.mods.approveFunction(id, plugin.pluginId, plugin.digest, status.workspace)
+          const profile = {
+            id: "paired-display", name: "Paired display benchmark",
+            capabilities: [{ pluginId: plugin.pluginId, name: plugin.name, digest: plugin.digest }]
+          }
+          const initial = await api.mods.clawView(id)
+          await api.mods.clawChange(id, { kind: "save", profile,
+            workspace: initial.workspace, revision: initial.revision })
+          for (const target of seeded) {
+            const before = await api.mods.clawView(target.id)
+            const after = await api.mods.clawChange(target.id, { kind: "apply", id: profile.id,
+              workspace: before.workspace, revision: before.revision, bindingRevision: before.bindingRevision })
+            if (after.active?.capabilities[0]?.digest !== plugin.digest) throw Error("Display Mod not applied")
+          }
+          activePlugin = { id: plugin.pluginId, digest: plugin.digest }
+        }
         const lobby = await api.threads.create({
           title: "Paired Electron lobby",
           workspacePath: workspace,
           agentMode: "normal"
         })
         await api.workspace.set(lobby.thread_id ?? lobby.id, workspace)
-        return { targets: seeded, persistedDirectoryCount: (await api.threads.list()).length }
+        return { targets: seeded, mode, activePlugin, persistedDirectoryCount: (await api.threads.list()).length }
       },
       {
         workspace,
@@ -374,17 +476,20 @@ async function seedBranch(branch) {
         targets,
         version: applications[branch].version,
         protect: options.protect,
-        branch
+        mode,
+        protectedCanary,
+        activePluginName,
+        pluginZip: mode === "active" ? activePluginZip() : undefined
       }
     )
   )
   await writeFile(join(runOutput, `seed-${branch}.json`), JSON.stringify(result, null, 2))
-  return { home: join(directory, "openwork"), targets: result.targets }
+  return { home: join(directory, "openwork"), targets: result.targets, mode }
 }
 
-async function openThread(page, target, kind) {
+async function openThread(page, target, kind, mode) {
   const title = page.getByText(target.title, { exact: true }).first()
-  await title.evaluate((element, target) => {
+  await title.evaluate((element, { target, requiredMarker, protectedCanary }) => {
     element.addEventListener(
       "click",
       () => {
@@ -394,6 +499,7 @@ async function openThread(page, target, kind) {
           sawRow = null,
           sawText = null,
           stable = 0
+        let rawCanaryFrames = 0
         const frames = { noScope: 0, noTargetRow: 0, noBody: 0, hiddenOrPending: 0, ready: 0 }
         window.pairedOpen = new Promise((resolve, reject) => {
           function frame(now) {
@@ -401,7 +507,8 @@ async function openThread(page, target, kind) {
             if (scope && sawScope === null) sawScope = now - started
             const row = scope?.querySelector(`[data-chat-message-id="${target.row}"]`)
             if (row && sawRow === null) sawRow = now - started
-            const marker = row?.textContent?.includes(target.marker)
+            const marker = row?.textContent?.includes(requiredMarker)
+            if (row?.textContent?.includes(protectedCanary)) rawCanaryFrames++
             if (marker && sawText === null) sawText = now - started
             const viewport = row?.closest("[data-radix-scroll-area-viewport]")
             const style = viewport?.getBoundingClientRect(),
@@ -432,6 +539,7 @@ async function openThread(page, target, kind) {
                 rowMs: sawRow,
                 markerMs: sawText,
                 frames,
+                rawCanaryFrames,
                 mountedRows: scope.querySelectorAll("[data-chat-message-id]").length,
                 viewportHeight: viewport.clientHeight
               })
@@ -444,7 +552,7 @@ async function openThread(page, target, kind) {
       },
       { once: true, capture: true }
     )
-  }, target)
+  }, { target, requiredMarker: mode === "active" ? activeMarker + target.marker : target.marker, protectedCanary })
   const started = performance.now()
   await title.click()
   const ready = await page.evaluate(() => window.pairedOpen)
@@ -460,10 +568,14 @@ async function scrollThread(page, target, wave, diagnostic = false) {
   const box = await viewport.boundingBox()
   assert(box && box.height > 200, "Visible chat viewport required for native wheel input")
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-  await viewport.evaluate((view, diagnostic) => {
+  await viewport.evaluate((view, { diagnostic, protectedCanary }) => {
     const started = [],
       frames = []
-    const visibility = { frames: 0, noRows: 0, noBody: 0, partial: 0, allReadable: 0 }
+    const visibility = {
+      frames: 0, noRows: 0, noBody: 0, partial: 0, allReadable: 0,
+      lostReadable: 0, rawCanaryFrames: 0, errorFrames: 0, maxBlankMs: 0
+    }
+    let visibleBody = new Map(), blankSince = null
     const top = view.scrollTop
     const sampleVisible = () => {
       const rect = view.getBoundingClientRect()
@@ -471,14 +583,12 @@ async function scrollThread(page, target, wave, diagnostic = false) {
         const box = row.getBoundingClientRect()
         return box.height > 0 && box.bottom > rect.top && box.top < rect.bottom
       })
-      const readable = rows.filter(
-        (row) =>
+      const body = new Map(rows.map((row) => [row.getAttribute("data-chat-message-id"),
           row.textContent?.includes("PAIRED_BODY_") &&
-          !row.querySelector("[data-function-site-pending]") &&
           !row.closest('[aria-hidden="true"], [inert]') &&
           row.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
-      )
-      return { visible: rows.length, readable: readable.length }
+      ]))
+      return { visible: rows.length, readable: [...body.values()].filter(Boolean).length, body }
     }
     let pending,
       last,
@@ -510,6 +620,13 @@ async function scrollThread(page, target, wave, diagnostic = false) {
           else if (!sample.readable) visibility.noBody++
           else if (sample.readable < sample.visible) visibility.partial++
           else visibility.allReadable++
+          for (const [id, readable] of sample.body)
+            if (!readable && visibleBody.get(id)) visibility.lostReadable++
+          visibleBody = sample.body
+          if (view.textContent?.includes(protectedCanary)) visibility.rawCanaryFrames++
+          if (view.querySelector('[data-function-site] [role="alert"]')) visibility.errorFrames++
+          if (blankSince !== null) visibility.maxBlankMs = Math.max(visibility.maxBlankMs, now - blankSince)
+          blankSince = sample.readable ? null : blankSince ?? now
         }
       }
       token = requestAnimationFrame(frame)
@@ -521,18 +638,22 @@ async function scrollThread(page, target, wave, diagnostic = false) {
       cancelAnimationFrame(token)
       view.removeEventListener("wheel", wheel, true)
       view.removeEventListener("scroll", scroll)
+      if (blankSince !== null)
+        visibility.maxBlankMs = Math.max(visibility.maxBlankMs, performance.now() - blankSince)
+      const { visible, readable } = sampleVisible()
       return {
         frames,
         wheels: started,
         top,
         endTop: view.scrollTop,
         scrollEvents,
-        ...sampleVisible(),
+        visible,
+        readable,
         viewportHeight: view.clientHeight,
         ...(diagnostic ? { visibility } : {})
       }
     }
-  }, diagnostic)
+  }, { diagnostic, protectedCanary })
   for (const delta of wheelDeltas) {
     await page.mouse.wheel(0, delta)
     await wait(wheelIntervalMs)
@@ -560,6 +681,7 @@ async function removeRun(directory) {
 
 const observations = []
 let passed = false
+let comparison = null
 let preflight = []
 const cpuTotal = () =>
   cpus().reduce(
@@ -631,6 +753,74 @@ function laneStatistics(record) {
   }
 }
 
+function comparisonReport() {
+  const left = observations.filter((record) => record.branch === "baseline")
+  const right = observations.filter((record) => record.branch === "mods")
+  const opens = (records, index) => statistics(records.map((record) => record.opens[index].ms))
+  const paired = (index) => statistics(right.map((record, pair) => record.opens[index].ms - left[pair].opens[index].ms))
+  function aggregate(records) {
+    const measured = records.flatMap((record) => record.scrolls.filter((scroll) => !scroll.diagnostic))
+    const visibility = records.map((record) => record.scrolls.find((scroll) => scroll.diagnostic).visibility)
+    return {
+      applicationReady: statistics(records.map((record) => record.applicationReadyMs)),
+      firstOpen: opens(records, 0),
+      firstVisitOther: opens(records, 1),
+      warmSwitch: statistics(records.flatMap((record) => record.opens.slice(2).map((open) => open.ms))),
+      frameIntervals: statistics(measured.flatMap((scroll) => scroll.frames)),
+      wheelResponse: statistics(measured.flatMap((scroll) => scroll.wheels.flatMap(
+        (wheel) => wheel.moved === null ? [] : [wheel.moved]))),
+      lostReadable: visibility.reduce((sum, sample) => sum + sample.lostReadable, 0),
+      errorFrames: visibility.reduce((sum, sample) => sum + sample.errorFrames, 0),
+      rawCanaryFrames: visibility.reduce((sum, sample) => sum + sample.rawCanaryFrames, 0) +
+        records.flatMap((record) => record.opens).reduce((sum, open) => sum + open.rawCanaryFrames, 0),
+      maxBlankMs: Math.max(...visibility.map((sample) => sample.maxBlankMs)),
+      modsErrors: [...new Set(records.flatMap((record) => record.modsErrors))]
+    }
+  }
+  const baseline = aggregate(left), candidate = aggregate(right)
+  const firstOpen = paired(0), firstVisitOther = paired(1)
+  const deltas = {
+    firstOpenMs: firstOpen.median,
+    firstVisitOtherMs: firstVisitOther.median,
+    warmP95Ms: candidate.warmSwitch.p95 - baseline.warmSwitch.p95,
+    framesP95Ms: candidate.frameIntervals.p95 - baseline.frameIntervals.p95,
+    wheelP95Ms: candidate.wheelResponse.p95 - baseline.wheelResponse.p95
+  }
+  const calibration = options.mode === "aa"
+  const budget = budgets[calibration ? "off" : options.mode]
+  const metrics = {
+    firstOpenMs: budget.coldMs,
+    firstVisitOtherMs: budget.coldMs,
+    warmP95Ms: budget.warmP95Ms,
+    framesP95Ms: budget.framesP95Ms,
+    wheelP95Ms: budget.wheelP95Ms
+  }
+  const regressions = []
+  for (const [metric, max] of Object.entries(metrics)) {
+    const delta = calibration ? Math.abs(deltas[metric]) : deltas[metric]
+    if (!Number.isFinite(delta) || delta > max) regressions.push({ metric, observed: delta, max })
+  }
+  for (const [side, result] of [["baseline", baseline], ["candidate", candidate]]) {
+    const quality = { lostReadable: 0, errorFrames: 0, maxBlankMs: side === "candidate" ? budget.blankMs : 0 }
+    if (side === "candidate" && options.protect) quality.rawCanaryFrames = 0
+    for (const [metric, max] of Object.entries(quality))
+      if (result[metric] > max) regressions.push({ side, metric, observed: result[metric], max })
+    if (result.modsErrors.length) regressions.push({ side, metric: "modsErrors", observed: result.modsErrors })
+  }
+  const qualified = options.idle && pairedRuns >= 8 && !options["trace-ipc"] && (calibration || !!options.calibration)
+  return {
+    mode: options.mode,
+    status: qualified ? regressions.length ? "failed" : "passed" : "diagnostic",
+    fingerprint: calibrationFingerprint,
+    baseline,
+    candidate,
+    paired: { firstOpen, firstVisitOther },
+    deltas,
+    budget,
+    regressions
+  }
+}
+
 try {
   const seeds = {}
   for (const branch of Object.keys(applications)) seeds[branch] = await seedBranch(branch)
@@ -657,10 +847,10 @@ try {
             "First measured thread already loaded"
           )
           await page.waitForTimeout(300)
-          const opens = [await openThread(page, first, "first-open")]
-          opens.push(await openThread(page, second, "first-visit-other-thread"))
+          const opens = [await openThread(page, first, "first-open", seed.mode)]
+          opens.push(await openThread(page, second, "first-visit-other-thread", seed.mode))
           for (let index = 0; index < 8; index++)
-            opens.push(await openThread(page, index % 2 ? second : first, "warm-switch"))
+            opens.push(await openThread(page, index % 2 ? second : first, "warm-switch", seed.mode))
           const scrolls = []
           for (let wave = 0; wave < 3; wave++) scrolls.push(await scrollThread(page, second, wave))
           scrolls.push(await scrollThread(page, second, 3, true))
@@ -691,10 +881,14 @@ try {
     }
   }
   passed = true
+  comparison = comparisonReport()
+  await writeFile(join(runOutput, "comparison.json"), JSON.stringify(comparison, null, 2))
+  console.log(JSON.stringify({ gate: comparison.status, deltas: comparison.deltas, regressions: comparison.regressions }))
+  if (comparison.status === "failed") process.exitCode = 1
 } finally {
   await writeFile(
     join(runOutput, "observations.json"),
-    JSON.stringify({ passed, manifest, preflight, observations }, null, 2)
+    JSON.stringify({ passed, gate: comparison?.status ?? null, manifest, preflight, observations }, null, 2)
   )
   const lanes = observations.map((record) => ({
     pair: record.pair,
@@ -702,12 +896,13 @@ try {
     ...laneStatistics(record)
   }))
   await writeFile(join(runOutput, "lane-statistics.json"), JSON.stringify(lanes, null, 2))
-  if (passed && !options.keep) {
+  if (passed && comparison?.status !== "failed" && !options.keep) {
     for (const branch of Object.keys(applications)) await removeRun(join(runtime, `seed-${branch}`))
     await removeRun(workspace)
     await rmdir(runtime)
   }
   console.log(
-    JSON.stringify({ passed, artifacts: runOutput, runtimePreserved: !passed || options.keep })
+    JSON.stringify({ passed, gate: comparison?.status ?? null, artifacts: runOutput,
+      runtimePreserved: !passed || comparison?.status === "failed" || options.keep })
   )
 }

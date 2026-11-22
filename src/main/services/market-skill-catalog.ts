@@ -7,6 +7,8 @@ import {
   type MarketSkillCatalogPage
 } from "../../shared/market-skill-catalog"
 import { readBoundedResponse } from "./market-source-access"
+import { parseJsonResponse, RemoteJsonResponseError } from "../../shared/json-response"
+import { marketListItems } from "../../shared/market-list-response"
 
 export function marketSkillUrl(route: string): string {
   const base = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, "")
@@ -35,14 +37,17 @@ async function fetchCatalog(): Promise<MarketSkillCatalogPage> {
       await response.body?.cancel()
       throw new Error("HTTP error! status: " + response.status)
     }
-    if (!response.headers.get("content-type")?.includes("application/json")) {
-      await response.body?.cancel()
-      throw new Error("Response is not JSON")
-    }
     const body = await readBoundedResponse(response, MARKET_SKILL_LIST_MAX_RESPONSE_BYTES)
     if (!body) throw new Error("Market skill list is unavailable")
-    const data = JSON.parse(new TextDecoder().decode(body)) as { items?: unknown }
-    const items = Array.isArray(data.items) ? data.items : []
+    const data = parseJsonResponse<{
+      success?: unknown
+      ok?: unknown
+      status?: unknown
+    } | null>(response, new TextDecoder().decode(body), "应用市场")
+    const status = typeof data?.status === "string" ? data.status.trim().toLowerCase() : ""
+    if (data?.success === false || data?.ok === false || status === "error" || status === "fail")
+      throw new RemoteJsonResponseError(response, "应用市场", "invalid-shape")
+    const items = marketListItems(data, response)
     publishCatalog({ items, hash: createHash("sha256").update(body).digest("hex") })
     return { items: items.slice(0, MARKET_SKILL_LIST_MAX_ITEMS), total: items.length }
   } catch (error) {

@@ -144,7 +144,10 @@ export class FunctionUiSites {
         }
         // Slot admission and insertion share the same synchronous section across all row types.
         if (occupied >= limit) throw new ModFunctionError("MODS_UI_SITE_LIMIT")
+        signal?.throwIfAborted()
       } else {
+        // Once singleton replacement starts, finish the transition so the caller can retire it.
+        signal?.throwIfAborted()
         const previous = [...this.slots.values()].find((entry) => entry.component === component)
         if (previous) await this.unmount(previous.owner)
         this.host.assertLive()
@@ -152,7 +155,6 @@ export class FunctionUiSites {
         if (nativeRequest && this.host.pendingQuestion?.() !== nativeRequest)
           throw new ModFunctionError("MODS_UI_QUESTION_STALE")
       }
-      signal?.throwIfAborted()
       const owner = randomUUID()
       this.slots.set(owner, { component, messageId, owner, nativeRequest: nativeRequest ?? undefined,
         drawings: this.drawings(owner, component) })

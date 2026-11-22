@@ -32,7 +32,7 @@ import {
   type ModTier
 } from "../../../shared/mods/v2/contracts"
 import { FUNCTION_GUEST_BOOTSTRAP } from "./guest-bootstrap"
-import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/site-vocabulary"
 import { FUNCTION_CODEGEN_GUARD } from "./guest-codegen"
 import { FUNCTION_URL_GLOBALS } from "./guest-url-source"
 import { FUNCTION_URL_LAZY_GLOBALS } from "./guest-url"
@@ -64,6 +64,15 @@ function bootstrapProgram(): Promise<string> {
     })
   }
   return compiledBootstrap
+}
+
+function prepareGuestEnvironment() {
+  return [Promise.resolve().then(getQuickJS), Promise.resolve().then(bootstrapProgram)] as const
+}
+
+/** Initializes only process-local engine and trusted SDK code, with no guest or context. */
+export async function prepareEmptyFunctionGuestEnvironment(): Promise<void> {
+  await Promise.all(prepareGuestEnvironment())
 }
 
 interface InvocationFrame {
@@ -164,7 +173,18 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
   ) {}
 
   static async create(code: string, options: ModObject = {}): Promise<FunctionGuestRuntime> {
-    const engine = await getQuickJS()
+    // Lower both sources before guest evaluation so continuation identity stays explicit.
+    // Pure preparation can overlap. Hold the load until every preparation task settles.
+    const [engineResult, bootstrapResult, programResult] = await Promise.allSettled([
+      ...prepareGuestEnvironment(),
+      Promise.resolve().then(() => modCompiler().transform(code, { target: "es2016" }))
+    ] as const)
+    if (engineResult.status === "rejected") throw engineResult.reason
+    if (bootstrapResult.status === "rejected") throw bootstrapResult.reason
+    if (programResult.status === "rejected") throw programResult.reason
+    const engine = engineResult.value
+    const bootstrap = bootstrapResult.value
+    const program = programResult.value.code
     const vm = engine.newRuntime()
     vm.setMemoryLimit(16 * 1024 * 1024)
     vm.setMaxStackSize(512 * 1024)
@@ -364,11 +384,6 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     context.setProp(context.global, "__functionInitializeUrl", initializeUrl)
     initializeUrl.dispose()
     try {
-      // Native await bypasses Promise.then; lowering both sources makes continuation identity
-      // explicit. Compilation happens only on load, outside the guest's execution slices.
-      const compiler = modCompiler()
-      const bootstrap = await bootstrapProgram()
-      const program = (await compiler.transform(code, { target: "es2016" })).code
       guest.evaluate(FUNCTION_CODEGEN_GUARD).dispose()
       guest.deadline = performance.now() + 50
       guest.uiCopyDispose = installFunctionUiResolveDataCopy(context)

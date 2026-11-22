@@ -46,7 +46,14 @@ function workflowFactory(deps: Record<string, unknown>, selected = "createRuntim
   }
   visit(source)
   if (!factory) throw Error("Production workflow factory not found")
-  const javascript = ts.transpileModule(`const createChild=${factory.getText(source)}`, {
+  let cleanupHelper = ""
+  if (selected === "cleanupThread") {
+    const declaration = source.statements.find((statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === "cleanupChildRuntimeResources")
+    if (!declaration) throw Error("Production child cleanup helper not found")
+    cleanupHelper = declaration.getText(source).replace(/^export\s+/, "")
+  }
+  const javascript = ts.transpileModule(`${cleanupHelper}\nconst createChild=${factory.getText(source)}`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
   }).outputText
   return new Function(
@@ -59,17 +66,17 @@ it.each([false, true])("the real Workflow cleanup waits Function retirement and 
   const gate = Promise.withResolvers<void>()
   const releaseChild = vi.fn()
   const drain = vi.fn(() => gate.promise)
-  const processDrain = vi.fn(async () => {})
+  const physicalExit = Promise.withResolvers<void>()
+  const processDrain = vi.fn(() => physicalExit.promise)
+  const children = new Map([["child", releaseChild]])
   const revoke = vi.fn(async () => {})
   const checkpoint = vi.fn(async () => {})
   const removeCheckpoint = vi.fn()
   const cleanup = workflowFactory({
     getModsManager: () => ({ closeFunctionThreadAndWait: drain }),
-    workflowModsChildren: new Map([["child", releaseChild]]),
-    worktreeSubagentThreads: new Set(["child"]),
+    workflowModsChildren: children,
     clearActionStationarityTurn: vi.fn(),
-    LocalSandbox: { cancelBackgroundTasksAndWait: processDrain,
-      cancelBackgroundTasks: vi.fn(), revokeGrantedAclsForRun: revoke },
+    LocalSandbox: { cancelBackgroundTasksAndWait: processDrain, revokeGrantedAclsForRun: revoke },
     closeCheckpointer: checkpoint,
     deleteThreadCheckpoint: removeCheckpoint
   }, "cleanupThread")
@@ -80,12 +87,18 @@ it.each([false, true])("the real Workflow cleanup waits Function retirement and 
   expect(processDrain).not.toHaveBeenCalled()
   if (failure) gate.reject(Error("EXIT_UNCONFIRMED"))
   else gate.resolve()
-  await observed
+  await vi.waitFor(() => expect(processDrain).toHaveBeenCalledExactlyOnceWith("child"))
   expect(releaseChild).toHaveBeenCalledOnce()
-  expect(processDrain).toHaveBeenCalledOnce()
-  expect(revoke).toHaveBeenCalledOnce()
-  expect(checkpoint).toHaveBeenCalledOnce()
-  expect(removeCheckpoint).toHaveBeenCalledOnce()
+  expect(children.has("child")).toBe(false)
+  expect(revoke).not.toHaveBeenCalled()
+  expect(checkpoint).not.toHaveBeenCalled()
+  expect(removeCheckpoint).not.toHaveBeenCalled()
+  physicalExit.resolve()
+  await observed
+  expect(revoke).toHaveBeenCalledExactlyOnceWith("child")
+  expect(checkpoint).toHaveBeenCalledExactlyOnceWith("child")
+  expect(removeCheckpoint).toHaveBeenCalledExactlyOnceWith("child")
+  expect(removeCheckpoint.mock.invocationCallOrder[0]).toBeGreaterThan(checkpoint.mock.invocationCallOrder[0])
 })
 
 it.each(["full", "read_only", "none"])(
@@ -98,15 +111,16 @@ it.each(["full", "read_only", "none"])(
     const createAgentRuntime = vi.fn<
       (options: CreateAgentRuntimeOptions) => Promise<typeof runtime>
     >(async () => runtime)
-    const children = new Set<string>()
+    const children = new Map<string, () => void>()
+    const closeChild = vi.fn()
     const construct = workflowFactory({
       createAgentRuntime,
       createWorkflowChildModsRuntime: async (_input: unknown,
         create: (bind: (lifecycle: unknown) => void) => Promise<unknown>) => ({
-        runtime: await create(() => {}), close: vi.fn()
+        runtime: await create(() => {}), close: closeChild
       }),
       creatorAccounting: undefined,
-      workflowModsChildren: new Map(),
+      workflowModsChildren: children,
       normalizedHarnessAgentsPrompt: "TEAM_REQUIRED_KNOWLEDGE",
       normalizedHarnessAgentmdLoadStatus: status,
       workspacePath: "parent-workspace",
@@ -140,7 +154,7 @@ it.each(["full", "read_only", "none"])(
       pluginOutputDir: "output",
       onFileMutation: vi.fn(),
       managedExecution: undefined,
-      worktreeSubagentThreads: children
+      autoBackgroundHandoff: false
     })
     expect(
       await construct({
@@ -157,6 +171,8 @@ it.each(["full", "read_only", "none"])(
         workspacePath: "parent-workspace",
         allowedToolNames: ["read_file", "structured_output"],
         approvalThreadId: "parent-thread",
+        shellParentThreadId: "parent-thread",
+        autoBackgroundHandoff: false,
         harnessAgentsPrompt: "TEAM_REQUIRED_KNOWLEDGE",
         agentmdLoadStatus: status,
         enableAgentsPrompt: shellAccess === "full",
@@ -167,7 +183,8 @@ it.each(["full", "read_only", "none"])(
         onFileMutation: undefined
       })
     )
-    expect(children.has("child")).toBe(true)
+    expect(children.get("child")).toBe(closeChild)
+    expect(closeChild).not.toHaveBeenCalled()
     expect(status).toHaveLength(1)
   }
 )

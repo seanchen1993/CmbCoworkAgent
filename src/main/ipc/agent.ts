@@ -48,7 +48,8 @@ import { types as nativeTypes } from "node:util"
 import { nowIsoLocal } from "../util/local-time"
 import { StreamAssistantText } from "./stream-assistant-text"
 import { yieldBeforeStreamProjection } from "./stream-projection-yield"
-import { bindNativePartialQueuedMessage, reconcileNativePartialQueuedMessages } from
+import { bindNativePartialQueuedMessage, hasNativePartialPersistenceReceipt,
+  reconcileNativePartialQueuedMessages } from
   "../agent/native-partial-persistence"
 import { AsyncKeyedLock } from "./async-keyed-lock"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
@@ -4708,8 +4709,11 @@ function persistStreamTranscriptChunk(
     rememberFunctionPlacedMessage(threadId, canonical, guardOwner)
     return canonical.id
   }
-  if (Array.isArray(payload) && getSerializedMessageRole(payload[0]) === "assistant") {
-    const metadata = messageStreamMetadata(mode, payload)
+  // The native partial receipt pins the whole frame and its persisted identity.
+  const nativePartial = hasNativePartialPersistenceReceipt(payload)
+  if (!nativePartial && mode === "messages" && Array.isArray(payload) &&
+    getSerializedMessageRole(payload[0]) === "assistant") {
+    const metadata = asPlainRecord(payload[1])
     const identity = getCurrentRunNotificationAssistantIdentity(
       threadId,
       runToken,
@@ -4719,7 +4723,8 @@ function persistStreamTranscriptChunk(
   }
   const message = persistedMessageFromStreamPayload(payload)
   if (!message) return null
-  const completedRoute = routeCurrentRunCompletedAssistantMessage(threadId, message, runToken)
+  const completedRoute = nativePartial ? undefined :
+    routeCurrentRunCompletedAssistantMessage(threadId, message, runToken)
   let streamContentMode = message.streamContentMode
   if (completedRoute) {
     message.id = completedRoute.stableId
@@ -14013,8 +14018,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             })
         }
-        const detachedShellCancelled =
-          !cancelWorkers && !controller && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
+        const detachedShellCancelled = !cancelWorkers && !controller
+          ? await LocalSandbox.cancelDetachedBackgroundTasksAndWait(threadId)
+          : false
         if (controller && !cancelWorkers) {
           try {
             stopRequestByRunController.get(controller)?.()

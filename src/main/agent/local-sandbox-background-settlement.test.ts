@@ -362,7 +362,7 @@ describe("LocalSandbox background-task settlement", () => {
     expect(raw.mock.calls[0][0]).toBe("echo foreground")
   })
 
-  it.each(["dedicated", "foreground"] as const)("scopes %s Stop to desktop shells", async (stop) => {
+  it.each(["dedicated", "foreground", "idle native"] as const)("scopes %s Stop to desktop shells", async (stop) => {
     const threadId = "shared-shell-stop-ownership"
     const sandbox = new LocalSandbox({
       rootDir: process.cwd(),
@@ -398,8 +398,13 @@ describe("LocalSandbox background-task settlement", () => {
 
       const externalPending = sandbox.executeBackground("echo external")
       await vi.waitFor(() => expect(externalSignal).toBeDefined())
+      let idleSettlement: Promise<boolean> | undefined
+      const idleReceipt = vi.fn()
       if (stop === "dedicated") {
         expect(LocalSandbox.cancelDetachedBackgroundTasks(threadId)).toBe(true)
+      } else if (stop === "idle native") {
+        idleSettlement = LocalSandbox.cancelDetachedBackgroundTasksAndWait(threadId)
+        void idleSettlement.then(idleReceipt, idleReceipt)
       } else {
         LocalSandbox.cancelBackgroundTasks(threadId, desktopOnly)
       }
@@ -415,7 +420,9 @@ describe("LocalSandbox background-task settlement", () => {
       expect(
         claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "one" }).acquired
       ).toBe(true)
+      expect(idleReceipt).not.toHaveBeenCalled()
       desktopExecution.resolve({ output: "finished", exitCode: 0, truncated: false })
+      if (idleSettlement) await expect(idleSettlement).resolves.toBe(true)
       await vi.waitFor(() =>
         expect(LocalSandbox.hasActiveBackgroundTasks(threadId, desktopOnly)).toBe(false)
       )

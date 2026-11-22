@@ -20,6 +20,7 @@ import {
   configureProjectStageDebugResolver
 } from "./project-stage-debug"
 import { ProjectStageSnapshots } from "./project-stage-snapshots"
+import { createProjectTemplate } from "./project-template"
 import { inspectProjectSource } from "./project-doctor"
 import { ProjectAuthoringSessions } from "./project-authoring-session"
 import { ProjectPreviewRegistry } from "./project-preview-registry"
@@ -54,9 +55,54 @@ import {
 } from "../../../shared/project-runtime"
 
 const cleanup: Array<() => Promise<void>> = []
+const activeCases = new Set<Promise<void>>()
+
+function ownedStageCase(run: () => Promise<void>) {
+  return () => {
+    const completion = Promise.resolve().then(run)
+    activeCases.add(completion)
+    const release = () => { activeCases.delete(completion) }
+    void completion.then(release, release)
+    return completion
+  }
+}
+
 afterEach(async () => {
+  // Vitest can time a case out while its actual Host operation still owns the fixture.
+  await Promise.allSettled(activeCases)
   for (const close of cleanup.splice(0).reverse()) await close()
 })
+
+async function stageCaseStep<T>(step: string, work: () => Promise<T>): Promise<T> {
+  const started = performance.now()
+  try {
+    return await work()
+  } catch (cause) {
+    throw Error(`${step} failed after ${Math.round(performance.now() - started)} ms`, { cause })
+  }
+}
+
+async function observeStageCaseTimeout(run: () => Promise<void>) {
+  const timeout = AbortSignal.timeout.bind(AbortSignal)
+  const deadlines: Array<{ signal: AbortSignal; origin: Error }> = []
+  const observe = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+    const signal = timeout(ms)
+    deadlines.push({ signal, origin: Error(`Stage operation deadline of ${ms} ms started here`) })
+    return signal
+  })
+  try {
+    await run()
+  } catch (error) {
+    const cause = error instanceof Error ? error.cause : undefined
+    const deadline = deadlines.find(({ signal }) =>
+      signal.aborted && (signal.reason === error || signal.reason === cause)
+    )
+    if (deadline) console.warn(deadline.origin.stack)
+    throw error
+  } finally {
+    observe.mockRestore()
+  }
+}
 
 it("keeps an unavailable snapshot store from changing ordinary command or execution decisions", async () => {
   const root = await mkdtemp(join(tmpdir(), "creator-stage-debug-"))
@@ -258,7 +304,9 @@ async function fixture(
     trialRoot = prefix + "x".repeat(parentLength - prefix.length)
   }
   sessions.configurePersistence(settings, join(root, "sources"), trialRoot)
-  let draft = await sessions.scaffold(scope, "docs", "受控文档", () => {}, "harness-lite")
+  const id = "docs"
+  const name = "受控文档"
+  let files = createProjectTemplate({ packageId: id, name, template: "harness-lite" }).files
   const userConfig = parseFunctionUserConfig({
     audience: {
       type: "string",
@@ -268,54 +316,31 @@ async function fixture(
     }
   })!
   if (nativeConfiguration) {
-    draft = await sessions.save(
-      scope,
-      {
-        id: draft.id,
-        revision: draft.revision,
-        name: draft.name,
-        files: draft.source.files.map((file) =>
-          /(?:^|\/)plugin\.json$/.test(file.path)
-            ? { ...file, text: JSON.stringify({ ...JSON.parse(file.text), userConfig }) }
-            : file
-        )
-      },
-      () => {}
+    files = files.map((file) =>
+      /(?:^|\/)plugin\.json$/.test(file.path)
+        ? { ...file, text: JSON.stringify({ ...JSON.parse(file.text), userConfig }) }
+        : file
     )
   }
   if (providerScript) {
-    draft = await sessions.save(
-      scope,
-      {
-        id: draft.id,
-        revision: draft.revision,
-        name: draft.name,
-        files: [
-          ...draft.source.files.map((file) =>
-            file.path === "devclaw.project-runtime.json"
-              ? {
-                  ...file,
-                  text: JSON.stringify(
-                    wrapProjectRuntimeManifest(JSON.parse(file.text), {
-                      apiVersion: "devclaw.extension-contract/v1",
-                      requires: [CONTEXT_HANDOFF_PROTOCOL],
-                      context: {
-                        sourceAccess: "read-only",
-                        mutableData: "host",
-                        configuration: "host-resolved",
-                        knowledge: { required: false },
-                        provider: { entry: "hooks/context.py", operations: ["session-context"] }
-                      }
-                    })
-                  )
-                }
-              : file
-          ),
-          { path: "hooks/context.py", text: providerScript }
-        ]
-      },
-      () => {}
-    )
+    files = [
+      ...files.map((file) => {
+        if (file.path !== "devclaw.project-runtime.json") return file
+        const manifest = wrapProjectRuntimeManifest(JSON.parse(file.text), {
+          apiVersion: "devclaw.extension-contract/v1",
+          requires: [CONTEXT_HANDOFF_PROTOCOL],
+          context: {
+            sourceAccess: "read-only",
+            mutableData: "host",
+            configuration: "host-resolved",
+            knowledge: { required: false },
+            provider: { entry: "hooks/context.py", operations: ["session-context"] }
+          }
+        })
+        return { ...file, text: JSON.stringify(manifest) }
+      }),
+      { path: "hooks/context.py", text: providerScript }
+    ]
   }
   if (recovery) {
     const hook = {
@@ -325,21 +350,15 @@ async function fixture(
       prompt: "Check actual stage artifacts",
       fallback: "block"
     }
-    draft = await sessions.save(
-      scope,
-      {
-        id: draft.id,
-        revision: draft.revision,
-        name: draft.name,
-        files: [
-          ...draft.source.files,
-          { path: "devclaw.stage-recovery.json", text: JSON.stringify(recovery) },
-          { path: "hooks/hooks.json", text: JSON.stringify([hook]) }
-        ]
-      },
-      () => {}
-    )
+    files = [
+      ...files,
+      { path: "devclaw.stage-recovery.json", text: JSON.stringify(recovery) },
+      { path: "hooks/hooks.json", text: JSON.stringify([hook]) }
+    ]
   }
+
+  // The fixture needs one complete source revision, then one edited candidate after the trial.
+  const draft = await sessions.save(scope, { id, name, revision: 0, files }, () => {})
   if (providerScript) {
     const { report } = inspectProjectSource(draft.source)
     expect(report.valid, JSON.stringify(report.diagnostics)).toBe(true)
@@ -698,12 +717,12 @@ it("requires the original baseline for child branches while preserving repeated 
   expect(f.service.get(f.original.projectId)).toEqual(f.original)
 }, 15000)
 
-it("creates a native prompt-Hook branch without borrowing original approvals or dropping the declaration", async () => {
-  const f = await fixture(false, undefined, () => {}, {
+it("creates a native prompt-Hook branch without borrowing original approvals or dropping the declaration", ownedStageCase(async () => {
+  const f = await stageCaseStep("Prepare prompt-Hook fixture", () => fixture(false, undefined, () => {}, {
     apiVersion: "devclaw.stage-recovery/v1",
     hookExecution: "prompt-only",
     externalEffects: "deny"
-  })
+  }))
   const plan = await f.prepare()
   expect(plan.recovery).toMatchObject({ profile: "prompt-only", requiresNetworkApproval: false })
   const result = await f.debug.create(f.context, {
@@ -717,7 +736,7 @@ it("creates a native prompt-Hook branch without borrowing original approvals or 
   expect(
     await readFile(join(f.packages.read(branch.pluginDigest).root, "hooks/hooks.json"), "utf8")
   ).toContain("Check actual stage artifacts")
-}, 15000)
+}), 15000)
 
 it("forks a real configuration-only Host package through the complete native snapshot and branch service", async () => {
   const f = await fixture(
@@ -778,8 +797,8 @@ it("forks a real configuration-only Host package through the complete native sna
 
 it.runIf(process.platform === "win32")(
   "runs an independently approved real context script on the first trial and again on a frozen stage branch",
-  async () => {
-    const f = await realContextFixture(200)
+  ownedStageCase(() => observeStageCaseTimeout(async () => {
+    const f = await stageCaseStep("Run original native context trial", () => realContextFixture(200))
     expect(f.original.workspace.length).toBe(200)
     expect(f.original.workspace.startsWith("\\\\?\\")).toBe(false)
     const originalOperations = f.service.operations(f.original.projectId)
@@ -788,13 +807,13 @@ it.runIf(process.platform === "win32")(
         (operation) => operation.approval?.contextProviderApproval?.allowNetworkSideEffects
       )
     ).toBe(true)
-    const plan = await f.prepare()
-    const created = await f.debug.create(f.context, {
+    const plan = await stageCaseStep("Prepare frozen branch", f.prepare)
+    const created = await stageCaseStep("Create frozen branch", () => f.debug.create(f.context, {
       threadId: f.scope.threadId,
       preparationId: plan.id,
       expectedDigest: plan.candidateDigest,
       recoveryApproval: { policyDigest: plan.recovery!.policyDigest, allowNetworkSideEffects: true }
-    })
+    }))
     const branch = f.service.get(created.projectId)!
     const operation = f.service.prepare({
       projectId: branch.projectId,
@@ -825,12 +844,13 @@ it.runIf(process.platform === "win32")(
         allowNetworkSideEffects: true
       }
     })
-    expect((await f.service.start(operation.operationId)).status).toBe("succeeded")
+    expect((await stageCaseStep("Run approved frozen branch", () =>
+      f.service.start(operation.operationId))).status).toBe("succeeded")
     expect(f.service.operations(f.original.projectId)).toEqual(originalOperations)
     expect(new StageRecoveryHookJournal(f.settings).list(branch.projectId)).toMatchObject([
       { phase: "settled", exitCode: 0 }
     ])
-  },
+  })),
   40000
 )
 

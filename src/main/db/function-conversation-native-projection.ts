@@ -51,6 +51,7 @@ type SqlRow = Record<string, NativeSqliteValue>
 interface Baseline {
   readonly columns: FunctionConversationProjectionColumns | undefined
   readonly fragments: readonly SqlRow[]
+  readonly activeFragmentGeneration: string | undefined
   readonly state: SqlRow | undefined
 }
 interface Captured {
@@ -173,11 +174,24 @@ function digest(columns: FunctionConversationProjectionColumns): string {
 function parts(db: NativeSqliteAdapter, threadId: string, uuid: string) {
   const fragments = query(db, `SELECT * FROM thread_message_fragments
     WHERE thread_id=? AND message_id=? ORDER BY fragment_id`, [threadId, uuid])
+  const hasGeneration = fragments.length > 0 && Object.hasOwn(fragments[0], "generation")
   for (const row of fragments) {
-    if (Object.keys(row).length !== 5 || row.thread_id !== threadId || row.message_id !== uuid ||
-      typeof row.content_text !== "string") fail()
+    if (Object.keys(row).length !== (hasGeneration ? 6 : 5) ||
+      row.thread_id !== threadId || row.message_id !== uuid || typeof row.content_text !== "string" ||
+      (hasGeneration && typeof row.generation !== "string")) fail()
     integer(row.fragment_id); integer(row.created_at)
     Object.freeze(row)
+  }
+  let activeFragmentGeneration: string | undefined
+  if (hasGeneration) {
+    const schema = query(db, `SELECT 1 AS supported FROM pragma_table_xinfo('thread_message_fragments')
+      WHERE name='generation' AND upper(type)='TEXT' AND "notnull"=1
+        AND dflt_value=quote('') AND pk=0 AND hidden=0`)[0]
+    if (!schema) fail()
+    const published = query(db, `SELECT fragment_generation FROM thread_messages
+      WHERE thread_id=? AND message_id=?`, [threadId, uuid])[0]?.fragment_generation
+    if (typeof published !== "string") fail()
+    activeFragmentGeneration = published
   }
   const states = query(db, `SELECT * FROM thread_message_fragment_states
     WHERE thread_id=? AND message_id=?`, [threadId, uuid])
@@ -187,10 +201,11 @@ function parts(db: NativeSqliteAdapter, threadId: string, uuid: string) {
     if (Object.keys(state).length !== 4 || state.thread_id !== threadId || state.message_id !== uuid) fail()
     integer(state.total_chars); integer(state.updated_at); Object.freeze(state)
   }
-  return { fragments: Object.freeze(fragments), state }
+  return { fragments: Object.freeze(fragments), activeFragmentGeneration, state }
 }
 function sameBaseline(a: Baseline, b: Baseline): boolean {
   return (a.columns ? !!b.columns && digest(a.columns) === digest(b.columns) : !b.columns) &&
+    a.activeFragmentGeneration === b.activeFragmentGeneration &&
     JSON.stringify(a.fragments) === JSON.stringify(b.fragments) &&
     JSON.stringify(a.state) === JSON.stringify(b.state)
 }
@@ -237,7 +252,8 @@ export function createFunctionConversationNativeProjectionAccess(input: {
       metadata: typeof row.metadata === "string" ? row.metadata : null }, incarnation))
       fail("MODS_CONVERSATION_THREAD_CHANGED")
   }
-  const read = (facts: FunctionNativeProjectionFacts): Baseline => {
+  // The published generation, raw fragments and row must describe one SQLite snapshot.
+  const read = (facts: FunctionNativeProjectionFacts): Baseline => database.withReadSnapshot(() => {
     const columns = readFunctionConversationRawProjection(database, threadId, facts.uuid)
     if (columns) {
       if (columns.function_row_json !== null) fail("MODS_CONVERSATION_MIGRATION_REQUIRED")
@@ -246,7 +262,7 @@ export function createFunctionConversationNativeProjectionAccess(input: {
     const fragments = parts(database, threadId, facts.uuid)
     if (!columns && (fragments.fragments.length || fragments.state)) fail()
     return { columns, ...fragments }
-  }
+  })
   const assertProvider = (facts: FunctionNativeProjectionFacts) => {
     if (query(database, `SELECT message_id FROM thread_messages WHERE thread_id=? AND role=?
       AND COALESCE(provider_source_id,message_id)=? AND COALESCE(provider_occurrence,1)=?

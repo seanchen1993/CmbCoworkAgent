@@ -5,7 +5,7 @@ import { HookHaltError } from "../hooks/halt"
 import { createShellTaskMonitorTools, SHELL_TASK_OWNER_CONFIG_KEY } from "./shell-monitor-tool"
 import { ShellTaskMonitor, type ShellTaskSnapshot } from "./shell-task-monitor"
 
-type Backend = Parameters<typeof createShellTaskMonitorTools>[0]
+type Backend = Exclude<Parameters<typeof createShellTaskMonitorTools>[0], "metadata-only">
 
 const completed: ShellTaskSnapshot = {
   completed: true,
@@ -37,6 +37,15 @@ function createBackend() {
 }
 
 describe("shell monitor tools", () => {
+  it("exposes the same monitor definitions without granting execution to metadata reads", async () => {
+    const tools = createShellTaskMonitorTools("metadata-only")
+    expect(tools.map((tool) => tool.name)).toEqual(["monitor", "task_output"])
+    for (const tool of tools)
+      await expect(tool.invoke({ task_id: "task" })).rejects.toMatchObject({
+        code: "MODS_TOOL_METADATA_ONLY"
+      })
+  })
+
   it("passes each tool's name to hooks and keeps the compatibility wait default", async () => {
     const backend = createBackend()
     const [monitor, taskOutput] = createShellTaskMonitorTools(backend)

@@ -359,7 +359,11 @@ function originalIpcCompletion(f: Awaited<ReturnType<typeof reviewGraphFixture>>
     (statement) =>
       ts.isFunctionDeclaration(statement) && statement.name?.text === "settlePhysicalAgentRun"
   )
-  if (!completionGate || !done || !settlement) throw Error("ORIGINAL_IPC_COMPLETION_REQUIRED")
+  const pendingKey = source.statements.find(
+    (statement) => ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "pendingStreamTranscriptKey"
+  )
+  if (!completionGate || !done || !settlement || !pendingKey) throw Error("ORIGINAL_IPC_COMPLETION_REQUIRED")
   const controller = f.controller,
     events: unknown[] = []
   const bindings = {
@@ -397,6 +401,7 @@ function originalIpcCompletion(f: Awaited<ReturnType<typeof reviewGraphFixture>>
     agentRunExecutionContextStorage: { getStore: () => undefined },
     flushPendingStreamTranscriptMessages: async () => {},
     discardStreamTranscriptToolCallAccumulators: () => {},
+    streamTranscriptBoundaries: new Map(),
     invalidateCurrentRunMessagePreparer: () => {},
     activeRuns: new Map([[f.scope.threadId, controller]]),
     activeRunSettled: new Map(),
@@ -414,6 +419,7 @@ function originalIpcCompletion(f: Awaited<ReturnType<typeof reviewGraphFixture>>
     [
       completionGate.getText(source),
       ...done.map((statement) => statement.getText(source)),
+      pendingKey.getText(source),
       settlement.getText(source),
       "return settlePhysicalAgentRun"
     ].join("\n"),

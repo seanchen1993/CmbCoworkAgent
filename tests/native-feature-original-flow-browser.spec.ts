@@ -186,6 +186,7 @@ async function main() {
             const state={accountRevision:0,threads:[{thread_id:'history-thread',title:'归档历史会话',metadata:{workspacePath:'C:/isolated',harnessFeature:{projectId:'container',slug:'request-a'}}}],models:[],installedPlugins:[],createThread:async()=>{throw Error('UNEXPECTED_NEW_THREAD')},selectThread:async id=>{window.stageFixture.selectedHistoryThreads.push(id)}};
             export const useAppStore=selector=>selector(state);useAppStore.getState=()=>state;useAppStore.subscribe=()=>()=>{};
             export const isThreadDeletionPending=()=>false,isThreadRetired=()=>false;
+            export const adoptThreadSearchSummary=()=>{throw Error("Unexpected cross-thread search in feature detail fixture")};
           `
           }))
         }

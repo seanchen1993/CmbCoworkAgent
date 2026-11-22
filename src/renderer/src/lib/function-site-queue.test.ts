@@ -127,6 +127,28 @@ it("keeps unqualified and optional history reads in their existing background la
   expect(functionSitePriority("ChatHeader", false, true)).toBe("interactive")
 })
 
+it("keeps cold decorations and the hidden probe from filling the visible transcript lanes", async () => {
+  const queue = createFunctionSiteQueue()
+  const gate = Promise.withResolvers<void>()
+  const started: string[] = []
+  let initialHistory = true
+  const read = (component: Parameters<typeof functionSitePriority>[0], visible = false) =>
+    queue.run(() => true, async () => { started.push(component); await gate.promise },
+      () => functionSitePriority(component, visible, true, initialHistory))
+
+  const jobs = [read("SessionMode"), read("PromptHint"), read("ChatHeader"), read("AbovePrompt"),
+    read("UserMessage"), read("AssistantMessage", true), read("AskUserQuestion", true)]
+  expect(started).toEqual(["SessionMode", "AssistantMessage", "AskUserQuestion"])
+  initialHistory = false
+  queue.refresh()
+  await Promise.resolve()
+  expect(started).toEqual(["SessionMode", "AssistantMessage", "AskUserQuestion", "PromptHint"])
+
+  gate.resolve()
+  await Promise.all(jobs)
+  expect(started).toHaveLength(jobs.length)
+})
+
 it("promotes newly visible rows and demotes rows scrolled away while waiting", async () => {
   const queue = createFunctionSiteQueue()
   let release!: () => void

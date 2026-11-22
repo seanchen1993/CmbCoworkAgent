@@ -97,6 +97,12 @@ async function boot() {
     ipcMain.handle("open-login-page", () => undefined)
   })
   page = app.windows()[0]
+  await page.addLocatorHandler(
+    page.getByRole("dialog", { name: "把助手变成适合你的工作台" }),
+    async (intro) => {
+      await intro.getByRole("button", { name: "先自己试试", exact: true }).click()
+    }
+  )
   await page.waitForFunction(() => Boolean(window.api?.mods))
   await openModsSettings(page)
 }

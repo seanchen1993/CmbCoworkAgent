@@ -1,5 +1,5 @@
 import { ClawStore } from "../claw-store"
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
@@ -20,6 +20,34 @@ import { createModModelBoundary } from "../../agent/mods-model-boundary"
 import { FunctionTurnLifecycle, type FunctionTurnLifecycleHost } from "./turn-lifecycle"
 
 const cleanups: Array<() => Promise<void>> = []
+
+it("reuses proved installed code across ordinary guests without reusing a stale grant", async () => {
+  const f = await fixture()
+  await f.approve()
+  const previousLoads = f.loads()
+  const compile = vi.spyOn(functionLoader, "compileFunctionPlugin")
+  try {
+    expect(await f.manager.commands(f.root, "first")).not.toHaveLength(0)
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(await f.manager.commands(f.root, "second")).not.toHaveLength(0)
+    expect(f.loads()).toBe(previousLoads + 2)
+    expect(compile).toHaveBeenCalledTimes(1)
+
+    const path = join(f.plugin, "hooks", "register.ts")
+    const original = await readFile(path, "utf8")
+    const previous = await stat(path)
+    const updated = original.replaceAll("claw-info", "claw-test")
+    expect(updated).not.toBe(original)
+    expect(Buffer.byteLength(updated)).toBe(Buffer.byteLength(original))
+    await writeFile(path, updated)
+    await utimes(path, previous.atime, previous.mtime)
+    expect(await f.manager.commands(f.root, "unapproved")).toEqual([])
+    expect(f.loads()).toBe(previousLoads + 2)
+    expect(compile).toHaveBeenCalledTimes(2)
+  } finally {
+    compile.mockRestore()
+  }
+})
 
 it("reuses proved status compilation while reading each workspace grant afresh", async () => {
   const f = await fixture()

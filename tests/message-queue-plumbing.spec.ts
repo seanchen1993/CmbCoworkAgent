@@ -80,33 +80,43 @@ const packageJson = read("package.json")
 
 // ── Middleware placement (solo/team/workflow isolation) ─────────────────────────
 
+const queueMiddlewareCalls: ts.CallExpression[] = []
+const runtimeSource = ts.createSourceFile("runtime.ts", runtime, ts.ScriptTarget.Latest, true)
+function collectQueueMiddlewareCalls(node: ts.Node): void {
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+    node.expression.text === "createCurrentRunMessageQueueMiddleware") queueMiddlewareCalls.push(node)
+  ts.forEachChild(node, collectQueueMiddlewareCalls)
+}
+collectQueueMiddlewareCalls(runtimeSource)
+
 function testMiddlewareOnlyOnMainStack(): void {
   // Called exactly once — on the main-agent stack. Never added to a subagent stack
   // (task subagents, workflow leaves, coordinator workers), so a foreground steer
   // can't leak into a background subagent's loop.
-  assertOccurrences(
-    runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
-    1,
-    "middleware invoked once (main stack only)"
-  )
+  assert(queueMiddlewareCalls.length === 1, "middleware invoked once on the main stack")
+}
+
+function testScopedRecoveryReceivesPhysicalRunOwnership(): void {
+  const [owner, , preparation] = queueMiddlewareCalls[0]?.arguments ?? []
+  assert(owner?.getText(runtimeSource) === "currentRunMessageQueueOwnerToken",
+    "each middleware closure is bound to its physical run token")
+  assertMatches(preparation?.getText(runtimeSource) ?? "",
+    /prepareLegacyScopedProviderHistory\(\s*threadId, scopedTurn, currentRunMessageQueueOwnerToken, signal\)/,
+    "scoped recovery uses the physical run token and model cancellation signal")
+  assertIncludes(queueModule,
+    "prepareScopedProviderHistory?.(threadId, scopedTurn, request.runtime?.signal)",
+    "the model runtime forwards its cancellation signal to scoped recovery")
 }
 
 function testMiddlewareBeforeSummarizationAndHITL(): void {
-  // Slice from the (single) main-stack invocation — summarization also appears in
-  // the subagent stack earlier in the file, so a whole-file order check is wrong.
-  const idx = runtime.indexOf(
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)"
-  )
-  assert(idx >= 0, "queue middleware present on the main stack")
-  const after = runtime.slice(idx)
+  const call = queueMiddlewareCalls[0]
+  assert(call && ts.isArrayLiteralExpression(call.parent), "queue middleware is in the main stack")
+  const stack = (call.parent as ts.ArrayLiteralExpression).elements
+  const index = stack.indexOf(call)
   // beforeModel must run before summarization (injected turns participate in
   // context management): the queue middleware immediately precedes it in the array.
-  assertMatches(
-    after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*mainSummarizationController\.middleware/,
-    "queue middleware immediately precedes summarization on the main stack"
-  )
+  assert(stack[index + 1]?.getText(runtimeSource) === "mainSummarizationController.middleware",
+    "queue middleware immediately precedes summarization on the main stack")
   assertIncludes(
     runtime,
     "const mainSummarizationController = createCmbContextController(mainSummarizationOptions)",
@@ -114,12 +124,8 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
   // injection.
-  assertSourceOrder(
-    after,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
-    "humanInTheLoopMiddleware",
-    "queue middleware before HITL on the main stack"
-  )
+  assert(stack.slice(index + 1).some(node => node.getText(runtimeSource).includes("humanInTheLoopMiddleware")),
+    "queue middleware before HITL on the main stack")
 }
 
 function testQueueModuleIsElectronFree(): void {
@@ -714,11 +720,6 @@ function testClearOnEveryRunExit(): void {
     5,
     "setup failures and shutdown races both roll back continuation reservations"
   )
-  assertIncludes(
-    runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
-    "each middleware closure is bound to its physical run token"
-  )
   // Hook accounting also binds the same physical owner before runtime creation.
   // Check the three actual runtime factories rather than unrelated whole-file text.
   const factoryNames = new Set([
@@ -1166,7 +1167,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   assertSourceOrder(
     transcriptFlushBody,
     "try {",
-    "const resolved = resolveStreamTranscriptFlush({",
+    "resolveStreamTranscriptFlush({",
     "stream batches enter the run-scoped identity resolver inside the restoration boundary"
   )
   assertSourceOrder(
@@ -1175,6 +1176,9 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "getThreadMessageIdentityContext(",
     "the resolver receives both the run identity and a bounded durable identity context"
   )
+  assertIncludes(transcriptFlushBody,
+    "const resolved = boundaryId ? withThreadMessageIdentitySnapshot(resolve) : resolve()",
+    "scoped provider lookups share the SQLite identity snapshot")
   assertNotIncludes(
     transcriptFlushBody,
     "getThreadMessages(threadId)",
@@ -1248,7 +1252,9 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "non-strict shutdown flush reports remaining evidence without discarding it"
   )
   const resetStart = agentIpc.indexOf("function resetFailedStreamAttempt(")
-  const resetBody = agentIpc.slice(resetStart, resetStart + 1200)
+  const resetEnd = agentIpc.indexOf("interface StreamDisconnectRetryResult", resetStart)
+  assert(resetStart >= 0 && resetEnd > resetStart, "stream retry reset helper has a complete boundary")
+  const resetBody = agentIpc.slice(resetStart, resetEnd)
   assertSourceOrder(
     resetBody,
     "if (options.preservePendingTranscript)",
@@ -1257,9 +1263,9 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertSourceOrder(
     resetBody,
-    "discardPendingStreamTranscriptMessages(threadId, runToken)",
-    "if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return",
-    "an obsolete run clears only its local tracking before owner validation"
+    "if (!isCurrentRunMessageQueueOwner(threadId, runToken)) {",
+    "rollback = attempt?.rollback()",
+    "an obsolete run clears its local tracking before any durable rollback"
   )
   assertSourceOrder(
     resetBody,
@@ -2665,12 +2671,12 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   )
   const streamPersistBody = agentIpc.slice(streamPersistStart, streamPersistEnd)
   const canonicalPersistStart = streamPersistBody.indexOf("if (canonical) {")
-  const canonicalPersistEnd = streamPersistBody.indexOf(
-    "const message = persistedMessageFromStreamPayload(payload)",
-    canonicalPersistStart
-  )
+  const canonicalReturn = streamPersistBody.indexOf("return canonical.id", canonicalPersistStart)
+  const canonicalPersistEnd = streamPersistBody.indexOf("\n  }", canonicalReturn)
+  const ordinaryPersistStart = streamPersistBody.indexOf("persistedMessageFromStreamPayload(payload)")
   assert(
-    canonicalPersistStart >= 0 && canonicalPersistEnd > canonicalPersistStart,
+    canonicalPersistStart >= 0 && canonicalReturn > canonicalPersistStart &&
+      canonicalPersistEnd > canonicalReturn && ordinaryPersistStart > canonicalPersistEnd,
     "the canonical branch ends before ordinary message conversion"
   )
   const canonicalPersistBody = streamPersistBody.slice(canonicalPersistStart, canonicalPersistEnd)
@@ -3204,6 +3210,7 @@ function main(): void {
   const tests = [
     testMiddlewareOnlyOnMainStack,
     testMiddlewareBeforeSummarizationAndHITL,
+    testScopedRecoveryReceivesPhysicalRunOwnership,
     testQueueModuleIsElectronFree,
     testAfterModelSkipsOnToolCalls,
     testQueueIpcRequiresActiveRun,

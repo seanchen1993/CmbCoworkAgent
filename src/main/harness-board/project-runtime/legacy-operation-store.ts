@@ -245,7 +245,7 @@ export class LegacyOperationStore {
   protectsProject(projectId: string): boolean {
     if (!this.optInIndex) return false
     // A missing binding is insufficient when another instance could have already published opt-in.
-    return this.optInIndex.read()?.has(projectId) !== false
+    return this.optInIndex.readGeneration(projectId) !== null
   }
   getBinding(projectId: string): LegacyProjectRuntimeBinding | undefined {
     const row = this.db
@@ -254,7 +254,7 @@ export class LegacyOperationStore {
       .get(projectId)
     if (!row) return undefined
     if (this.optInIndex && (typeof row.generation !== "string" ||
-      this.optInIndex.read()?.get(projectId) !== row.generation))
+      this.optInIndex.readGeneration(projectId) !== row.generation))
       throw new LegacyBindingGenerationError()
     return binding(JSON.parse(String(row.data)))
   }

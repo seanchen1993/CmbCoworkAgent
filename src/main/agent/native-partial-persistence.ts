@@ -96,6 +96,11 @@ export function bindNativePartialQueuedMessage(payload: unknown, message: Queued
   Reflect.apply(set, queued, [message, Object.freeze({ ...receipt, digest: queuedFingerprint(message) })])
 }
 
+/** Routing classification only. The queue binding still verifies the complete original frame. */
+export function hasNativePartialPersistenceReceipt(payload: unknown): boolean {
+  return read(wires, payload) !== undefined
+}
+
 /** Retire only this exact authenticated partial after its full canonical seal is verified. */
 export function reconcileNativePartialQueuedMessage(message: QueuedStreamTranscriptMessage,
   threadId: string, runId: string): QueuedStreamTranscriptMessage | undefined {

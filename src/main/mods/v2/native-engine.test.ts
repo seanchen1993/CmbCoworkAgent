@@ -1,4 +1,4 @@
-import { expect, it } from "vitest"
+import { expect, it, vi } from "vitest"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { isModObject } from "../../../shared/mods/v2/contracts"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
@@ -25,9 +25,7 @@ it.each(["AbovePrompt", "ChatHeader"] as const)("pins %s geometry through native
 
 it("rechecks publication policy on a later snapshot of the same drawing", async () => {
   const drawing = new FunctionNativeDrawing(input(), () => {})
-  drawing.beginPublication()
-  await drawing.protect(engine(0), unchanged)
-  drawing.beginPublication()
+  await drawing.protect(engine(0), unchanged, "begin")
   let called = false
   const safe = await drawing.protect(engine(0), async (value) => {
     called = true
@@ -35,9 +33,21 @@ it("rechecks publication policy on a later snapshot of the same drawing", async 
       ...entry,
       props: { ...(entry.props as ModObject), text: "changed safe policy" }
     }))
-  })
+  }, "begin")
   expect(called).toBe(true)
   expect(safe.entries[0].props.text).toBe("changed safe policy")
+})
+
+it("uses one admission check before initial publication and rechecks after the publisher yields", async () => {
+  const check = vi.fn()
+  const drawing = new FunctionNativeDrawing(input(), check)
+  check.mockClear()
+  await expect(drawing.protect(engine(0), async (value) => {
+    expect(check).toHaveBeenCalledTimes(1)
+    check.mockImplementation(() => { throw Error("MODS_REVOKED") })
+    return value
+  }, "begin")).rejects.toThrow("MODS_REVOKED")
+  expect(check).toHaveBeenCalledTimes(2)
 })
 
 it("keeps legacy cosmetic changes while validating their actual presentation schema", () => {

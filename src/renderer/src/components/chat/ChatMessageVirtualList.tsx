@@ -37,6 +37,7 @@ import { CHAT_VIRTUAL_OVERSCAN } from "./chat-virtual-overscan"
 import { installChatDetachedLayoutAnchor } from "./chat-detached-layout-anchor"
 import { acquireChatExternalScrollAnchor } from "./chat-external-scroll-anchor"
 import { ChatVirtualPrependLayout, type ChatVirtualPrependLayoutContext } from "./chat-virtual-prepend-layout"
+import { isChatRowPresented } from "./chat-row-presentation"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
   ChatScrollVirtualRangeRef,
@@ -160,6 +161,7 @@ export interface ChatMessageVirtualListProps {
    * only when its virtual list mounts; subsequent follow/restore decisions belong to the parent.
    */
   initialTopMostItemIndex?: ChatMessageVirtualInitialLocation
+  deferInitialHistoryReads?: boolean
   onInitialVirtualItemsRendered: () => void
   onContentHeightChanged: () => void
   onAtBottomStateChange: (atBottom: boolean) => void
@@ -418,6 +420,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   virtuosoRef,
   navigatorVirtualRangeRef,
   initialTopMostItemIndex,
+  deferInitialHistoryReads,
   historyWindowRevision,
   onInitialVirtualItemsRendered,
   onContentHeightChanged,
@@ -591,6 +594,47 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     [initialTopMostItemIndex, visibleMessageIndexes.length]
   )
 
+  const [positionedHistoryTail, setPositionedHistoryTail] = useState<{
+    windowKey: string; messageId: string
+  }>()
+  const initialTailId = deferInitialHistoryReads &&
+    typeof resolvedInitialTopMostItemIndex === "object" &&
+    resolvedInitialTopMostItemIndex.index === "LAST"
+    ? messages[visibleMessageIndexes.at(-1) ?? -1]?.id : undefined
+  const waitingForInitialPosition = Boolean(initialTailId) &&
+    positionedHistoryTail?.windowKey !== virtualWindow.key
+  const scheduleInitialHistoryPositionRef = useRef<(() => void) | undefined>(undefined)
+  const checkInitialHistoryPosition = useCallback(() =>
+    scheduleInitialHistoryPositionRef.current?.(), [])
+  useLayoutEffect(() => {
+    if (!waitingForInitialPosition || !initialTailId || !customScrollParent) return
+    const viewport = customScrollParent
+    let frame: number | undefined
+    const check = (): void => {
+      frame = undefined
+      const tail = contentMessageRefs.current.get(initialTailId)
+      if (!tail || !viewport.contains(tail) || !isChatRowPresented(tail)) return
+      const row = tail.getBoundingClientRect()
+      const view = viewport.getBoundingClientRect()
+      // A protected placeholder already provides usable geometry. Requiring
+      // its body here would deadlock with the display read admission.
+      if (row.width > 0 && row.height > 0 && row.bottom > view.top && row.top < view.bottom &&
+        row.right > view.left && row.left < view.right)
+        setPositionedHistoryTail({ windowKey: virtualWindow.key, messageId: initialTailId })
+    }
+    const schedule = (): void => {
+      frame ??= requestAnimationFrame(check)
+    }
+    scheduleInitialHistoryPositionRef.current = schedule
+    viewport.addEventListener("scroll", schedule, { passive: true })
+    schedule()
+    return () => {
+      scheduleInitialHistoryPositionRef.current = undefined
+      viewport.removeEventListener("scroll", schedule)
+      if (frame !== undefined) cancelAnimationFrame(frame)
+    }
+  }, [contentMessageRefs, customScrollParent, initialTailId, virtualWindow.key, waitingForInitialPosition])
+
   const handleVirtualRangeChanged = useCallback(
     (range: ListRange): void => {
       navigatorVirtualRangeRef.current = resolveChatScrollVirtualRangeSnapshot(
@@ -599,11 +643,13 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         range,
         virtualWindow.firstItemIndex
       )
+      checkInitialHistoryPosition()
     },
-    [messages, navigatorVirtualRangeRef, visibleMessageIndexes, virtualWindow.firstItemIndex]
+    [checkInitialHistoryPosition, messages, navigatorVirtualRangeRef, visibleMessageIndexes, virtualWindow.firstItemIndex]
   )
 
   const handleItemsRendered = (): void => {
+    checkInitialHistoryPosition()
     if (initialVirtualItemsRenderedThreadRef.current === threadId) return
     initialVirtualItemsRenderedThreadRef.current = threadId
     onInitialVirtualItemsRendered()
@@ -853,7 +899,11 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         totalListHeightChanged={onContentHeightChanged}
         context={{ header: <>{historyHeader}<FunctionPlacedRows threadId={threadId} rows={placedRows.start} /></>, footer: footerContent,
           windowKey: virtualWindow.key, firstItemIndex: virtualWindow.firstItemIndex,
-          scrollParent: customScrollParent, virtuosoRef }}
+          scrollParent: customScrollParent, virtuosoRef,
+          initialHistoryReadPending: waitingForInitialPosition,
+          positionedHistoryTail: !waitingForInitialPosition && initialTailId === positionedHistoryTail?.messageId
+            ? positionedHistoryTail : undefined,
+          checkInitialHistoryPosition }}
         components={chatVirtualListComponents}
         itemContent={(_absoluteIndex, row) => {
           // Virtuoso can expose its previous measured row during the prepend transaction.

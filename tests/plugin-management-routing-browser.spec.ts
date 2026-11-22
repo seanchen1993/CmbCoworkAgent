@@ -54,6 +54,20 @@ async function main() {
             },
             (args) => ({ path: args.path, namespace: "fixture" })
           )
+          builder.onResolve({ filter: /^@\/lib\/thread-context$/ }, (args) =>
+            args.importer.endsWith("ProjectPluginDevelopmentGuide.tsx")
+              ? { path: "project-plugin-shortcut-thread-context", namespace: "fixture" }
+              : undefined
+          )
+          builder.onLoad(
+            { filter: /^project-plugin-shortcut-thread-context$/, namespace: "fixture" },
+            () => ({
+              loader: "js",
+              contents: `export const useThreadContext = () => ({
+                getThreadActions() { throw Error("Shortcut launch is outside this fixture") }
+              });`
+            })
+          )
           builder.onLoad({ filter: /.*/, namespace: "fixture" }, (args) => ({
             resolveDir: process.cwd(),
             loader: "tsx",

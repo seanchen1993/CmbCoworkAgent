@@ -18,7 +18,10 @@ function fixture() {
   let incarnation = "first",
     database: object = {},
     enabled = false,
-    protection = true
+    protection = true,
+    direct = true,
+    sourceEnabled = false,
+    usage: "chat" | "project" = "chat"
   let publisher = async (value: ModJson): Promise<ModJson> =>
     JSON.parse(JSON.stringify(value).replaceAll("PRIVATE", "SAFE")) as ModJson
   const publish = vi.fn((_workspace: string, value: ModJson) => publisher(value))
@@ -41,10 +44,11 @@ function fixture() {
   const manager = new FunctionModsManager(
     store,
     {
-      plugins: () => [],
+      plugins: () => [{ id: "sample", name: "Sample", path: root, enabled: sourceEnabled }],
       enabled: () => enabled,
       protects: () => protection,
-      captureDisplayScope: capture,
+      captureDisplayScope: () => direct ? capture() : undefined,
+      capabilityContext: () => ({ usage, identity: "scope" }),
       captureSiteGuard: () => capture().assertCurrent,
       changed: vi.fn(),
       publish
@@ -84,9 +88,30 @@ function fixture() {
     },
     protect(value: boolean) {
       protection = value
+    },
+    setSource(value: boolean) {
+      sourceEnabled = value
+    },
+    setScope(value: typeof usage, directScope: boolean) {
+      usage = value
+      direct = directScope
     }
   }
 }
+
+it("qualifies only direct ordinary history with an empty enabled inventory without starting a guest", () => {
+  const f = fixture()
+  const qualify = () => f.manager.canUseNativeChatHistory(f.root, "thread")
+  expect(qualify()).toBe(true)
+  f.setSource(true)
+  expect(qualify()).toBe(false)
+  f.setSource(false)
+  f.setScope("chat", false)
+  expect(qualify()).toBe(false)
+  f.setScope("project", true)
+  expect(qualify()).toBe(false)
+  expect(f.load).not.toHaveBeenCalled()
+})
 
 it("publishes protected passive native text with no owner or guest and reuses valid data", async () => {
   const f = fixture()

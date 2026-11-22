@@ -2,7 +2,9 @@ import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import { addMessages } from "@langchain/langgraph"
 import type { BrowserWindow } from "electron"
+import { createHash } from "node:crypto"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { DatabaseSync } from "node:sqlite"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, it, vi } from "vitest"
@@ -31,10 +33,21 @@ import {
   GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
 } from "../agent/goals/internal-prompt"
 import { goalManager } from "../agent/goals/runtime"
-import { createPhysicalScopedGateRecoveryMessage } from "../agent/runtime"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
+import {
+  createPhysicalScopedGateRecoveryMessage,
+  prepareLegacyScopedProviderHistory
+} from "../agent/runtime"
+import { closeCheckpointRuntimeProjectionWorker } from "../checkpointer/runtime-projection-client"
+import { captureStockLegacyTranscriptSource } from "../checkpointer/legacy-stock-transcript-admission"
+import { bootstrapStockLegacyCheckpointTranscript } from "../checkpointer/legacy-stock-transcript-store"
+import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "../checkpointer/runtime-projection-protocol"
 import { bootstrapLegacyCheckpointTranscript } from "../checkpointer/runtime-projection-store"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import * as db from "../db"
+import { captureThreadIncarnation } from "../services/thread-incarnation"
+import { ModsManager, setModsManager } from "../mods/manager"
+import { DEFAULT_MOD_POLICY } from "../mods/policy"
 import {
   createPhysicalRunHiddenUserMessage,
   persistAndForwardPhysicalRunStreamChunk
@@ -45,7 +58,7 @@ import {
   createStreamDataSerializer
 } from "./stream-data-serialization"
 
-const storage = vi.hoisted(() => ({ path: "" }))
+const storage = vi.hoisted(() => ({ path: "", checkpointPath: "" }))
 vi.mock("electron", async (importOriginal) => ({
   ...(await importOriginal<typeof import("electron")>()),
   BrowserWindow: { getAllWindows: () => [] }
@@ -53,6 +66,7 @@ vi.mock("electron", async (importOriginal) => ({
 vi.mock("../storage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../storage")>()),
   getDbPath: () => storage.path,
+  getThreadCheckpointPath: () => storage.checkpointPath,
   getMemorySessionOptInMigrationState: () => ({ migrated: true })
 }))
 
@@ -60,6 +74,7 @@ const window = {
   isDestroyed: () => false,
   webContents: { isDestroyed: () => false, send: vi.fn() }
 } as unknown as BrowserWindow
+
 
 it("routes physical hidden inputs through the durable boundary helper", () => {
   const agentSource = readFileSync(join(__dirname, "agent.ts"), "utf8")
@@ -659,7 +674,7 @@ it.each([false, true])("prepares provider history and respects the run owner (Go
   setCurrentRunMessageQueueOwner(threadId, runToken)
   try {
     const initial = wrapModelCall(request, handler)
-    expect(prepare).toHaveBeenCalledWith(threadId, goalTurn)
+    expect(prepare).toHaveBeenCalledWith(threadId, goalTurn, undefined)
     expect(handler).not.toHaveBeenCalled()
     finishPreparation()
     await initial
@@ -674,3 +689,229 @@ it.each([false, true])("prepares provider history and respects the run owner (Go
     clearCurrentRunMessageQueue(threadId)
   }
 })
+
+it.each([false, true])("recovers a pending legacy Goal provider occurrence (fragmented: %s)", async (fragmented) => {
+  const directory = mkdtempSync(join(tmpdir(), "cmb-legacy-goal-running-recovery-"))
+  storage.path = join(directory, "threads.sqlite")
+  storage.checkpointPath = join(directory, "checkpoint.sqlite")
+  const threadId = "legacy-goal-running-recovery"
+  const runToken = "current-physical-run"
+  const providerId = "repeated-provider-id"
+  const recoveredId = buildMessageSameRoleDuplicateId(providerId, "assistant", 2)
+  const reply = fragmented ? "待恢复的正文".repeat(140_000) : "Pending reply"
+  const signal = new AbortController().signal
+  const hidden = new HumanMessage({ id: "hidden", content: "Continuation",
+    additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true } })
+  try {
+    await db.initializeDatabase()
+    db.createThread(threadId, { harnessProjectSession: { projectId: "legacy-project", kind: "chat" } })
+    db.upsertThreadMessages(threadId, [
+      { id: "root", role: "user", content: "Question", created_at: new Date() },
+      { id: providerId, role: "assistant", content: "Prior reply", created_at: new Date() }
+    ])
+    db.reserveThreadGraphTranscriptBoundary(threadId, hidden.id!)
+    const saver = new SqlJsSaver(storage.checkpointPath)
+    try {
+      await saver.put({ configurable: { thread_id: threadId, checkpoint_ns: "" } }, {
+        id: "legacy-goal", ts: new Date().toISOString(), v: 1,
+        channel_values: { messages: [hidden, new AIMessage({ id: providerId, content: reply,
+          additional_kwargs: { [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerId,
+            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: 2 } })] },
+        channel_versions: { messages: 1 }, versions_seen: {}
+      }, { source: "loop", step: 1, parents: {} })
+    } finally {
+      await saver.close()
+    }
+    // Reproduce an interrupted older migration that recorded ordinals without provider tuples.
+    const database = new DatabaseSync(storage.path)
+    try {
+      const currentMigration = database.prepare(`SELECT status
+        FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?`)
+      const cancellation = new SharedArrayBuffer(4)
+      const flag = new Int32Array(cancellation)
+      const load = Atomics.load
+      const pause = vi.spyOn(Atomics, "load").mockImplementation((target, index) => {
+        if (target.buffer === cancellation && currentMigration.get(threadId)?.status === "migrating")
+          Atomics.store(flag, 0, 1)
+        return load(target, index)
+      })
+      try {
+        expect(() => bootstrapLegacyCheckpointTranscript(
+          storage.checkpointPath, storage.path, threadId, "", cancellation
+        )).toThrow(expect.objectContaining({ name: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED }))
+      } finally {
+        pause.mockRestore()
+      }
+      database.prepare(`UPDATE legacy_checkpoint_transcript_slots
+        SET provider_source_id = NULL, role = NULL, provider_occurrence = NULL WHERE thread_id = ?`)
+        .run(threadId)
+      // The compacted checkpoint had only occurrence 2 and its archived time still used the raw ID.
+      database.prepare("UPDATE threads SET thread_values = ? WHERE thread_id = ?")
+        .run(JSON.stringify({ messageTimes: { [providerId]: { start_at: 200, end_at: 300 } } }), threadId)
+    } finally {
+      database.close()
+    }
+    expect(db.hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(true)
+    const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined,
+      (id, scopedTurn, activeSignal) => prepareLegacyScopedProviderHistory(
+        id, scopedTurn, runToken, activeSignal))
+    const wrapModelCall = middleware.wrapModelCall as unknown as (
+      request: { runtime: { configurable: { thread_id: string }; signal: AbortSignal };
+        messages: HumanMessage[] }, handler: () => Promise<AIMessage>
+    ) => Promise<AIMessage>
+    const handler = vi.fn(async () => {
+      expect(db.hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(false)
+      const recovered = db.getThreadMessages(threadId)
+      expect(recovered).toEqual([
+        expect.objectContaining({ id: "root", content: "Question" }),
+        expect.objectContaining({ id: providerId, content: "Prior reply" }),
+        expect.objectContaining({ id: recoveredId, provider_occurrence: 2 })
+      ])
+      const hash = (content: string) => createHash("sha256").update(content).digest("hex")
+      let recoveredBody = String(recovered[2].content)
+      if (fragmented) {
+        const fragments = db.getDb().exec(`SELECT content_text FROM thread_message_fragments
+          WHERE thread_id = ? AND message_id = ? ORDER BY fragment_id`, [threadId, recoveredId])
+        recoveredBody = fragments[0]?.values.map(([content]) => String(content)).join("") ?? ""
+      }
+      expect(hash(recoveredBody)).toBe(hash(reply))
+      expect([recovered[1].start_at, recovered[1].end_at]).toEqual([undefined, undefined])
+      expect([recovered[2].start_at?.getTime(), recovered[2].end_at?.getTime()]).toEqual([200, 300])
+      return new AIMessage({ id: "current-reply", content: "Result" })
+    })
+    setCurrentRunMessageQueueOwner(threadId, runToken)
+    await wrapModelCall({ runtime: { configurable: { thread_id: threadId }, signal },
+      messages: [hidden] }, handler)
+    expect(handler).toHaveBeenCalledOnce()
+  } finally {
+    clearCurrentRunMessageQueue(threadId, runToken)
+    await closeCheckpointRuntimeProjectionWorker()
+    await db.closeDatabase()
+    rmSync(directory, { recursive: true, force: true })
+  }
+}, 20_000)
+
+const stockScopes = ["ordinary", "project", "project with newer checkpoint", "protected project"]
+it.each(stockScopes)("resumes an interrupted stock reservation in %s", async (scope) => {
+  const directory = mkdtempSync(join(tmpdir(), "cmb-stock-running-recovery-"))
+  storage.path = join(directory, "threads.sqlite")
+  storage.checkpointPath = join(directory, "checkpoint.sqlite")
+  const threadId = "stock-running-recovery"
+  const runToken = "current-stock-run"
+  const signal = new AbortController().signal
+  const protectedOutput = scope === "protected project"
+  const hasNewerCheckpoint = scope === "project with newer checkpoint"
+  const manager = new ModsManager(join(directory, "mods.sqlite"), () => [], async () => true,
+    () => undefined, undefined, { ...DEFAULT_MOD_POLICY, required: false })
+  try {
+    await db.initializeDatabase()
+    const thread = db.createThread(threadId, { workspacePath: directory })
+    const root = new HumanMessage({ id: "root", content: "Initial question" })
+    const prior = new AIMessage({ id: "prior", content: "Earlier response" })
+    const hidden = new HumanMessage({ id: "goal-boundary", content: "Continue Goal",
+      additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true } })
+    const missing = new AIMessage({ id: "checkpoint-only", content: "Recovered Goal response" })
+    db.upsertThreadMessages(threadId, [
+      { id: root.id!, role: "user", content: String(root.content), created_at: new Date() },
+      { id: prior.id!, role: "assistant", content: String(prior.content), created_at: new Date() }
+    ], { preserveExistingOrder: true })
+    db.reserveThreadGraphTranscriptBoundary(threadId, hidden.id!)
+    const oldRows = Array.from({ length: 70 }, (_, index) => ({ id: `existing-${index}`,
+      role: "assistant" as const, content: `Existing ${index}`, created_at: new Date() }))
+    db.upsertThreadMessages(threadId, oldRows, { preserveExistingOrder: true })
+    const history = [root, prior, missing, hidden,
+      ...oldRows.map(row => new AIMessage({ id: row.id, content: row.content }))]
+    const saver = new SqlJsSaver(storage.checkpointPath)
+    try {
+      await saver.put({ configurable: { thread_id: threadId, checkpoint_ns: "" } }, {
+        id: "stock-goal", ts: new Date().toISOString(), v: 1,
+        channel_values: { messages: history },
+        channel_versions: { messages: 1 }, versions_seen: {}
+      }, { source: "loop", step: 1, parents: {} })
+    } finally {
+      await saver.close()
+    }
+    const source = captureStockLegacyTranscriptSource({ database: db.getDb(),
+      checkpointPath: storage.checkpointPath, threadId, incarnation: captureThreadIncarnation(thread),
+      assertCurrent() {} })!
+    expect(source).toBeDefined()
+    const observer = new DatabaseSync(storage.path)
+    try {
+      const marker = observer.prepare(`SELECT status, scoped_order, ordinal_reservation
+        FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?`)
+      const cancellation = new SharedArrayBuffer(4)
+      const flag = new Int32Array(cancellation)
+      const load = Atomics.load
+      const pause = vi.spyOn(Atomics, "load").mockImplementation((target, index) => {
+        // Read from a separate connection and wait until the reservation is durable.
+        if (target.buffer === cancellation && marker.get(threadId)?.status === "reserving")
+          Atomics.store(flag, 0, 1)
+        return load(target, index)
+      })
+      try {
+        expect(() => bootstrapStockLegacyCheckpointTranscript(
+          storage.checkpointPath, storage.path, threadId, "", cancellation, source.authority
+        )).toThrow(expect.objectContaining({ name: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED }))
+      } finally {
+        pause.mockRestore()
+      }
+      expect(marker.get(threadId)).toMatchObject({ status: "reserving", scoped_order: 1,
+        ordinal_reservation: expect.any(String) })
+      // Old UAT allowed the same stock reservation for project chats. Recreate
+      // their durable attribution after seeding with the current ordinary path.
+      if (scope !== "ordinary") observer.prepare(`UPDATE threads SET metadata =
+        json_set(metadata, '$.harnessProjectSession', json(?)) WHERE thread_id = ?`)
+        .run(JSON.stringify({ projectId: "legacy-project", kind: "chat" }), threadId)
+      expect(db.hasPendingGoalTranscriptOrder(threadId)).toBe(true)
+    } finally {
+      observer.close()
+    }
+    if (hasNewerCheckpoint) {
+      // LangGraph can write a new input checkpoint before the model's history hook.
+      const newerSaver = new SqlJsSaver(storage.checkpointPath, undefined, { maxRootCheckpoints: 3 })
+      try {
+        await newerSaver.put({ configurable: { thread_id: threadId, checkpoint_ns: "",
+          checkpoint_id: "stock-goal" } }, {
+          id: "stock-goal-newer", ts: new Date().toISOString(), v: 1,
+          channel_values: { messages: [...history,
+            new HumanMessage({ id: "newer-only", content: "New graph input" })] },
+          channel_versions: { messages: 2 }, versions_seen: {}
+        }, { source: "input", step: 2, parents: {} })
+      } finally {
+        await newerSaver.close()
+      }
+      const checkpoints = new DatabaseSync(storage.checkpointPath, { readOnly: true })
+      try {
+        expect(checkpoints.prepare(`SELECT checkpoint_id FROM checkpoints WHERE thread_id=?
+          ORDER BY checkpoint_ts DESC, checkpoint_id DESC`).all(threadId).map(row => row.checkpoint_id))
+          .toEqual(["stock-goal-newer", "stock-goal"])
+      } finally {
+        checkpoints.close()
+      }
+    }
+    manager.configure(directory, false, protectedOutput)
+    setModsManager(manager)
+    setCurrentRunMessageQueueOwner(threadId, runToken)
+    expect(claimLocalThreadRunLease({ threadId, owner: "desktop", runId: runToken }).acquired).toBe(true)
+    const recovery = prepareLegacyScopedProviderHistory(threadId, true, runToken, signal)
+    if (protectedOutput) {
+      await expect(recovery).rejects.toMatchObject({ name: "LEGACY_CHECKPOINT_TRANSCRIPT_SOURCE_UNAVAILABLE" })
+      expect(db.hasPendingGoalTranscriptOrder(threadId)).toBe(true)
+      expect(db.getThreadMessages(threadId).some(message => message.id === missing.id)).toBe(false)
+      return
+    }
+    await recovery
+    expect(db.hasPendingGoalTranscriptOrder(threadId)).toBe(false)
+    expect(db.getThreadMessages(threadId).map(message => message.id)).toEqual([
+      root.id, prior.id, missing.id, ...oldRows.map(message => message.id)
+    ])
+  } finally {
+    setModsManager(undefined)
+    manager.close()
+    clearCurrentRunMessageQueue(threadId, runToken)
+    releaseLocalThreadRunLease(threadId, "desktop", runToken)
+    await closeCheckpointRuntimeProjectionWorker()
+    await db.closeDatabase()
+    rmSync(directory, { recursive: true, force: true })
+  }
+}, 20_000)

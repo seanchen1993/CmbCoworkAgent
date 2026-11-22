@@ -53,6 +53,55 @@ const MESSAGE_PREFIX_SENTINEL_COUNT = 24
 const MESSAGE_PREFIX_TAIL_WINDOW = 16
 const MESSAGE_PREFIX_MIN_SHARED_TAIL = 4
 const CHECKPOINT_LINEAGE_SPAN = 128
+const CHECKPOINT_LINEAGE_COLUMNS = `(
+        thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT, conflicting_parent INTEGER NOT NULL DEFAULT 0,
+        lineage_depth INTEGER, ancestor_span_id TEXT, ancestor_span_depth INTEGER,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      )`
+const CHECKPOINT_LINEAGE_SCHEMA = `CREATE TABLE checkpoint_lineage ${CHECKPOINT_LINEAGE_COLUMNS}`
+const CHECKPOINT_LINEAGE_INDEX = `CREATE INDEX checkpoint_lineage_conflicts
+        ON checkpoint_lineage(thread_id, checkpoint_ns, lineage_depth) WHERE conflicting_parent = 1`
+
+function checkpointLineageWrite(row: "NEW" | "child") {
+  const legacy = row === "NEW", table = legacy ? "checkpoint_lineage" : "main.checkpoint_lineage"
+  return `INSERT INTO ${table}
+        (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, lineage_depth, ancestor_span_id, ancestor_span_depth)
+        SELECT ${row}.thread_id, ${row}.checkpoint_ns, ${row}.checkpoint_id, ${row}.parent_checkpoint_id, COALESCE(parent.lineage_depth + 1, 0),
+          CASE WHEN parent.lineage_depth % ${CHECKPOINT_LINEAGE_SPAN} = 0 THEN parent.checkpoint_id ELSE parent.ancestor_span_id END,
+          CASE WHEN parent.lineage_depth % ${CHECKPOINT_LINEAGE_SPAN} = 0 THEN parent.lineage_depth ELSE parent.ancestor_span_depth END
+        FROM ${legacy ? "(SELECT 1)" : "child"} LEFT JOIN ${table} AS parent ON parent.thread_id = ${row}.thread_id
+          AND parent.checkpoint_ns = ${row}.checkpoint_ns AND parent.checkpoint_id = ${row}.parent_checkpoint_id
+        WHERE 1
+        ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET conflicting_parent = 1
+        WHERE checkpoint_lineage.parent_checkpoint_id IS NOT excluded.parent_checkpoint_id;`
+}
+
+const CHECKPOINT_LINEAGE_WRITE = `WITH child(thread_id,checkpoint_ns,checkpoint_id,parent_checkpoint_id)
+  AS (VALUES (?,?,?,?)) ${checkpointLineageWrite("child")}`
+const HISTORICAL_LINEAGE_INSERT = `CREATE TRIGGER checkpoint_lineage_insert AFTER INSERT ON checkpoints
+        BEGIN ${checkpointLineageWrite("NEW")} END`
+const HISTORICAL_LINEAGE_UPDATE = `CREATE TRIGGER checkpoint_lineage_parent_update
+        AFTER UPDATE OF parent_checkpoint_id, checkpoint_id ON checkpoints
+        WHEN NEW.parent_checkpoint_id IS NOT OLD.parent_checkpoint_id OR NEW.checkpoint_id IS NOT OLD.checkpoint_id
+        BEGIN ${checkpointLineageWrite("NEW")} END`
+const CHECKPOINT_LINEAGE_UNEXPECTED_OBJECTS = `SELECT COUNT(*) AS count FROM main.sqlite_schema
+  WHERE tbl_name='checkpoint_lineage' COLLATE NOCASE AND (type='trigger' OR (type='index' AND NOT (
+    (name='sqlite_autoindex_checkpoint_lineage_1' AND sql IS NULL) OR
+    (name='checkpoint_lineage_conflicts' AND sql IS ?)
+  )))`
+const COMPACT_CHECKPOINT_LINEAGE_SCHEMA = CHECKPOINT_LINEAGE_SCHEMA.replace(/\s+/g, "")
+function isCheckpointLineageSchema(sql: unknown): boolean {
+  if (typeof sql !== "string") return false
+  let index = 0
+  for (let offset = 0; offset < sql.length; offset++) {
+    const character = sql[offset]
+    if (character === " " || character === "\t" || character === "\r" || character === "\n")
+      continue
+    if (character !== COMPACT_CHECKPOINT_LINEAGE_SCHEMA[index++]) return false
+  }
+  return index === COMPACT_CHECKPOINT_LINEAGE_SCHEMA.length
+}
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type { BaseMessage } from "@langchain/core/messages"
 import {
@@ -1045,46 +1094,50 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   }
 
   private ensureCheckpointLineage(database: NativeSqliteAdapter): void {
-    if (database.exec(`SELECT 1 FROM sqlite_schema WHERE type = 'trigger'
-      AND name = 'checkpoint_lineage_parent_update'`)[0]?.values.length) return
+    const initialized = isCheckpointLineageSchema(database.exec(`SELECT lineage.sql
+      FROM main.sqlite_schema AS lineage WHERE lineage.type='table' AND lineage.name='checkpoint_lineage'
+      AND EXISTS (SELECT 1 FROM main.sqlite_schema WHERE type='index'
+        AND name='checkpoint_lineage_conflicts' AND sql IS ?)`,
+    [CHECKPOINT_LINEAGE_INDEX])[0]?.values[0]?.[0])
+    const historical = database.exec(`SELECT name FROM main.sqlite_schema
+      WHERE type = 'trigger' AND tbl_name = 'checkpoints' AND
+        ((name = 'checkpoint_lineage_insert' AND sql IS ?) OR
+         (name = 'checkpoint_lineage_parent_update' AND sql IS ?))`,
+    [HISTORICAL_LINEAGE_INSERT, HISTORICAL_LINEAGE_UPDATE])[0]?.values ?? []
+    if (initialized && historical.length === 0) return
     database.withImmediateWriteTransaction(() => {
-      database.run(`CREATE TABLE IF NOT EXISTS checkpoint_lineage (
-        thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
-        parent_checkpoint_id TEXT, conflicting_parent INTEGER NOT NULL DEFAULT 0,
-        lineage_depth INTEGER, ancestor_span_id TEXT, ancestor_span_depth INTEGER,
-        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-      )`)
-      const lineageColumns = database.exec("PRAGMA table_info(checkpoint_lineage)")[0]?.values ?? []
+      for (const [name] of historical) {
+        // Drop only the exact built-in definitions installed by the previous Saver.
+        if (name === "checkpoint_lineage_insert")
+          database.run("DROP TRIGGER IF EXISTS main.checkpoint_lineage_insert")
+        else if (name === "checkpoint_lineage_parent_update")
+          database.run("DROP TRIGGER IF EXISTS main.checkpoint_lineage_parent_update")
+      }
+      if (initialized) return
+      database.run(`CREATE TABLE IF NOT EXISTS main.checkpoint_lineage ${CHECKPOINT_LINEAGE_COLUMNS}`)
+      const lineageColumns = database.exec("PRAGMA main.table_info(checkpoint_lineage)")[0]?.values ?? []
       for (const [name, type] of [
         ["lineage_depth", "INTEGER"], ["ancestor_span_id", "TEXT"], ["ancestor_span_depth", "INTEGER"]
       ]) {
         if (!lineageColumns.some((column) => column[1] === name))
-          database.run(`ALTER TABLE checkpoint_lineage ADD COLUMN ${name} ${type}`)
+          database.run(`ALTER TABLE main.checkpoint_lineage ADD COLUMN ${name} ${type}`)
       }
-      database.run(`CREATE INDEX IF NOT EXISTS checkpoint_lineage_conflicts
+      database.run(`CREATE INDEX IF NOT EXISTS main.checkpoint_lineage_conflicts
         ON checkpoint_lineage(thread_id, checkpoint_ns, lineage_depth) WHERE conflicting_parent = 1`)
-      database.run(`INSERT INTO checkpoint_lineage
+      const definition = database.exec(`SELECT sql FROM main.sqlite_schema
+        WHERE type='table' AND name='checkpoint_lineage'`)[0]?.values[0]?.[0]
+      const unsafeObjects = database.exec(CHECKPOINT_LINEAGE_UNEXPECTED_OBJECTS,
+        [CHECKPOINT_LINEAGE_INDEX])[0]?.values[0]?.[0]
+      const tempTriggers = database.exec(`SELECT COUNT(*) FROM temp.sqlite_schema
+        WHERE type='trigger' AND tbl_name='checkpoint_lineage' COLLATE NOCASE`)[0]?.values[0]?.[0]
+      if (!isCheckpointLineageSchema(definition) ||
+        unsafeObjects !== 0 || tempTriggers !== 0) throw Error("SQLJS_SAVER_PREPARED_SCHEMA_UNSUPPORTED")
+      database.run(`INSERT INTO main.checkpoint_lineage
         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, lineage_depth)
         SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
-          CASE WHEN parent_checkpoint_id IS NULL THEN 0 END FROM checkpoints WHERE 1
+          CASE WHEN parent_checkpoint_id IS NULL THEN 0 END FROM main.checkpoints WHERE 1
         ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET conflicting_parent = 1
         WHERE checkpoint_lineage.parent_checkpoint_id IS NOT excluded.parent_checkpoint_id`)
-      const recordLineage = `INSERT INTO checkpoint_lineage
-        (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, lineage_depth, ancestor_span_id, ancestor_span_depth)
-        SELECT NEW.thread_id, NEW.checkpoint_ns, NEW.checkpoint_id, NEW.parent_checkpoint_id, COALESCE(parent.lineage_depth + 1, 0),
-          CASE WHEN parent.lineage_depth % ${CHECKPOINT_LINEAGE_SPAN} = 0 THEN parent.checkpoint_id ELSE parent.ancestor_span_id END,
-          CASE WHEN parent.lineage_depth % ${CHECKPOINT_LINEAGE_SPAN} = 0 THEN parent.lineage_depth ELSE parent.ancestor_span_depth END
-        FROM (SELECT 1) LEFT JOIN checkpoint_lineage AS parent ON parent.thread_id = NEW.thread_id
-          AND parent.checkpoint_ns = NEW.checkpoint_ns AND parent.checkpoint_id = NEW.parent_checkpoint_id
-        WHERE 1
-        ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET conflicting_parent = 1
-        WHERE checkpoint_lineage.parent_checkpoint_id IS NOT excluded.parent_checkpoint_id;`
-      database.run(`CREATE TRIGGER IF NOT EXISTS checkpoint_lineage_insert AFTER INSERT ON checkpoints
-        BEGIN ${recordLineage} END`)
-      database.run(`CREATE TRIGGER IF NOT EXISTS checkpoint_lineage_parent_update
-        AFTER UPDATE OF parent_checkpoint_id, checkpoint_id ON checkpoints
-        WHEN NEW.parent_checkpoint_id IS NOT OLD.parent_checkpoint_id OR NEW.checkpoint_id IS NOT OLD.checkpoint_id
-        BEGIN ${recordLineage} END`)
     })
   }
 
@@ -3895,18 +3948,23 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     if (!execution || !identity || !file) throw Error("SQLJS_SAVER_PREPARED_DATA_INVALID")
     const identityData = sharedContainerData(identity), fileData = sharedContainerData(file)
     const schema = execution.prepareReadOne("SELECT rowid,rootpage,sql,type FROM main.sqlite_schema WHERE name=? COLLATE NOCASE")
+    const preparedTables = `('checkpoints','writes','checkpoint_message_snapshots',
+      'checkpoint_runtime_projections','checkpoint_lineage')`
     const temporary = execution.prepareReadOne(`SELECT COUNT(*) AS count FROM temp.sqlite_schema
-      WHERE (lower(name) IN ('checkpoints','writes','checkpoint_message_snapshots','checkpoint_runtime_projections')
+      WHERE (lower(name) IN ${preparedTables}
         AND type IN ('table','view')) OR (type='trigger' AND lower(tbl_name) IN
-        ('checkpoints','writes','checkpoint_message_snapshots','checkpoint_runtime_projections'))`)
+        ${preparedTables})`)
     const triggers = execution.prepareReadOne(`SELECT COUNT(*) AS count FROM main.sqlite_schema
-      WHERE type='trigger' AND lower(tbl_name) IN
-        ('checkpoints','writes','checkpoint_message_snapshots','checkpoint_runtime_projections')`)
-    const names = ["checkpoints", "writes", "checkpoint_message_snapshots", "checkpoint_runtime_projections"]
+      WHERE type='trigger' AND lower(tbl_name) IN ${preparedTables}`)
+    const lineageObjects = execution.prepareReadOne(CHECKPOINT_LINEAGE_UNEXPECTED_OBJECTS)
+    const names = ["checkpoints", "writes", "checkpoint_message_snapshots",
+      "checkpoint_runtime_projections", "checkpoint_lineage"]
     const definitions: NonNullable<ReturnType<typeof schema>>[] = []
     for (let index = 0; index < names.length; index++) {
       const row = schema([names[index]])
       if (!row || row.type !== "table" || typeof row.sql !== "string")
+        throw Error("SQLJS_SAVER_PREPARED_SCHEMA_UNSUPPORTED")
+      if (names[index] === "checkpoint_lineage" && !isCheckpointLineageSchema(row.sql))
         throw Error("SQLJS_SAVER_PREPARED_SCHEMA_UNSUPPORTED")
       appendPreparedData(definitions, row)
     }
@@ -3932,7 +3990,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       if (!samePath || actual.nlink > 1n || sharedString(actual.dev) !== file.dev ||
         sharedString(actual.ino) !== file.ino || sharedString(actual.birthtimeNs) !== file.birthtime)
         throw Error("SQLJS_SAVER_DATABASE_IDENTITY_CHANGED")
-      if (temporary()?.count !== 0 || triggers()?.count !== 0)
+      if (temporary()?.count !== 0 || triggers()?.count !== 0 ||
+        lineageObjects([CHECKPOINT_LINEAGE_INDEX])?.count !== 0)
         throw Error("SQLJS_SAVER_PREPARED_SCHEMA_UNSUPPORTED")
       for (let index = 0; index < names.length; index++) {
         const value = schema([names[index]]), original = definitions[index]!
@@ -3983,7 +4042,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     onPreparedData?: SqlJsSaverPreparedCheckpointObserver,
     restoreThread = false
   ): Promise<RunnableConfig> {
-    await this.initialize()
+    // Restore already owns the ready Saver's exclusive database admission.
+    if (!restoreThread) await this.initialize()
     assertCurrent?.()
     if (!this.db) throw new Error("Database not initialized")
     const database = this.db
@@ -4335,6 +4395,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
             forkBoundaryMarker
           ]
         )
+        transaction.run(CHECKPOINT_LINEAGE_WRITE,
+          [thread_id, checkpoint_ns, checkpoint.id, parent_checkpoint_id ?? null])
         transaction.run(
           `INSERT INTO checkpoint_runtime_projections
            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,

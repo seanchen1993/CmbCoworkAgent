@@ -14,7 +14,7 @@ import {
 } from "../harness-board/native-harness"
 import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
+import { existsSync, lstatSync } from "node:fs"
 import { join } from "node:path"
 import { getOpenworkDir, getPlugins } from "../storage"
 import { HostProjectStore } from "../harness-board/project-runtime/host-store"
@@ -125,7 +125,7 @@ export function registerProjectRuntimeHandlers(
       },
       assertWorkspaceIdle: (workspace) => {
         for (const lease of listLocalThreadRunLeases()) {
-          const raw = getThreadCore(lease.threadId)?.metadata
+          const raw = getThreadRuntimeScope(lease.threadId)?.metadata
           const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
           if (
             typeof metadata?.workspacePath === "string" &&
@@ -188,7 +188,7 @@ export function registerProjectRuntimeHandlers(
     },
     assertWorkspaceIdle: (workspace) => {
       for (const lease of listLocalThreadRunLeases()) {
-        const raw = getThreadCore(lease.threadId)?.metadata
+        const raw = getThreadRuntimeScope(lease.threadId)?.metadata
         const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
         if (
           typeof metadata?.workspacePath === "string" &&
@@ -203,10 +203,28 @@ export function registerProjectRuntimeHandlers(
       )
     }
   })
-  const compositionDatabasePath = join(getOpenworkDir(), "project-compositions", "state.sqlite")
-  const hasCompositionStore = () => existsSync(compositionDatabasePath)
+  const compositionDirectory = join(getOpenworkDir(), "project-compositions")
+  const compositionDatabasePath = join(compositionDirectory, "state.sqlite")
+  const compositionEvidence = [compositionDatabasePath, compositionDatabasePath + "-wal",
+    compositionDatabasePath + "-shm", compositionDatabasePath + "-journal",
+    join(compositionDirectory, "admission")]
+  let observedCompositionStorage = false
+  const hasCompositionStore = () => {
+    if (!observedCompositionStorage && hasFile(compositionDirectory))
+      observedCompositionStorage = compositionEvidence.some(hasFile)
+    return observedCompositionStorage
+  }
+  function hasFile(path: string): boolean {
+    try {
+      lstatSync(path)
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+      throw error
+    }
+  }
   function compositionGuard<T>(workspace: string, work: () => T): T {
-    return hasCompositionStore() ? compositions.store().guardWorkspaceMutation(workspace, work) : work()
+    return hasCompositionStore() ? compositions.guardWorkspace(workspace, work) : work()
   }
   function internalCompositionProject(projectId: string): boolean {
     return (
@@ -220,7 +238,7 @@ export function registerProjectRuntimeHandlers(
     const raw = getThreadRuntimeScope(threadId)?.metadata
     const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
     return typeof metadata?.workspacePath === "string"
-      ? compositions.guardThreadRunAdmission(metadata.workspacePath, work)
+      ? compositions.guardWorkspace(metadata.workspacePath, work, true)
       : work()
   })
   projectAuthoringSessions.setChanged((threadId) => {
@@ -313,7 +331,7 @@ export function registerProjectRuntimeHandlers(
             if (LocalSandbox.hasActiveBackgroundTasksInWorkspace(project.workspace))
               throw Error("PROJECT_BACKGROUND_TASKS_ACTIVE")
             for (const lease of listLocalThreadRunLeases()) {
-              const raw = getThreadCore(lease.threadId)?.metadata
+              const raw = getThreadRuntimeScope(lease.threadId)?.metadata
               const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
               if (typeof metadata?.workspacePath === "string" &&
                 workspacePathsOverlap(metadata.workspacePath, project.workspace))
@@ -337,7 +355,7 @@ export function registerProjectRuntimeHandlers(
               throw Error("PROJECT_BACKGROUND_TASKS_ACTIVE")
             for (const lease of listLocalThreadRunLeases()) {
               if (lease.threadId === operation.execution.threadId) continue
-              const raw = getThreadCore(lease.threadId)?.metadata
+              const raw = getThreadRuntimeScope(lease.threadId)?.metadata
               const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
               if (typeof metadata?.workspacePath === "string" &&
                 workspacePathsOverlap(metadata.workspacePath, project.workspace))

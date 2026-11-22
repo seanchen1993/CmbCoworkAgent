@@ -12,7 +12,8 @@ import { captureLocalThreadRunLease, claimLocalThreadRunLease, getLocalThreadRun
   releaseLocalThreadRunLease } from
   "../agent/thread-run-lease"
 import { captureCurrentRunMessageQueueOwner, clearCurrentRunMessageQueue, isCurrentRunMessageQueueOwner,
-  setCurrentRunMessageQueueOwner } from "../agent/current-run-message-queue"
+  mergeCurrentRunGraphProviderOccurrences, setCurrentRunMessageQueueOwner } from
+  "../agent/current-run-message-queue"
 import { getMessageProviderOccurrence, getMessageProviderSourceId } from
   "../../shared/message-role-collision"
 import { resolveStreamTranscriptFlush, type QueuedStreamTranscriptMessage } from
@@ -73,8 +74,10 @@ function actualFunctions(pending: Map<string, Pending>) {
     ts.ScriptTarget.Latest, true)
   const names = ["pendingStreamTranscriptKey", "flushPendingStreamTranscriptMessages",
     "captureNativeConversationTranscriptFlush", "queueStreamTranscriptMessage",
-    "isPhysicalStreamRunActive", "throwIfPhysicalStreamRunIsInactive"]
-  const declarations = source.statements.filter(node => ts.isFunctionDeclaration(node) &&
+    "isPhysicalStreamRunActive", "throwIfPhysicalStreamRunIsInactive",
+    "loadPreviousRunProviderOccurrences", "StreamTranscriptSnapshotRequiredError"]
+  const declarations = source.statements.filter(node =>
+    (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
     node.name && names.includes(node.name.text))
   if (declarations.length !== names.length) throw Error("ACTUAL_FLUSH_SOURCE_MISSING")
   const code = ts.transpileModule(`${declarations.map(node => node.getText(source)).join("\n")}
@@ -85,6 +88,7 @@ function actualFunctions(pending: Map<string, Pending>) {
   const api: ActualFlush = runInNewContext(code, { exports: {}, console, setTimeout, clearTimeout,
     STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS: 250, pendingStreamTranscriptMessages: pending,
     streamTranscriptAssistantIdentities: new Map(), latestStreamAssistantCandidate: new Map(),
+    streamTranscriptBoundaries: new Map(),
     streamTranscriptAttempts: new Map(), ThreadMessageStreamAttempt: appDb.ThreadMessageStreamAttempt,
     streamAssistantRevision: 0, getMessageProviderSourceId, getMessageProviderOccurrence,
     captureLocalThreadRunLease, captureThreadIncarnation, matchesThreadIncarnation,
@@ -96,6 +100,10 @@ function actualFunctions(pending: Map<string, Pending>) {
     getThreadRuntimeScope: (...args: Parameters<typeof appDb.getThreadRuntimeScope>) =>
       appDb.getThreadRuntimeScope(...args),
     getThreadMessageIdentityContext: appDb.getThreadMessageIdentityContext,
+    getThreadTranscriptBoundaryOrdinal: appDb.getThreadTranscriptBoundaryOrdinal,
+    getThreadMessageProviderOccurrencesBeforeUser: appDb.getThreadMessageProviderOccurrencesBeforeUser,
+    mergeCurrentRunGraphProviderOccurrences,
+    withThreadMessageIdentitySnapshot: appDb.withThreadMessageIdentitySnapshot,
     partitionCanonicalThreadMessageEchoes: appDb.partitionCanonicalThreadMessageEchoes,
     appendThreadMessageTextDelta: appDb.appendThreadMessageTextDelta,
     upsertThreadMessages: (...args: Parameters<typeof appDb.upsertThreadMessages>) =>

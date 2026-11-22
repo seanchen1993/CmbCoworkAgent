@@ -8,7 +8,7 @@ import { readFunctionConversationNativeSqliteCurrentExecution,
   type NativeSqliteAdapter, type NativeSqliteReadOne, type NativeSqliteValue } from
   "./native-sqlite-adapter"
 
-/** Exact current storage schema. Unknown columns require an explicit receipt migration. */
+/** Exact sealed fields. Unknown storage columns require an explicit compatibility decision. */
 export const FUNCTION_CONVERSATION_PROJECTION_COLUMNS = Object.freeze([
   "thread_id", "message_id", "provider_source_id", "provider_occurrence", "role", "content_json",
   "prompt_origin_json", "function_row_json", "reasoning", "tool_calls_json", "tool_call_id", "name",
@@ -29,6 +29,31 @@ export interface FunctionConversationProjectionSelection {
 }
 
 type SqlRow = Record<string, NativeSqliteValue>
+const SEALED_COLUMN_NAMES = FUNCTION_CONVERSATION_PROJECTION_COLUMNS.map(name => `'${name}'`).join(",")
+// The fork replay key is ordinary storage lineage, never part of a native receipt. Accept
+// both database layouts so installing the additive migration leaves existing seals valid.
+const FORK_LINEAGE_COLUMN = `name = 'fork_replay_key' AND upper(type) = 'TEXT'
+  AND "notnull" = 0 AND dflt_value IS NULL AND pk = 0 AND hidden = 0`
+// The ordinary generation only selects fragments. Native receipts still reject every
+// physical fragment and fragment state, so no generated value can alter the sealed body.
+const FRAGMENT_GENERATION_COLUMN = `name = 'fragment_generation' AND upper(type) = 'TEXT'
+  AND "notnull" = 1 AND dflt_value = quote('') AND pk = 0 AND hidden = 0`
+export const FUNCTION_CONVERSATION_PROJECTION_SCHEMA_QUERY = `SELECT COUNT(*) AS schema_count,
+  COALESCE(SUM(${FORK_LINEAGE_COLUMN}),0) AS schema_fork_lineage,
+  COALESCE(SUM(${FRAGMENT_GENERATION_COLUMN}),0) AS schema_fragment_generation,
+  COALESCE(SUM(hidden <> 0 OR (name NOT IN (${SEALED_COLUMN_NAMES}) AND
+    NOT COALESCE((${FORK_LINEAGE_COLUMN}) OR (${FRAGMENT_GENERATION_COLUMN}),0))),0) AS schema_extra
+  FROM pragma_table_xinfo('thread_messages')`
+
+export function assertFunctionConversationProjectionSchema(facts: SqlRow | undefined): void {
+  const lineage = facts?.schema_fork_lineage
+  const generation = facts?.schema_fragment_generation
+  if ((lineage !== 0 && lineage !== 1) ||
+    (generation !== 0 && generation !== 1) ||
+    facts?.schema_count !== FUNCTION_CONVERSATION_PROJECTION_COLUMNS.length + lineage + generation ||
+    facts?.schema_extra !== 0) fail("MODS_CONVERSATION_PROJECTION_SCHEMA")
+}
+
 const TABLE = "function_conversation_projection_receipts"
 const readers = new WeakMap<NativeSqliteAdapter, Map<string, NativeSqliteReadOne>>()
 const SAME_PAYLOAD = "typeof(payload_json)='text' AND payload_json COLLATE BINARY=?3"
@@ -175,11 +200,9 @@ function current(db: NativeSqliteAdapter, selection: PinnedSelection): void {
 /** Raw values only. Never invoke a renderer parser, clamp, alias resolver or stream merge. */
 export function readFunctionConversationRawProjection(db: NativeSqliteAdapter, threadId: string,
   uuid: string): FunctionConversationProjectionColumns | undefined {
-  const schema = query(db, "PRAGMA table_info(thread_messages)")
-  if (schema.length !== FUNCTION_CONVERSATION_PROJECTION_COLUMNS.length ||
-    schema.some(column => !FUNCTION_CONVERSATION_PROJECTION_COLUMNS.some(name => name === column.name)))
-    fail("MODS_CONVERSATION_PROJECTION_SCHEMA")
-  const row = readOne(db, "SELECT * FROM thread_messages WHERE thread_id=? AND message_id=?",
+  assertFunctionConversationProjectionSchema(readOne(db, FUNCTION_CONVERSATION_PROJECTION_SCHEMA_QUERY, []))
+  const row = readOne(db, `SELECT ${FUNCTION_CONVERSATION_PROJECTION_COLUMNS.join(",")}
+    FROM thread_messages WHERE thread_id=? AND message_id=?`,
     [text(threadId), text(uuid)])
   if (!row) return undefined
   return validateFunctionConversationRawProjection(row, threadId, uuid)

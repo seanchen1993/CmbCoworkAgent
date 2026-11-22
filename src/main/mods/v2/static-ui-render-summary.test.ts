@@ -11,6 +11,7 @@ import { FunctionNamedState, namedStateInput, type FunctionNamedStateScope } fro
 import {
   analyzeStaticUiRenderSummary,
   bindStaticUiRenderSummary,
+  staticUiRenderSiteHints,
   type StaticUiRenderSummary
 } from "./static-ui-render-summary"
 import type { FunctionRegistration } from "../../../shared/mods/v2/contracts"
@@ -194,6 +195,55 @@ describe("host static ui.render summary", () => {
     const changed = code.replace("Object.defineProperty", "globalThis.evil")
     expect(changed).not.toBe(code)
     expect(analyzeStaticUiRenderSummary(changed).kind).toBe("unknown")
+  })
+
+  it("recognizes ES2016 object spread in the production package only as a site hint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "static-render-site-hint-"))
+    roots.push(root)
+    await mkdir(join(root, "mods"))
+    await writeFile(join(root, "plugin.json"), JSON.stringify({ name: "paired-display-electron" }))
+    await writeFile(join(root, "mods/manifest.json"), JSON.stringify({
+      apiVersion: "cmb.mods/v2", id: "paired-display-electron", entry: "main.ts"
+    }))
+    await writeFile(join(root, "mods/main.ts"), `export function register(on) {
+      on("ui.render", {component: "AssistantMessage"}, ($, event, next) => next({
+        ...event, props: { ...event.props, text: "PAIRED_ACTIVE_DECORATION " + event.props.text }
+      }))
+    }`)
+    const { code } = await compileFunctionPlugin(root)
+    expect(staticUiRenderSiteHints(code)).toEqual(["AssistantMessage"])
+    const summary = analyzeStaticUiRenderSummary(code)
+    expect(summary.kind).toBe("unknown")
+    const guest = await FunctionGuestRuntime.create(code)
+    try {
+      expect(guest.registrations).toHaveLength(1)
+      expect(bindStaticUiRenderSummary(summary, code, guest.registrations)).toBeUndefined()
+    } finally {
+      guest.dispose()
+    }
+
+    for (const changed of [
+      code.replace("Object.getOwnPropertyDescriptors", "Object.getOwnPropertyDescriptor"),
+      code.replace("return a;", "return b;"),
+      code.replace("var __getOwnPropSymbols = Object.getOwnPropertySymbols;", ""),
+      code.replace("next(__spreadProps(", "next(__spreadProps.call(")
+    ]) {
+      expect(changed).not.toBe(code)
+      expect(staticUiRenderSiteHints(changed)).toEqual([])
+    }
+  })
+
+  it.each([
+    ['{component:"Pane"}', ["Pane"]],
+    ['{component:"AssistantMessage", kind:"answer"}', []],
+    ['(event) => event.component === "AssistantMessage"', []],
+    ['{...options, component:"AssistantMessage"}', []]
+  ])("does not predict another or conditional site from %s", async (matcher, expected) => {
+    const code = await compiled(`export function register(on, options) {
+      on("ui.render", ${matcher}, ($, event, next) => next({ ...event }))
+    }`)
+    expect(staticUiRenderSiteHints(code)).toEqual(expected)
+    expect(analyzeStaticUiRenderSummary(code).kind).toBe("unknown")
   })
 
   it("binds exact bytes, count, order and real registration metadata only", async () => {

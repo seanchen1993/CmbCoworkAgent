@@ -26,8 +26,11 @@ async function fixture(
     origin?: FunctionPluginPromptOrigin
     noSources?: boolean
     globallyEnabled?(): boolean
+    protects?(): boolean
     noDisplayScope?: boolean
+    project?: boolean
     captureSiteGuard?: () => () => void
+    beforeGuestLoad?: () => Promise<void> | void
   } = {}
 ) {
   const root = await mkdtemp(join(tmpdir(), "display-read-"))
@@ -73,7 +76,10 @@ async function fixture(
     {
       plugins: () => (options.noSources ? [] : [source]),
       enabled: () => options.globallyEnabled?.() ?? true,
-      protects: () => options.globallyEnabled?.() ?? true,
+      protects: () => options.protects?.() ?? options.globallyEnabled?.() ?? true,
+      capabilityContext: () => options.project
+        ? { usage: "project", identity: "display-read-project", projectId: "project" }
+        : { usage: "chat", identity: "display-read-fixture" },
       captureSiteGuard: options.captureSiteGuard ?? (() => () => {}),
       captureDisplayScope: () =>
         options.noDisplayScope
@@ -91,8 +97,9 @@ async function fixture(
       publish
     },
     () => ({
-      async load(code, options) {
-        const guest = await FunctionGuestRuntime.create(code, options)
+      async load(code, guestOptions) {
+        if (options.beforeGuestLoad) await options.beforeGuestLoad()
+        const guest = await FunctionGuestRuntime.create(code, guestOptions)
         const invoke = guest.invoke.bind(guest)
         vi.spyOn(guest, "invoke").mockImplementation((...args) => {
           events.push(args[3].event)
@@ -127,6 +134,52 @@ async function fixture(
     manager.siteRead(root, "thread", "AssistantMessage", { text, isFirstOfReply: true }, row)
   return { root, file, control, manager, events, read, changed, publish }
 }
+
+it("keeps unprotected unmatched ordinary chrome native after the original cold startup", async () => {
+  const f = await fixture(
+    `on("session.start", ($,e,next)=>next(e));
+      on("ui.render", {component:"AssistantMessage"}, ($,e,next)=>next(e))`,
+    "",
+    { protects: () => false }
+  )
+  const render = vi.spyOn(f.manager, "siteRender")
+  const props = { isWorking: false, bodyColumns: 48, maxRows: 8 }
+  expect(await f.manager.siteRead(f.root, "thread", "ChatHeader", props)).toEqual({
+    state: "inactive",
+    reason: "no-protection-or-functions"
+  })
+  expect(f.events).toContain("session.start")
+  expect(f.events).not.toContain("ui.render")
+  expect(render).not.toHaveBeenCalled()
+
+  expect((await f.read()).state).not.toBe("inactive")
+  expect(f.events).toContain("ui.render")
+})
+
+it("retains protected chrome publication and dynamic ordinary chrome matchers", async () => {
+  let protectedOutput = true
+  const f = await fixture(
+    `on("ui.render", {component:"AssistantMessage"}, ($,e,next)=>next(e))`,
+    "",
+    { protects: () => protectedOutput }
+  )
+  const props = { isWorking: false, bodyColumns: 48, maxRows: 8 }
+  const readHeader = () => f.manager.siteRead(f.root, "thread", "ChatHeader", props)
+  expect((await readHeader()).state).toBe("mounted")
+  expect(f.publish).toHaveBeenCalled()
+  protectedOutput = false
+  expect((await readHeader()).state).toBe("inactive")
+  await expect(f.manager.siteRead(f.root, "thread", "ChatHeader", {}))
+    .rejects.toMatchObject({ code: "MODS_UI_SITE_PROPS" })
+
+  const dynamic = await fixture(
+    `on("ui.render", (input)=>input.component === "ChatHeader", ($,e,next)=>next(e))`,
+    "",
+    { protects: () => false }
+  )
+  expect((await dynamic.manager.siteRead(dynamic.root, "thread", "ChatHeader", props)).state)
+    .toBe("mounted")
+})
 
 it("routes an AbovePrompt-only literal Mod away from transcript guest drawing", async () => {
   const f = await fixture(`on("ui.render", {component:"AbovePrompt"}, ($,e,next)=>next(e))`)
@@ -925,6 +978,168 @@ it.each(["projection", "legacy", "owner-required"] as const)(
     }
   }
 )
+
+it.each([
+  { component: "ChatHeader", project: false },
+  { component: "AbovePrompt", project: false },
+  { component: "PromptHint", project: false },
+  { component: "SessionMode", project: false },
+  { component: "ChatHeader", project: true }
+] as const)("fences cold $component discovery cancellation with project=$project",
+  async ({ component, project }) => {
+    const f = await fixture("", "", { project })
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+    const status = f.manager.status.bind(f.manager)
+    const inspection = vi.spyOn(f.manager, "status").mockImplementationOnce(async workspace => {
+      const result = await status(workspace)
+      entered.resolve()
+      await release.promise
+      return result
+    })
+    const mounts = vi.spyOn(FunctionUiSites.prototype, "mount")
+    const controller = new AbortController(), reason = Error("cancel during chrome discovery")
+    const props = { isWorking: false, bodyColumns: 48, maxRows: 8 }
+    const pending = f.manager.siteRead(f.root, "thread", component, props, undefined, undefined,
+      undefined, FUNCTION_DISPLAY_PROTOCOL, false, controller.signal)
+    const observed = Promise.allSettled([pending])
+    try {
+      await Promise.race([entered.promise, pending.then(() => {
+        throw Error("Expected discovery to remain held")
+      })])
+      controller.abort(reason)
+      expect(mounts).not.toHaveBeenCalled()
+      release.resolve()
+      await expect(pending).rejects.toBe(reason)
+      expect(mounts).toHaveBeenCalledTimes(project ? 1 : 0)
+    } finally {
+      release.resolve()
+      await observed
+      inspection.mockRestore()
+      mounts.mockRestore()
+    }
+  }
+)
+
+it("retires a cancelled chrome read after shared startup and still publishes the live row", async () => {
+  const f = await fixture(`on("session.start", ($,e,next)=>next(e))`, "", { noDisplayScope: true })
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const create = FunctionGuestRuntime.create.bind(FunctionGuestRuntime)
+  const guests = vi.spyOn(FunctionGuestRuntime, "create").mockImplementationOnce(async (...args) => {
+    entered.resolve()
+    await release.promise
+    return create(...args)
+  })
+  const mounts = vi.spyOn(FunctionUiSites.prototype, "mount")
+  const controller = new AbortController(), reason = Error("cancel chrome during shared startup")
+  const props = { isWorking: false, bodyColumns: 48, maxRows: 8 }
+  const stale = f.manager.siteRead(f.root, "thread", "ChatHeader", props, undefined, undefined,
+    undefined, FUNCTION_DISPLAY_PROTOCOL, false, controller.signal)
+  const reads = [stale]
+  void stale.catch(() => {})
+  try {
+    await Promise.race([entered.promise, stale.then(() => {
+      throw Error("Expected startup to remain held")
+    })])
+    const live = f.read("PRIVATE live", "remaining-row")
+    reads.push(live)
+    controller.abort(reason)
+    release.resolve()
+    await expect(stale).rejects.toBe(reason)
+    const result = await live
+    expect(result.state).toBe("mounted")
+    expect(JSON.stringify(result)).toContain("SAFE live")
+    expect(JSON.stringify(result)).not.toContain("PRIVATE live")
+    expect(mounts.mock.calls.map(call => call[0])).toEqual(["AssistantMessage"])
+    expect(guests).toHaveBeenCalledTimes(1)
+    expect(f.events.filter(event => event === "session.start")).toHaveLength(1)
+    if (result.state === "mounted") await f.manager.siteUnmount(f.root, "thread", result.owner)
+  } finally {
+    release.resolve()
+    await Promise.allSettled(reads)
+    mounts.mockRestore()
+    guests.mockRestore()
+  }
+})
+
+it("keeps the previous protected host-only chrome owner on queue cancellation", async () => {
+  const f = await fixture("", "", { noSources: true })
+  const props = { isWorking: false, isDraft: true, hint: "PRIVATE hint" }
+  const current = await f.manager.siteRead(f.root, "thread", "PromptHint", props)
+  if (current.state !== "mounted") throw Error("Expected the real host-only owner")
+  const mount = FunctionUiSites.prototype.mount
+  const controller = new AbortController(), reason = Error("cancel before host-only mount")
+  const queued = vi.spyOn(FunctionUiSites.prototype, "mount").mockImplementationOnce(function (
+    this: FunctionUiSites, ...args
+  ) {
+    controller.abort(reason)
+    return mount.apply(this, args)
+  })
+  try {
+    await expect(f.manager.siteRead(f.root, "thread", "PromptHint", props, undefined, undefined,
+      undefined, FUNCTION_DISPLAY_PROTOCOL, false, controller.signal)).rejects.toBe(reason)
+    expect(queued).toHaveBeenCalledWith("PromptHint", undefined, undefined, controller.signal)
+    const snapshot = await f.manager.siteRender(f.root, "thread", current.owner, props)
+    expect(snapshot?.id).toBe(current.owner)
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE hint")
+    expect(f.publish).toHaveBeenCalled()
+  } finally {
+    queued.mockRestore()
+    await f.manager.siteUnmount(f.root, "thread", current.owner)
+  }
+})
+
+it.each([false, true])("cancels one cold site waiter without releasing the shared build (revoked: %s)",
+  async (revoked) => {
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+    const controller = new AbortController()
+    const load = vi.fn(() => {
+      entered.resolve()
+      return release.promise
+    })
+    let hold = false
+    const f = await fixture(`on("ui.render", {component:"AssistantMessage"}, ($,e,next)=>next(e));`,
+      "", { beforeGuestLoad: () => hold ? load() : undefined })
+    const observeSession = vi.spyOn(f.manager as unknown as {
+      session(...args: unknown[]): Promise<unknown>
+    }, "session")
+    const read = (key: string, signal?: AbortSignal) => f.manager.siteRead(f.root, "thread",
+      "AssistantMessage", { text: "PRIVATE shared", isFirstOfReply: true }, key, undefined,
+      undefined, FUNCTION_DISPLAY_PROTOCOL, false, signal)
+    hold = true
+    const ownerSettled = vi.fn()
+    const owner = Promise.allSettled([read("build-owner").finally(ownerSettled)])
+    try {
+      await entered.promise
+      const aborted = expect(read("cancelled-reader", controller.signal)).rejects.toThrow("cancelled-reader")
+      const follower = Promise.allSettled([read("live-follower", new AbortController().signal)])
+      await vi.waitFor(() => expect(observeSession.mock.calls.length).toBeGreaterThanOrEqual(3))
+      controller.abort(Error("cancelled-reader"))
+      await aborted
+      expect(ownerSettled).not.toHaveBeenCalled()
+      expect(f.manager.configurationBusy("thread")).toBe(true)
+      expect(f.events).not.toContain("ui.render")
+      expect(load).toHaveBeenCalledTimes(1)
+      if (revoked) f.manager.revoke(f.root, "display")
+      release.resolve()
+      const results = [...await owner, ...await follower]
+      if (revoked) {
+        for (const result of results)
+          if (result.status === "fulfilled") expect(result.value.state).toBe("retired")
+        expect(f.events).not.toContain("ui.render")
+      } else {
+        for (const result of results) {
+          expect(result.status).toBe("fulfilled")
+          const displayed = JSON.stringify(result.status === "fulfilled" && result.value)
+          expect(displayed).toContain("SAFE shared")
+          expect(displayed).not.toContain("PRIVATE")
+        }
+      }
+      expect(load).toHaveBeenCalledTimes(1)
+    } finally {
+      release.resolve()
+      await owner
+    }
+  })
 
 it("cancels owned guest rendering and keeps its session usable for the next protected row", async () => {
   const f = await fixture(`on("ui.render", {component:"AssistantMessage"}, async ($,e,next)=>{

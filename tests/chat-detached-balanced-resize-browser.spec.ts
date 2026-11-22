@@ -51,6 +51,49 @@ async function main(): Promise<void> {
           const head=owners;
           viewport.scrollTop=userTop;await frame();await frame();
           return {initial,wheel,afterWheel,userTop,afterTop,pointer,blur,head};
+        },async burst(){
+          const nativeSet=window.setTimeout, nativeClear=window.clearTimeout;
+          let settleGesture, reads=0, maxObserved=0;
+          const delayedId=-1000;
+          const query=root.querySelectorAll;
+          root.querySelectorAll=function(selector){
+            if(selector==='[data-chat-message-row]') reads++;
+            return query.call(this,selector);
+          };
+          window.setTimeout=(callback,delay,...args)=>{
+            if(delay!==120) return nativeSet(callback,delay,...args);
+            settleGesture=()=>callback(...args);
+            return delayedId;
+          };
+          window.clearTimeout=id=>{
+            if(id===delayedId) settleGesture=undefined;
+            else nativeClear(id);
+          };
+          try {
+            for(let i=0;i<5;i++){
+              viewport.dispatchEvent(new WheelEvent('wheel',{deltaY:i%2===0?4:-4}));
+              viewport.scrollTop=375+(i%2===0?4:0);
+              const recycled=document.querySelector('#below');
+              recycled.replaceWith(recycled.cloneNode(true));
+              await frame();
+              maxObserved=Math.max(maxObserved,
+                [...observations].filter(node=>node.matches('[data-chat-message-row]')).length);
+            }
+            const top=viewport.scrollTop, hotReads=reads;
+            settleGesture();
+            await frame();await frame();
+            const after=viewport.scrollTop;
+            const resumedReads=reads-hotReads;
+            const offsetBefore=offset();
+            document.querySelector('#above').style.height='375px';
+            document.querySelector('#below').style.height='925px';
+            await frame();await frame();await frame();
+            return {hotReads,maxObserved,resumedReads,top,after,offsetBefore,offsetAfter:offset()};
+          } finally {
+            root.querySelectorAll=query;
+            window.setTimeout=nativeSet;
+            window.clearTimeout=nativeClear;
+          }
         },async lifecycle(){
           const observedRows=()=>[...observations].filter(node=>node.matches('[data-chat-message-row]')).length;
           const initial=observedRows();
@@ -111,6 +154,16 @@ async function main(): Promise<void> {
     assert.deepEqual([ownership.initial, ownership.wheel, ownership.afterWheel,
       ownership.pointer, ownership.blur, ownership.head], [1, 0, 1, 0, 1, 0])
     assert.equal(ownership.afterTop, ownership.userTop, "User scrolling must not be pulled back")
+    const burst = await page.evaluate("window.fixture.burst()") as {
+      hotReads: number, maxObserved: number, resumedReads: number, top: number,
+      after: number, offsetBefore: number, offsetAfter: number
+    }
+    assert.equal(burst.hotReads, 0, "Wheel plus virtual row recycling must not sample detached geometry")
+    assert.equal(burst.maxObserved, 0, "Keep row resize observations out of the wheel burst")
+    assert.equal(burst.resumedReads, 2, "Sample the anchor and subscribe to mounted rows once")
+    assert.equal(burst.after, burst.top, "Settling must preserve the position reached by wheel")
+    assert.ok(Math.abs(burst.offsetBefore - burst.offsetAfter) <= 0.5,
+      "Subsequent balanced height changes must retain the newly captured anchor")
     const lifecycle = (await page.evaluate("window.fixture.lifecycle()")) as {
       initial: number
       stale: number

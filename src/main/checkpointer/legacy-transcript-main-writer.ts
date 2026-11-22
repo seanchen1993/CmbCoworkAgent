@@ -5,6 +5,7 @@ import { stat } from "node:fs/promises"
 import { NativeSqliteAdapter, type NativeSqliteValue } from "../db/native-sqlite-adapter"
 import { checkpointWalInBackground } from "../db/wal-checkpoint"
 import { ensureLegacyTranscriptSlots } from "../db/legacy-transcript-slots"
+import { buildAvailableProviderOccurrenceId } from "../../shared/message-role-collision"
 import { createLegacyDurableIdentityLookup, getLegacyTranscriptSlotIdentity,
   reserveLegacyTranscriptOrdinals } from "./legacy-transcript-order"
 import {
@@ -440,6 +441,7 @@ function copyCommand(value: unknown): LegacyTranscriptWriteCommand {
         fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
       return value
     }
+    let identityBytes = 0
     return {
       kind,
       checkpointId: text(source.checkpointId),
@@ -447,11 +449,28 @@ function copyCommand(value: unknown): LegacyTranscriptWriteCommand {
       index: integer(source.index),
       complete: source.complete,
       entries: entries(source.entries).map((value) => {
-        const entry = object(value, ["messageId", "startAt", "endAt"])
+        const keys = ["messageId", "startAt", "endAt"]
+        if (value && typeof value === "object" && !types.isProxy(value) &&
+          Object.hasOwn(value, "providerIdentity")) keys.push("providerIdentity")
+        const entry = object(value, keys)
+        const identity = keys.length === 4
+          ? object(entry.providerIdentity, ["sourceId", "occurrence", "role", "toolCallId"])
+          : undefined
+        let providerIdentity: { sourceId: string; occurrence: number;
+          role: LegacyTranscriptWriteRow["role"]; toolCallId: string | null } | undefined
+        if (identity) {
+          const sourceId = text(identity.sourceId), occurrence = integer(identity.occurrence)
+          const role = text(identity.role), toolCallId = nullableText(identity.toolCallId)
+          identityBytes += Buffer.byteLength(sourceId) + Buffer.byteLength(toolCallId ?? "") + 32
+          if (!sourceId || occurrence === 0 || !["user", "assistant", "system", "tool"].includes(role) ||
+            identityBytes > limits.batchBytes) fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
+          providerIdentity = { sourceId, occurrence, role: role as LegacyTranscriptWriteRow["role"], toolCallId }
+        }
         return Object.freeze({
           messageId: text(entry.messageId),
           startAt: time(entry.startAt),
-          endAt: time(entry.endAt)
+          endAt: time(entry.endAt),
+          ...(providerIdentity && { providerIdentity })
         })
       })
     }
@@ -648,26 +667,47 @@ function usesScopedOrder(actor: Actor): boolean {
       [actor.threadId])?.[0] === 1
 }
 
+function scopedCopyIdentity(message: LegacyTranscriptWriteRow, index: number): LegacyTranscriptOrderIdentity {
+  return {
+    ...message, checkpointIndex: index,
+    ...(message.providerSourceId && message.providerOccurrence !== null && {
+      declaredProviderIdentity: { provider_source_id: message.providerSourceId,
+        provider_occurrence: message.providerOccurrence }
+    })
+  }
+}
+
 function insertMessage(
   actor: Actor,
   message: LegacyTranscriptWriteRow,
   index: number,
   total: number
-): number {
+): { inserted: number; messageId: string } {
   const database = actor.database
   const scoped = usesScopedOrder(actor)
   let ordinal = index
+  let messageId = message.messageId
   if (scoped) {
     const slot = row(database, `SELECT ordinal,provider_source_id,role,provider_occurrence
       FROM legacy_checkpoint_transcript_slots
       WHERE thread_id=? AND checkpoint_id=? AND message_index=?`,
     [actor.threadId, actor.source?.checkpointId, index])
     // A missing slot is already satisfied by an existing durable occurrence.
-    if (!slot) return 0
+    if (!slot) return { inserted: 0, messageId }
     const identity = getLegacyTranscriptSlotIdentity(message)
     if (slot[1] !== null && (slot[1] !== identity.source || slot[2] !== identity.role ||
       slot[3] !== identity.occurrence)) fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
     ordinal = integer(slot[0])
+    const copyIdentity = scopedCopyIdentity(message, index)
+    const declared = copyIdentity.declaredProviderIdentity
+    const occupied = { has: (id: string) => Boolean(row(database,
+      "SELECT 1 FROM thread_messages WHERE thread_id=? AND message_id=?", [actor.threadId, id])) }
+    if (declared && occupied.has(messageId)) {
+      const existing = createLegacyDurableIdentityLookup(database, actor.threadId)(copyIdentity)
+      if (existing) return { inserted: 0, messageId: existing.message_id }
+      messageId = buildAvailableProviderOccurrenceId(
+        declared.provider_source_id, message.role, declared.provider_occurrence, occupied)
+    }
   }
   const recovery = (actor.recoveryIntegrity ??= (
     database.exec("PRAGMA table_info(thread_messages)")[0]?.values ?? []
@@ -679,7 +719,7 @@ function insertMessage(
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,NULL,?${recovery ? ",?" : ""})`,
     [
       actor.threadId,
-      message.messageId,
+      messageId,
       message.providerSourceId,
       message.providerOccurrence,
       message.role,
@@ -702,7 +742,7 @@ function insertMessage(
     WHERE thread_id=? AND message_id=? AND ordinal>=?`,
       [index, actor.threadId, message.messageId, total]
     )
-  return inserted
+  return { inserted, messageId }
 }
 function copy(
   actor: Actor,
@@ -719,7 +759,7 @@ function copy(
     if (command.fragmentIndex !== 0 || command.index + command.rows.length > state.totalMessages)
       fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
     for (const message of command.rows)
-      inserted += insertMessage(actor, message, next++, state.totalMessages)
+      inserted += insertMessage(actor, message, next++, state.totalMessages).inserted
   } else {
     if (
       command.fragmentIndex > command.totalFragments ||
@@ -742,10 +782,17 @@ function copy(
     )
       fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
     actor.fragment ??= { index: command.index, total: command.totalFragments, row: command.row }
-    inserted =
-      command.fragmentIndex === 0
-        ? insertMessage(actor, command.row, command.index, state.totalMessages)
-        : 0
+    let messageId = command.row.messageId
+    if (command.fragmentIndex === 0) {
+      ({ inserted, messageId } = insertMessage(actor, command.row, command.index, state.totalMessages))
+    } else if (usesScopedOrder(actor)) {
+      // A previous batch or request may have inserted this occurrence under a
+      // collision-safe ID. Resume only against that exact durable identity.
+      const existing = createLegacyDurableIdentityLookup(actor.database, actor.threadId)(
+        scopedCopyIdentity(command.row, command.index))
+      if (!existing) fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+      messageId = existing.message_id
+    }
     fragmentOwned = command.fragmentIndex > 0 || inserted > 0
     if (fragmentOwned) {
       let characters = 0
@@ -756,7 +803,7 @@ function copy(
           VALUES (?,?,?,?)`,
           [
             actor.threadId,
-            command.row.messageId,
+            messageId,
             value,
             command.row.createdAt + command.fragmentIndex + index
           ]
@@ -768,7 +815,7 @@ function copy(
           `INSERT INTO thread_message_fragment_states(thread_id,message_id,total_chars,updated_at)
         VALUES (?,?,?,?) ON CONFLICT(thread_id,message_id) DO UPDATE SET
         total_chars=thread_message_fragment_states.total_chars+excluded.total_chars,updated_at=excluded.updated_at`,
-          [actor.threadId, command.row.messageId, characters, Date.now()]
+          [actor.threadId, messageId, characters, Date.now()]
         )
     }
     const complete = command.complete || !fragmentOwned
@@ -865,10 +912,24 @@ function timingPage(
     [actor.threadId, timing.live, actor.threadId, timing.source]
   )
   if (!matches) fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
-  for (const entry of command.entries) {
+  const findScopedIdentity = usesScopedOrder(actor)
+    ? createLegacyDurableIdentityLookup(actor.database, actor.threadId)
+    : undefined
+  for (const [index, entry] of command.entries.entries()) {
     if (entry.endAt !== null && entry.startAt !== null && entry.endAt < entry.startAt)
       fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
     if (entry.startAt === null && entry.endAt === null) continue
+    let messageId = entry.messageId
+    const identity = entry.providerIdentity
+    if (findScopedIdentity && identity) {
+      const durable = findScopedIdentity({ messageId, checkpointIndex: command.index + index,
+        role: identity.role, toolCallId: identity.toolCallId, providerSourceId: identity.sourceId,
+        providerOccurrence: identity.occurrence, declaredProviderIdentity: {
+          provider_source_id: identity.sourceId, provider_occurrence: identity.occurrence
+        } })
+      if (!durable) continue
+      messageId = durable.message_id
+    }
     actor.database.run(
       `UPDATE thread_messages SET
       start_at=COALESCE(start_at,CASE WHEN end_at IS NULL OR ?<=end_at THEN ? END),
@@ -884,7 +945,7 @@ function timingPage(
         entry.startAt,
         entry.startAt,
         actor.threadId,
-        entry.messageId
+        messageId
       ]
     )
   }

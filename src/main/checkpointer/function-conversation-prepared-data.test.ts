@@ -68,6 +68,64 @@ function fixture(legacy = false) {
 }
 
 describe("actual prepared native checkpoint data", () => {
+  it.each([false, true])("retires only the historical lineage triggers with replacement=%s", async replacement => {
+    const f = fixture()
+    await f.saver.initialize()
+    const existing = Reflect.get(f.saver, "db") as NativeSqliteAdapter
+    // The exact built-in SQL stored by the previous UAT Saver.
+    const record = `INSERT INTO checkpoint_lineage
+        (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, lineage_depth, ancestor_span_id, ancestor_span_depth)
+        SELECT NEW.thread_id, NEW.checkpoint_ns, NEW.checkpoint_id, NEW.parent_checkpoint_id, COALESCE(parent.lineage_depth + 1, 0),
+          CASE WHEN parent.lineage_depth % 128 = 0 THEN parent.checkpoint_id ELSE parent.ancestor_span_id END,
+          CASE WHEN parent.lineage_depth % 128 = 0 THEN parent.lineage_depth ELSE parent.ancestor_span_depth END
+        FROM (SELECT 1) LEFT JOIN checkpoint_lineage AS parent ON parent.thread_id = NEW.thread_id
+          AND parent.checkpoint_ns = NEW.checkpoint_ns AND parent.checkpoint_id = NEW.parent_checkpoint_id
+        WHERE 1
+        ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET conflicting_parent = 1
+        WHERE checkpoint_lineage.parent_checkpoint_id IS NOT excluded.parent_checkpoint_id;`
+    existing.run(`CREATE TRIGGER IF NOT EXISTS checkpoint_lineage_insert AFTER INSERT ON checkpoints
+        BEGIN ${replacement ? "DELETE FROM writes;" : record} END`)
+    existing.run(`CREATE TRIGGER IF NOT EXISTS checkpoint_lineage_parent_update
+        AFTER UPDATE OF parent_checkpoint_id, checkpoint_id ON checkpoints
+        WHEN NEW.parent_checkpoint_id IS NOT OLD.parent_checkpoint_id OR NEW.checkpoint_id IS NOT OLD.checkpoint_id
+        BEGIN ${record} END`)
+    await f.saver.close()
+    const saver = new SqlJsSaver(f.graphPath)
+    cleanup.push(() => saver.close())
+    await saver.initialize()
+    const database = Reflect.get(saver, "db") as NativeSqliteAdapter
+    const lineage = () => database.exec(`SELECT checkpoint_id,parent_checkpoint_id,lineage_depth,
+      ancestor_span_id,conflicting_parent FROM main.checkpoint_lineage ORDER BY lineage_depth`)[0].values
+    const remaining = database.exec(`SELECT name FROM main.sqlite_schema WHERE type='trigger'
+      AND tbl_name='checkpoints'`)[0].values
+    const first = f.checkpoint(), wrapped = f.bridge.wrap(saver)
+    if (replacement) {
+      expect(remaining).toEqual([["checkpoint_lineage_insert"]])
+      await expect(wrapped.put(f.config(), first, metadata)).rejects.toThrow("PREPARED_SCHEMA_UNSUPPORTED")
+      expect(lineage()).toEqual([])
+      return
+    }
+    expect(remaining).toEqual([])
+    await wrapped.put(f.config(), first, metadata)
+    const child = f.checkpoint()
+    await wrapped.put(f.config(first.id), child, metadata)
+    expect(lineage()).toEqual([[first.id, null, 0, null, 0], [child.id, first.id, 1, first.id, 0]])
+    // Reuse of a checkpoint ID with a different parent must retain the conflict evidence.
+    await saver.put(f.config(), child, metadata)
+    expect(lineage()[1]).toEqual([child.id, first.id, 1, first.id, 1])
+  })
+
+  it("rolls back the lineage when an ordinary checkpoint transaction fails after its write", async () => {
+    const f = fixture()
+    await f.saver.initialize()
+    const database = Reflect.get(f.saver, "db") as NativeSqliteAdapter
+    database.run(`CREATE TRIGGER abort_projection BEFORE INSERT ON checkpoint_runtime_projections
+      BEGIN SELECT RAISE(ABORT, 'ACTUAL_PROJECTION_ABORT'); END`)
+    await expect(f.saver.put(f.config(), f.checkpoint(), metadata)).rejects.toThrow("ACTUAL_PROJECTION_ABORT")
+    expect(database.exec(`SELECT (SELECT COUNT(*) FROM checkpoints),
+      (SELECT COUNT(*) FROM checkpoint_lineage)`)[0].values).toEqual([[0, 0]])
+  })
+
   it("persists only data before native COMMIT, is idempotent, and never brands a prepared token committed", async () => {
     const f = fixture(), checkpoint = f.checkpoint(), observer = f.bridge.bindSaver(f.saver)
     const prepared = observer.prepare(f.config(), checkpoint)!
@@ -388,13 +446,20 @@ describe("actual prepared native checkpoint data", () => {
         "SELECT COUNT(*) FROM checkpoints")[0].values).toEqual([[0]])
     })
 
-  it.each(["uppercase-temp", "fourth-table-trigger"] as const)(
+  it.each(["uppercase-temp", "fourth-table-trigger", "lineage-trigger", "lineage-shadow",
+    "lineage-expression-index"] as const)(
     "rejects %s before any native CP mutation", async mutation => {
       const f = fixture(), checkpoint = f.checkpoint()
       await expect(f.bridge.wrap(f.saver, undefined, undefined, { prepared: () => {
         const database = Reflect.get(f.saver, "db") as NativeSqliteAdapter
-        database.run(mutation === "uppercase-temp" ? "CREATE TEMP TABLE CHECKPOINTS(value)" :
-          "CREATE TRIGGER corrupt_runtime AFTER INSERT ON checkpoint_runtime_projections BEGIN DELETE FROM checkpoints; END")
+        const sql = {
+          "uppercase-temp": "CREATE TEMP TABLE CHECKPOINTS(value)",
+          "fourth-table-trigger": "CREATE TRIGGER corrupt_runtime AFTER INSERT ON checkpoint_runtime_projections BEGIN DELETE FROM checkpoints; END",
+          "lineage-trigger": "CREATE TRIGGER corrupt_runtime AFTER INSERT ON checkpoint_lineage BEGIN DELETE FROM checkpoints; END",
+          "lineage-shadow": "CREATE TEMP VIEW CHECKPOINT_LINEAGE AS SELECT 1",
+          "lineage-expression-index": "CREATE INDEX external_expression ON checkpoint_lineage(length(checkpoint_id))"
+        }
+        database.run(sql[mutation])
       } }).put(f.config(), checkpoint, metadata)).rejects.toThrow("PREPARED_SCHEMA_UNSUPPORTED")
       expect(f.count("function_conversation_deliveries")).toBe(0)
     })

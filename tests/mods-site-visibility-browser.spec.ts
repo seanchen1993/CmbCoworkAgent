@@ -35,9 +35,12 @@ async function main() {
       <div style="opacity:0"><section id="transparent" class="row">transparent</section></div>
       <section id="hidden" class="row" style="visibility:hidden">hidden</section>
       <div id="transcript" data-radix-scroll-area-viewport style="height:100px;overflow:auto">
+        <div id="transcript-presentation">
         <div style="height:400px"></div>
-        <div data-chat-message-row style="height:50px">
+        <div id="transcript-row" data-chat-message-row style="height:50px">
           <section id="transcript-site" style="display:contents">protected transcript</section>
+          <section id="transcript-companion" style="display:contents">another site</section>
+        </div>
         </div>
       </div>`)
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
@@ -88,7 +91,8 @@ async function main() {
     assert.equal(await page.evaluate("window.transcriptProbe.visible()"), false)
     // Scroll restoration can still be settling while the user scrolls. Newly visible
     // messages must be promoted in the read queue during that window too.
-    await page.locator("#transcript").evaluate(node => node.setAttribute("data-chat-initial-presentation", "pending"))
+    await page.locator("#transcript-presentation").evaluate(node =>
+      node.setAttribute("data-chat-initial-presentation", "pending"))
     await page.evaluate("document.getElementById('transcript').scrollTop=400")
     await page.waitForFunction("window.transcriptProbe.visible()")
     assert.equal(await page.evaluate("window.transcriptVisibilityChanges"), 1)
@@ -99,6 +103,48 @@ async function main() {
     await page.evaluate("document.getElementById('transcript').scrollTop=400")
     await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
     assert.equal(await page.evaluate("window.transcriptVisibilityChanges"), 2)
+    await page.evaluate(`
+      const presentation = document.getElementById('transcript-presentation');
+      presentation.style.visibility = 'hidden';
+      window.hiddenProbe = FunctionSiteVisibility.observeFunctionSiteVisibility(
+        document.getElementById('transcript-site'));
+      window.hiddenProbeAtMount = window.hiddenProbe.visible();
+      const nativeObserver = new IntersectionObserver(([entry]) => {
+        window.hiddenProbeIntersects = entry.isIntersecting && entry.intersectionRatio > 0;
+        nativeObserver.disconnect();
+      });
+      nativeObserver.observe(document.getElementById('transcript-row'));
+    `)
+    await page.waitForFunction("window.hiddenProbeIntersects===true")
+    assert.equal(await page.evaluate("window.hiddenProbeAtMount"), false, "Hidden probe has no cold visible priority")
+    assert.equal(await page.evaluate("window.hiddenProbe.visible()"), false, "Geometry IO must not promote a hidden probe")
+    await page.evaluate("document.getElementById('transcript-presentation').style.visibility = ''")
+    await page.waitForFunction("window.hiddenProbe.visible()")
+    await page.evaluate("window.hiddenProbe.close()")
+    await page.evaluate(`
+      const viewport = document.getElementById('transcript');
+      document.getElementById('transcript-presentation')
+        .setAttribute("data-chat-initial-presentation", "ready");
+      let reads = 0;
+      for (const node of [viewport, document.getElementById('transcript-row')]) {
+        const read = node.getBoundingClientRect.bind(node);
+        node.getBoundingClientRect = () => { reads++; return read() };
+      }
+      window.settledRectReads = () => reads;
+      window.settledFirst = FunctionSiteVisibility.observeFunctionSiteVisibility(
+        document.getElementById('transcript-site'));
+    `)
+    await page.waitForFunction("window.settledFirst.visible()")
+    assert.equal(await page.evaluate(`
+      window.settledSecond = FunctionSiteVisibility.observeFunctionSiteVisibility(
+        document.getElementById('transcript-companion'));
+      window.settledSecond.visible();
+    `), true, "A second site reuses the row's sampled visibility")
+    assert.equal(await page.evaluate("window.settledRectReads()"), 0,
+      "Settled transcript mounts never force row or viewport geometry")
+    await page.evaluate("window.settledFirst.close();document.getElementById('transcript').scrollTop=0")
+    await page.waitForFunction("!window.settledSecond.visible()")
+    await page.evaluate("window.settledSecond.close()")
     console.log("PASS actual contents/ancestor-clipping/viewport scheduling geometry")
 
     const errors: string[] = []
@@ -276,6 +322,161 @@ async function main() {
     await page.evaluate("window.duration.close()")
     assert.deepEqual(errors, [])
     console.log("PASS initial elapsed-time reads respect real row visibility and preserve physical cancellation")
+
+    await mount(page, `
+      import {ChatVirtualPrependLayout} from ${JSON.stringify(resolve("src/renderer/src/components/chat/chat-virtual-prepend-layout.tsx"))};
+      import {FunctionSite} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionSite.tsx"))};
+      import {ModsChatScope} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
+      import {functionSiteQueue} from ${JSON.stringify(resolve("src/renderer/src/lib/function-site-queue.ts"))};
+      const reads = [];
+      let admissions = 0;
+      const run = functionSiteQueue.run;
+      functionSiteQueue.run = function (...args) {
+        admissions++;
+        return Reflect.apply(run, this, args);
+      };
+      window.api.mods.onCardsChanged = () => () => {};
+      window.api.mods.onConfigurationChanged = () => () => {};
+      window.api.mods.nextSiteReadId = () => String(reads.length + 1);
+      window.api.mods.siteUnmount = async () => {};
+      window.api.mods.siteRead = async (_thread, component, props, id, _message, _expected, _owner, readId) => {
+        reads.push(id);
+        return {state:"mounted",owner:readId,snapshot:{key:readId,id:readId,plugin:"engine",
+          generation:readId,title:"probe",rows:2,closeOnEscape:false,
+          tree:{type:"Text",props:{},children:["SAFE "+id]},
+          nativeContent:{component,entries:[{ref:0,props}]}}};
+      };
+      const row = (id, top, history=true) => <div key={id} id={id} data-chat-message-row
+        style={{position:"absolute",top,height:32,width:300}}><FunctionSite threadId="probe"
+        component="AssistantMessage" presentationId={id} facts={{text:"body"}} allowUnboundHistory={history}
+        fallback={<span>RAW {id}</span>}/></div>;
+      function ProbeFixture() {
+        const [phase, setPhase] = useState("hidden");
+        window.virtualProbe = { wrongWindow:() => setPhase("wrong"), reveal:() => setPhase("ready"),
+          reads, admissions:() => admissions };
+        return <ModsChatScope.Provider value={{threadId:"probe",enabled:true,ready:true,
+          isCurrent:() => true,prefetchHistory:true}}>
+          <div data-radix-scroll-area-viewport style={{height:120,width:320,overflow:"auto"}}>
+            <ChatVirtualPrependLayout forwardedRef={null}
+              context={{windowKey:"probe",firstItemIndex:0,scrollParent:null,initialHistoryReadPending:phase==="wrong"}}
+              style={{position:"relative",height:500,visibility:phase==="hidden" ? "hidden" : undefined}}>
+              {phase==="hidden" && row("discarded-probe", 30)}
+              {phase==="wrong" && <>{row("wrong-window", 30)}{row("live-row", 65, false)}</>}
+              {phase!=="hidden" && row("visible-row", 0)}
+              {phase!=="hidden" && row("overscan-row", 400)}
+            </ChatVirtualPrependLayout>
+          </div>
+        </ModsChatScope.Provider>;
+      }
+      host.render(<ProbeFixture/>);
+    `, [browserWorkerPlugin()])
+    await page.locator("#discarded-probe [data-function-site-pending]").waitFor({ state: "attached" })
+    await settle()
+    assert.equal(await page.evaluate("window.virtualProbe.admissions()"), 0,
+      "The hidden positioning layer must not use display queue capacity")
+    assert.equal(await page.getByText("RAW", { exact: false }).count(), 0)
+    await page.evaluate("window.virtualProbe.wrongWindow()")
+    await page.getByText("SAFE live-row", { exact: true }).waitFor({ timeout: 5_000 })
+    await settle()
+    assert.deepEqual(await page.evaluate("window.virtualProbe.reads"), ["live-row"],
+      "Even when the temporary historical rows appear visible, they do not dispatch before the true position")
+    assert.equal(await page.getByText("RAW", { exact: false }).count(), 0)
+    await page.evaluate("window.virtualProbe.reveal()")
+    await page.getByText("SAFE visible-row", { exact: true }).waitFor({ timeout: 5_000 })
+    await page.getByText("SAFE overscan-row", { exact: true }).waitFor({ state: "attached", timeout: 5_000 })
+    assert.deepEqual(
+      (await page.evaluate("window.virtualProbe.reads") as string[]).toSorted(),
+      ["live-row", "overscan-row", "visible-row"]
+    )
+    assert.equal(await page.getByText("RAW", { exact: false }).count(), 0)
+    assert.deepEqual(errors, [])
+    console.log("PASS hidden positioning rows stay out of the display queue and retain fallback protection")
+
+    await mount(page, `
+      import {ChatVirtualPrependLayout} from ${JSON.stringify(resolve("src/renderer/src/components/chat/chat-virtual-prepend-layout.tsx"))};
+      import {FunctionMessageText} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionMessageText.tsx"))};
+      import {ModsChatScope} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
+      const reads = [];
+      const held = new Map();
+      let maxActive = 0;
+      window.api.mods.onCardsChanged = () => () => {};
+      window.api.mods.onConfigurationChanged = () => () => {};
+      window.api.mods.nextSiteReadId = () => String(reads.length + 1);
+      window.api.mods.siteUnmount = async () => {};
+      window.api.mods.siteRead = async (_thread, component, props, id, _message, _expected, _owner, readId) => {
+        reads.push(id);
+        await new Promise(resolve => {
+          held.set(id, resolve);
+          maxActive = Math.max(maxActive, held.size);
+        });
+        return {state:"mounted",owner:readId,snapshot:{key:readId,id:readId,plugin:"engine",
+          generation:readId,title:"tail",rows:2,closeOnEscape:false,
+          tree:{type:"Text",props:{},children:["SAFE "+id]},
+          nativeContent:{component,entries:[{ref:0,props:{...props,text:"SAFE "+id}}]}}};
+      };
+      const release = id => {
+        const complete = held.get(id);
+        held.delete(id);
+        complete?.();
+      };
+      const text = (messageId, block=0) => {
+        const id = messageId+":"+block;
+        return <FunctionMessageText key={id} threadId="tail" messageId={messageId}
+          presentationId={id} isFirstText={block===0} role="assistant" text={"RAW "+id}
+          isExpanded={false} isFirstOfReply={false} isHistory fallback={<span>RAW {id}</span>}
+          renderText={text => <span>{text}</span>}/>;
+      };
+      const tail = {messageId:"tail"};
+      function TailFixture({phase}) {
+        const [position, setPosition] = useState(phase);
+        window.initialTail = { reads, release, maxActive:() => maxActive,
+          position:() => setPosition("positioned"), takeover:() => setPosition("takeover"),
+          reset:() => { reads.length=0; maxActive=0; host.render(<TailFixture key="takeover" phase="pending"/>); } };
+        return <ModsChatScope.Provider value={{threadId:"tail",enabled:true,ready:true,
+          isCurrent:() => true,prioritizeInitialHistory:true}}>
+          <div data-radix-scroll-area-viewport style={{height:240,width:320,overflow:"auto"}}>
+            <ChatVirtualPrependLayout forwardedRef={null} context={{windowKey:"tail",firstItemIndex:0,
+              scrollParent:null,initialHistoryReadPending:position==="pending",
+              positionedHistoryTail:position==="positioned" ? tail : undefined}}>
+              {["before-1","before-2","before-3","before-4","tail"].map(id =>
+                <div key={id} data-chat-message-row style={{height:32,width:300}}>
+                  {text(id)}{id==="tail" && text(id,1)}
+                </div>)}
+            </ChatVirtualPrependLayout>
+          </div>
+        </ModsChatScope.Provider>;
+      }
+      host.render(<TailFixture key="first" phase="pending"/>);
+    `, [browserWorkerPlugin()])
+    await page.locator("[data-chat-message-row] [data-function-site-pending]").last().waitFor({ state: "attached" })
+    await settle()
+    assert.deepEqual(await page.evaluate("window.initialTail.reads"), [])
+    await page.evaluate("window.initialTail.position()")
+    await page.waitForFunction("window.initialTail.reads.length===4")
+    assert.deepEqual(await page.evaluate("window.initialTail.reads"),
+      ["tail:0", "before-1:0", "before-2:0", "before-3:0"],
+      "The confirmed tail's first text reaches the existing four slots ahead of earlier rows")
+    assert.equal(await page.getByText("RAW", { exact: false }).count(), 0)
+    await page.evaluate("window.initialTail.reads.slice().forEach(window.initialTail.release)")
+    await page.waitForFunction("window.initialTail.reads.length===6")
+    assert.deepEqual(await page.evaluate("window.initialTail.reads.slice(4)"), ["before-4:0", "tail:1"],
+      "Other blocks follow normal admission order")
+    await page.evaluate("window.initialTail.reads.slice(4).forEach(window.initialTail.release)")
+    await page.getByText("SAFE tail:1", { exact: true }).waitFor()
+    assert.equal(await page.evaluate("window.initialTail.maxActive()"), 4)
+    await page.evaluate("window.initialTail.reset()")
+    await page.getByText("SAFE tail:1", { exact: true }).waitFor({ state: "detached" })
+    await page.evaluate("window.initialTail.takeover()")
+    await page.waitForFunction("window.initialTail.reads.length===4")
+    assert.deepEqual(await page.evaluate("window.initialTail.reads"),
+      ["before-1:0", "before-2:0", "before-3:0", "before-4:0"],
+      "A user takeover without a confirmed position cannot award tail priority")
+    await page.evaluate("window.initialTail.reads.slice().forEach(window.initialTail.release)")
+    await page.waitForFunction("window.initialTail.reads.length===6")
+    await page.evaluate("window.initialTail.reads.slice(4).forEach(window.initialTail.release)")
+    await page.getByText("SAFE tail:1", { exact: true }).waitFor()
+    assert.deepEqual(errors, [])
+    console.log("PASS only the positioned tail's first static text leads cold display admission")
   } finally {
     await browser.close()
   }

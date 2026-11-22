@@ -15,8 +15,13 @@ export function ensureLegacyMessageTimeArchive(database: NativeSqliteAdapter): v
   database.run(`CREATE TABLE IF NOT EXISTS thread_legacy_message_times (
     thread_id TEXT PRIMARY KEY,
     values_json TEXT NOT NULL,
-    applied_checkpoint_id TEXT
+    applied_checkpoint_id TEXT,
+    applied_context TEXT
   )`)
+  const columns = database.exec("PRAGMA table_info(thread_legacy_message_times)")[0]?.values
+  if (!columns?.some((column) => column[1] === "applied_context")) {
+    database.run("ALTER TABLE thread_legacy_message_times ADD COLUMN applied_context TEXT")
+  }
   database.run(`CREATE TRIGGER IF NOT EXISTS preserve_legacy_message_times
     BEFORE UPDATE OF thread_values ON threads
     WHEN OLD.thread_values IS NOT NEW.thread_values

@@ -980,7 +980,9 @@ function assignScopedGraphAssistantIdentity(
 export function createCurrentRunMessageQueueMiddleware(
   ownerRunToken?: string,
   loadGraphProviderOccurrence?: GraphProviderOccurrenceLoader,
-  prepareScopedProviderHistory?: (threadId: string, scopedTurn: boolean) => Promise<void> | undefined
+  prepareScopedProviderHistory?: (
+    threadId: string, scopedTurn: boolean, signal: AbortSignal | undefined
+  ) => Promise<void> | undefined
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
@@ -993,7 +995,7 @@ export function createCurrentRunMessageQueueMiddleware(
       // Record before the handler can emit the first raw delta.
       if (threadId && ownerRunToken && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
         const scopedTurn = rememberScopedGraphProviderOccurrences(threadId, ownerRunToken, messages)
-        const preparation = prepareScopedProviderHistory?.(threadId, scopedTurn)
+        const preparation = prepareScopedProviderHistory?.(threadId, scopedTurn, request.runtime?.signal)
         if (preparation) {
           await preparation
           request.runtime?.signal?.throwIfAborted()

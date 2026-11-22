@@ -38,6 +38,24 @@ it("rejects a scope replacement during capability evaluation", () => {
   expect(() => readModsChatDisplayCapability(manager, access)).toThrow("MODS_SCOPE_CHANGED")
 })
 
+it("grants native history only with an affirmative, unprotected proof", () => {
+  const access = { workspace: "workspace", assertCurrent: vi.fn() }
+  const proof = vi.fn(() => true)
+  const manager = { isEnabled: () => true, protects: () => false }
+  expect(readModsChatDisplayCapability(manager, access, proof))
+    .toEqual({ enabled: true, nativeHistory: true })
+  expect(readModsChatDisplayCapability({ ...manager, protects: () => true }, access, proof))
+    .toEqual({ enabled: true, nativeHistory: false })
+  expect(proof).toHaveBeenCalledTimes(1)
+  proof.mockImplementation(() => { throw new ModError("MODS_THREAD_READ_ONLY") })
+  expect(readModsChatDisplayCapability(manager, access, proof))
+    .toEqual({ enabled: true, nativeHistory: false })
+  access.assertCurrent.mockImplementationOnce(() => {}).mockImplementationOnce(() => {
+    throw new ModError("MODS_SCOPE_CHANGED")
+  })
+  expect(() => readModsChatDisplayCapability(manager, access, proof)).toThrow("MODS_SCOPE_CHANGED")
+})
+
 function handlers(context: Record<string, unknown>): Array<(event: object, input?: unknown) => boolean> {
   const source = ts.createSourceFile("mods.ts", readFileSync(new URL("./mods.ts", import.meta.url),
     "utf8"), ts.ScriptTarget.Latest, true)

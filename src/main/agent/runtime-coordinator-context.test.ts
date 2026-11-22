@@ -105,6 +105,7 @@ it.each(["initial", "failover", "handoff"])(
       toolStrategy: "standard",
       workerActionStationarityTurnId: "turn",
       managedExecution: true,
+      autoBackgroundHandoff: false,
       candidateId: "first",
       nextCandidate: "second",
       usedWorkerModelId: "used",
@@ -131,6 +132,7 @@ it.each(["initial", "failover", "handoff"])(
     expect(options.approvalThreadId).toBe("parent")
     expect(options.enableAgentsPrompt).toBe(false)
     expect(options.disableSubagents).toBe(true)
+    expect(options.autoBackgroundHandoff).toBe(false)
     expect(options.creatorAccounting).toBe(workerAccounting)
     expect(options.filesystemAccess.workload).toBe(stage === "handoff" ? "read_only" : "verify")
   }

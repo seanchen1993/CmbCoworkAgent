@@ -21,7 +21,13 @@ const declaration = source.statements.find(
     ts.isFunctionDeclaration(statement) && statement.name?.text === "settlePhysicalAgentRun"
 )
 if (!declaration) throw Error("Actual physical settlement helper is missing")
-const javascript = ts.transpile(declaration.getText(source), { target: ts.ScriptTarget.ES2022 })
+const pendingKey = source.statements.find(
+  (statement) => ts.isFunctionDeclaration(statement) &&
+    statement.name?.text === "pendingStreamTranscriptKey"
+)
+if (!pendingKey) throw Error("Actual transcript key helper is missing")
+const javascript = ts.transpile([pendingKey, declaration].map(node => node.getText(source)).join("\n"),
+  { target: ts.ScriptTarget.ES2022 })
 
 function fixture(settlement: Promise<void>) {
   const release = vi.fn(),
@@ -53,6 +59,7 @@ function fixture(settlement: Promise<void>) {
     },
     flushPendingStreamTranscriptMessages: vi.fn(),
     discardStreamTranscriptToolCallAccumulators: vi.fn(),
+    streamTranscriptBoundaries: new Map(),
     invalidateCurrentRunMessagePreparer: vi.fn(),
     activeRuns: new Map(),
     activeRunSettled: new Map(),

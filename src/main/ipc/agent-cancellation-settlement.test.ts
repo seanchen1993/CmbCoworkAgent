@@ -24,7 +24,12 @@ const original = source.statements.find(
     ts.isFunctionDeclaration(node) && node.name?.text === "settlePhysicalAgentRun"
 )!
 if (!original) throw Error("Original physical settlement is missing")
-const code = ts.transpile(original.getText(source), { target: ts.ScriptTarget.ES2022 })
+const pendingKey = source.statements.find(
+  (node) => ts.isFunctionDeclaration(node) && node.name?.text === "pendingStreamTranscriptKey"
+)
+if (!pendingKey) throw Error("Original transcript key helper is missing")
+const code = ts.transpile([pendingKey, original].map(node => node.getText(source)).join("\n"),
+  { target: ts.ScriptTarget.ES2022 })
 
 function fixture(
   options: {
@@ -75,6 +80,7 @@ function fixture(
     runSettlementPhases,
     flushPendingStreamTranscriptMessages: noop,
     discardStreamTranscriptToolCallAccumulators: noop,
+    streamTranscriptBoundaries: new Map(),
     invalidateCurrentRunMessagePreparer: noop,
     activeRuns: new Map([["thread", controller]]),
     clearCurrentRunMessageQueue: noop,

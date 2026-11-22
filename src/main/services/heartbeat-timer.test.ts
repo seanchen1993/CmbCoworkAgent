@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { AIMessage } from "@langchain/core/messages"
 import type { ChatResult } from "@langchain/core/outputs"
+import type { CheckpointTuple } from "@langchain/langgraph-checkpoint"
 import { createAgent } from "langchain"
 import type { CreateAgentRuntimeOptions } from "../agent/runtime"
 import type { ModsManager } from "../mods/manager"
@@ -156,10 +157,22 @@ describe("heartbeat timer invalidation", () => {
       mocks.getThreadCore.mockReturnValue(null)
       mocks.pinCheckpointer.mockReturnValue(() => {})
       mocks.closeCheckpointer.mockResolvedValue(undefined)
-      const prune = vi.fn(async () => {})
+      const preHeartbeatSnapshot: CheckpointTuple = {
+        config: { configurable: { thread_id: "heartbeat" } },
+        checkpoint: {
+          id: "prior-heartbeat-checkpoint",
+          ts: "2026-11-01T00:00:00.000Z",
+          v: 1,
+          channel_values: { messages: [new AIMessage("Prior actionable heartbeat")] },
+          channel_versions: {},
+          versions_seen: {}
+        },
+        metadata: { source: "loop", step: 1, parents: {} }
+      }
+      const restoreThreadCheckpoint = vi.fn().mockResolvedValue(undefined)
       mocks.getCheckpointer.mockResolvedValue({
-        getTuple: async () => undefined,
-        deleteThread: prune
+        getTuple: vi.fn().mockResolvedValue(preHeartbeatSnapshot),
+        restoreThreadCheckpoint
       })
       class HeartbeatModel extends BaseChatModel {
         bindTools(): this {
@@ -236,7 +249,9 @@ describe("heartbeat timer invalidation", () => {
             cache_creation_input_tokens: 0
           })
         } else expect(facts.usage).toBeUndefined()
-        expect(prune).toHaveBeenCalledTimes(ending === "silent" ? 1 : 0)
+        if (ending === "silent") {
+          expect(restoreThreadCheckpoint).toHaveBeenCalledExactlyOnceWith("heartbeat", preHeartbeatSnapshot)
+        } else expect(restoreThreadCheckpoint).not.toHaveBeenCalled()
       } finally {
         lifecycle.close()
         authorities.close()
@@ -326,9 +341,10 @@ describe("heartbeat timer invalidation", () => {
     mocks.getHeartbeatContent.mockReturnValue("- inspect workspace")
     mocks.getThreadCore.mockReturnValue(null)
     mocks.pinCheckpointer.mockReturnValue(vi.fn())
+    const restoreThreadCheckpoint = vi.fn().mockResolvedValue(undefined)
     mocks.getCheckpointer.mockResolvedValue({
       getTuple: vi.fn().mockResolvedValue(undefined),
-      deleteThread: vi.fn().mockResolvedValue(undefined)
+      restoreThreadCheckpoint
     })
     mocks.closeCheckpointer.mockResolvedValue(undefined)
     mocks.createAgentRuntime.mockResolvedValue({ stream: async () => [] })
@@ -339,5 +355,6 @@ describe("heartbeat timer invalidation", () => {
       expect.objectContaining({ autoBackgroundHandoff: false, threadId: "heartbeat" })
     )
     expect(mocks.createAgentRuntime.mock.calls[0][0]).not.toHaveProperty("managedExecution")
+    expect(restoreThreadCheckpoint).toHaveBeenCalledExactlyOnceWith("heartbeat", undefined)
   })
 })

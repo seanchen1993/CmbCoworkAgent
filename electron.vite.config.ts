@@ -8,6 +8,7 @@ import tailwindcss from "@tailwindcss/vite"
 import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
 import { mirrorBundledModExamples } from "./src/main/build/bundled-mod-examples"
 import { checkReactVirtuosoScrollCancel } from "./scripts/apply-react-virtuoso-scroll-cancel.mjs"
+import { radixScrollbarWheel } from "./scripts/vite-radix-scrollbar-wheel"
 // import {app} from "electron"
 
 checkReactVirtuosoScrollCancel({ workspaceRoot: resolve(".") })
@@ -166,7 +167,7 @@ export default defineConfig({
         "@renderer": resolve("src/renderer/src")
       }
     },
-    plugins: [optionalMmjModule(), react(), tailwindcss()],
+    plugins: [radixScrollbarWheel(), optionalMmjModule(), react(), tailwindcss()],
     server: {
       fs: {
         // Worktrees may share node_modules through a symlink; allow its static assets too.

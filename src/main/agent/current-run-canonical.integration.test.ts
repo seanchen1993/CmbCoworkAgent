@@ -123,6 +123,7 @@ function fixture() {
     flushTranscriptBeforeCurrentRunInjection: (actualThread: string, actualRun: string) => {
       guard()
       if (actualThread !== threadId || actualRun !== runToken) throw Error("ACTUAL_RUN_REQUIRED")
+      return () => guard()
     },
     readCurrentRunCanonicalAssistantCompletion,
     sameFunctionConversationTranscriptStamp,

@@ -3,6 +3,7 @@ import type { CheckpointDatabaseFileIdentity } from "./checkpoint-database-ident
 import type { FunctionConversationTranscriptStamp } from "../../shared/mods/v2/conversation-transcript"
 import type { FunctionConversationState } from "./function-conversation-state"
 import type { LegacyTranscriptWriterData } from "./legacy-transcript-write-protocol"
+import type { StockLegacyTranscriptAuthority } from "./legacy-stock-transcript-authority"
 import type { FunctionSessionCheckpoint, FunctionSessionMessagePage,
   FunctionSessionPageInput } from "../../shared/mods/v2/session"
 import type { CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
@@ -89,8 +90,7 @@ export type LegacySearchBootstrapGuard = {
   | { checkpointId?: undefined; checkpointRowId?: undefined; recoverySuffix?: undefined }
 )
 
-export interface LegacyCheckpointTranscriptBootstrapRequest {
-  legacyWriter: LegacyTranscriptWriterData
+interface LegacyCheckpointTranscriptBootstrapRequestBase {
   type: "bootstrap-legacy-transcript"
   requestId: number
   databasePath: string
@@ -100,6 +100,12 @@ export interface LegacyCheckpointTranscriptBootstrapRequest {
   cancellationBuffer: SharedArrayBuffer
   searchGuard?: LegacySearchBootstrapGuard
 }
+
+export type LegacyCheckpointTranscriptBootstrapRequest =
+  LegacyCheckpointTranscriptBootstrapRequestBase & (
+    | { legacyWriter: LegacyTranscriptWriterData; stockAuthority?: never }
+    | { legacyWriter?: never; stockAuthority: StockLegacyTranscriptAuthority }
+  )
 
 export interface CheckpointTranscriptPresenceRequest {
   type: "inspect-transcript-presence"

@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer"
 import type { QuickJSContext, QuickJSHandle } from "quickjs-emscripten"
 import { MODS_MAX_BYTES } from "../../../shared/mods/validation"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
-import { isFunctionUiRenderComponent } from "../../../shared/mods/v2/sites"
+import { isFunctionUiRenderComponent } from "../../../shared/mods/v2/site-vocabulary"
 import type {
   FunctionUiResolveAssembly,
   FunctionUiResolveCall,

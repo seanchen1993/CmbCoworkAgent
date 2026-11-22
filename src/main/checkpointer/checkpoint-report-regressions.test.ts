@@ -21,8 +21,11 @@ import * as threadDb from "../db"
 import { recoverMainCheckpointMessages } from "../agent/checkpoint-message-recovery"
 import { readThreadMessagesPage } from "../thread-message-hydration/page-reader"
 import { readThreadHydrationProjection } from "../thread-metadata-hydration/reader"
-import { bootstrapLegacyCheckpointTranscript } from "./runtime-projection-store"
-import { hasPendingLegacyMessageTimes, migrateLegacyMessageTimes } from "./legacy-message-times"
+import { bootstrapStockLegacyCheckpointTranscript } from "./legacy-stock-transcript-store"
+import { hasPendingStockLegacyMessageTimes, migrateLegacyMessageTimes } from "./legacy-stock-message-times"
+import type { LegacySearchBootstrapGuard } from "./runtime-projection-protocol"
+import { sqliteRecoveryFamilyKey } from "../db/sqlite-recovery-family"
+import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { SqlJsSaver } from "./sqljs-saver"
 import { persistedMessageToRuntimeMessage } from "../ipc/persisted-runtime-message"
 import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX, GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../shared/goal-events"
@@ -59,12 +62,13 @@ function message(id: string, role: Message["role"], content: Message["content"] 
   return { id, role, content, created_at: new Date(Date.parse(TS) - 1) }
 }
 
-function page(options: ThreadMessagesPageOptions = {}) {
+function page(options: ThreadMessagesPageOptions = {}, auditStockLegacyTimes = false) {
   return readThreadMessagesPage(reader, {
     type: "read-page",
     requestId: 1,
     databasePath: state.databasePath,
     threadId: "thread",
+    ...(auditStockLegacyTimes && { auditStockLegacyTimes: true as const }),
     options: { limit: 1000, byteBudget: 4 * 1024 * 1024, ...options },
     cancellationBuffer: new SharedArrayBuffer(4)
   }).page
@@ -124,13 +128,23 @@ async function seedCheckpoint(
   return path
 }
 
-function bootstrap(path: string) {
-  return bootstrapLegacyCheckpointTranscript(
+function bootstrap(path: string, guard?: LegacySearchBootstrapGuard) {
+  const row = threadDb.getThreadCore("thread")
+  const messageDatabaseFile = threadDb.getOpenDatabaseFile(threadDb.getDb())
+  if (!row || !messageDatabaseFile) throw Error("Missing ordinary legacy fixture identity")
+  return bootstrapStockLegacyCheckpointTranscript(
     path,
     state.databasePath,
     "thread",
     "",
-    new SharedArrayBuffer(4)
+    new SharedArrayBuffer(4),
+    {
+      messageDatabaseFile,
+      checkpointFamilyKey: sqliteRecoveryFamilyKey(path),
+      incarnation: captureThreadIncarnation(row),
+      workspace: ""
+    },
+    guard
   )
 }
 
@@ -448,12 +462,23 @@ describe("legacy checkpoint timing migration", () => {
     reader.exec(`UPDATE thread_legacy_message_times
       SET applied_checkpoint_id = 'cp', applied_context = NULL WHERE thread_id = 'thread'`)
     const path = await seedCheckpoint([new AIMessage({ id: "tail-reply", content: "tail-reply" })], { legacy: true })
-    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(true)
+    expect(hasPendingStockLegacyMessageTimes(reader, "thread", "cp")).toBe(true)
     bootstrap(path)
     expect(page().messages.map((row) => row.start_at?.toISOString())).toEqual([START, END])
-    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+    expect(hasPendingStockLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
     expect(reader.prepare("SELECT applied_checkpoint_id, applied_context FROM thread_legacy_message_times").get())
       .toEqual({ applied_checkpoint_id: "cp", applied_context: expect.any(String) })
+    const firstPage = { includeVisibleMessagePresence: true }
+    expect(page(firstPage, true).legacyMessageTimesPending).toBeUndefined()
+    // A raw tail append deliberately leaves both the app bucket and the structure epoch
+    // untouched. The existing stock source ledger must still trigger an exact re-audit.
+    reader.exec(`INSERT INTO thread_messages (thread_id, message_id, ordinal, role, content_json, created_at)
+      SELECT 'thread', 'raw-tail', MAX(ordinal) + 1, 'assistant', '"raw tail"', ${Date.parse(TS)}
+      FROM thread_messages WHERE thread_id = 'thread'`)
+    expect(page(firstPage, true).legacyMessageTimesPending).toBe(true)
+    expect(page(firstPage).legacyMessageTimesPending).toBeUndefined()
+    reader.exec("DELETE FROM legacy_checkpoint_transcript_sources WHERE thread_id = 'thread'")
+    expect(page(firstPage, true).legacyMessageTimesPending).toBeUndefined()
   })
 
   it("audits the changed durable membership when a checkpoint keeps its ID", async () => {
@@ -467,7 +492,7 @@ describe("legacy checkpoint timing migration", () => {
     const tail = new AIMessage({ id: "tail-reply", content: "tail-reply" })
     const path = await seedCheckpoint([tail], { legacy: true })
     bootstrap(path)
-    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+    expect(hasPendingStockLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
     const source = new SqlJsSaver(path)
     const restored = new AIMessage({ id: "older-reply", content: "older-reply" })
     const [type, payload] = await source.serde.dumpsTyped(checkpoint([restored, tail]))
@@ -482,7 +507,7 @@ describe("legacy checkpoint timing migration", () => {
     bootstrap(path)
     expect(page().messages.map((row) => [row.id, row.start_at?.toISOString()]))
       .toEqual([["older-reply", START], ["tail-reply", END]])
-    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+    expect(hasPendingStockLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
   })
 
   it("preserves the original positional archive after a proven append to an interrupted copy", async () => {
@@ -511,7 +536,7 @@ describe("legacy checkpoint timing migration", () => {
     expect(bootstrap(path).stats.searchProjectionState).toBe("complete")
     expect(page().messages.map((row) => row.start_at?.toISOString()))
       .toEqual([...Array.from({ length: originalCount }, () => START), undefined])
-    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+    expect(hasPendingStockLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
   })
 
   it("preserves an unpublished positional time archive across a proven provider revision", async () => {
@@ -525,11 +550,9 @@ describe("legacy checkpoint timing migration", () => {
     const path = await seedCheckpoint([assistant("temporary", "old provisional")], { legacy: true })
     const row = reader.prepare(`SELECT created_at, json_extract(metadata, '$.cmb_thread_incarnation') AS token
       FROM threads WHERE thread_id = 'thread'`).get()
-    const guarded = () => bootstrapLegacyCheckpointTranscript(
-      path, state.databasePath, "thread", "", new SharedArrayBuffer(4), {
-        incarnation: { token: typeof row?.token === "string" ? row.token : null, legacyCreatedAt: Number(row?.created_at) }
-      }
-    )
+    const guarded = () => bootstrap(path, {
+      incarnation: { token: typeof row?.token === "string" ? row.token : null, legacyCreatedAt: Number(row?.created_at) }
+    })
     expect(guarded().stats.searchProjectionState).toBe("complete")
     expect(page().messages[0].start_at).toBeUndefined()
     const saver = new SqlJsSaver(path)

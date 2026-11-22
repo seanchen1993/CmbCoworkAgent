@@ -1,4 +1,4 @@
-import { expect, it } from "vitest"
+import { expect, it, vi } from "vitest"
 import {
   claimLocalThreadRunLease,
   getLocalThreadRunLease,
@@ -30,4 +30,30 @@ it("fences new and handed-off runs without changing existing ownership or cancel
   }
   expect(claimLocalThreadRunLease(input).acquired).toBe(true)
   releaseLocalThreadRunLease(input.threadId, "desktop", "first")
+})
+
+it("retains and releases the physical admission with the exact run lease across handoff", () => {
+  const input = { threadId: "composition-physical-admission", owner: "desktop" as const, runId: "one" }
+  const first = vi.fn()
+  const second = vi.fn()
+  let release = first
+  const dispose = registerLocalThreadRunAdmissionGuard((_id, work) => work(release))
+  try {
+    expect(claimLocalThreadRunLease(input).acquired).toBe(true)
+    expect(claimLocalThreadRunLease(input).acquired).toBe(true)
+    expect(first).not.toHaveBeenCalled()
+    expect(releaseLocalThreadRunLease(input.threadId, "desktop", "foreign")).toBe(false)
+    expect(first).not.toHaveBeenCalled()
+    release = second
+    expect(claimLocalThreadRunLease({ ...input, runId: "two", handoffFromRunId: "one" }).acquired)
+      .toBe(true)
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(second).not.toHaveBeenCalled()
+    expect(releaseLocalThreadRunLease(input.threadId, "desktop", "two")).toBe(true)
+    expect(second).toHaveBeenCalledTimes(1)
+  } finally {
+    dispose()
+    releaseLocalThreadRunLease(input.threadId, "desktop", "one")
+    releaseLocalThreadRunLease(input.threadId, "desktop", "two")
+  }
 })

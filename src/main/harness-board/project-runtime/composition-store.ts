@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync } from "node:fs"
+import { existsSync, mkdirSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { AsyncLocalStorage } from "node:async_hooks"
@@ -10,6 +10,13 @@ import {
   type CompositionCompletionProof
 } from "../../../shared/project-runtime/composition"
 import { runtimeDigest, runtimeDirectory, runtimeDirectoryIdentity } from "./safe-files"
+import {
+  acquireCompositionAdmission,
+  compositionDatabaseIdentity,
+  compositionWorkspaceKey,
+  compositionWorkspaceKeys,
+  existingCompositionDatabaseIdentity
+} from "./composition-admission"
 
 import {
   parseCompositionUnitContext, parseCompositionUnitContexts,
@@ -29,16 +36,90 @@ export interface CompositionWorkspaceObservation {
 
 const COMPOSITION_BUSY_TIMEOUT_MS = 5_000
 
+function readCompositionLeases(db: DatabaseSync, key: string): string[] {
+  return db.prepare(`SELECT l.run_id FROM composition_leases l WHERE l.workspace=?
+    UNION
+    SELECT l.run_id FROM composition_unit_workspaces u
+    JOIN composition_leases l ON l.run_id=u.run_id WHERE u.workspace=?`).all(key, key).map(row => {
+    if (typeof row.run_id !== "string" || !row.run_id) throw Error("COMPOSITION_STORAGE_INVALID")
+    return row.run_id
+  })
+}
+
+/** Read the committed ledger under the workspace locks, without taking the ledger writer mutex. */
+function guardCompositionWorkspace<T>(
+  path: string,
+  workspace: string,
+  work: (release?: () => void) => T,
+  retain: boolean,
+  opened?: { db: DatabaseSync; identity: string; owner?: string }
+): T {
+  const keys = compositionWorkspaceKeys(workspace)
+  const releases: Array<() => void> = []
+  const release = () => {
+    let failure: unknown
+    while (releases.length) {
+      try { releases.pop()!() } catch (error) { failure ??= error }
+    }
+    if (failure) throw failure
+  }
+  let attached = false
+  let readOnly: DatabaseSync | undefined
+  try {
+    for (const key of keys) releases.push(acquireCompositionAdmission(path, key, "reader"))
+    const identity = compositionDatabaseIdentity(path)
+    if (opened && opened.identity !== identity) throw Error("COMPOSITION_STORAGE_CHANGED")
+    const db = opened?.db ?? (readOnly = new DatabaseSync(path, { readOnly: true, timeout: 0 }))
+    const leases = keys.map(key => readCompositionLeases(db, key))
+    const blocking = leases.flat().find(runId => runId !== opened?.owner)
+    if (blocking) {
+      const run = db.prepare(`SELECT json_extract(data,'$.configurationPending') AS pending
+        FROM composition_runs WHERE id=?`).get(blocking)
+      if (!run) throw Error("COMPOSITION_STORAGE_INVALID")
+      throw Error(run.pending === 1
+        ? "当前组合等待配置，请先完成参数与授权，或取消本次组合后继续会话"
+        : "COMPOSITION_WORKSPACE_BUSY")
+    }
+    // A valid lexical lease cannot move its owner to an unrelated physical directory.
+    if (opened?.owner && !leases.at(-1)?.includes(opened.owner))
+      throw Error("COMPOSITION_WORKSPACE_OWNER_CHANGED")
+    if (compositionDatabaseIdentity(path) !== identity)
+      throw Error("COMPOSITION_STORAGE_CHANGED")
+    const currentKeys = compositionWorkspaceKeys(workspace)
+    if (keys.length !== currentKeys.length || keys.some((key, index) => key !== currentKeys[index]))
+      throw Error("COMPOSITION_ADMISSION_SCOPE_CHANGED")
+    readOnly?.close()
+    readOnly = undefined
+    const result = work(retain ? release : undefined)
+    attached = retain
+    return result
+  } finally {
+    try {
+      readOnly?.close()
+    } finally {
+      if (!attached) release()
+    }
+  }
+}
+
+export function guardUnopenedCompositionWorkspace<T>(
+  path: string,
+  workspace: string,
+  work: (release?: () => void) => T,
+  retain = false
+): T {
+  return guardCompositionWorkspace(path, workspace, work, retain)
+}
+
 /** Dedicated database; the original host/legacy schemas and guards are untouched. */
 export class ProjectCompositionStore {
   private readonly db: DatabaseSync
   private readonly owner = new AsyncLocalStorage<string>()
-  private mutationDepth = 0
+  private readonly identity: string
   constructor(
-    path: string,
+    private readonly path: string,
     private readonly now = () => Date.now(),
-    private readonly assertWorkspaceIdle?: (workspace: string, parentProjectId: string) => void,
-    options: { failFastOnOpen?: boolean } = {}
+    private readonly assertWorkspaceIdle?: (workspace: string, parentProjectId: string) => void
   ) {
     const missing: string[] = []
     let parent = dirname(resolve(path))
@@ -48,13 +129,14 @@ export class ProjectCompositionStore {
     }
     runtimeDirectory(parent)
     for (const directory of missing.reverse()) {
-      mkdirSync(directory)
+      mkdirSync(directory, { recursive: true })
       runtimeDirectory(directory)
     }
-    this.db = new DatabaseSync(path, {
-      timeout: options.failFastOnOpen ? 0 : COMPOSITION_BUSY_TIMEOUT_MS
-    })
+    const before = existingCompositionDatabaseIdentity(path)
+    this.db = new DatabaseSync(path, { timeout: COMPOSITION_BUSY_TIMEOUT_MS })
     try {
+      this.identity = compositionDatabaseIdentity(path)
+      if (before && before !== this.identity) throw Error("COMPOSITION_STORAGE_CHANGED")
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS composition_runs (
           id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_id TEXT NOT NULL,
@@ -65,7 +147,6 @@ export class ProjectCompositionStore {
         CREATE TABLE IF NOT EXISTS composition_unit_workspaces (
           workspace TEXT PRIMARY KEY, run_id TEXT NOT NULL, unit_id TEXT NOT NULL,
           directory_identity TEXT NOT NULL, directory_path TEXT NOT NULL, UNIQUE(run_id,unit_id));`)
-      if (options.failFastOnOpen) this.db.exec(`PRAGMA busy_timeout = ${COMPOSITION_BUSY_TIMEOUT_MS}`)
     } catch (error) {
       this.db.close()
       throw error
@@ -81,7 +162,7 @@ export class ProjectCompositionStore {
       throw Error("COMPOSITION_OWNER_NOT_ACTIVE")
     return this.owner.run(runId, work)
   }
-  /** Read-only authority check. Real mutations still use guardWorkspaceMutation's transaction. */
+  /** Read-only authority check. Real mutations still acquire the workspace admission lock. */
   assertWorkspaceAuthority(
     workspace: string,
     expectedUnit?: { runId: string; unitId: string }
@@ -112,82 +193,76 @@ export class ProjectCompositionStore {
     if (!lease || lease.run_id !== owner) throw Error("COMPOSITION_WORKSPACE_OWNER_CHANGED")
     return Object.freeze({ workspace: canonical, identity })
   }
-  /** Wrap original host/legacy admission transactions, always before acquiring their DB locks. */
-  guardWorkspaceMutation<T>(
-    workspace: string,
-    work: () => T,
-    options: { failFastOnLock?: boolean } = {}
-  ): T {
-    const check = () => {
-      const active = this.db.prepare("SELECT run_id FROM composition_leases LIMIT 1").get()
-      if (!active) {
-        if (this.owner.getStore()) throw Error("COMPOSITION_WORKSPACE_OWNER_CHANGED")
-        return work()
-      }
-      const keyOf = (path: string) =>
-        process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path)
-      const keys = new Set([keyOf(workspace)])
-      try {
-        keys.add(keyOf(realpathSync(workspace)))
-      } catch {
-        /* Unrelated original paths keep their own validation. */
-      }
-      let lease: Record<string, unknown> | undefined
-      for (const key of keys) {
-        lease =
-          this.db.prepare("SELECT run_id FROM composition_leases WHERE workspace=?").get(key) ??
-          this.db
-            .prepare(
-              `SELECT l.run_id FROM composition_unit_workspaces u
-          JOIN composition_leases l ON l.run_id=u.run_id WHERE u.workspace=?`
-            )
-            .get(key)
-        if (lease) break
-      }
-      if (lease && lease.run_id !== this.owner.getStore())
-        throw Error(this.require(String(lease.run_id)).configurationPending
-          ? "当前组合等待配置，请先完成参数与授权，或取消本次组合后继续会话"
-          : "COMPOSITION_WORKSPACE_BUSY")
-      if (this.owner.getStore() && (!lease || lease.run_id !== this.owner.getStore()))
-        throw Error("COMPOSITION_WORKSPACE_OWNER_CHANGED")
-      return work()
-    }
-    if (this.mutationDepth) return check()
-    return this.transaction(() => {
-      this.mutationDepth++
-      try {
-        return check()
-      } finally {
-        this.mutationDepth--
-      }
-    }, options.failFastOnLock)
+  /** Original host/legacy transactions share this fence until their synchronous commit. */
+  guardWorkspaceMutation<T>(workspace: string, work: () => T): T {
+    return this.guardWorkspaceAdmission(workspace, work, false)
   }
+
+  guardWorkspaceAdmission<T>(
+    workspace: string,
+    work: (release?: () => void) => T,
+    retain: boolean
+  ): T {
+    return guardCompositionWorkspace(this.path, workspace, work, retain, {
+      db: this.db,
+      identity: this.identity,
+      owner: this.owner.getStore()
+    })
+  }
+
+  private claimWorkspace<T>(key: string, work: () => T): T {
+    const release = acquireCompositionAdmission(this.path, key, "writer")
+    try {
+      if (compositionDatabaseIdentity(this.path) !== this.identity)
+        throw Error("COMPOSITION_STORAGE_CHANGED")
+      return this.transaction(work)
+    } finally {
+      release()
+    }
+  }
+
   registerUnitWorkspace(runId: string, unitId: string, workspace: string): void {
     const canonical = runtimeDirectory(workspace)
-    const key = process.platform === "win32" ? canonical.toLowerCase() : canonical
+    const key = compositionWorkspaceKey(canonical)
     const identity = runtimeDirectoryIdentity(canonical)
-    this.transaction(() => {
+    const priorWorkspace = () => this.db
+      .prepare("SELECT workspace,directory_identity FROM composition_unit_workspaces WHERE run_id=? AND unit_id=?")
+      .get(runId, unitId)
+    const assertCurrent = () => {
+      if (compositionDatabaseIdentity(this.path) !== this.identity)
+        throw Error("COMPOSITION_STORAGE_CHANGED")
       const run = this.require(runId)
-      if (
-        !run.definition.units.some((unit) => unit.id === unitId) ||
-        !this.db.prepare("SELECT run_id FROM composition_leases WHERE run_id=?").get(runId)
-      )
+      if (!run.definition.units.some((unit) => unit.id === unitId) ||
+        !this.db.prepare("SELECT run_id FROM composition_leases WHERE run_id=?").get(runId))
         throw Error("COMPOSITION_OWNER_NOT_ACTIVE")
-      const previous = this.db
-        .prepare(
-          "SELECT workspace,directory_identity FROM composition_unit_workspaces WHERE run_id=? AND unit_id=?"
-        )
-        .get(runId, unitId)
-      if (previous) {
-        if (previous.workspace !== key || previous.directory_identity !== identity)
-          throw Error("COMPOSITION_WORKSPACE_OWNER_CHANGED")
+      return run
+    }
+    const matchesPrior = (previous: Record<string, unknown>) => {
+      if (previous.workspace !== key || previous.directory_identity !== identity)
+        throw Error("COMPOSITION_WORKSPACE_OWNER_CHANGED")
+    }
+    // A retained unit's immutable binding needs no writer lock during repeated preparation.
+    const previous = priorWorkspace()
+    if (previous) {
+      assertCurrent()
+      matchesPrior(previous)
+      return
+    }
+    this.claimWorkspace(key, () => {
+      const run = assertCurrent()
+      const existing = priorWorkspace()
+      if (existing) {
+        matchesPrior(existing)
         return
       }
+      if (readCompositionLeases(this.db, key).length) throw Error("COMPOSITION_WORKSPACE_BUSY")
+      this.assertWorkspaceIdle?.(canonical, run.definition.parentProjectId)
       this.db
         .prepare("INSERT INTO composition_unit_workspaces VALUES (?,?,?,?,?)")
         .run(key, runId, unitId, identity, canonical)
     })
   }
+
   unitWorkspace(runId: string, unitId: string): string | undefined {
     const row = this.db
       .prepare(
@@ -216,13 +291,8 @@ export class ProjectCompositionStore {
       ? run.definition.parentProjectId
       : undefined
   }
-  private transaction<T>(work: () => T, failFastOnLock = false): T {
-    if (failFastOnLock) this.db.exec("PRAGMA busy_timeout = 0")
-    try {
-      this.db.exec("BEGIN IMMEDIATE")
-    } finally {
-      if (failFastOnLock) this.db.exec(`PRAGMA busy_timeout = ${COMPOSITION_BUSY_TIMEOUT_MS}`)
-    }
+  private transaction<T>(work: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE")
     try {
       const result = work()
       this.db.exec("COMMIT")
@@ -305,21 +375,24 @@ export class ProjectCompositionStore {
     definition.workspace = runtimeDirectory(definition.workspace)
     compositionText(requestId)
     const digest = runtimeDigest(JSON.stringify(definition))
-    return this.transaction(() => {
-      const previous = this.db
-        .prepare("SELECT id FROM composition_runs WHERE project_id=? AND request_id=?")
-        .get(definition.parentProjectId, requestId)
-      if (previous) {
-        const run = this.require(String(previous.id))
-        if (run.definitionDigest !== digest) throw Error("COMPOSITION_IDEMPOTENCY_CONFLICT")
-        return { run, created: false }
-      }
-      const workspaceKey =
-        process.platform === "win32" ? definition.workspace.toLowerCase() : definition.workspace
+    const workspaceKey = compositionWorkspaceKey(definition.workspace)
+    const readPrevious = () => this.db
+      .prepare("SELECT id FROM composition_runs WHERE project_id=? AND request_id=?")
+      .get(definition.parentProjectId, requestId)
+    const replay = (previous: Record<string, unknown>) => {
+      const run = this.require(String(previous.id))
+      if (run.definitionDigest !== digest) throw Error("COMPOSITION_IDEMPOTENCY_CONFLICT")
+      return { run, created: false }
+    }
+    const previous = readPrevious()
+    if (previous) return replay(previous)
+    return this.claimWorkspace(workspaceKey, () => {
+      const existing = readPrevious()
+      if (existing) return replay(existing)
       if (
-        this.db
-          .prepare("SELECT run_id FROM composition_leases WHERE workspace=? OR project_id=?")
-          .get(workspaceKey, definition.parentProjectId)
+        readCompositionLeases(this.db, workspaceKey).length ||
+        this.db.prepare("SELECT run_id FROM composition_leases WHERE project_id=?")
+          .get(definition.parentProjectId)
       )
         throw Error("COMPOSITION_WORKSPACE_BUSY")
       this.assertWorkspaceIdle?.(definition.workspace, definition.parentProjectId)
