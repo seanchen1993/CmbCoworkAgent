@@ -67,57 +67,67 @@ const customConfig = {
 }
 
 describe("LAILAS gateway errors on ordinary model connections", () => {
-  it("shortens a rejected summary and continues the latest task without a UI error hook", async () => {
-    const requests: Array<{ stream?: boolean; messages: unknown[] }> = []
-    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
-      const body = JSON.parse(String(init.body))
-      requests.push(body)
-      if (requests.length === 1)
-        return new Response(JSON.stringify(lailasEnvelope), { status: 485 })
-      return body.stream ? summaryResponse() : finalResponse()
-    })
-    const phases: string[] = []
-    const model = getModelInstance(customConfig, undefined, 1, "context-compaction")
-    const middleware = createCmbSummarizationMiddleware({
-      model: configureContextCompactionModel(model, (event) =>
-        phases.push(event.phase)
-      ) as typeof model,
-      backend: {
-        write: async (path: string) => ({ path }),
-        downloadFiles: async () => []
-      } as never,
-      trigger: { type: "messages", value: 4 },
-      keep: { type: "messages", value: 1 },
-      trimTokensToSummarize: 650_000,
-      maxInputTokens: 1_000_000
-    }) as unknown as {
-      wrapModelCall: (
-        request: unknown,
-        next: (request: { messages: BaseMessage[] }) => Promise<unknown>
-      ) => Promise<Command>
+  it.each([
+    { scenario: "automatic compaction", trigger: 4, expectedStreams: [true, true, false] },
+    { scenario: "main request overflow", trigger: 100, expectedStreams: [false, true, true, false] }
+  ])(
+    "shortens a rejected summary after $scenario and continues the latest task",
+    async ({ trigger, expectedStreams }) => {
+      const requests: Array<{ stream?: boolean; messages: unknown[] }> = []
+      let rejectedSummary = false
+      vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+        const body = JSON.parse(String(init.body))
+        requests.push(body)
+        if (requests.length === 1 || (body.stream && !rejectedSummary)) {
+          if (body.stream) rejectedSummary = true
+          return new Response(JSON.stringify(lailasEnvelope), { status: 485 })
+        }
+        return body.stream ? summaryResponse() : finalResponse()
+      })
+      const phases: string[] = []
+      const model = getModelInstance(customConfig, undefined, 1, "context-compaction")
+      const middleware = createCmbSummarizationMiddleware({
+        model: configureContextCompactionModel(model, (event) =>
+          phases.push(event.phase)
+        ) as typeof model,
+        backend: {
+          write: async (path: string) => ({ path }),
+          downloadFiles: async () => []
+        } as never,
+        trigger: { type: "messages", value: trigger },
+        keep: { type: "messages", value: 1 },
+        trimTokensToSummarize: 650_000,
+        maxInputTokens: 1_000_000
+      }) as unknown as {
+        wrapModelCall: (
+          request: unknown,
+          next: (request: { messages: BaseMessage[] }) => Promise<unknown>
+        ) => Promise<Command>
+      }
+      const history = Array.from(
+        { length: 10 },
+        (_, i) =>
+          new HumanMessage("Historical request " + i + " " + "historical information ".repeat(120))
+      )
+      const agent = getModelInstance(customConfig, undefined, 1, "agent")
+      const result = await middleware.wrapModelCall(
+        {
+          messages: [...history, new HumanMessage("LATEST_TASK")],
+          state: {},
+          tools: []
+        },
+        (request) => agent.invoke(request.messages)
+      )
+      expect(result).toBeInstanceOf(Command)
+      expect(phases).toEqual(["started", "failed", "started", "completed"])
+      expect(requests.map((body) => Boolean(body.stream))).toEqual(expectedStreams)
+      const [firstSummary, shorterSummary, finalRequest] = requests.slice(-3)
+      expect(Buffer.byteLength(JSON.stringify(shorterSummary.messages))).toBeLessThan(
+        Buffer.byteLength(JSON.stringify(firstSummary.messages))
+      )
+      expect(JSON.stringify(finalRequest.messages)).toContain("LATEST_TASK")
     }
-    const history = Array.from(
-      { length: 10 },
-      (_, i) =>
-        new HumanMessage("Historical request " + i + " " + "historical information ".repeat(120))
-    )
-    const agent = getModelInstance(customConfig, undefined, 1, "agent")
-    const result = await middleware.wrapModelCall(
-      {
-        messages: [...history, new HumanMessage("LATEST_TASK")],
-        state: {},
-        tools: []
-      },
-      (request) => agent.invoke(request.messages)
-    )
-    expect(result).toBeInstanceOf(Command)
-    expect(phases).toEqual(["started", "failed", "started", "completed"])
-    expect(requests.map((body) => Boolean(body.stream))).toEqual([true, true, false])
-    expect(Buffer.byteLength(JSON.stringify(requests[1].messages))).toBeLessThan(
-      Buffer.byteLength(JSON.stringify(requests[0].messages))
-    )
-    expect(JSON.stringify(requests[2].messages)).toContain("LATEST_TASK")
-  })
+  )
 
   it.each([
     { body: lailasEnvelope, expected: modelError.message, limit: 1048576 },
