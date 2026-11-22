@@ -42,7 +42,7 @@ import {
   sep
 } from "path"
 import { createHash, randomUUID } from "crypto"
-import { execFile } from "child_process"
+import { execFile, type ExecFileException } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
 import {
@@ -584,6 +584,7 @@ async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
   const inFlight = gitWorkTreeRequests.get(dir)
   if (inFlight) return inFlight
 
+  const startedAt = Date.now()
   const request = execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
     cwd: dir,
     encoding: "utf-8",
@@ -591,8 +592,27 @@ async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
     maxBuffer: 1024 * 1024,
     windowsHide: true
   })
-    .then(({ stdout }) => rememberGitWorkTreeResult(dir, stdout.trim() === "true"))
-    .catch(() => rememberGitWorkTreeResult(dir, false))
+    .then(({ stdout }) => {
+      const result = stdout.trim()
+      if (result !== "true") {
+        console.info("[AdoptionTracker] git work tree check returned non-true", {
+          dir,
+          stdout: result.slice(0, 120)
+        })
+      }
+      return rememberGitWorkTreeResult(dir, result === "true")
+    })
+    .catch((error: ExecFileException) => {
+      console.info("[AdoptionTracker] git work tree check failed", {
+        dir,
+        code: error.code,
+        signal: error.signal,
+        killed: error.killed,
+        elapsedMs: Date.now() - startedAt,
+        detail: (error.stderr?.trim() || error.message).slice(0, 512)
+      })
+      return rememberGitWorkTreeResult(dir, false)
+    })
     .finally(() => {
       if (gitWorkTreeRequests.get(dir) === request) gitWorkTreeRequests.delete(dir)
     })
