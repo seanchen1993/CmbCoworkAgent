@@ -225,7 +225,8 @@ describe("LAILAS gateway errors on ordinary model connections", () => {
       return response
     })
     vi.stubGlobal("fetch", send)
-    const model = getModelInstance(customConfig, undefined, 1, "context-compaction")
+    // Leave one retry available to catch an accidental resend of the same 485 request.
+    const model = getModelInstance(customConfig, undefined, 2, "context-compaction")
     const result = model
       .invoke("summary", { signal: caller.signal })
       .catch((error: unknown) => error)
