@@ -974,7 +974,7 @@ export class ImRemoteRunner {
                   }
                 )
               })
-            await this.dependencies.replyClient.sendPending().catch((error) => {
+            await this.dependencies.replyClient.sendPending(waiting.conversationKey).catch((error) => {
               console.warn("[IM] Remote wait outbox drain deferred; interaction remains active", {
                 eventId: waiting.eventId,
                 threadId: interaction.threadId,
@@ -1338,7 +1338,7 @@ export class ImRemoteRunner {
               : "error",
       targetKind: event.targetSnapshot?.kind ?? "unknown"
     })
-    await this.dependencies.replyClient.sendPending()
+    await this.dependencies.replyClient.sendPending(event.conversationKey)
     await this.dependencies.gateway.sendAcknowledgement(acknowledgementForTerminal(event))
   }
 

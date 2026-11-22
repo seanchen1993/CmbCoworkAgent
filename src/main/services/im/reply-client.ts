@@ -49,32 +49,83 @@ export interface ImReplyDrainResult {
   deferred: number
 }
 
-// Scheduler, ingress and Agent completion can all request an outbox drain.
-// Serialize by store rather than by client instance so those entry points can
-// never submit the same durable segment concurrently.
-const activeDrains = new WeakMap<ImEventStore, Promise<ImReplyDrainResult>>()
+// All clients backed by one store share ownership of a conversation's active submission.
+interface ConversationDrain {
+  wake: boolean
+  done: Promise<ImReplyDrainResult>
+}
+const activeDrains = new WeakMap<ImEventStore, Map<string, ConversationDrain>>()
+const emptyResult = (): ImReplyDrainResult => ({ sent: 0, unknown: 0, failed: 0, deferred: 0 })
 
 export class ImReplyClient {
   constructor(
     private readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
     private readonly eventStore: ImEventStore = imEventStore,
     private readonly now: () => number = Date.now,
-    private readonly afterDrain?: () => void
+    private readonly afterDrain?: (key?: string) => void
   ) {}
 
-  async sendPending(): Promise<ImReplyDrainResult> {
+  async wakePending(): Promise<void> {
     const active = activeDrains.get(this.eventStore)
-    if (active) return active
-    const drain = this.drainPending().finally(() => {
-      if (activeDrains.get(this.eventStore) === drain) activeDrains.delete(this.eventStore)
-    })
-    activeDrains.set(this.eventStore, drain)
-    return drain
+    for (const key of this.eventStore.pendingReplyConversations()) {
+      if (!active?.has(key)) void this.sendPending(key).catch(error => console.warn("[IM] Reply remains queued:", error))
+    }
   }
 
-  private async drainPending(): Promise<ImReplyDrainResult> {
-    const result = { sent: 0, unknown: 0, failed: 0, deferred: 0 }
-    const records = this.eventStore.listOutbox()
+  async sendPending(conversationKey?: string): Promise<ImReplyDrainResult> {
+    let active = activeDrains.get(this.eventStore)
+    if (!active) {
+      active = new Map()
+      activeDrains.set(this.eventStore, active)
+    }
+    const keys = conversationKey ? [conversationKey]
+      : new Set([...this.eventStore.pendingReplyConversations(), ...active.keys()])
+    const drains = Array.from(keys, key => {
+      const running = active.get(key)
+      if (running) {
+        running.wake = true
+        return running.done
+      }
+      const lane: ConversationDrain = {
+        wake: true,
+        done: Promise.resolve().then(async () => {
+          const result = emptyResult()
+          try {
+            while (lane.wake) {
+              lane.wake = false
+              await this.drainConversation(key, result)
+            }
+            return result
+          } finally {
+            active.delete(key)
+            this.notifyDrained(key)
+          }
+        })
+      }
+      active.set(key, lane)
+      return lane.done
+    })
+    if (!drains.length) this.notifyDrained()
+    const total = emptyResult()
+    for (const result of await Promise.all(drains)) {
+      total.sent += result.sent
+      total.unknown += result.unknown
+      total.failed += result.failed
+      total.deferred += result.deferred
+    }
+    return total
+  }
+
+  private notifyDrained(key?: string): void {
+    try {
+      this.afterDrain?.(key)
+    } catch (error) {
+      console.warn("[IM] Auxiliary switch cards deferred:", error)
+    }
+  }
+
+  private async drainConversation(key: string, result: ImReplyDrainResult): Promise<void> {
+    const records = this.eventStore.conversationOutbox(key)
     const deliveryStates = new Map<string, Map<number, ImReplyOutboxRecord["state"]>>()
     for (const record of records) {
       const states = deliveryStates.get(record.deliveryId) ?? new Map()
@@ -82,12 +133,8 @@ export class ImReplyClient {
       deliveryStates.set(record.deliveryId, states)
     }
     for (const record of records) {
-      if (
-        record.state !== "pending" ||
-        (record.nextAttemptAt !== null && record.nextAttemptAt > this.now())
-      ) {
-        continue
-      }
+      if (record.state === "sending") return
+      if (record.state !== "pending") continue
       const states = deliveryStates.get(record.deliveryId)!
       let precedingSegmentsSent = true
       for (let index = 0; index < record.segmentIndex; index += 1) {
@@ -97,26 +144,23 @@ export class ImReplyClient {
         }
       }
       if (!precedingSegmentsSent) continue
-      const outcome = await this.sendOne(record)
-      result[outcome] += 1
-      states.set(
-        record.segmentIndex,
-        outcome === "sent"
-          ? "sent"
-          : outcome === "unknown"
-            ? "unknown"
-            : outcome === "failed"
-              ? "failed"
-              : "pending"
-      )
+      if (record.nextAttemptAt !== null && record.nextAttemptAt > this.now()) return
+      let release: (() => void) | undefined
+      try {
+        if (this.gateway.deliveryOrder) {
+          release = await this.gateway.deliveryOrder.acquire(key, "reply", record.deliveryOrder ?? record.createdAt * 1024)
+          if (!this.eventStore.isOutboxPending(record.outboxId)) continue
+        }
+        const outcome = await this.sendOne(record)
+        result[outcome] += 1
+        if (outcome === "deferred") return
+        states.set(record.segmentIndex, outcome)
+        if (this.gateway.deliveryOrder && outcome === "sent" && record.segmentIndex === record.segmentCount - 1)
+          this.notifyDrained(key)
+      } finally {
+        release?.()
+      }
     }
-    // Schedule App-owned card delivery only after all ready reply segments have settled.
-    try {
-      this.afterDrain?.()
-    } catch (error) {
-      console.warn("[IM] Auxiliary switch cards deferred:", error)
-    }
-    return result
   }
 
   /**

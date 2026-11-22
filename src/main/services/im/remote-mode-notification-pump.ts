@@ -923,6 +923,6 @@ export class ImRemoteModeNotificationPump {
         threadId: notice.threadId
       })
     }
-    await this.dependencies.replyClient.sendPending()
+    await this.dependencies.replyClient.sendPending(notice.conversationKey)
   }
 }

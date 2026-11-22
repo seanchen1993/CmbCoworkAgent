@@ -1,3 +1,4 @@
+import { ImDeliveryOrder } from "../src/main/services/im/delivery-order"
 import assert from "node:assert/strict"
 import { WebSocketServer, type WebSocket } from "ws"
 import type { RemoteImEventV1 } from "../src/shared/im-gateway-contract"
@@ -629,9 +630,12 @@ async function main(): Promise<void> {
   // A gate can be decided on the desktop while its card is still being sent.
   // The update used to be refused as a command already in flight and dropped
   // with nothing left to retry, leaving a decided request showing live buttons.
+  const olderReply = new ImDeliveryOrder(() => null)
+  const releaseOlderReply = await olderReply.acquire("conversation-1", "reply", 1)
   const overlappingClient = new ImGatewayWsClient({
     url: () => `ws://127.0.0.1:${address.port}/ws`,
     token: () => "card-token",
+    deliveryOrder: olderReply,
     appVersion: "test",
     onRemoteEvent: () => undefined
   })
@@ -652,6 +656,9 @@ async function main(): Promise<void> {
     cardVersion: 2,
     content: [{ type: "title", content: "已在桌面处理" }]
   })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(cardFrames, [], "neither the card nor its update may jump ahead of an earlier reply")
+  releaseOlderReply()
   assert.deepEqual(await sending, { state: "accepted" })
   assert.deepEqual(
     await updating,
