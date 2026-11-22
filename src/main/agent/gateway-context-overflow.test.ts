@@ -195,6 +195,54 @@ describe("LAILAS gateway errors on ordinary model connections", () => {
     expect(clone).not.toHaveBeenCalled()
     expect(onFetchError).not.toHaveBeenCalled()
   })
+
+  it.each(["cancel", "timeout"])("aborts a stalled 485 body on %s", async (action) => {
+    vi.useRealTimers()
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
+    const caller = new AbortController()
+    let transportSignal: AbortSignal | undefined
+    let body: ReadableStreamDefaultController<Uint8Array> | undefined
+    let reading!: () => void
+    const startedReading = new Promise<void>((resolve) => {
+      reading = resolve
+    })
+    const send = vi.fn(async (_url: unknown, init: RequestInit) => {
+      transportSignal = init.signal!
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          body = controller
+          init.signal!.addEventListener("abort", () => controller.error(init.signal!.reason), {
+            once: true
+          })
+        }
+      })
+      const response = new Response(stream, { status: 485 })
+      const clone = response.clone.bind(response)
+      vi.spyOn(response, "clone").mockImplementation(() => {
+        reading()
+        return clone()
+      })
+      return response
+    })
+    vi.stubGlobal("fetch", send)
+    const model = getModelInstance(customConfig, undefined, 1, "context-compaction")
+    const result = model
+      .invoke("summary", { signal: caller.signal })
+      .catch((error: unknown) => error)
+    try {
+      await startedReading
+      if (action === "cancel") caller.abort()
+      else await vi.advanceTimersByTimeAsync(60_000)
+      expect(transportSignal?.aborted).toBe(true)
+    } finally {
+      if (!transportSignal?.aborted) body?.close()
+    }
+    const error = await result
+    expect(error).toBeInstanceOf(Error)
+    if (action === "cancel")
+      expect(error).toMatchObject({ message: expect.stringMatching(/abort/i) })
+    expect(send).toHaveBeenCalledTimes(1)
+  })
 })
 
 function finalResponse(): Response {

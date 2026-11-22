@@ -4355,12 +4355,9 @@ function createRetryingFetch(
         const sendFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
         const res = await sendFetch(input, { ...init, signal: attemptCtrl.signal })
 
-        // IMPORTANT: do not cancel the per-attempt timeout yet for streaming
-        // responses — we want the timeout to cover only the time up to the
-        // first byte. Once the response headers are in, we cancel the timer
-        // because downstream (SDK / LangChain) owns the stream lifetime from
-        // here and should not be interrupted mid-stream by our timer.
-        cleanup()
+        // The SDK owns successful streams after headers. For a 485 we still
+        // own the body while checking the gateway error, so keep it abortable.
+        if (res.status !== 485) cleanup()
 
         // Ground truth for the streaming path: an SSE response announces itself as
         // content-type text/event-stream; application/json means the gateway buffered
@@ -4390,6 +4387,10 @@ function createRetryingFetch(
         // Success, non-retryable error, or overflow handled by summarization.
         if (!isRetryableStatus(res.status) || contextOverflow) {
           const response = res.status >= 400 ? await prepareErrorResponse(res) : res
+          if (res.status === 485) {
+            cleanup()
+            parentSignal?.throwIfAborted()
+          }
           // Clear any previous retry indicator when this retry loop ends.
           if (attempt > 1) hooks?.onRetrySuccess?.()
           return response
