@@ -391,6 +391,39 @@ it("charges each HTTP retry and preserves unknown failed usage after a successfu
   })
 })
 
+it("accounts once for a LAILAS input overflow before the real summary request", async () => {
+  const f = accountingFixture({ modelAttemptLimit: 2 })
+  const receipt = await f.prepare()
+  const http = await server((response, index) => {
+    if (index !== 1) return success(response)
+    response.writeHead(485, { "content-type": "application/json" })
+    response.end(JSON.stringify({
+      returnCode: "LAILAS1485",
+      errorMsg: "输入参数异常. " + JSON.stringify({
+        error: {
+          code: 400,
+          param: "input_tokens",
+          message: "This model's maximum context length is 4096 tokens. " +
+            "Your prompt contains 4097 input tokens."
+        }
+      }),
+      usage: { prompt_tokens: 99999, completion_tokens: 99999, total_tokens: 199998 }
+    }))
+  })
+  await expect(consume(http.config, receipt, "agent", 3))
+    .rejects.toThrow(/maximum context length is 4096 tokens/)
+  expect(http.count()).toBe(1)
+  expect(await consume(http.config, receipt, "context-compaction")).toBe("ok")
+  expect(http.count()).toBe(2)
+  expect(f.model()).toMatchObject({
+    attempts: 2,
+    usageReportedAttempts: 1,
+    usageUnknownAttempts: 1,
+    inputTokens: 11,
+    outputTokens: 3
+  })
+})
+
 it("does not send the retry past the limit, and provider failover cannot classify its wrapped error as retryable", async () => {
   const f = accountingFixture({ modelAttemptLimit: 1 }),
     receipt = await f.prepare()

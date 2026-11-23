@@ -162,7 +162,8 @@ export function withCompletionModelBudget(
       reservation?.settle(lastUsage?.input, lastUsage?.output)
     }
     const observeUsage = (value: unknown): void => {
-      if (!value || typeof value !== "object") return
+      // A 485 carries gateway diagnostics rather than a completed provider response.
+      if (response.status === 485 || !value || typeof value !== "object") return
       const usage = (value as Record<string, unknown>).usage
       if (!usage || typeof usage !== "object") return
       const record = usage as Record<string, unknown>
