@@ -5939,7 +5939,10 @@ export function ChatContainer({
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (content: string, options: { id?: string } = {}): Promise<Message> => {
+    async (
+      content: string,
+      options: { id?: string; contextLabel?: "requirement-workbench" } = {}
+    ): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: options.id ?? crypto.randomUUID(),
@@ -5947,7 +5950,8 @@ export function ChatContainer({
         content,
         created_at: userStartAt,
         start_at: userStartAt,
-        end_at: userStartAt
+        end_at: userStartAt,
+        contextLabel: options.contextLabel
       }
       appendMessage(userMessage)
       return userMessage
@@ -6602,6 +6606,9 @@ export function ChatContainer({
       const composedDraft: QueuedMessage = {
         id: crypto.randomUUID(),
         text: userText,
+        ...(surface === "requirement-session"
+          ? { contextLabel: "requirement-workbench" as const }
+          : {}),
         ...(selectedBotMentions.length ? { botMentions: parseBotMessageMentions(userText, selectedBotMentions) } : {}),
         ...(replyForSubmission ? { botReplyTo: replyForSubmission } : {}),
         attachmentModelBlocks,
@@ -6743,7 +6750,9 @@ export function ChatContainer({
       if (shouldAppendVisibleUserMessage) {
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
-        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent)
+        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent, {
+          contextLabel: surface === "requirement-session" ? "requirement-workbench" : undefined
+        })
         visibleUserMessage = await visibleUserMessagePromise
       }
 
@@ -7292,7 +7301,8 @@ export function ChatContainer({
       // a new orphaned "ghost" user bubble behind every attempt (appendMessage upserts
       // by id, so re-using queued.id makes a retry replace the same bubble instead).
       const visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
-        id: queued.id
+        id: queued.id,
+        contextLabel: queued.contextLabel
       })
       if (isFirstMessage) {
         const currentThread = threads.find((t) => t.thread_id === threadId)

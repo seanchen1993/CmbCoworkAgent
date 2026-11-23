@@ -8,7 +8,6 @@ import {
 } from "@/components/sidebar/RequirementThreadSidebar"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { PulsatingDots } from "@/components/ui/pulsating-loader"
 import { useAppStore } from "@/lib/store"
 import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
@@ -367,7 +366,6 @@ function RequirementConversationSession({
   )
   const manifestBelongsToCurrentThread = manifestThreadId === threadId
   const prdGenerationCompleted =
-    !conversationLoading &&
     manifestBelongsToCurrentThread &&
     isRequirementPrdGenerationCompleted(requirementSpaceManifest)
   const requirementSpacePublished =
@@ -1361,14 +1359,7 @@ function RequirementConversationSession({
                   className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-info/20 bg-status-info/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-status-info"
                   aria-live="polite"
                 >
-                  {conversationLoading ? (
-                    <>
-                      需求规范中
-                      <PulsatingDots />
-                    </>
-                  ) : (
-                    "需求工作台"
-                  )}
+                  需求工作台
                 </span>
               </div>
               {rightPanelCollapsed ? (

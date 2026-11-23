@@ -809,7 +809,7 @@ export function RequirementDetailsPanel({
             (selectedFunction || fullPrdWorkspaceOpen) && "hidden"
           )}
         >
-          {manifestLoading ? (
+          {manifestLoading && !prdGenerationCompleted ? (
             <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin text-primary" />
               正在读取需求空间数据

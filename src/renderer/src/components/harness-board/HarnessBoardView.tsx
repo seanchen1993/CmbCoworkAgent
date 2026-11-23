@@ -159,6 +159,13 @@ import { marketApi, type MarketItem } from "../../api/market"
 import { formatTopUserOrgName } from "@/components/dashboard/use-dashboard"
 import { UpdateVersionTooltip } from "@/components/customize/MarketPanel/MarketUpdateBadge"
 import {
+  clearRequirementDevelopmentIntent,
+  type RequirementDevelopmentIntent
+} from "@/lib/requirement-development"
+import { useRequirementDevelopmentOnboarding } from "./use-requirement-development-sessions"
+import { RequirementProjectSelectionDialog } from "./RequirementProjectSelectionDialog"
+import { completeRequirementDevelopment } from "./complete-requirement-development"
+import {
   findInstalledPluginForMarketItem,
   getMarketPluginUpdateInfo,
   installMarketPluginUpdate,
@@ -8461,6 +8468,15 @@ export function HarnessBoardView({
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<ProjectCreateForm>(() => createEmptyProjectForm())
   const [formError, setFormError] = useState<string | null>(null)
+  const [requirementProjectChoice, setRequirementProjectChoice] =
+    useState<RequirementDevelopmentIntent | null>(null)
+  const [requirementProjectChoiceOpen, setRequirementProjectChoiceOpen] = useState(false)
+  const [requirementSelectableProjects, setRequirementSelectableProjects] = useState<
+    HarnessProjectListItem[] | null
+  >(null)
+  const [requirementCreatedProjectId, setRequirementCreatedProjectId] = useState<string | null>(
+    null
+  )
   const [workspaceValidating, setWorkspaceValidating] = useState(false)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<HarnessProjectListItem | null>(null)
@@ -9851,6 +9867,10 @@ export function HarnessBoardView({
         return
       }
       if (!creating && !workspaceValidating) {
+        if (requirementProjectChoice) {
+          clearRequirementDevelopmentIntent()
+          setRequirementProjectChoice(null)
+        }
         setDialogOpen(false)
         closeProjectDialogAdapterSession()
         resetCreateForm()
@@ -9861,6 +9881,7 @@ export function HarnessBoardView({
       creating,
       workspaceValidating,
       openCreateDialog,
+      requirementProjectChoice,
       resetCreateForm
     ]
   )
@@ -9914,7 +9935,10 @@ export function HarnessBoardView({
     }
     setCreating(true)
     try {
-      await window.api.harnessBoard.createProject(form)
+      const created = await window.api.harnessBoard.createProject(form)
+      if (requirementProjectChoice) {
+        setRequirementCreatedProjectId(created.projectId)
+      }
       setDialogOpen(false)
       closeProjectDialogAdapterSession()
       resetCreateForm()
@@ -10149,9 +10173,33 @@ export function HarnessBoardView({
     [refreshFeaturePublicConstraints]
   )
 
+  useEffect(() => {
+    if (!requirementCreatedProjectId) return
+    let cancelled = false
+    void window.api.harnessBoard
+      .listProjects()
+      .then((items) => {
+        if (cancelled) return
+        const project = items.find((item) => item.projectId === requirementCreatedProjectId)
+        if (!project) throw new Error("新建项目未出现在项目列表中")
+        setRequirementCreatedProjectId(null)
+        openFeatureCreateDialog(project)
+      })
+      .catch((error) => {
+        if (!cancelled) toast.error(cleanIpcError(error))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [openFeatureCreateDialog, requirementCreatedProjectId])
+
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
       if (!open && !creatingFeatureProjectId && !updatingFeatureDeployUnits) {
+        if (requirementProjectChoice) {
+          clearRequirementDevelopmentIntent()
+          setRequirementProjectChoice(null)
+        }
         featureWorkflowRequestIdRef.current += 1
         setFeatureWorkspace({ source: "directory", path: "" })
         setFeatureMappingDrafts({})
@@ -10168,7 +10216,7 @@ export function HarnessBoardView({
         setSelectedDeployUnitIds(new Set())
       }
     },
-    [creatingFeatureProjectId, updatingFeatureDeployUnits]
+    [creatingFeatureProjectId, requirementProjectChoice, updatingFeatureDeployUnits]
   )
 
   const handleOpenDeployUnitSettings = useCallback((): void => {
@@ -10347,6 +10395,17 @@ export function HarnessBoardView({
         ...workflowInput
       })
 
+      let requirementThreadId: string | null = null
+      if (requirementProjectChoice) {
+        requirementThreadId = await completeRequirementDevelopment({
+          intent: requirementProjectChoice,
+          projectId: result.projectId,
+          featureSlug: result.slug,
+          createThread
+        })
+        setRequirementProjectChoice(null)
+      }
+
       if (target) {
         try {
           await linkFeatureToBot(result.projectId, result.slug, target)
@@ -10366,9 +10425,13 @@ export function HarnessBoardView({
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
         projectId: result.projectId,
-        slug: result.slug
+        slug: result.slug,
+        ...(requirementThreadId ? { activeSessionThreadId: requirementThreadId } : {})
       })
-      setIsViewingSession(false)
+      setIsViewingSession(Boolean(requirementThreadId))
+      if (requirementThreadId) {
+        await selectThread(requirementThreadId, { preserveView: true })
+      }
     } catch (error) {
       setFeatureError(cleanIpcError(error))
     } finally {
@@ -10385,7 +10448,10 @@ export function HarnessBoardView({
     featureMappings,
     featureWorkspace,
     deployUnitMappingsDirty,
-    loadProjectDetail
+    loadProjectDetail,
+    createThread,
+    requirementProjectChoice,
+    selectThread
   ])
 
   const threadsById = useMemo(
@@ -10980,6 +11046,22 @@ export function HarnessBoardView({
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
+
+  useRequirementDevelopmentOnboarding({
+    openSession: (threadId, context) => {
+      if (context.featureSlug) {
+        openFeatureDetail(context.projectId, context.featureSlug, threadId)
+      } else {
+        openProjectSession(context.projectId, threadId)
+      }
+      void selectThread(threadId, { preserveView: true })
+    },
+    openProjectChoice: (intent, selectableProjects) => {
+      setRequirementSelectableProjects(selectableProjects)
+      setRequirementProjectChoice(intent)
+      setRequirementProjectChoiceOpen(true)
+    }
+  })
 
   const searchProjectId = selectedFeature?.projectId ?? selectedProjectSession?.projectId ?? selectedProjectId
   const searchProjectThreadId = isViewingSession
@@ -11791,6 +11873,40 @@ export function HarnessBoardView({
   const fallbackFeatureSummary = selectedFeatureProjectDetail?.runs.find(
     (run) => run.slug === selectedFeature?.slug
   )
+  const requirementProjectSelectionDialog = (
+    <RequirementProjectSelectionDialog
+      open={requirementProjectChoiceOpen}
+      projects={requirementSelectableProjects ?? []}
+      loading={requirementSelectableProjects === null}
+      onOpenChange={(open) => {
+        if (!open) {
+          setRequirementProjectChoiceOpen(false)
+          setRequirementProjectChoice(null)
+          clearRequirementDevelopmentIntent()
+        }
+      }}
+      onSelect={(project) => {
+        const compatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
+        if (compatibilityMessage) {
+          toast.warning(compatibilityMessage)
+          return
+        }
+        setRequirementProjectChoiceOpen(false)
+        setSelectedProjectSession(null)
+        setSelectedProjectId(null)
+        setIsViewingSession(false)
+        openFeatureCreateDialog(project)
+      }}
+      onCreate={() => {
+        setRequirementProjectChoiceOpen(false)
+        setSelectedProjectSession(null)
+        setSelectedFeature(null)
+        setSelectedProjectId(null)
+        setIsViewingSession(false)
+        openCreateDialog()
+      }}
+    />
+  )
   useEffect(() => {
     if (historyProjectId) {
       onActiveSessionThreadChange?.(null)
@@ -11815,6 +11931,7 @@ export function HarnessBoardView({
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
         />
+        {requirementProjectSelectionDialog}
         {sidebarPortal}
       </>
     )
@@ -11880,6 +11997,7 @@ export function HarnessBoardView({
           onSubmit={handleSubmitFeatureDialog}
         />
         {sidebarDeleteDialog}
+        {requirementProjectSelectionDialog}
         {sidebarPortal}
       </>
     )
@@ -11899,6 +12017,7 @@ export function HarnessBoardView({
           onHarnessSessionCreated={handleActiveProjectSessionChange}
         />
         {sidebarDeleteDialog}
+        {requirementProjectSelectionDialog}
         {sidebarPortal}
       </>
     )
@@ -12009,6 +12128,7 @@ export function HarnessBoardView({
           leanToken={leanTokenConfig.leanToken}
         />
         {sidebarDeleteDialog}
+        {requirementProjectSelectionDialog}
         {sidebarPortal}
       </>
     )
@@ -12378,6 +12498,7 @@ export function HarnessBoardView({
         leanToken={leanTokenConfig.leanToken}
       />
       {sidebarDeleteDialog}
+      {requirementProjectSelectionDialog}
       {sidebarPortal}
     </div>
   )
