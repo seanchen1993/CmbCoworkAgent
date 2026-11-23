@@ -15,4 +15,20 @@ export interface TrustedReleaseInstallReceipt extends TrustedReleaseRef {
 export interface TrustedReleaseApi {
   available(): Promise<boolean>
   install(ref: TrustedReleaseRef): Promise<TrustedReleaseInstallReceipt | null>
+  prepareUse(input: TrustedReleaseUseRequest): Promise<TrustedReleaseUseReport>
+}
+
+export interface TrustedReleaseUseRequest extends TrustedReleaseRef {
+  installationId: string
+  threadId: string
+  expectedWorkspace: string
+}
+
+export interface TrustedReleaseUseReport {
+  release: TrustedReleaseInstallReceipt
+  target: { threadId: string; workspace: string }
+  name: string
+  version: string
+  contentDigest: string
+  state: "inactive"
 }

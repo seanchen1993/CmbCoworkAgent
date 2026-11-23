@@ -1379,7 +1379,22 @@ export function registerModsHandlers(
       root: releasesRoot, index: new PluginCatalogIndex(join(releasesRoot, "installations.json"))
     })
   )
-  registerTrustedReleaseHandlers(ipcMain, releases, window, trusted)
+  registerTrustedReleaseHandlers(ipcMain, releases, window, trusted, (threadId, workspace) => {
+    const thread = getThreadCore(threadId)
+    if (!thread) throw Error("TRUSTED_RELEASE_TARGET_CHANGED")
+    const incarnation = captureThreadIncarnation(thread)
+    const assertCurrent = () => {
+      if (!matchesThreadIncarnation(getThreadCore(threadId), incarnation) ||
+        writableThreadScope(threadId) !== workspace ||
+        readNativeChildModsContext(threadId))
+        throw Error("TRUSTED_RELEASE_TARGET_CHANGED")
+      assertStandaloneThread(threadId)
+      if (functionCapabilityContext(workspace, threadId).usage !== "chat")
+        throw Error("TRUSTED_RELEASE_DESTINATION_UNSUPPORTED")
+    }
+    assertCurrent()
+    return assertCurrent
+  })
   // Recovery validates committed receipts and removes interrupted staging.
   // A fresh account confirmation is required to finish uncommitted installations.
   void releases.recover().catch(() => {

@@ -2,6 +2,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import AdmZip from "adm-zip"
+import { derivationContentIdentity } from "../../plugins/derivation-source"
+import { PluginStartUseService } from "../../plugins/plugin-start-use"
+import type { TrustedReleaseUseReport } from "../../../shared/mods/trusted-release"
 import { compileFunctionPlugin } from "../v2/loader"
 import type { AuthoringSourceBundle } from "./authoring-bundle"
 import { TrustedReleaseAuthority, type TrustedReleaseMetadata } from "./trusted-release-authority"
@@ -65,6 +68,41 @@ export class TrustedReleaseDelivery {
 
   recover(): Promise<void> {
     return this.installer.recover()
+  }
+
+  async prepareUse(
+    ref: unknown,
+    installationId: string,
+    target: TrustedReleaseUseReport["target"],
+    scope: { signal: AbortSignal; assertCurrent(): void }
+  ): Promise<TrustedReleaseUseReport> {
+    scope.assertCurrent()
+    const inspected = await this.authority.inspect(ref, scope.signal)
+    const assertCurrent = () => {
+      scope.assertCurrent()
+      inspected.assertCurrent()
+    }
+    assertCurrent()
+    const { entry, source } = this.installer.readForUse(installationId, inspected.release)
+    const compiled = await compileTrustedReleaseSource(source, assertCurrent)
+    assertTrustedReleaseCompiledDigest(compiled.digest, entry.receipt.compiledDigest)
+    const { name, version, description } = readTrustedReleasePackageIdentity(source)
+    if (compiled.name !== name || entry.name !== name || entry.version !== version)
+      throw Error("TRUSTED_RELEASE_PACKAGE_IDENTITY_MISMATCH")
+    const privatePlugin = {
+      id: entry.id, path: entry.path, name, version, description, enabled: false,
+      author: "", createdAt: "", updatedAt: "", skillCount: 0, hookCount: 0, mcpServerCount: 0
+    }
+    const prepare = new PluginStartUseService({ plugins: () => [privatePlugin] })
+    const digest = derivationContentIdentity(inspected.release.package.files)
+    const report = await prepare.prepare({
+      threadId: target.threadId, expectedWorkspace: target.workspace,
+      pluginId: entry.id, expected: { name, version, digest }
+    }, assertCurrent)
+    if (report.kind !== "chat") throw Error("TRUSTED_RELEASE_DESTINATION_UNSUPPORTED")
+    this.installer.readForUse(installationId, inspected.release)
+    assertCurrent()
+    return { release: entry.receipt, target, name, version, contentDigest: digest, state: "inactive" }
   }
 
   async install(

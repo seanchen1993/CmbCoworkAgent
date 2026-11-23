@@ -3324,7 +3324,9 @@ const api = {
     trustedRelease: {
       available: () => ipcRenderer.invoke("mods:trusted-release:available"),
       install: (ref: import("../shared/mods/trusted-release").TrustedReleaseRef) =>
-        ipcRenderer.invoke("mods:trusted-release:install", ref)
+        ipcRenderer.invoke("mods:trusted-release:install", ref),
+      prepareUse: (input: import("../shared/mods/trusted-release").TrustedReleaseUseRequest) =>
+        ipcRenderer.invoke("mods:trusted-release:prepare-use", input)
     },
     authoringPreview: createAuthoringPreviewBridge((channel, payload) =>
       ipcRenderer.invoke(channel, payload)

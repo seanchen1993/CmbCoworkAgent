@@ -1,21 +1,27 @@
 import { dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
+import type { TrustedReleaseUseRequest } from "../../shared/mods/trusted-release"
 import type { TrustedReleaseDelivery } from "../mods/devtools/trusted-release-delivery"
 
 export function registerTrustedReleaseHandlers(
   ipc: IpcMain,
   delivery: TrustedReleaseDelivery,
   window: () => BrowserWindow | null,
-  trusted: (event: IpcMainInvokeEvent) => void
+  trusted: (event: IpcMainInvokeEvent) => void,
+  captureUseTarget?: (threadId: string, workspace: string) => () => void
 ): void {
   ipc.handle("mods:trusted-release:available", event => {
     trusted(event)
     return delivery.available
   })
-  let installing = false
-  ipc.handle("mods:trusted-release:install", async (event, input: unknown) => {
+  let busy = false
+  type Scope = { signal: AbortSignal; assertCurrent(): void }
+  async function withOwner<T>(
+    event: IpcMainInvokeEvent,
+    operation: (owner: BrowserWindow, scope: Scope) => Promise<T>
+  ): Promise<T> {
     trusted(event)
     if (!delivery.available) throw Error("TRUSTED_RELEASE_AUTHORITY_UNAVAILABLE")
-    if (installing) throw Error("TRUSTED_RELEASE_BUSY")
+    if (busy) throw Error("TRUSTED_RELEASE_BUSY")
     const owner = window()
     const sender = event.sender
     const frame = sender.mainFrame
@@ -30,13 +36,24 @@ export function registerTrustedReleaseHandlers(
         throw Error("TRUSTED_RELEASE_WINDOW_CHANGED")
       trusted(event)
     }
-    installing = true
+    busy = true
     sender.on("did-start-navigation", cancel)
     sender.on("render-process-gone", cancel)
     sender.on("destroyed", cancel)
     try {
-      return await delivery.install(input, { signal, assertCurrent }, async ({ release, name, version }) => {
-        assertCurrent()
+      assertCurrent()
+      return await operation(owner, { signal, assertCurrent })
+    } finally {
+      sender.removeListener("did-start-navigation", cancel)
+      sender.removeListener("render-process-gone", cancel)
+      sender.removeListener("destroyed", cancel)
+      busy = false
+    }
+  }
+  ipc.handle("mods:trusted-release:install", (event, input: unknown) =>
+    withOwner(event, (owner, scope) =>
+      delivery.install(input, scope, async ({ release, name, version }) => {
+        scope.assertCurrent()
         const result = await dialog.showMessageBox(owner, {
           type: "question", title: "安装已核验的灵件版本",
           message: "安装 " + name + " " + version + "？",
@@ -51,11 +68,28 @@ export function registerTrustedReleaseHandlers(
         })
         return result.response === 1
       })
-    } finally {
-      sender.removeListener("did-start-navigation", cancel)
-      sender.removeListener("render-process-gone", cancel)
-      sender.removeListener("destroyed", cancel)
-      installing = false
-    }
-  })
+    )
+  )
+  ipc.handle("mods:trusted-release:prepare-use", (event, input: unknown) =>
+    withOwner(event, async (_owner, scope) => {
+      if (!captureUseTarget || !input || typeof input !== "object")
+        throw Error("TRUSTED_RELEASE_DESTINATION_UNSUPPORTED")
+      const { threadId, expectedWorkspace, installationId, publisherId, listingId, releaseId } =
+        input as Partial<TrustedReleaseUseRequest>
+      if (typeof threadId !== "string" || !threadId || threadId.length > 200 ||
+        typeof expectedWorkspace !== "string" || !expectedWorkspace || expectedWorkspace.length > 4096 ||
+        typeof installationId !== "string" || installationId.length !== 36)
+        throw Error("TRUSTED_RELEASE_USE_INPUT_INVALID")
+      const assertTarget = captureUseTarget(threadId, expectedWorkspace)
+      return delivery.prepareUse({ publisherId, listingId, releaseId }, installationId, {
+        threadId, workspace: expectedWorkspace
+      }, {
+        signal: scope.signal,
+        assertCurrent() {
+          scope.assertCurrent()
+          assertTarget()
+        }
+      })
+    })
+  )
 }

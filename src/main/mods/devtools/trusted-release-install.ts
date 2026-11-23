@@ -12,6 +12,7 @@ import {
 } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import type { TrustedReleaseInstallReceipt } from "../../../shared/mods/trusted-release"
+import type { TrustedReleaseMetadata } from "./trusted-release-authority"
 import { PluginCatalogIndex } from "../../plugins/catalog-index"
 import { withPluginCatalogMutation } from "../../plugins/catalog-mutation"
 import {
@@ -152,7 +153,7 @@ function readIntent(input: unknown, releaseDirectoryName: string): InstallationI
   }
 }
 
-function verifySource(directory: string, digest: string): void {
+function verifySource(directory: string, digest: string): AuthoringSourceBundle {
   const files: AuthoringSourceFile[] = []
   let bytes = 0
   function visit(path: string, prefix: string): void {
@@ -178,8 +179,9 @@ function verifySource(directory: string, digest: string): void {
     }
   }
   visit(directory, "")
-  if (readPureFunctionSource(createAuthoringSourceBundle(files)).digest !== digest)
-    throw Error("TRUSTED_RELEASE_SOURCE_CHANGED")
+  const source = readPureFunctionSource(createAuthoringSourceBundle(files))
+  if (source.digest !== digest) throw Error("TRUSTED_RELEASE_SOURCE_CHANGED")
+  return source
 }
 
 /** Owns only the private inactive release store. The legacy plugin catalog is outside this service. */
@@ -190,6 +192,27 @@ export class TrustedReleaseInstaller {
   constructor(options: { root: string; index: PluginCatalogIndex }) {
     this.root = resolve(options.root)
     this.index = options.index
+  }
+
+  /** An interrupted transaction without a committed private index entry cannot be used. */
+  readForUse(id: string, expected: TrustedReleaseMetadata) {
+    if (!installationId.test(id) || !statIfPresent(this.root))
+      throw Error("TRUSTED_RELEASE_INSTALLATION_UNAVAILABLE")
+    requireDirectory(this.root)
+    const entry = this.readIndex(this.index.capture().raw).find(row => row.id === id)
+    if (!entry) throw Error("TRUSTED_RELEASE_INSTALLATION_UNAVAILABLE")
+    const { receipt } = entry
+    if (receipt.publisherId !== expected.publisherId || receipt.listingId !== expected.listingId ||
+      receipt.releaseId !== expected.releaseId || receipt.packageSha256 !== expected.package.packageSha256 ||
+      receipt.sourceDigest !== expected.package.sourceDigest ||
+      receipt.compiledDigest !== expected.package.compiledDigest)
+      throw Error("TRUSTED_RELEASE_IDENTITY_MISMATCH")
+    const directory = dirname(entry.path)
+    requireDirectory(directory)
+    const intent = readIntent(JSON.parse(readText(join(directory, "receipt.json"), 24 * 1024)),
+      releaseKey(receipt.releaseId))
+    if (!this.sameIntent(entry, intent)) throw Error("TRUSTED_RELEASE_INDEX_CONFLICT")
+    return { entry, source: verifySource(entry.path, receipt.sourceDigest) }
   }
 
   install(

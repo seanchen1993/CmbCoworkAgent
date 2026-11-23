@@ -140,3 +140,40 @@ it("keeps the online path unavailable without a main-process authority", async (
   expect(confirm).not.toHaveBeenCalled()
   expect(f.index.capture().raw).toBeNull()
 })
+
+it("preflights the exact installed release without downloading or enabling either version", async () => {
+  const f = await fixture()
+  const receipt = (await f.delivery.install(reference, scope(), async () => true))!
+  const target = { threadId: "ordinary-chat", workspace: f.directory }
+  const indexBefore = f.index.capture().raw
+  f.downloaded.bytes = Buffer.alloc(0)
+  const report = await f.delivery.prepareUse(reference, receipt.installationId, target, scope())
+  expect(report).toMatchObject({ release: receipt, target, name: "example", state: "inactive" })
+  expect(report.contentDigest).toMatch(/^[a-f0-9]{64}$/)
+  expect(f.index.capture().raw).toBe(indexBefore)
+  expect(await readFile(f.legacyPath, "utf8")).toBe(f.legacy)
+})
+
+it("rejects changed release identity, target, source and account during preflight", async () => {
+  const f = await fixture()
+  const receipt = (await f.delivery.install(reference, scope(), async () => true))!
+  const target = { threadId: "ordinary-chat", workspace: f.directory }
+  const prepare = (useScope = scope()) =>
+    f.delivery.prepareUse(reference, receipt.installationId, target, useScope)
+  const original = f.metadata.package
+  f.metadata.package = { ...original, packageSha256: "0".repeat(64) }
+  await expect(prepare()).rejects.toThrow("TRUSTED_RELEASE_IDENTITY_MISMATCH")
+  f.metadata.package = original
+  let checks = 0
+  await expect(prepare({
+    ...scope(),
+    assertCurrent() {
+      if (++checks > 2) throw Error("TRUSTED_RELEASE_TARGET_CHANGED")
+    }
+  })).rejects.toThrow("TRUSTED_RELEASE_TARGET_CHANGED")
+  const [{ path }] = JSON.parse(f.index.capture().raw!) as Array<{ path: string }>
+  await writeFile(join(path, "mods/main.ts"), "export const replaced = true")
+  await expect(prepare()).rejects.toThrow(/TRUSTED_RELEASE_.*(?:SOURCE|DIGEST)/)
+  f.changeAccount()
+  await expect(prepare()).rejects.toThrow("TRUSTED_RELEASE_ACCOUNT_CHANGED")
+})

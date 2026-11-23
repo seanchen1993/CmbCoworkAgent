@@ -48,6 +48,12 @@ async function main() {
       await api.workspace.set(thread.thread_id, workspace)
       const status = await api.mods.status(thread.thread_id)
       const scope = { threadId: thread.thread_id, expectedWorkspace: status.workspace }
+      const prepareError = await api.mods.trustedRelease.prepareUse({
+        ...scope, installationId: crypto.randomUUID(), publisherId: "publisher",
+        listingId: "listing", releaseId: "release"
+      }).then(() => "", error => String(error))
+      if (!prepareError.includes("TRUSTED_RELEASE_AUTHORITY_UNAVAILABLE"))
+        throw Error("Expected preflight to require a configured release authority")
       const id = "release-example", name = "发布候选验证"
       const source = await api.mods.authoring.generate({ ...scope, id, name, kind: "command", instruction: "Summarize" })
       const saved = await api.mods.authoring.save({ ...scope, id, name, expectedRevision: 0, files: source.files })

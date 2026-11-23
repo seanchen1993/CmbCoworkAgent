@@ -56,7 +56,7 @@ export function derivationDigest(files: DerivationFile[], excluded: string[]): s
 }
 /** Host provenance compares retained paths and bytes across a source checkout and its ZIP.
  * Copy CAS separately includes permissions and excluded-path observations. */
-export function derivationContentIdentity(files: DerivationFile[]): string {
+export function derivationContentIdentity(files: readonly Pick<DerivationFile, "path" | "digest">[]): string {
   return hash(
     JSON.stringify(
       files

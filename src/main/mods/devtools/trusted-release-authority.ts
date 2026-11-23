@@ -106,18 +106,10 @@ export class TrustedReleaseAuthority {
     readonly bytes: Uint8Array
     assertCurrent(): void
   }> {
-    const ref = readRef(input)
-    const { session, accountId, assertCurrent } = this.session(signal)
-    const receipt = record(await callAdapter(assertCurrent, () => session.resolveRelease(ref, signal)))
-    assertTarget(receipt, accountId, ref)
-    if (receipt.releaseId !== ref.releaseId) throw Error("TRUSTED_RELEASE_IDENTITY_MISMATCH")
-    if (receipt.canDownload !== true) throw Error("TRUSTED_RELEASE_DOWNLOAD_DENIED")
-    const manifest = readTrustedReleasePackageManifest(receipt.package)
-    const release = Object.freeze({ ...ref, package: manifest })
-
+    const { ref, session, accountId, release, assertCurrent } = await this.resolve(input, signal)
     const downloaded = record(await callAdapter(assertCurrent, () => session.downloadRelease(ref, signal)))
     assertTarget(downloaded, accountId, ref)
-    if (downloaded.releaseId !== ref.releaseId || downloaded.packageSha256 !== manifest.packageSha256)
+    if (downloaded.releaseId !== ref.releaseId || downloaded.packageSha256 !== release.package.packageSha256)
       throw Error("TRUSTED_RELEASE_IDENTITY_MISMATCH")
     const bytes = downloaded.bytes
     if (
@@ -127,6 +119,23 @@ export class TrustedReleaseAuthority {
     )
       throw Error("TRUSTED_RELEASE_PACKAGE_DOWNLOAD_INVALID")
     return Object.freeze({ release, bytes: Uint8Array.from(bytes), assertCurrent })
+  }
+
+  async inspect(input: unknown, signal?: AbortSignal) {
+    const { release, assertCurrent } = await this.resolve(input, signal)
+    return { release, assertCurrent }
+  }
+
+  private async resolve(input: unknown, signal?: AbortSignal) {
+    const ref = readRef(input)
+    const { session, accountId, assertCurrent } = this.session(signal)
+    const receipt = record(await callAdapter(assertCurrent, () => session.resolveRelease(ref, signal)))
+    assertTarget(receipt, accountId, ref)
+    if (receipt.releaseId !== ref.releaseId) throw Error("TRUSTED_RELEASE_IDENTITY_MISMATCH")
+    if (receipt.canDownload !== true) throw Error("TRUSTED_RELEASE_DOWNLOAD_DENIED")
+    const manifest = readTrustedReleasePackageManifest(receipt.package)
+    const release = Object.freeze({ ...ref, package: manifest })
+    return { ref, session, accountId, release, assertCurrent }
   }
 
   private session(signal?: AbortSignal) {
