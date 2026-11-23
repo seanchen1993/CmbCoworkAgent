@@ -65,13 +65,16 @@ const langGraphToolResultPrefix =
 const generatedAssistantId = /^current-run-assistant:[0-9a-f-]{36}$/i
 const botFileDeliveryToolName = "bot_deliver_files"
 
-function indexAssistantTurns(rows: readonly { id: string; role?: string }[]): Map<string, string> {
+function indexAssistantTurns(
+  rows: readonly { id: string; role?: string }[],
+  includeResults = false
+): Map<string, string> {
   const turns = new Map<string, string>()
   let turn = 0
   let anchor = ""
   for (const { role, id } of rows) {
     if (role === "user" || role === "system") anchor = `${++turn}\u0000${id}`
-    if (role === "assistant") turns.set(id, anchor)
+    if (role === "assistant" || (includeResults && role === "tool")) turns.set(id, anchor)
   }
   return turns
 }
@@ -1198,8 +1201,11 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
   const extraReplays = new Map<string, T[]>()
   const freshReplays = new Set<T>()
   const nextBoundary = new Map<T, number>()
+  const scopes = new Map<T, string>()
+  const rawScopes = checkpointTurns && indexAssistantTurns(checkpointTurns.rawToolTranscript, true)
   let boundary = messages.length
   let durableTurn = -1
+  let visibleTurn = 0
   let durablePrefixLength: number | undefined
   for (let index = messages.length - 1; index >= 0; index--) {
     const row = messages[index]
@@ -1208,6 +1214,11 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
   }
   for (const [index, row] of messages.entries()) {
     if (row.role === "user") durableTurn = durable.visibleUsers.get(row.id)?.index ?? -1
+    if (row.role === "user" || row.role === "system") visibleTurn++
+    const scope = rawScopes
+      ? checkpointTurns?.uniqueMessageIds.has(row.id) ? rawScopes.get(row.id) : undefined
+      : String(visibleTurn)
+    if (scope !== undefined) scopes.set(row, scope)
     if (row.role !== "tool" || !row.tool_call_id || !hasToolResultExecutionId(row)) continue
     positions.set(row, index)
     if (owned.has(row)) continue
@@ -1219,14 +1230,17 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
       continue
     }
     if (ownedExecutions.get(key)?.some((prior) => sameStoredToolResult(prior, row))) continue
-    const byName = latestUnowned.get(row.tool_call_id) ?? new Map()
+    if (scope === undefined) continue
+    const scopedCall = JSON.stringify([scope, row.tool_call_id])
+    const byName = latestUnowned.get(scopedCall) ?? new Map()
     byName.set(row.name ?? "", index)
-    latestUnowned.set(row.tool_call_id, byName)
+    latestUnowned.set(scopedCall, byName)
   }
   const hasReplacement = (call: Call, result: T) => {
     const position = positions.get(result)
-    const candidates = latestUnowned.get(call.id)
-    return position !== undefined &&
+    const scope = scopes.get(result)
+    const candidates = latestUnowned.get(JSON.stringify([scope, call.id]))
+    return scope !== undefined && position !== undefined &&
       Math.max(candidates?.get(call.name) ?? -1, candidates?.get("") ?? -1) > position
   }
   const precedingCopies = (exchange: PartialToolExchange<T>, current: number) =>
@@ -1236,7 +1250,9 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
       const before = nextBoundary.get(exchange.assistant) ?? messages.length
       return (unownedReplays.get(id) ?? []).filter((row) => {
         const position = positions.get(row)!
-        return position > after && position < before && wasEarlierResult(row, current)
+        const scope = scopes.get(row)
+        return scope !== undefined && scope === scopes.get(exchange.assistant) &&
+          position > after && position < before && wasEarlierResult(row, current)
       })
     })
   const laterAssistants = new Set<string>()
@@ -1388,6 +1404,7 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
           ) &&
           !wasEarlierResult(next, displacedBefore.get(previous)!) &&
           (positions.get(next) ?? -1) > (positions.get(previous) ?? -1) &&
+          scopes.get(next) === scopes.get(previous) &&
           (!next.name || !previous.name || next.name === previous.name) &&
           next.goal_id === previous.goal_id &&
           next.active_window_id === previous.active_window_id
@@ -2049,12 +2066,17 @@ function isReplayProseExtension(after: ReplayProse, before: ReplayProse): boolea
   )
 }
 
-function nameCheckpointResultVersions<T extends TranscriptMessage>(messages: T[]): T[] {
+function nameCheckpointResultVersions<T extends TranscriptMessage>(
+  messages: T[],
+  checkpointTurns?: CheckpointReplayTurns
+): { messages: T[]; checkpointTurns?: CheckpointReplayTurns } {
   const byId = new Map<string, T>()
+  const counts = new Map<string, number>()
   const versioned = new Set<string>()
   const ambiguous = new Set<string>()
   const used = new Set(messages.map(({ id }) => id))
   for (const row of messages) {
+    counts.set(row.id, (counts.get(row.id) ?? 0) + 1)
     const first = byId.get(row.id)
     if (!first) byId.set(row.id, row)
     else if (
@@ -2074,9 +2096,21 @@ function nameCheckpointResultVersions<T extends TranscriptMessage>(messages: T[]
     }
   }
   for (const id of ambiguous) versioned.delete(id)
-  if (!versioned.size) return messages
+  if (checkpointTurns && versioned.size) {
+    const rawCounts = new Map<string, number>()
+    for (const row of checkpointTurns.rawToolTranscript) {
+      used.add(row.id)
+      if (row.role === "tool") rawCounts.set(row.id, (rawCounts.get(row.id) ?? 0) + 1)
+      else versioned.delete(row.id)
+    }
+    for (const id of versioned) {
+      if (rawCounts.get(id) !== counts.get(id)) versioned.delete(id)
+    }
+  }
+  if (!versioned.size) return { messages, checkpointTurns }
   const done = new Map<string, number>()
-  return messages.map((row) => {
+  const renamed = new Map<string, string[]>()
+  const named = messages.map((row) => {
     if (!versioned.has(row.id) || row.role !== "tool") return row
     let occurrence = (done.get(row.id) ?? 0) + 1
     if (occurrence === 1) {
@@ -2087,8 +2121,32 @@ function nameCheckpointResultVersions<T extends TranscriptMessage>(messages: T[]
     while (used.has(id)) id = buildMessageSameRoleDuplicateId(row.id, "tool", ++occurrence)
     done.set(row.id, occurrence)
     used.add(id)
+    const ids = renamed.get(row.id) ?? [row.id]
+    ids.push(id)
+    renamed.set(row.id, ids)
     return { ...row, id, provider_source_id: row.id, provider_occurrence: occurrence }
   })
+  if (!checkpointTurns) return { messages: named }
+  const offsets = new Map<string, number>()
+  const uniqueMessageIds = new Set(checkpointTurns.uniqueMessageIds)
+  const rawToolTranscript = checkpointTurns.rawToolTranscript.map((row) => {
+    const ids = row.role === "tool" ? renamed.get(row.id) : undefined
+    if (!ids) return row
+    const offset = offsets.get(row.id) ?? 0
+    const id = ids[offset]
+    offsets.set(row.id, offset + 1)
+    uniqueMessageIds.add(id)
+    return { ...row, id }
+  })
+  return {
+    messages: named,
+    checkpointTurns: {
+      ...checkpointTurns,
+      uniqueMessageIds,
+      rawToolTranscript,
+      rawResultByCall: resolveToolResultOwnership(rawToolTranscript, ({ id }) => id)
+    }
+  }
 }
 
 function getReplayProseMatch(stored: ReplayProse, source: ReplayProse): number {
@@ -2517,12 +2575,13 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   const repairedDurable = repairLocalResultReplays(durableRows)?.messages ?? durableRows
   const canonical =
     foldInterruptedAndProjectedToolCopies(repairedDurable)?.messages ?? repairedDurable
-  const checkpointVersions = rawCheckpointTurns
-    ? checkpointRows
-    : nameCheckpointResultVersions(checkpointRows)
-  const stagedCheckpoint = repairLocalResultReplays(checkpointVersions, rawCheckpointTurns)
-  let replay = stagedCheckpoint?.messages ?? checkpointVersions
-  let checkpointTurns = stagedCheckpoint?.checkpointTurns ?? rawCheckpointTurns
+  const checkpointVersions = nameCheckpointResultVersions(checkpointRows, rawCheckpointTurns)
+  const stagedCheckpoint = repairLocalResultReplays(
+    checkpointVersions.messages,
+    checkpointVersions.checkpointTurns
+  )
+  let replay = stagedCheckpoint?.messages ?? checkpointVersions.messages
+  let checkpointTurns = stagedCheckpoint?.checkpointTurns ?? checkpointVersions.checkpointTurns
   const foldedCheckpoint = foldInterruptedAndProjectedToolCopies(replay, checkpointTurns)
   if (foldedCheckpoint) {
     replay = foldedCheckpoint.messages

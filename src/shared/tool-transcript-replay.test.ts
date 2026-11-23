@@ -223,7 +223,7 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each(["both-stale", "stale-read", "stale-list", "revised-result"])(
+  it.each(["both-stale", "stale-read", "stale-list", "revised-result", "revised-result-with-hidden"])(
     "rebinds only new result versions in a clipped parallel batch (%s)",
     (mode) => {
       const [initial, read] = exchange()
@@ -246,14 +246,15 @@ describe("tool transcript replay", () => {
         content: "Checking and displaying results"
       }
       const nextUser = { ...user, id: "next-user" }
+      const revised = mode.startsWith("revised-result")
       const durable = [
         user, assistant, read, list, latest, readCopy,
         { ...list, id: `${list.id}::cmb-same-role-duplicate:tool:2` }, nextUser
       ]
       const fresh = {
         ...read,
-        id: mode === "revised-result" ? read.id : "9c09fdd9-e146-4c2c-9b12-cac648551576",
-        provider_source_id: mode === "revised-result" ? undefined : "9c09fdd9-e146-4c2c-9b12-cac648551576",
+        id: revised ? read.id : "9c09fdd9-e146-4c2c-9b12-cac648551576",
+        provider_source_id: revised ? undefined : "9c09fdd9-e146-4c2c-9b12-cac648551576",
         provider_occurrence: undefined,
         content: "Current file contents"
       }
@@ -261,12 +262,17 @@ describe("tool transcript replay", () => {
         nextUser,
         assistant,
         ...(mode === "stale-list" ? [fresh, list] : [
-          mode === "revised-result" ? { ...read, provider_source_id: undefined } : read,
+          revised ? { ...read, provider_source_id: undefined } : read,
           ...(mode === "both-stale" ? [list] : []),
           fresh
         ])
       ]
-      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint)
+      const turns = mode === "revised-result-with-hidden"
+        ? readCheckpointReplayTurns({
+            channel_values: { messages: [...checkpointRows(checkpoint), hiddenTeam] }
+          })
+        : undefined
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
       const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable, {
         useStableProviderOccurrences: true
       })
