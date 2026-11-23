@@ -154,7 +154,7 @@ describe("builtin model registry", () => {
       idleModelEnvironment: "uat",
       model: "pro",
       notice: "当前使用 UAT 测试环境。",
-      maxTokens: 128_000
+      maxTokens: 200_000
     })
     state.idleModelUseUat = false
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBe("idle-test-key")
@@ -233,7 +233,7 @@ describe("builtin model registry", () => {
     const ref = "builtin:idle-ultra"
     state.idleModelUseUat = true
     expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)).toMatchObject({
-      maxTokens: 128_000,
+      maxTokens: 200_000,
       lockedFields: ["baseUrl", "model", "apiKey"]
     })
     expect(() => updateBuiltinModelOverride(id, { maxTokens: 31_999 })).toThrow("32000~1000000")
@@ -256,7 +256,7 @@ describe("builtin model registry", () => {
     state.idleModelUseUat = true
     expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
     resetBuiltinModelOverride(id)
-    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(128_000)
+    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(200_000)
   })
 
   it("prefers Pro before MiniMax while honoring saved defaults and availability", async () => {

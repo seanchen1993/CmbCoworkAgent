@@ -9,6 +9,7 @@ export const IDLE_MODEL_ID = "idle-ultra"
 export const IDLE_MODEL_NAME = "码豆模型PRO"
 export const IDLE_MODEL_MODE = "pro"
 export const IDLE_MODEL_MAX_TOKENS = 128_000
+export const IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS = 200_000
 export const IDLE_MODEL_SAP_REQUIRED_MESSAGE = "请先完善当前用户的八位 SAP 员工编号"
 export const IDLE_MODEL_UAT_NOTICE = "当前使用 UAT 测试环境。"
 
