@@ -1,3 +1,4 @@
+import { parseBotToolReceiptId } from "./bots/turn-feedback"
 import type { CheckpointAuthorityTranscriptMessage } from "./checkpoint-transcript"
 import {
   buildMessageSameRoleDuplicateId,
@@ -99,14 +100,19 @@ function sameValue(left: unknown, right: unknown, depth = 0): boolean {
   )
 }
 
-function sameRow(left: TranscriptMessage, right: TranscriptMessage): boolean {
+function sameRow(
+  left: TranscriptMessage,
+  right: TranscriptMessage,
+  checkpointScopeMayBeMissing = false
+): boolean {
   const status = (row: TranscriptMessage) => row.status || (row.role === "tool" ? "success" : "")
   const failed = (row: TranscriptMessage) => row.is_error ?? row.status === "error"
   return (
     hasSameReplayId(left, right) &&
     left.tool_call_id === right.tool_call_id &&
-    left.goal_id === right.goal_id &&
-    left.active_window_id === right.active_window_id &&
+    (left.goal_id === right.goal_id || (checkpointScopeMayBeMissing && right.goal_id == null)) &&
+    (left.active_window_id === right.active_window_id ||
+      (checkpointScopeMayBeMissing && right.active_window_id == null)) &&
     sameValue(left.botHistoryDeliveryScope, right.botHistoryDeliveryScope) &&
     !left.content_preview_notice &&
     !right.content_preview_notice &&
@@ -122,17 +128,18 @@ function sameRow(left: TranscriptMessage, right: TranscriptMessage): boolean {
 
 function isSameExchange(
   left: ToolExchange<TranscriptMessage>,
-  right: ToolExchange<TranscriptMessage>
+  right: ToolExchange<TranscriptMessage>,
+  checkpointScopeMayBeMissing = false
 ): boolean {
   return (
-    sameRow(left.assistant, right.assistant) &&
+    sameRow(left.assistant, right.assistant, checkpointScopeMayBeMissing) &&
     left.calls.length === right.calls.length &&
     left.calls.every(
       (call, index) =>
         call.id === right.calls[index].id &&
         call.name === right.calls[index].name &&
         sameValue(call.args, right.calls[index].args) &&
-        sameRow(left.results[index], right.results[index])
+        sameRow(left.results[index], right.results[index], checkpointScopeMayBeMissing)
     )
   )
 }
@@ -149,6 +156,7 @@ function hasToolResultExecutionId(result: TranscriptMessage): boolean {
   const callId = result.tool_call_id
   if (typeof callId !== "string" || !callId || source === callId) return false
   if (toolResultUuid.test(source)) return true
+  if (parseBotToolReceiptId(source, typeof result.name === "string" ? result.name : "")) return true
   const prefix = langGraphToolResultPrefix.exec(source)?.[0]
   return Boolean(prefix && source.slice(prefix.length) === callId)
 }
@@ -203,32 +211,40 @@ export function hasToolReplayCandidates(messages: readonly TranscriptMessage[]):
 
 function indexAnchoredExchanges<T extends TranscriptMessage>(
   messages: readonly T[],
-  unsafeAnchors?: ReadonlySet<string>
+  checkpointPrefixes?: ReadonlyMap<string, ReadonlySet<string>>
 ) {
   const ownership = resolveToolResultOwnership(messages)
   const byAnchor = new Map<
     string,
-    { exchange: ToolExchange<T>; position: number; anchor: T } | null
+    { exchange: ToolExchange<T>; position: number; anchor: T; hasPhysicalResults: boolean } | null
   >()
   let anchor: T | undefined
   let position = 0
   for (const message of messages) {
     if (message.role === "user" || message.role === "system") {
-      anchor = message.role === "user" && !unsafeAnchors?.has(message.id) ? message : undefined
+      anchor = message.role === "user" ? message : undefined
       position = 0
       continue
     }
     if (!anchor || message.role !== "assistant") continue
     const exchange = readExchange(message, ownership)
     if (exchange) {
+      const prefix = checkpointPrefixes?.get(anchor.id)
+      const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
       const key = JSON.stringify([
         anchor.id,
         exchangeKey(exchange),
-        exchange.results.every(hasToolResultExecutionId)
-          ? exchange.results.map(resultReplayKey)
-          : null
+        hasPhysicalResults ? exchange.results.map(resultReplayKey) : null
       ])
-      byAnchor.set(key, byAnchor.has(key) ? null : { exchange, position, anchor })
+      const unsafe =
+        prefix &&
+        (!hasPhysicalResults ||
+          !prefix.has(message.id) ||
+          exchange.results.some(({ id }) => !prefix.has(id)))
+      byAnchor.set(
+        key,
+        unsafe || byAnchor.has(key) ? null : { exchange, position, anchor, hasPhysicalResults }
+      )
     }
     position++
   }
@@ -297,22 +313,22 @@ function applyCheckpointAlignments<T extends TranscriptMessage>(
 export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   canonical: readonly T[],
   replay: T[],
-  unsafeAnchors?: ReadonlySet<string>
+  checkpointPrefixes?: ReadonlyMap<string, ReadonlySet<string>>
 ): T[] {
   if (canonical.length < 3 || replay.length < 3) return replay
-  const candidates = indexAnchoredExchanges(canonical, unsafeAnchors)
+  const candidates = indexAnchoredExchanges(canonical)
   if (candidates.size === 0) return replay
   const groups: Array<Array<[copy: T, durable: T]>> = []
-  for (const [key, candidate] of indexAnchoredExchanges(replay, unsafeAnchors)) {
+  for (const [key, candidate] of indexAnchoredExchanges(replay, checkpointPrefixes)) {
     const target = candidates.get(key)
     if (
       !target ||
       !candidate ||
       (target.position !== candidate.position && !hasExecutionIdentity(target.exchange)) ||
-      !sameRow(target.anchor, candidate.anchor) ||
+      !sameRow(target.anchor, candidate.anchor, target.hasPhysicalResults) ||
       (getMessageProviderOccurrence(target.anchor) ?? 1) !==
         (getMessageProviderOccurrence(candidate.anchor) ?? 1) ||
-      !isSameExchange(target.exchange, candidate.exchange)
+      !isSameExchange(target.exchange, candidate.exchange, target.hasPhysicalResults)
     )
       continue
     const rows: Array<[copy: T, durable: T]> = [

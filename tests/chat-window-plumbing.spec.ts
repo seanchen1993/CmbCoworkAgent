@@ -68,6 +68,11 @@ async function main(): Promise<void> {
   assert.match(container, /pendingDurableHistoryAnchorRef/)
   assert.match(container, /if \(!target && anchor\.attempt === 0 && visibleIndex !== undefined\)/)
   assert.match(container, /pendingDurableHistoryAnchorRef\.current = null[\s\S]*RESTORE_END/)
+  assert.equal(
+    (container.match(/const displayId = resolveDisplayMessageId\(anchor\.messageId\)/g) ?? []).length,
+    2,
+    "Both history anchors must resolve the mounted row after replay folding"
+  )
   assert.match(
     container,
     /const cancelPendingHistoryAnchorFromUserGesture[\s\S]*generation: anchor\.generation/,

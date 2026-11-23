@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
-  findVisibleAnchorsWithHiddenCheckpointTurns,
+  findCheckpointReplayPrefixesBeforeHiddenTurns,
   mergeCheckpointAuthorityTranscriptMessages
 } from "./checkpoint-transcript"
 import type { CheckpointAuthorityTranscriptMessage as Message } from "./checkpoint-transcript"
@@ -112,7 +112,7 @@ describe("tool transcript replay", () => {
       content: "notification",
       additional_kwargs: { cmb_internal_coordinator_notification: true }
     }
-    const unsafe = findVisibleAnchorsWithHiddenCheckpointTurns({
+    const prefixes = findCheckpointReplayPrefixesBeforeHiddenTurns({
       channel_values: {
         messages: [
           { ...user, type: "human" },
@@ -123,7 +123,7 @@ describe("tool transcript replay", () => {
         ]
       }
     })
-    expect([...unsafe]).toEqual([user.id])
+    expect([...prefixes.keys()]).toEqual([user.id])
     const checkpoint = [user, ...exchange(), later, ...exchange()]
     const canonical = [user, ...exchange(3), later, ...exchange(2)]
     // Give the two independent turns distinct result and assistant source IDs.
@@ -133,10 +133,52 @@ describe("tool transcript replay", () => {
         row.provider_source_id = `later-${row.provider_source_id}`
       }
     }
-    expect(alignReplayedToolExchanges(canonical, checkpoint, unsafe).map(({ id }) => id)).toEqual([
-      ...checkpoint.slice(0, 4).map(({ id }) => id),
-      ...canonical.slice(-2).map(({ id }) => id)
-    ])
+    expect(alignReplayedToolExchanges(canonical, checkpoint, prefixes).map(({ id }) => id)).toEqual(
+      [...checkpoint.slice(0, 4).map(({ id }) => id), ...canonical.slice(-2).map(({ id }) => id)]
+    )
+  })
+
+  it("aligns a completed execution before an internal Team turn and keeps the Goal scope", () => {
+    const checkpoint = [user, ...exchange()]
+    const raw = checkpoint.map((row) => ({
+      ...row,
+      type: row.role === "user" ? "human" : row.role === "assistant" ? "ai" : "tool"
+    }))
+    const prefixes = findCheckpointReplayPrefixesBeforeHiddenTurns({
+      channel_values: {
+        messages: [
+          ...raw,
+          {
+            id: "hidden-team",
+            type: "human",
+            content: "Notification",
+            additional_kwargs: { cmb_internal_coordinator_notification: true }
+          }
+        ]
+      }
+    })
+    const goalUser = { ...user, goal_id: "goal", active_window_id: "window" }
+    const canonical = [goalUser, ...exchange(2)]
+    const aligned = alignReplayedToolExchanges(canonical, checkpoint, prefixes)
+    expect([...prefixes.get(user.id)!]).toEqual(checkpoint.slice(1).map(({ id }) => id))
+    expect(mergeCheckpointAuthorityTranscriptMessages(aligned, canonical)).toEqual(canonical)
+    const conflicting = [{ ...user, goal_id: "another-goal" }, ...exchange()]
+    expect(alignReplayedToolExchanges(canonical, conflicting, prefixes)).toBe(conflicting)
+    const laterTool = findCheckpointReplayPrefixesBeforeHiddenTurns({
+      channel_values: {
+        messages: [
+          ...raw.slice(0, 2),
+          {
+            id: "hidden-team",
+            type: "human",
+            content: "Notification",
+            additional_kwargs: { cmb_internal_coordinator_notification: true }
+          },
+          raw[2]
+        ]
+      }
+    })
+    expect(alignReplayedToolExchanges(canonical, checkpoint, laterTool)).toBe(checkpoint)
   })
 
   it("identifies adjacent replay with the same result execution ID", () => {
@@ -182,6 +224,27 @@ describe("tool transcript replay", () => {
         ...scoped(2, run, "another-call")
       ]).size
     ).toBe(0)
+  })
+
+  it("folds host-generated Bot receipts by execution and preserves separate attempts", () => {
+    const nativeReceipt = (occurrence: number, attempt: number) => {
+      const [assistant, tool] = exchange(occurrence)
+      const name = "bot_work_create"
+      const source = `bot-attempt-${resultId}-${attempt}`
+      return [
+        { ...assistant, tool_calls: [{ id: "shared-call", name, args: {} }] },
+        { ...tool, id: tool.id.replace(resultId, source), provider_source_id: source, name }
+      ]
+    }
+    const first = nativeReceipt(1, 1)
+    const replay = nativeReceipt(2, 1)
+    const next = nativeReceipt(3, 2)
+    expect(findReplayedToolExchangeAliases([...first, ...replay, ...next])).toEqual(
+      new Map([
+        [replay[0].id, first[0].id],
+        [replay[1].id, first[1].id]
+      ])
+    )
   })
 
   it("retains surrounding reasoning and final replies when a strong execution moved slots", () => {

@@ -602,20 +602,34 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
 }
 
-/** A hidden graph turn can share the last visible user in a projected page. */
-export function findVisibleAnchorsWithHiddenCheckpointTurns(checkpoint: unknown): ReadonlySet<string> {
-  const unsafeAnchors = new Set<string>()
+/** A hidden turn can change tool bindings after it. Capture the completed prefix of its visible turn. */
+export function findCheckpointReplayPrefixesBeforeHiddenTurns(
+  checkpoint: unknown
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const prefixes = new Map<string, Set<string>>()
+  const visibleAnchors = new Set<string>()
   let visibleAnchor: string | undefined
+  let beforeHidden = new Set<string>()
   getCheckpointMessages(checkpoint).forEach((message, index) => {
-    if (!isRecord(message) || getMessageRole(message) !== "user") return
-    const content = getMessageContent(message)
-    if (isInternalNotificationMessage(message) || !isVisibleTranscriptMessage("user", content)) {
-      if (visibleAnchor) unsafeAnchors.add(visibleAnchor)
-    } else {
-      visibleAnchor = getMessageId(message, index)
+    if (!isRecord(message)) return
+    const role = getMessageRole(message)
+    if (role === "user") {
+      const content = getMessageContent(message)
+      if (isInternalNotificationMessage(message) || !isVisibleTranscriptMessage("user", content)) {
+        if (visibleAnchor && !prefixes.has(visibleAnchor)) prefixes.set(visibleAnchor, beforeHidden)
+      } else {
+        visibleAnchor = getMessageId(message, index)
+        beforeHidden = new Set()
+        if (visibleAnchors.has(visibleAnchor)) prefixes.set(visibleAnchor, beforeHidden)
+        visibleAnchors.add(visibleAnchor)
+      }
+    } else if ((role === "assistant" || role === "tool") && visibleAnchor) {
+      const id = getMessageId(message, index)
+      if (prefixes.has(visibleAnchor)) beforeHidden.delete(id)
+      else beforeHidden.add(id)
     }
   })
-  return unsafeAnchors
+  return prefixes
 }
 
 export function filterNewCheckpointReplayMessages(

@@ -98,7 +98,7 @@ import {
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
-  findVisibleAnchorsWithHiddenCheckpointTurns,
+  findCheckpointReplayPrefixesBeforeHiddenTurns,
   isCheckpointEmptyAssistantToolCallMessage,
   isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
@@ -6397,7 +6397,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let durableConversationPresence: ThreadConversationPresence = "unknown"
       let hasPersistedVisibleTailAfterCheckpoint = false
       let checkpointMessagesLoaded = false
-      let checkpointUnsafeReplayAnchors: ReadonlySet<string> | undefined
+      let checkpointReplayPrefixes: ReadonlyMap<string, ReadonlySet<string>> | undefined
       let checkpointPresenceFallbackResolved = false
       let mainTranscriptPublished = false
       let criticalHistoryHydrationFailed = false
@@ -6819,7 +6819,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             Array.isArray(channelValues.messages)
           ) {
             checkpointMessagesLoaded = true
-            checkpointUnsafeReplayAnchors = findVisibleAnchorsWithHiddenCheckpointTurns(
+            checkpointReplayPrefixes = findCheckpointReplayPrefixesBeforeHiddenTurns(
               latestCheckpoint.checkpoint
             )
             let internalGoalPromptIndex = 0
@@ -7088,7 +7088,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         alignReplayedToolExchanges(
           visiblePersistedThreadMessages,
           checkpointTranscript,
-          checkpointUnsafeReplayAnchors
+          checkpointReplayPrefixes
         ),
         visiblePersistedThreadMessages
       )

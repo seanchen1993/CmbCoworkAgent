@@ -5257,7 +5257,8 @@ export function ChatContainer({
     ) {
       return
     }
-    const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+    const displayId = resolveDisplayMessageId(anchor.messageId)
+    const visibleIndex = visibleMessageIndexById.get(displayId)
     if (visibleIndex === undefined) {
       pendingChatSessionAnchorRef.current = null
       return
@@ -5273,9 +5274,9 @@ export function ChatContainer({
       if (pendingChatSessionAnchorRef.current !== anchor) return
       const viewport = getViewport()
       const target =
-        contentMessageRefs.current.get(anchor.messageId) ??
+        contentMessageRefs.current.get(displayId) ??
         Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
-          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+          (candidate) => candidate.dataset.chatMessageId === displayId
         )
       if (viewport && target) {
         const viewportTop = viewport.getBoundingClientRect().top
@@ -5310,6 +5311,7 @@ export function ChatContainer({
     getViewport,
     historyLoading,
     historyPageLoading,
+    resolveDisplayMessageId,
     scrollParent,
     threadId,
     visibleMessageIndexById
@@ -5440,6 +5442,7 @@ export function ChatContainer({
     ) {
       return
     }
+    const displayId = resolveDisplayMessageId(anchor.messageId)
     let frame: number | null = null
     const finishRestore = (): void => {
       if (pendingDurableHistoryAnchorRef.current !== anchor) return
@@ -5450,9 +5453,9 @@ export function ChatContainer({
       if (pendingDurableHistoryAnchorRef.current !== anchor) return
       const viewport = getViewport()
       const target =
-        contentMessageRefs.current.get(anchor.messageId) ??
+        contentMessageRefs.current.get(displayId) ??
         Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
-          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+          (candidate) => candidate.dataset.chatMessageId === displayId
         )
       if (viewport && target) {
         const delta = getChatHistoryAnchorTop(target) - anchor.viewportTop
@@ -5463,7 +5466,7 @@ export function ChatContainer({
           return
         }
       }
-      const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+      const visibleIndex = visibleMessageIndexById.get(displayId)
       if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
         virtuosoRef.current?.scrollToIndex({
           index: visibleIndex,
@@ -5488,6 +5491,7 @@ export function ChatContainer({
     getViewport,
     historyLoadedMessageCount,
     historyPageLoading,
+    resolveDisplayMessageId,
     threadId,
     visibleMessageIndexById
   ])
