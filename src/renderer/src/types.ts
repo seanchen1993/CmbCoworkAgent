@@ -289,6 +289,7 @@ export interface Message {
   historical_tool_replay_id?: string
   legacy_checkpoint_replay_of?: string
   legacy_checkpoint_replay_end?: string
+  legacy_checkpoint_tool_outcomes?: readonly import("../../shared/tool-result-ownership").VerifiedToolOutcome[]
   /** A rendered Goal event occupies the position immediately before its durable anchor. */
   transcript_anchor_message_id?: string
   provider_source_id?: string

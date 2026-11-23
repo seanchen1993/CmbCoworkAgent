@@ -27,9 +27,12 @@ import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoi
 import { readLegacyImportedCheckpointReplayEvidence } from "../../shared/tool-transcript-replay"
 import {
   getRawWorkerToolCallId,
+  getWorkerToolResultKey,
   getWorkerToolUiKey,
+  readToolOwnershipId,
   resolveToolResultOwnership,
-  type ToolOwnershipMessage
+  type ToolOwnershipMessage,
+  type VerifiedToolOutcome
 } from "../../shared/tool-result-ownership"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
@@ -48,6 +51,8 @@ export const THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET = 8 * 1024 * 1024
 const THREAD_MESSAGE_HYDRATION_MIN_BYTE_BUDGET = 64 * 1024
 const THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD = 1024
 const OVERSIZED_MESSAGE_MARKER = "\n[完整消息过大，当前仅显示有界预览]"
+type LegacyReplayPageFields = Pick<Message,
+  "legacy_checkpoint_replay_of" | "legacy_checkpoint_replay_end" | "legacy_checkpoint_tool_outcomes">
 
 interface ThreadMessageRow {
   thread_id: string
@@ -1108,8 +1113,8 @@ function readPageLegacyReplayAliases(
   truncatedIds: readonly string[],
   forward: boolean,
   cancellation: Int32Array
-): ReadonlyMap<string, Pick<Message, "legacy_checkpoint_replay_of" | "legacy_checkpoint_replay_end">> {
-  const aliases = new Map<string, Pick<Message, "legacy_checkpoint_replay_of" | "legacy_checkpoint_replay_end">>()
+): ReadonlyMap<string, LegacyReplayPageFields> {
+  const aliases = new Map<string, LegacyReplayPageFields>()
   const { checkpointDirectory, threadId } = request
   if (!checkpointDirectory || !/^[a-zA-Z0-9_-]+$/.test(threadId) || !messages.some((row) =>
     (row.provider_occurrence ?? 1) > 1 &&
@@ -1163,10 +1168,11 @@ function readPageLegacyReplayAliases(
     const stored = byId.get(row.message_id)
     if (row.role === "assistant" && stored?.tool_calls?.some(({ id }, index) => {
       if (missingSlots.has(getWorkerToolUiKey(stored.id, id, index))) return false
-      let fence = laterOwnerFences.get(id)
+      const identity = getWorkerToolResultKey(stored.id, id) ?? id
+      let fence = laterOwnerFences.get(identity)
       if (fence === undefined) {
-        fence = proveLaterToolResultOwners(database, threadId, id, first, last, cancellation)
-        laterOwnerFences.set(id, fence)
+        fence = proveLaterToolResultOwners(database, threadId, id, identity, first, last, cancellation)
+        laterOwnerFences.set(identity, fence)
       }
       return fence <= (stored.ordinal ?? last)
     })) continue
@@ -1198,20 +1204,27 @@ function readPageLegacyReplayAliases(
         if (!visibleIds.has(id)) continue
         const canonical = byId.get(retained)
         let end: string | undefined
+        const outcomes: VerifiedToolOutcome[] = []
         if (canonical?.role === "assistant") {
           let last = positions.get(retained) ?? -1
           for (const [index, call] of (canonical.tool_calls ?? []).entries()) {
             const result = missingSlots.get(getWorkerToolUiKey(retained, call.id, index))
             const position = result && positions.get(result.id)
-            if (result && typeof position === "number" && position > last) {
+            if (!result) continue
+            if (typeof position === "number" && position > last) {
               last = position
               end = result.id
             }
+            const { status } = result
+            outcomes.push({ assistantId: retained, resultId: result.id, callId: call.id, slot: index,
+              status: status === "rejected" || status === "interrupted" ? status
+                : result.is_error || status === "error" || status === "failed" ? "failed" : "completed" })
           }
         }
         aliases.set(id, {
           legacy_checkpoint_replay_of: retained,
-          ...(end ? { legacy_checkpoint_replay_end: end } : {})
+          ...(end ? { legacy_checkpoint_replay_end: end } : {}),
+          ...(outcomes.length ? { legacy_checkpoint_tool_outcomes: outcomes } : {})
         })
       }
     } catch {
@@ -1223,52 +1236,56 @@ function readPageLegacyReplayAliases(
 }
 
 function proveLaterToolResultOwners(
-  database: DatabaseSync, threadId: string, callId: string, first: number, last: number,
+  database: DatabaseSync, threadId: string, callId: string, oldCallIdentity: string, first: number, last: number,
   cancellation: Int32Array
 ): number {
   // Return the oldest positively identified user turn with a matching result.
   // An empty suffix cannot receive the old call. An unresolved suffix can.
   const limit = 64
-  const byCall = database.prepare(`SELECT message_id, ordinal FROM thread_messages
+  const byCall = database.prepare(`SELECT message_id, ordinal, tool_call_id FROM thread_messages
     WHERE thread_id = ? AND role = 'tool' AND tool_call_id = ? AND ordinal > ?
     ORDER BY ordinal LIMIT ?`)
   const rawCallId = getRawWorkerToolCallId(callId)
-  const results = [...new Set([callId, rawCallId])]
+  const rawMatches = [...new Set([callId, rawCallId])]
     .flatMap((id) => byCall.all(threadId, id, last, limit + 1))
-  const scopedResult = database.prepare(`SELECT 1 FROM thread_messages
+  const scopedMatches = database.prepare(`SELECT message_id, ordinal, tool_call_id FROM thread_messages
     WHERE thread_id = ? AND role = 'tool' AND ordinal > ?
       AND tool_call_id >= 'worker-turn-' AND tool_call_id < 'worker-turn.'
       AND instr(tool_call_id, '::') > 0 AND substr(tool_call_id, instr(tool_call_id, '::') + 2) = ?
-    LIMIT 1`).get(threadId, last, rawCallId)
-  if (scopedResult) return -Infinity
+    LIMIT ?`).all(threadId, last, rawCallId, limit + 1)
+  const results = [...new Map([...rawMatches, ...scopedMatches].map((row) => [row.message_id, row])).values()]
   if (!results.length) return Infinity
   if (results.length > limit) return -Infinity
   const nearestUser = database.prepare(`SELECT ordinal FROM thread_messages
     WHERE thread_id = ? AND role = 'user' AND ordinal < ? ORDER BY ordinal DESC LIMIT 1`)
-  const turns = new Map<number, { end: number; resultIds: Set<string> }>()
-  for (const { message_id: id, ordinal } of results) {
+  const turns = new Map<number, { end: number; results: Map<string, string | undefined> }>()
+  let lastUnscopedResult = first - 1
+  for (const { message_id: id, ordinal, tool_call_id: resultCallId } of results) {
     throwIfCancelled(cancellation)
-    if (typeof id !== "string" || typeof ordinal !== "number") return -Infinity
+    if (typeof id !== "string" || typeof ordinal !== "number" || typeof resultCallId !== "string") return -Infinity
     const user = nearestUser.get(threadId, ordinal)?.ordinal
     if (typeof user !== "number" || user <= first) return -Infinity
-    const turn = turns.get(user) ?? { end: ordinal, resultIds: new Set<string>() }
+    const identity = getWorkerToolResultKey(id, rawCallId) !== rawCallId
+      ? getWorkerToolResultKey(id, resultCallId) : undefined
+    if (identity === oldCallIdentity) return -Infinity
+    if (!identity) lastUnscopedResult = Math.max(lastUnscopedResult, ordinal)
+    const turn = turns.get(user) ?? { end: ordinal, results: new Map() }
     turn.end = Math.max(turn.end, ordinal)
-    turn.resultIds.add(id)
+    turn.results.set(id, identity)
     turns.set(user, turn)
   }
-  const lastResult = Math.max(...[...turns.values()].map(({ end }) => end))
   // Scoped worker rows can reset the resolver's turn counter. A skipped
   // interval containing any such row cannot prove a newer main-agent turn.
-  if (database.prepare(`SELECT 1 FROM thread_messages WHERE thread_id = ?
+  if (lastUnscopedResult >= first && database.prepare(`SELECT 1 FROM thread_messages WHERE thread_id = ?
     AND message_id >= 'worker-turn-' AND message_id < 'worker-turn.'
-    AND ordinal BETWEEN ? AND ? LIMIT 1`).get(threadId, first, lastResult)) return -Infinity
+    AND ordinal BETWEEN ? AND ? LIMIT 1`).get(threadId, first, lastUnscopedResult)) return -Infinity
   const readTurn = database.prepare(`SELECT message_id, role, tool_call_id,
       CASE WHEN length(CAST(tool_calls_json AS BLOB)) <= 65536 THEN tool_calls_json END AS tool_calls,
       length(CAST(tool_calls_json AS BLOB)) > 65536 AS incomplete
     FROM thread_messages WHERE thread_id = ? AND ordinal BETWEEN ? AND ?
     ORDER BY ordinal, created_at, message_id LIMIT ?`)
   let remainingBytes = 512 * 1024
-  for (const [user, { end, resultIds }] of turns) {
+  for (const [user, { end, results: expected }] of turns) {
     throwIfCancelled(cancellation)
     const rows = readTurn.all(threadId, user, end, limit + 1)
     if (rows.length > limit || rows[0]?.role !== "user" ||
@@ -1286,8 +1303,22 @@ function proveLaterToolResultOwners(
         tool_call_id: typeof row.tool_call_id === "string" ? row.tool_call_id : undefined
       }]
     })
-    const owned = new Set([...resolveToolResultOwnership(messages).values()].map(({ id }) => id))
-    if ([...resultIds].some((id) => !owned.has(id))) return -Infinity
+    const callIdentities = new Map<string, string>()
+    for (const message of messages) {
+      if (message.role !== "assistant") continue
+      for (const [index, call] of (message.tool_calls ?? []).entries()) {
+        const id = readToolOwnershipId(call)
+        const identity = id && getWorkerToolResultKey(message.id, id)
+        if (id && identity) callIdentities.set(getWorkerToolUiKey(message.id, id, index), identity)
+      }
+    }
+    const owners = new Map([...resolveToolResultOwnership(messages)]
+      .map(([key, result]) => [result.id, callIdentities.get(key)]))
+    for (const [id, identity] of expected) {
+      // A scoped result can fall back to an older turn. Only an exact scoped
+      // declaration proves that it cannot belong to the historical call.
+      if (!owners.has(id) || (identity && owners.get(id) !== identity)) return -Infinity
+    }
   }
   return Math.min(...turns.keys())
 }

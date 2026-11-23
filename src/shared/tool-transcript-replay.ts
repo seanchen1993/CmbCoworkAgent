@@ -2798,7 +2798,7 @@ function restoreLegacyProjectedCheckpointResults<T extends TranscriptMessage>(
         !sameReplayAnchor(storedAnchors.get(storedAssistant), anchor, true)) continue
     const source = readExchange(assistant, checkpointOwnership)
     const stored = readExchange(storedAssistant, storedOwnership)
-    if (!stored || !source || !sameExchangeCalls(stored, source, true, true) ||
+    if (!stored || !source || !sameExchangeCalls(stored, source, true, false) ||
         (turns && !hasRawCheckpointToolBindings(source, turns)) ||
         !stored.results.every((result, index) => {
           const peer = source.results[index]

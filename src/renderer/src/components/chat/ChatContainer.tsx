@@ -3814,6 +3814,7 @@ export function ChatContainer({
         const orderedToolCalls: Array<{
           key: string
           call: { id: string; name: string; args: Record<string, unknown> }
+          historicalStatus?: ToolCallStatus
         }> = []
 
         for (const message of toolDerivationMessages) {
@@ -3822,7 +3823,10 @@ export function ChatContainer({
             if (!toolCall?.id) return
             orderedToolCalls.push({
               key: getWorkerToolUiKey(message.id, toolCall.id, index),
-              call: toolCall
+              call: toolCall,
+              historicalStatus: message.legacy_checkpoint_tool_outcomes?.find((outcome) =>
+                outcome.assistantId === message.id && outcome.slot === index && outcome.callId === toolCall.id
+              )?.status
             })
           })
         }
@@ -3847,7 +3851,7 @@ export function ChatContainer({
         let activeAssigned = false
         const nextStates = new Map<string, ToolCallState>()
 
-        for (const { key, call: toolCall } of orderedToolCalls) {
+        for (const { key, call: toolCall, historicalStatus } of orderedToolCalls) {
           const baseState =
             lastOccurrenceKeyByCallId.get(toolCall.id) === key
               ? toolCallStates[toolCall.id]
@@ -3858,6 +3862,8 @@ export function ChatContainer({
 
           if (result !== undefined) {
             status = result.is_error ? "failed" : "completed"
+          } else if (historicalStatus) {
+            status = historicalStatus
           } else if (isTerminalToolCallStatus(baseState?.status)) {
             status = baseState!.status
           } else if (approvalKeys.has(key)) {

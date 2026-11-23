@@ -422,6 +422,8 @@ async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> 
     tool_calls: undefined
   }))
   const beforeCopy = splitSearch ? fill("before-legacy-copy", 80) : []
+  const beforeResult = beforeCopy.slice(0, 78)
+  const afterResult = beforeCopy.slice(78)
   const afterCopy = splitSearch ? fill("after-legacy-copy", 140) : []
   const laterExecution: Message[] = splitSearch ? [
     { ...end, id: "native-later-tool-user", content: "Read the later file" },
@@ -429,8 +431,8 @@ async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> 
     { ...tool, id: resultIds[1], content: "Independent later file contents" }
   ] : []
   const durable = [
-    user, assistant, { ...tool, content: body }, setOccurrence(revised, 2),
-    setOccurrence({ ...tool, content: body }, 2), ...beforeCopy,
+    user, assistant, { ...tool, content: body }, setOccurrence(revised, 2), ...beforeResult,
+    setOccurrence({ ...tool, content: body }, 2), ...afterResult,
     ...(legacy ? [copy] : []), end, ...afterCopy, ...laterExecution
   ]
   const checkpointId = `${id}-checkpoint`
@@ -460,8 +462,8 @@ async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> 
   })
   try {
     const visible = [
-      user, assistant, { ...tool, content: firstRaw }, revised, { ...tool, content: secondRaw },
-      ...beforeCopy
+      user, assistant, { ...tool, content: firstRaw }, revised, ...beforeResult,
+      { ...tool, content: secondRaw }, ...afterResult
     ]
     const checkpoint: Checkpoint = {
       v: 1,
@@ -776,6 +778,7 @@ async function main(): Promise<void> {
           const canonical = page.locator(`[data-chat-thread-id="${importedSearchThreadId}"]`)
             .locator(`[data-chat-message-id="${setOccurrence(projectedDurable[1], 2).id}"]`)
           assert.equal(await canonical.getByText("INTERRUPTED", { exact: true }).count(), 0)
+          await canonical.getByText("OK", { exact: true }).waitFor()
         }
         await page.screenshot({
           animations: "disabled",

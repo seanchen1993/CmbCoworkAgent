@@ -587,6 +587,12 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
             if (!current()) return { status: "staleIdentity" }
           }
           if (!page?.messages.some(({ id }) => id === canonicalMessageId)) return { status: "changed" }
+          const outcomes = message.legacy_checkpoint_tool_outcomes
+          if (outcomes?.length) page = {
+            ...page,
+            messages: page.messages.map((row) => row.id === canonicalMessageId
+              ? { ...row, legacy_checkpoint_tool_outcomes: outcomes } : row)
+          }
         }
         const finalIdentity = await readSearchThread(sender.id, request, false)
         if (!current() || !finalIdentity) return { status: "staleIdentity" }

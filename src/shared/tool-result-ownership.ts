@@ -5,6 +5,14 @@ export interface ToolOwnershipMessage {
   tool_call_id?: string
 }
 
+export interface VerifiedToolOutcome {
+  assistantId: string
+  resultId: string
+  callId: string
+  slot: number
+  status: "completed" | "failed" | "interrupted" | "rejected"
+}
+
 type PendingToolCall = {
   name: string
   identity: string

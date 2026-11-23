@@ -234,6 +234,8 @@ export interface Message {
   legacy_checkpoint_replay_of?: string
   /** Last bound result of the verified canonical exchange in the saved transcript. */
   legacy_checkpoint_replay_end?: string
+  /** Proven outcomes for a replay target, including results outside the history window. */
+  legacy_checkpoint_tool_outcomes?: readonly import("../shared/tool-result-ownership").VerifiedToolOutcome[]
   provider_source_id?: string
   provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"

@@ -90,7 +90,8 @@ export function areToolDerivationMessagesEqual(
     if (!other || message.id !== other.id || message.role !== other.role) return false
     if (message.role === "user") return true
     if (message.role === "assistant") {
-      return areToolCallsEqual(message.tool_calls, other.tool_calls)
+      return areToolCallsEqual(message.tool_calls, other.tool_calls) &&
+        areStructuredValuesEqual(message.legacy_checkpoint_tool_outcomes, other.legacy_checkpoint_tool_outcomes)
     }
     return (
       message.tool_call_id === other.tool_call_id &&

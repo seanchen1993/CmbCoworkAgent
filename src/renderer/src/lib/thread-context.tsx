@@ -5450,6 +5450,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 page = await load(end ?? canonicalMessageId)
                 if (end && isCurrentLoad() && !page.messages.some(({ id }) => id === canonicalMessageId))
                   page = await load(canonicalMessageId)
+                const outcomes = message?.legacy_checkpoint_tool_outcomes
+                if (outcomes?.length) page = {
+                  ...page,
+                  messages: page.messages.map((row) => row.id === canonicalMessageId
+                    ? { ...row, legacy_checkpoint_tool_outcomes: outcomes } : row)
+                }
               }
               return { page, goalEvent: undefined, canonicalMessageId }
             }

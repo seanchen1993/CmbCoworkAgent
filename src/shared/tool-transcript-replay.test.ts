@@ -107,38 +107,44 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each(["compacted", "projected", "partly-projected"])(
+  it.each(["compacted", "projected", "partly-projected", "revised-prose"])(
     "preserves distinct historical raw results under checkpoint recovery (%s)",
     (mode) => {
-    const [first, result] = exchange()
-    const [second, secondResult] = exchange(2)
-    const [copy, copyResult] = exchange(3)
-    const projected = [{ type: "text", text: "Same stored text" }]
-    const one = [...projected, { type: "resource_link", uri: "fixture://one" }]
-    const two = [...projected, { type: "resource_link", uri: "fixture://two" }]
-    const durable = [user, first, { ...result, content: projected }, second, {
-      ...secondResult, content: projected
-    }, copy]
-    const original = { channel_values: { messages: checkpointRows([
-      user, first, { ...result, content: one }, second, { ...secondResult, content: two },
-      copy, { ...copyResult, content: two }
-    ]) } }
-    const imported = new Set([copy.id])
-    const legacy = readLegacyImportedCheckpointReplayEvidence(durable, original, imported)
-    const tail = [
-      { ...user, id: "compacted-later-user" }, { ...user, id: "compacted-latest-user" }
-    ]
-    const latest = mode === "compacted" ? tail : [
-      user, first, { ...result, content: projected }, second, {
-        ...secondResult, content: mode === "projected" ? projected : two
-      }, ...tail
-    ]
-    const replay = prepareToolTranscriptReplayMerge(durable, latest, undefined, imported, legacy)
-    const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
-    expect(merged.map(({ id }) => id)).not.toContain(copy.id)
-    expect(merged.filter(({ role }) => role === "assistant").map(({ id }) => id)).toEqual([first.id, second.id])
-    expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content)).toEqual([one, two])
-  })
+      const [first, result] = exchange()
+      const [second, secondResult] = exchange(2)
+      const [copy, copyResult] = exchange(3)
+      const projected = [{ type: "text", text: "Same stored text" }]
+      const one = [...projected, { type: "resource_link", uri: "fixture://one" }]
+      const two = [...projected, { type: "resource_link", uri: "fixture://two" }]
+      const durable = [user, first, { ...result, content: projected }, second, {
+        ...secondResult, content: projected
+      }, copy]
+      const original = { channel_values: { messages: checkpointRows([
+        user, first, { ...result, content: one }, second, { ...secondResult, content: two },
+        copy, { ...copyResult, content: two }
+      ]) } }
+      const imported = new Set([copy.id])
+      const legacy = readLegacyImportedCheckpointReplayEvidence(durable, original, imported)
+      const tail = [
+        { ...user, id: "compacted-later-user" }, { ...user, id: "compacted-latest-user" }
+      ]
+      const presentation = mode === "revised-prose"
+        ? "Checking and explaining the result" : second.content
+      const latest = mode === "compacted" ? tail : [
+        user, first, { ...result, content: projected }, { ...second, content: presentation }, {
+          ...secondResult, content: mode === "partly-projected" ? two : projected
+        }, ...tail
+      ]
+      const replay = prepareToolTranscriptReplayMerge(durable, latest, undefined, imported, legacy)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
+      expect(merged.map(({ id }) => id)).not.toContain(copy.id)
+      expect(merged.filter(({ role }) => role === "assistant").map(({ id }) => id))
+        .toEqual([first.id, second.id])
+      expect(merged.find(({ id }) => id === second.id)?.content).toBe(presentation)
+      expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content))
+        .toEqual([one, two])
+    }
+  )
 
   it("aligns a complete cross-source exchange despite conflicting occurrence numbers", () => {
     const durable = [user, ...exchange(2)]
