@@ -1246,6 +1246,7 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
       )
         continue
       const slots: ResultSlot[] = []
+      let enrichedEmptyResult = false
       const corroborated = donor.exchange.results.every((result, index) => {
         const prior = batch.results[index]
         if (!result) {
@@ -1271,9 +1272,10 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
           sameRow(result, prior, true, false) &&
           typeof result.content === "string" &&
           typeof prior.content === "string" &&
-          prior.content &&
-          result.content.startsWith(prior.content)
+          result.content.startsWith(prior.content) &&
+          (prior.content || sameExchangeCalls(donor.exchange, batch, true, true))
         ) {
+          if (!prior.content) enrichedEmptyResult = true
           slots.push({
             prior,
             selected: { ...prior, content: result.content },
@@ -1307,7 +1309,17 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
         })
         return true
       })
-      if (corroborated && slots.some(({ observed }) => observed)) {
+      const hasIndependentWitness =
+        !enrichedEmptyResult ||
+        slots.some(
+          ({ prior, selected, target, observed }) =>
+            observed &&
+            (prior || selected)?.content !== "" &&
+            target &&
+            selected &&
+            sameStoredToolResult(target, prior ?? selected)
+        )
+      if (corroborated && hasIndependentWitness && slots.some(({ observed }) => observed)) {
         const needsAlignment = slots.some(
           ({ selected, target }) => !selected || !target || !sameRow(target, selected, true)
         )
@@ -1779,40 +1791,63 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   const rawAssistantTurns =
     rawCheckpointTurns && indexAssistantTurns(rawCheckpointTurns.rawToolTranscript)
   const keepHiddenToolScope = (rows: T[], sources: readonly T[]): T[] => {
-    if (
-      !rawAssistantTurns ||
-      !rawCheckpointTurns?.hiddenAssistants.size ||
-      !hasToolReplayCandidates(rows)
-    )
-      return rows
-    const { verified: mergedVisibleTurns } = findToolSlotCopyAliases(
-      rows,
-      resolveToolResultOwnership(rows)
-    )
-    if (!mergedVisibleTurns.size) return rows
-    const byId = new Map(rows.map((row, index) => [row.id, { row, sourceId: sources[index].id }]))
+    if (!rawAssistantTurns || !rawCheckpointTurns?.hiddenAssistants.size) return rows
+    const visibleTurns = indexAssistantTurns(sources)
+    type Declaration = { id: string; text: string; rawTurn: string; hidden: boolean }
+    const groups = new Map<string, Declaration[]>()
+    for (const [index, row] of rows.entries()) {
+      if (
+        row.role !== "assistant" ||
+        typeof row.content !== "string" ||
+        !Array.isArray(row.tool_calls) ||
+        !row.tool_calls.length
+      )
+        continue
+      const sourceId = sources[index].id
+      const rawTurn = rawAssistantTurns.get(sourceId)
+      if (rawTurn === undefined) continue
+      const key = JSON.stringify([
+        visibleTurns.get(sourceId),
+        getMessageProviderSourceId(row),
+        row.tool_calls.map(readToolOwnershipId)
+      ])
+      const group = groups.get(key) ?? []
+      group.push({
+        id: row.id,
+        text: row.content,
+        rawTurn,
+        hidden: rawCheckpointTurns.hiddenAssistants.has(sourceId)
+      })
+      groups.set(key, group)
+    }
     const protectedTurns = new Map<string, string>()
-    for (const [copyId, targetId] of mergedVisibleTurns) {
-      const copy = byId.get(copyId)
-      const target = byId.get(targetId)
+    for (const group of groups.values()) {
       if (
-        copy?.row.role !== "assistant" ||
-        target?.row.role !== "assistant" ||
-        sameValue(copy.row.content, target.row.content)
+        group.length < 2 ||
+        !group.some(({ hidden }) => hidden) ||
+        new Set(group.map(({ rawTurn }) => rawTurn)).size < 2
       )
         continue
-      const copyTurn = rawAssistantTurns.get(copy.sourceId)
-      const targetTurn = rawAssistantTurns.get(target.sourceId)
-      if (
-        copyTurn === undefined ||
-        targetTurn === undefined ||
-        copyTurn === targetTurn ||
-        (!rawCheckpointTurns.hiddenAssistants.has(copy.sourceId) &&
-          !rawCheckpointTurns.hiddenAssistants.has(target.sourceId))
-      )
-        continue
-      protectedTurns.set(copyId, copyTurn)
-      protectedTurns.set(targetId, targetTurn)
+      group.sort((left, right) => (left.text < right.text ? -1 : Number(left.text > right.text)))
+      const prefixes: Declaration[] = []
+      for (const declaration of group) {
+        while (prefixes.length && !declaration.text.startsWith(prefixes.at(-1)!.text))
+          prefixes.pop()
+        if (
+          prefixes.some(
+            (earlier) =>
+              earlier.text !== declaration.text &&
+              earlier.rawTurn !== declaration.rawTurn &&
+              (earlier.hidden || declaration.hidden)
+          )
+        ) {
+          // The merge can restore tool results missing from the checkpoint.
+          // Protect the raw distinction before result coverage becomes visible.
+          for (const { id, rawTurn } of group) protectedTurns.set(id, rawTurn)
+          break
+        }
+        prefixes.push(declaration)
+      }
     }
     if (!protectedTurns.size) return rows
     // Keep the raw boundary in memory through ID alignment and final replay
