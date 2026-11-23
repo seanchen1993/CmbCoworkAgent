@@ -5147,6 +5147,8 @@ const api = {
       ) as Promise<KnowledgeBaseSyncResult>,
     cancelKnowledgePreviewRequests: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelKnowledgePreviewRequests") as Promise<void>,
+    getDefaultProjectDirectoryPreview: (projectId: string): Promise<string> =>
+      ipcRenderer.invoke("harnessBoard:getDefaultProjectDirectoryPreview", projectId),
     selectProjectDirectory: (): Promise<{
       workspacePath: string
       projectDir: string

@@ -77,7 +77,7 @@ afterEach(async () => {
   await rm(state.root, { recursive: true, force: true })
 })
 
-function input(): HarnessProjectCreateInput {
+function input() {
   return {
     adapterId: "plugin",
     adapterType: "plugin",
@@ -89,7 +89,7 @@ function input(): HarnessProjectCreateInput {
     systemId: "system",
     systemName: "System",
     workspacePath: state.root
-  }
+  } satisfies HarnessProjectCreateInput
 }
 async function declareHost() {
   const source = createProjectTemplate({

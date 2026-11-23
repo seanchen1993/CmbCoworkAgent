@@ -3332,6 +3332,7 @@ interface CustomAPI {
     ) => Promise<KnowledgeDepositionWorkspace>
     syncKnowledgeBase: (idKey: string) => Promise<KnowledgeBaseSyncResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    getDefaultProjectDirectoryPreview: (projectId: string) => Promise<string>
     selectProjectDirectory: () => Promise<{
       workspacePath: string
       projectDir: string

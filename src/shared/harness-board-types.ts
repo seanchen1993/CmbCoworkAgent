@@ -283,17 +283,18 @@ export interface HarnessProjectMetadata {
 export interface HarnessProjectCreateInput {
   projectUseApproval?: import("./project-use-authorization").HarnessProjectUseApproval
   expectedNativeTemplate?: import("./plugin-start-use").PluginStartUseIdentity
+  projectId?: string
   adapterId: string
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
   projectFromLean: boolean
   isTestProject?: boolean
-  projectDir: string
+  projectDir?: string
   description: string
   systemId: string
   systemName: string
-  workspacePath: string
+  workspacePath?: string
   knowledgeBaseIds?: string[]
 }
 

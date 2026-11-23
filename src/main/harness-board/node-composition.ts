@@ -14,7 +14,14 @@ export interface NativeNodeContext extends NativeNodeCatalog {
   strictBusinessSelection?: BusinessModSelectionPolicy
   fingerprint: string
   sourceIdentity: string
-  invocation: { cwd: string; invocation: { executable: string; args: string[] } }
+  invocation: {
+    cwd: string
+    pluginName?: string
+    projectId?: string
+    workspace?: string
+    readonlyPackage?: boolean
+    invocation: { executable: string; args: string[] }
+  }
 }
 
 /** Only the installed AutoBiz inspection protocol can opt into native closure execution. */
@@ -38,7 +45,7 @@ export function nativeClosureInvocation(
   )
     throw Error("这个插件尚未提供可验证的节点组合入口，请使用原项目流程。")
   return {
-    cwd,
+    ...context.invocation,
     invocation: {
       executable: invocation.executable,
       args: [

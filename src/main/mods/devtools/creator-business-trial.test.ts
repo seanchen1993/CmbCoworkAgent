@@ -92,6 +92,7 @@ vi.mock("../../harness-board/service", async (importOriginal) => ({
       guard(): void
     }
   ) => {
+    if (!input.workspacePath || !input.projectDir) throw Error("Missing trial workspace")
     boundary.initialize(input, source)
     source.guard()
     const project: HarnessProjectMetadata = {
@@ -528,6 +529,7 @@ it("separates observation CAS from execution identity and requires physical sett
   })
   expect(f.trial().status(f.scope)?.phase).toBe("completed")
   const before = boundary.initialize.mock.calls[0][0] as HarnessProjectCreateInput
+  if (!before.workspacePath || !before.projectDir) throw Error("Missing trial workspace")
   await f.trial().request(f.scope, "second-plan", f.candidate, "Try a new version")
   await f.trial().prepare(f.input())
   await f.ready()

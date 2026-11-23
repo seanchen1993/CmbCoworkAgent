@@ -179,7 +179,7 @@ afterEach(async () => {
   expect(dirname(root)).toBe(canonicalTmpdir())
   await rm(root, { recursive: true, force: true })
 })
-function creation(review: Awaited<ReturnType<typeof reviewProjectUse>>): HarnessProjectCreateInput {
+function creation(review: Awaited<ReturnType<typeof reviewProjectUse>>) {
   return {
     ...input,
     name: "One",
@@ -189,7 +189,7 @@ function creation(review: Awaited<ReturnType<typeof reviewProjectUse>>): Harness
     systemId: "system",
     systemName: "System",
     projectUseApproval: { reviewId: review.reviewId, reviewDigest: review.reviewDigest }
-  }
+  } satisfies HarnessProjectCreateInput
 }
 async function publish(review: Awaited<ReturnType<typeof reviewProjectUse>>) {
   await mkdir(review.workspace, { recursive: true })

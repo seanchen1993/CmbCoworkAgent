@@ -442,6 +442,22 @@ describe("editing historical feature bindings", () => {
 })
 
 describe("plugin workspace placeholder", () => {
+  it("includes the plugin and command names when session context injection returns a failure", async () => {
+    const script = join(state.root, "failed-injection.cjs")
+    await writeFile(
+      script,
+      'console.log(JSON.stringify({ok:false,message:"script error details"}))'
+    )
+    state.sessionContextCommand = `"${process.execPath}" "${script}"`
+
+    const context = await buildHarnessFeatureAgentContext({
+      harnessFeature: { projectId: "p", slug: "f" }
+    })
+    expect(context?.sessionContextInjectWarning).toBe(
+      "插件「plugin」执行「session_context_inject」失败，请联系插件开发者"
+    )
+  })
+
   it.each(["/original-thread", "/fork-parent", "/managed-confirmed"])(
     "uses the actual session directory: %s",
     async (workspacePath) => {

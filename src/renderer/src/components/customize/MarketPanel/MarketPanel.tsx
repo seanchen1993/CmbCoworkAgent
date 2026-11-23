@@ -50,10 +50,6 @@ import type { McpConnectorConfig, PluginManifest, PluginMetadata, SkillMetadata 
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { MarketDetailView } from "./MarketDetailView"
 import { MarketSkillShortcutAction } from "./MarketSkillShortcutAction"
-import {
-  canCurrentUserViewMarketItem,
-  doesMarketUserIdMatchCurrentUser
-} from "../../../../../shared/market-item-visibility"
 import { SkillDetail } from "../SkillsPanel"
 import { MCPConnectorDetail } from "../MCPConnectorDetail"
 import { PluginDetailPanel } from "../PluginsPanel"
@@ -101,6 +97,12 @@ import {
   type SkillSortMode,
   type SkillUsageSummaryMetric
 } from "../../../lib/skill-data-service"
+import {
+  canCurrentUserViewMarketItem,
+  doesMarketUserIdMatchCurrentUser,
+  getMarketViewerIdCandidates,
+  parseMarketExtraJson
+} from "../../../lib/market-visibility"
 import {
   ORG_SKILL_MARKET_TYPE,
   OrgSkillMarketContent,
@@ -277,29 +279,6 @@ function resolveUploaderProfile(
       candidates.some((candidate) => profile.sapId.includes(candidate))
     ) ?? null
   )
-}
-
-interface UserInfoLite {
-  sapId?: string
-  ystId?: string
-  pathName?: string
-}
-
-type MarketExtraJson = {
-  skills?: string[]
-  grayUserIds?: string[]
-  grayOrgs?: string[]
-  updated_at?: string
-}
-
-function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
-  if (!extraJson?.trim()) return {}
-  try {
-    const parsed = JSON.parse(extraJson) as MarketExtraJson
-    return parsed && typeof parsed === "object" ? parsed : {}
-  } catch {
-    return {}
-  }
 }
 
 function getMarketUpdatedAt(item: Pick<MarketItem, "created_at" | "updated_at" | "extra_json">): string {
@@ -1116,20 +1095,14 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
         setAdminModeEnabled(false)
         return
       }
-      const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
+      const userInfo = await window.api.models.getUserInfo()
       setCurrentUserSapId(userInfo?.sapId?.trim() || null)
       setCurrentUserPathName(userInfo?.pathName?.trim() || null)
       const currentYstId = userInfo?.ystId?.trim() || ""
       const isAdmin = Boolean(currentYstId && MARKET_ADMIN_YST_IDS.has(currentYstId))
       setIsCurrentUserMarketAdmin(isAdmin)
       if (!isAdmin) setAdminModeEnabled(false)
-      const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean)
-      const candidates = Array.from(
-        new Set(normalizedIds.flatMap((id) => buildUploaderIdCandidates(id)))
-      )
-      setCurrentUserUploadCandidates(candidates)
+      setCurrentUserUploadCandidates(getMarketViewerIdCandidates(userInfo))
     } catch (err) {
       console.warn("[MarketPanel] Failed to load current user upload candidates:", err)
       setCurrentUserUploadCandidates([])
@@ -1991,6 +1964,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       categoryFilter,
       currentData,
       currentUserCandidateSet,
+      currentUserPathName,
       currentUserSapId,
       isMineUploadedItem,
       uploadFilterModes
@@ -2129,6 +2103,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     currentUserCandidateSet,
     loading,
     marketInitialSkillDetailName,
+    currentUserPathName,
     currentUserSapId,
     setMarketInitialSkillDetailName,
     skillsData

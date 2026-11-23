@@ -30,7 +30,7 @@ function windowsExecutable(executable: string, cwd: string, env: Record<string, 
       }
     }
   }
-  throw new Error(`Hook executable not found: ${executable}`)
+  throw Object.assign(new Error(`spawn ${executable} ENOENT`), { code: "ENOENT", path: executable, cwd })
 }
 
 /** Physical command ownership only; Hook decisions, permissions and receipts stay in runner. */

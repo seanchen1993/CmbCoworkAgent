@@ -83,6 +83,7 @@ import { useThreadBotOwners } from "../bots/use-thread-bot-owners"
 import { useLocalBotsUnread } from "../bots/use-bots"
 import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
+import { collectChangedStreamingThreadIds } from "@/lib/thread-stream-activity"
 import { botDefaultWorkspaceOwner, botWorkspaceDisplay, botWorkOwnerLabel } from "@/lib/bot-workspace-display"
 import { useBotWorkspaceProfiles } from "../bots/use-bot-workspace-profiles"
 
@@ -658,29 +659,17 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   const threadStateSummaries = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
 
-  // FIX: 发送消息后侧边栏线程时间不更新。
-  // 当线程开始或结束流式加载时，更新本地 updated_at，确保侧边栏时间立即刷新
-  const streamChangeRef = useRef<Record<string, boolean>>({})
+  // Refresh the list time when a reply starts or ends.
+  const previousStreamLoadingStates = useRef(allStreamLoadingStates)
   useEffect(() => {
-    const prev = streamChangeRef.current
-    const now = new Date()
-    const affectedIds = new Set<string>()
-    // 检查当前所有线程的加载状态变化
-    for (const threadId of Object.keys(allStreamLoadingStates)) {
-      const wasLoading = prev[threadId] === true
-      const isLoading = allStreamLoadingStates[threadId] === true
-      if (isLoading !== wasLoading) {
-        affectedIds.add(threadId)
-      }
+    const affectedIds = collectChangedStreamingThreadIds(
+      previousStreamLoadingStates.current,
+      allStreamLoadingStates
+    )
+    previousStreamLoadingStates.current = allStreamLoadingStates
+    if (affectedIds.length > 0) {
+      touchThreadSummaries(affectedIds, new Date())
     }
-    // 检查是否有线程从加载状态中移除（流式结束）
-    for (const threadId of Object.keys(prev)) {
-      if (!(threadId in allStreamLoadingStates)) {
-        affectedIds.add(threadId)
-      }
-    }
-    touchThreadSummaries(affectedIds, now)
-    streamChangeRef.current = { ...allStreamLoadingStates }
   }, [allStreamLoadingStates, touchThreadSummaries])
 
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)

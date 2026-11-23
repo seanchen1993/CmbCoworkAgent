@@ -29,7 +29,7 @@ import {
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
-import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectWorkspaceAdvancedSettings, ProjectWorkspaceField } from "./ProjectWorkspaceField"
 import { ProjectCapabilityPanel } from "./ProjectCapabilityPanel"
 import { HostProjectListItems, LocalProjectRun } from "./LocalProjectsPanel"
 import type { LocalProjectSummary, LocalProjectTemplate, LocalProjectView } from "../../../../shared/project-runtime/platform-api"
@@ -164,6 +164,7 @@ import {
   HARNESS_SIDEBAR_PROJECT_LOOKUP_BATCH_SIZE,
   takeHarnessSidebarProjectLookupBatch
 } from "@/lib/harness-sidebar-project-lookup"
+import { canCurrentUserViewMarketItem, getMarketViewerIdCandidates } from "@/lib/market-visibility"
 import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
 import { cn } from "@/lib/utils"
@@ -227,10 +228,14 @@ import {
 } from "../../../../shared/harness-board-types"
 import type { KnowledgeBaseListResult } from "../../../../shared/knowledge-base-types"
 import {
+  filterProjectDialogInstalledAdapters,
+  findInstalledPluginForAdapter,
+  findSelectedAdapter
+} from "./project-dialog-plugin-visibility"
+import {
   HARNESS_PROJECT_DETAIL_BATCH_SIZE,
   MAX_HARNESS_PROJECT_DETAIL_CACHE_ENTRIES,
   cacheHarnessBoardCatalog,
-  cacheHarnessBoardRegistry,
   cacheHarnessProjectDetails,
   invalidateHarnessProjectDetails,
   loadHarnessProjectDetailsCached,
@@ -301,6 +306,7 @@ const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const PINNED_HARNESS_PROJECTS_STORAGE_KEY = "harness:pinnedProjects"
 const PINNED_HARNESS_FEATURES_STORAGE_KEY = "harness:pinnedFeatures"
+const COLLAPSED_HARNESS_GROUPS_STORAGE_KEY = "harness:collapsedSessionGroups"
 const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
 const FEATURE_SESSION_INITIAL_VISIBLE_COUNT = 5
 const FEATURE_SESSION_VISIBLE_INCREMENT = 8
@@ -368,7 +374,10 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
   }
 }
 
-function createEmptyProjectForm(adapterId = ""): HarnessProjectCreateInput {
+type ProjectCreateForm = HarnessProjectCreateInput &
+  Pick<HarnessProjectMetadataUpdateInput, "workspacePath" | "projectDir">
+
+function createEmptyProjectForm(adapterId = ""): ProjectCreateForm {
   return createEmptyProjectMetadataForm(adapterId)
 }
 
@@ -588,6 +597,7 @@ interface HarnessMarketUploaderProfile {
 
 interface ProjectDialogMarketSnapshot {
   marketPlugins: MarketItem[]
+  visibleMarketPlugins: MarketItem[]
   uploaderProfiles: Record<string, HarnessMarketUploaderProfile>
 }
 
@@ -998,17 +1008,19 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
   return createHarnessFeatureThread({ projectId, slug, workspacePath, nextAction, createThread })
 }
 
-function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
+function metadataRequiredMissing(
+  form: HarnessProjectMetadataUpdateInput,
+  requireWorkspace = true
+): boolean {
   if (typeof form.isTestProject !== "boolean") return true
+  if (requireWorkspace && (!form.workspacePath.trim() || !form.projectDir.trim())) return true
   return [
     form.adapterId,
     form.adapterType,
     form.name,
     form.projectCode,
-    form.projectDir,
     form.systemId,
-    form.systemName,
-    form.workspacePath
+    form.systemName
   ].some((value) => !value.trim())
 }
 
@@ -1441,20 +1453,6 @@ function boardCompatibilityMessage(
   return compatibility.message || "插件看板协议与当前 APP 不兼容。"
 }
 
-function findSelectedAdapter(
-  registry: ProjectModeAdapterItem[],
-  adapterId: string
-): ProjectModeAdapterItem | null {
-  if (!adapterId) return null
-  const exactMatch = registry.find((adapter) => adapter.id === adapterId)
-  if (exactMatch) return exactMatch
-
-  const nameMatches = registry.filter(
-    (adapter) => adapter.type === "plugin" && adapter.name === adapterId
-  )
-  return nameMatches.length === 1 ? nameMatches[0] : null
-}
-
 function normalizeAdapterCategory(value?: string): string {
   const normalized = value?.trim()
   return normalized || OTHER_ADAPTER_SCENARIO
@@ -1480,18 +1478,6 @@ function buildMarketPluginMap(items: MarketItem[]): Map<string, MarketItem> {
 
 function normalizeAdapterMatchKey(value?: string): string {
   return normalizeAdapterMarketName(value).toLocaleLowerCase()
-}
-
-function findInstalledPluginForAdapter(
-  installedPlugins: PluginMetadata[],
-  adapter: HarnessAdapterRegistryItem
-): PluginMetadata | undefined {
-  const adapterKeys = new Set(
-    [adapter.id, adapter.name].map(normalizeAdapterMatchKey).filter(Boolean)
-  )
-  return installedPlugins.find((plugin) =>
-    [plugin.id, plugin.name].some((value) => adapterKeys.has(normalizeAdapterMatchKey(value)))
-  )
 }
 
 function findMarketPluginForAdapter(
@@ -1953,14 +1939,23 @@ async function loadHarnessInstalledPlugins(): Promise<PluginMetadata[]> {
   }
 }
 
-function takeHarnessMarketPluginWindow(items: readonly MarketItem[], limit = 64): MarketItem[] {
-  const result: MarketItem[] = []
-  for (const item of items) {
-    if (!isProjectModeMarketPlugin(item)) continue
-    result.push(item)
-    if (result.length >= limit) break
-  }
-  return result
+function getProjectDialogAdapters(
+  registry: HarnessAdapterRegistryItem[],
+  installedPlugins: PluginMetadata[],
+  snapshot: ProjectDialogMarketSnapshot
+): ProjectModeAdapterItem[] {
+  const visibleRegistry = filterProjectDialogInstalledAdapters(
+    registry,
+    installedPlugins,
+    snapshot.marketPlugins,
+    snapshot.visibleMarketPlugins
+  )
+  return applyMarketAdapterDisplayData(
+    visibleRegistry,
+    snapshot.visibleMarketPlugins,
+    installedPlugins,
+    snapshot.uploaderProfiles
+  )
 }
 
 interface WorkspaceChangeRefreshTask {
@@ -2118,6 +2113,7 @@ function AdapterPicker({
   allowHost = false,
   registry,
   value,
+  selectedAdapter,
   installingPluginNames,
   portalContainer,
   onInstallPlugin,
@@ -2126,6 +2122,7 @@ function AdapterPicker({
   allowHost?: boolean
   registry: ProjectModeAdapterItem[]
   value: string
+  selectedAdapter: HarnessAdapterRegistryItem | null
   installingPluginNames: Set<string>
   portalContainer?: HTMLElement | null
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
@@ -2135,7 +2132,6 @@ function AdapterPicker({
   const [query, setQuery] = useState("")
   const searchRef = useRef<HTMLInputElement>(null)
   const resultsRef = useRef<HTMLDivElement>(null)
-  const selectedAdapter = findSelectedAdapter(registry, value)
   const keyword = query.trim().toLocaleLowerCase()
   const filteredRegistry = registry.filter((adapter) =>
     [adapter.name, adapter.description, normalizeAdapterCategory(adapter.category)].some((text) =>
@@ -2550,7 +2546,9 @@ function EnterpriseProjectSearchInput({
           onFocus={() => {
             if (keyword) setOpen(true)
           }}
-          placeholder={`输入${searchLabel}搜索`}
+          placeholder={
+            searchField === "code" ? "输入项目编号搜索，存在 T+1 延迟" : `输入${searchLabel}搜索`
+          }
           className={harnessProjectCreateInputClassName}
           aria-autocomplete="list"
           aria-invalid={ariaInvalid ? true : undefined}
@@ -2890,6 +2888,7 @@ export function ProjectFormDialog({
   onInstallPlugin,
   onOpenSystemConstraints,
   onPickWorkspace,
+  onUseDefaultWorkspace,
   onSubmit
 }: {
   hostTemplates?: LocalProjectTemplate[]
@@ -2900,16 +2899,17 @@ export function ProjectFormDialog({
   creating: boolean
   workspaceValidating: boolean
   workspaceError: string | null
-  form: HarnessProjectCreateInput
+  form: ProjectCreateForm
   registry: ProjectModeAdapterItem[]
   knowledgeBases: KnowledgeBaseListResult | null
   installingPluginNames: Set<string>
   error: string | null
   verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
-  onChange: (form: HarnessProjectCreateInput) => void
+  onChange: React.Dispatch<React.SetStateAction<ProjectCreateForm>>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onPickWorkspace: () => void
+  onUseDefaultWorkspace: () => void
   onOpenSystemConstraints: () => void
   onSubmit: (approval?: HarnessProjectUseApproval) => void
 }): React.JSX.Element {
@@ -2949,7 +2949,7 @@ export function ProjectFormDialog({
   const authorizesCode = nativeReview.review?.sources.some((source) => !source.configurationOnly)
 
   const picker = <fieldset disabled={creating || !!hostStartUse}>
-    <AdapterPicker allowHost value={form.adapterId} registry={registry}
+    <AdapterPicker allowHost value={form.adapterId} selectedAdapter={selectedAdapter} registry={registry}
       installingPluginNames={installingPluginNames} portalContainer={dialogPortalContainer}
       onInstallPlugin={onInstallPlugin}
       onValueChange={(adapterId) => onChange({ ...form, adapterId, adapterType: "plugin" })} />
@@ -3093,14 +3093,32 @@ export function ProjectFormDialog({
                 onOpenSystemConstraints={onOpenSystemConstraints}
                 onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
               />
-              <ProjectWorkspaceField
-                workspacePath={form.workspacePath}
-                projectDir={form.projectDir}
-                artifactsInProjectDirectory={selectedAdapter?.runtimeMode !== "host"}
-                error={projectDirError}
-                disabled={creating || workspaceValidating}
-                onPickWorkspace={onPickWorkspace}
-              />
+              {selectedAdapter?.runtimeMode === "host" ? (
+                <ProjectWorkspaceField
+                  workspacePath={form.workspacePath}
+                  projectDir={form.projectDir}
+                  artifactsInProjectDirectory={false}
+                  required
+                  error={projectDirError}
+                  disabled={creating || workspaceValidating}
+                  onPickWorkspace={onPickWorkspace}
+                />
+              ) : (
+                <ProjectWorkspaceAdvancedSettings
+                  workspacePath={form.workspacePath}
+                  projectDir={form.projectDir}
+                  artifactsInProjectDirectory
+                  error={projectDirError}
+                  disabled={creating || workspaceValidating}
+                  onPickWorkspace={onPickWorkspace}
+                  onUseDefault={onUseDefaultWorkspace}
+                  onPreviewDefaultPath={() => {
+                    const projectId = form.projectId ?? crypto.randomUUID()
+                    if (!form.projectId) onChange((current) => ({ ...current, projectId }))
+                    return window.api.harnessBoard.getDefaultProjectDirectoryPreview(projectId)
+                  }}
+                />
+              )}
               {form.workspacePath.trim() && form.projectDir.trim() && (
                 <p className="mt-1.5 break-all text-xs leading-relaxed text-muted-foreground">
                   {selectedAdapter?.runtimeMode === "host"
@@ -3141,7 +3159,7 @@ export function ProjectFormDialog({
               workspaceValidating ||
               Boolean(workspaceError) ||
               verification.pending ||
-              metadataRequiredMissing(form) ||
+              metadataRequiredMissing(form, selectedAdapter?.runtimeMode === "host") ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form, { validateProjectDir: true }) ||
               (selectedAdapter?.runtimeMode === "host" && !nativeReview.approval) ||
@@ -3204,7 +3222,7 @@ function ProjectEditDialog({
     PROJECT_DESCRIPTION_MAX_CHARS
   )
   const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
-  const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
+  const selectedAdapter = findSelectedAdapter(registry, form.adapterId, project)
   const nativeAdapterId = project?.nativeBinding ? project.harnessAdapter.id : undefined
   const editRegistry = useMemo(() => nativeAdapterId
     ? registry.filter((item) => item.runtimeMode === "host" || item.id === nativeAdapterId)
@@ -3231,7 +3249,7 @@ function ProjectEditDialog({
     metadataNameInvalid(form) || metadataLengthInvalid(form)
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogPortalContainer}
         className={cn(
@@ -3348,6 +3366,7 @@ function ProjectEditDialog({
                   allowHost={!!nativeAdapterId}
                   value={form.adapterId}
                   registry={editRegistry}
+                  selectedAdapter={selectedAdapter}
                   installingPluginNames={installingPluginNames}
                   portalContainer={dialogPortalContainer}
                   onInstallPlugin={onInstallPlugin}
@@ -4794,7 +4813,6 @@ function ProjectCard({
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const pluginCompatibilityStatus = boardCompatibilityStatus(project.boardCompatibility)
   const archivedStatus: HarnessStatus = { label: "已归档", uiKind: "archived" }
-  const projectRootPath = resolveProjectRootPath(project)
 
   useEffect(() => {
     if (archived || !projectCode) return
@@ -4957,19 +4975,7 @@ function ProjectCard({
           )}
         </div>
 
-        <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2 border-t border-border/70 pt-2.5 text-[11px] text-muted-foreground">
-          <div className="flex min-w-0 items-center gap-1">
-            <FolderOpen className="size-3 shrink-0" />
-            <span className="truncate" title={projectRootPath}>
-              {getWorkspaceName(projectRootPath)}
-            </span>
-            {/*<span*/}
-            {/*  className="max-w-28 truncate rounded-full border border-border/80 bg-muted/70 px-2.5 py-1 text-[11px] text-muted-foreground"*/}
-            {/*  title={project.harnessAdapter.name}*/}
-            {/*>*/}
-            {/*  {project.harnessAdapter.name}*/}
-            {/*</span>*/}
-          </div>
+        <div className="mt-2.5 flex min-w-0 items-center justify-end border-t border-border/70 pt-2.5 text-[11px] text-muted-foreground empty:hidden">
           {pluginUpdateInfo ? (
             <ProjectPluginUpdateButton
               pluginUpdateInfo={pluginUpdateInfo}
@@ -6160,15 +6166,6 @@ function ProjectDetailPage({
                       {project.systemName || "-"}
                     </strong>
                   </span>
-                  <span
-                    className="shrink-0 max-w-52 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground"
-                    title={projectRootPath}
-                  >
-                    工作区{" "}
-                    <strong className="font-medium text-foreground">
-                      {getWorkspaceName(projectRootPath)}
-                    </strong>
-                  </span>
                   <span className="shrink-0 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[11px] text-muted-foreground">
                     特性{" "}
                     <strong className="font-medium text-foreground">
@@ -6181,17 +6178,13 @@ function ProjectDetailPage({
                       {loading || !detail ? "-" : activeCount}
                     </strong>
                   </span>
-                  <Button
+                  <button
                     type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    className="ml-auto size-7 shrink-0"
-                    title="打开项目工作区"
-                    aria-label="打开项目工作区"
+                    className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onClick={openProjectWorkspaceInFileManager}
                   >
-                    <FolderOpen className="size-3.5" />
-                  </Button>
+                    打开工作区
+                  </button>
                 </div>
               </section>
               <HarnessProjectPhaseFlow steps={phaseSteps} />
@@ -9135,9 +9128,6 @@ function EnterpriseHarnessBoardView({
     useState<SelectedProjectSession | null>(null)
   const [isViewingSession, setIsViewingSession] = useState(false)
   const [runDetail, setRunDetail] = useState<HarnessRunDetailViewModel | null>(null)
-  const [adapterRegistry, setAdapterRegistry] = useState<HarnessAdapterRegistryItem[]>(
-    () => initialCatalogSnapshot?.registry ?? []
-  )
   const [projectDialogAdapterRegistry, setProjectDialogAdapterRegistry] = useState<
     ProjectModeAdapterItem[]
   >([])
@@ -9185,7 +9175,7 @@ function EnterpriseHarnessBoardView({
   const nativeNodeIntent = useNativeNodeIntent()
   const [featureNativePlan, setFeatureNativePlan] = useState<NativeNodeIntent | null>(null)
   const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
+  const [form, setForm] = useState<ProjectCreateForm>(() => createEmptyProjectForm())
   const createAdapter = dialogOpen && !hostStartUse
     ? findSelectedAdapter(projectDialogAdapterRegistry, form.adapterId) : null
   const isEnabledHostAdapter = createAdapter?.runtimeMode === "host" && createAdapter.enabled !== false
@@ -9371,7 +9361,9 @@ function EnterpriseHarnessBoardView({
   }, [hostProjectIntent])
   const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
-  const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
+  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState(() =>
+    readStoredStringSet(COLLAPSED_HARNESS_GROUPS_STORAGE_KEY)
+  )
   const [pinnedProjectIds, setPinnedProjectIds] = useState<Set<string>>(() =>
     readStoredStringSet(PINNED_HARNESS_PROJECTS_STORAGE_KEY)
   )
@@ -9902,65 +9894,52 @@ function EnterpriseHarnessBoardView({
   }, [])
 
   const openProjectDialogAdapterSession = useCallback((): void => {
-    const sessionId = projectDialogAdapterSessionIdRef.current + 1
-    projectDialogAdapterSessionIdRef.current = sessionId
+    const sessionId = ++projectDialogAdapterSessionIdRef.current
     projectDialogOpenRef.current = true
     projectDialogMarketSnapshotRef.current = null
-    setProjectDialogAdapterRegistry(
-      applyMarketAdapterDisplayData(
-        adapterRegistry.filter((adapter) => adapter.boardCompatibility.status !== "missing-plugin"),
-        [],
-        []
-      )
-    )
-
-    const registryPromise = window.api.harnessBoard.registry()
-    const marketPluginsPromise = loadHarnessMarketPlugins()
-    const installedPluginsPromise = loadHarnessInstalledPlugins()
+    setProjectDialogAdapterRegistry([])
 
     void (async () => {
       try {
-        const registry = await registryPromise
-        if (
-          !projectDialogOpenRef.current ||
-          projectDialogAdapterSessionIdRef.current !== sessionId
-        ) {
-          return
-        }
-        setProjectDialogAdapterRegistry(applyMarketAdapterDisplayData(registry, [], []))
-
-        const [marketPlugins, installedPlugins] = await Promise.all([
-          marketPluginsPromise,
-          installedPluginsPromise
+        const isCurrentSession = (): boolean =>
+          projectDialogOpenRef.current && projectDialogAdapterSessionIdRef.current === sessionId
+        const marketData = Promise.all([
+          loadHarnessMarketPlugins(),
+          window.api.models.getUserInfo().catch(() => null)
         ])
-        const uploaderProfiles = await loadHarnessMarketPluginUploaderProfiles(marketPlugins)
-        if (
-          !projectDialogOpenRef.current ||
-          projectDialogAdapterSessionIdRef.current !== sessionId
-        ) {
-          return
-        }
+        const [registry, installedPlugins] = await Promise.all([
+          window.api.harnessBoard.registry(),
+          loadHarnessInstalledPlugins()
+        ])
+        if (!isCurrentSession()) return
 
-        projectDialogMarketSnapshotRef.current = { marketPlugins, uploaderProfiles }
-        setMarketPluginItems(marketPlugins)
-        setAdapterRegistry((current) => {
-          const enhanced = applyMarketAdapterDisplayData(
-            current,
-            takeHarnessMarketPluginWindow(marketPlugins),
-            [],
-            uploaderProfiles
-          )
-          cacheHarnessBoardRegistry(enhanced)
-          return enhanced
-        })
+        const localRegistry = registry.filter(
+          (adapter) => findInstalledPluginForAdapter(installedPlugins, adapter)?.origin === "local"
+        )
         setProjectDialogAdapterRegistry(
-          applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins, uploaderProfiles)
+          applyMarketAdapterDisplayData(localRegistry, [], installedPlugins)
+        )
+
+        const [marketPlugins, user] = await marketData
+        if (!isCurrentSession()) return
+        const candidates = getMarketViewerIdCandidates(user)
+        const visibleMarketPlugins = marketPlugins.filter((item) =>
+          canCurrentUserViewMarketItem(item, user?.sapId, candidates, user?.pathName?.trim())
+        )
+        const uploaderProfiles = await loadHarnessMarketPluginUploaderProfiles(visibleMarketPlugins)
+        if (!isCurrentSession()) return
+
+        const snapshot = { marketPlugins, visibleMarketPlugins, uploaderProfiles }
+        projectDialogMarketSnapshotRef.current = snapshot
+        setMarketPluginItems(marketPlugins)
+        setProjectDialogAdapterRegistry(
+          getProjectDialogAdapters(registry, installedPlugins, snapshot)
         )
       } catch (error) {
         console.warn("[HarnessBoard] Failed to load project dialog plugin options:", error)
       }
     })()
-  }, [adapterRegistry])
+  }, [])
 
   const drainProjectDetailQueueRef = useRef<() => void>(() => undefined)
   const scheduleProjectDetailDrain = useCallback((delayMs: number): void => {
@@ -10091,7 +10070,6 @@ function EnterpriseHarnessBoardView({
         const items = page.projects
         const registry = page.registry
         setProjects(items)
-        setAdapterRegistry(registry)
         setProjectNextCursor(page.projectNextCursor)
         setRegistryNextCursor(page.registryNextCursor)
         setCatalogSummary(page.summary)
@@ -10188,9 +10166,14 @@ function EnterpriseHarnessBoardView({
       const pluginName = normalizeAdapterMarketName(adapter.name)
       if (!pluginName || updatingPluginNames.has(pluginName)) return
 
-      const marketPlugins =
-        projectDialogMarketSnapshotRef.current?.marketPlugins ?? marketPluginItems
-      const marketPlugin = findMarketPluginForAdapter(marketPlugins, undefined, adapter)
+      const snapshot = projectDialogMarketSnapshotRef.current
+      if (!snapshot) return
+      const sessionId = projectDialogAdapterSessionIdRef.current
+      const marketPlugin = findMarketPluginForAdapter(
+        snapshot.visibleMarketPlugins,
+        undefined,
+        adapter
+      )
       if (!marketPlugin) {
         toast.error("未找到市场插件信息")
         return
@@ -10207,24 +10190,16 @@ function EnterpriseHarnessBoardView({
         )
         if (response.success) {
           try {
-            const sessionId = projectDialogAdapterSessionIdRef.current
             const [registry, installedPlugins] = await Promise.all([
               window.api.harnessBoard.registry(),
               loadHarnessInstalledPlugins()
             ])
-            const snapshot = projectDialogMarketSnapshotRef.current
             if (
-              snapshot &&
               projectDialogOpenRef.current &&
               projectDialogAdapterSessionIdRef.current === sessionId
             ) {
               setProjectDialogAdapterRegistry(
-                applyMarketAdapterDisplayData(
-                  registry,
-                  snapshot.marketPlugins,
-                  installedPlugins,
-                  snapshot.uploaderProfiles
-                )
+                getProjectDialogAdapters(registry, installedPlugins, snapshot)
               )
             }
           } catch (refreshError) {
@@ -10248,7 +10223,7 @@ function EnterpriseHarnessBoardView({
         })
       }
     },
-    [bumpPluginVersion, marketPluginItems, updatingPluginNames]
+    [bumpPluginVersion, updatingPluginNames]
   )
 
   const refreshProjectDetailsInBackground = useCallback(async () => {
@@ -10685,6 +10660,12 @@ function EnterpriseHarnessBoardView({
     }
   }
 
+  const handleUseDefaultWorkspace = (): void => {
+    setForm((current) => ({ ...current, workspacePath: "", projectDir: "" }))
+    setWorkspaceError(null)
+    setFormError(null)
+  }
+
   const handleSubmit = async (projectUseApproval?: HarnessProjectUseApproval): Promise<void> => {
     if (creatingProjectRef.current || creating || createProjectVerification.pending || workspaceValidating || workspaceError) return
     setFormError(null)
@@ -10692,7 +10673,8 @@ function EnterpriseHarnessBoardView({
       setFormError("原账号、聊天或目录已变化，请取消后重新选择插件创建项目。")
       return
     }
-    if (metadataRequiredMissing(form)) {
+    const selectedAdapter = findSelectedAdapter(projectDialogAdapterRegistry, form.adapterId)
+    if (metadataRequiredMissing(form, selectedAdapter?.runtimeMode === "host")) {
       setFormError("所有字段均为必填")
       return
     }
@@ -10701,7 +10683,10 @@ function EnterpriseHarnessBoardView({
       setFormError(nameError)
       return
     }
-    const selectedAdapter = findSelectedAdapter(projectDialogAdapterRegistry, form.adapterId)
+    if (!selectedAdapter || selectedAdapter.boardCompatibility.status === "missing-plugin") {
+      setFormError("请选择已安装且可用的插件")
+      return
+    }
     const compatibilityMessage = selectedAdapter?.runtimeMode === "host" ? null
       : boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
     if (compatibilityMessage) {
@@ -10868,6 +10853,14 @@ function EnterpriseHarnessBoardView({
     if (nameError) {
       setEditError(nameError)
       return
+    }
+
+    if (editForm.adapterId !== editingProject.harnessAdapter.id) {
+      const selectedAdapter = findSelectedAdapter(projectDialogAdapterRegistry, editForm.adapterId)
+      if (!selectedAdapter?.boardCompatibility.compatible) {
+        setEditError("请选择已安装且可用的插件")
+        return
+      }
     }
 
     setSavingEdit(true)
@@ -11918,9 +11911,7 @@ function EnterpriseHarnessBoardView({
 
   const openFeatureDetail = useCallback(
     (projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean): void => {
-      if (!activeSessionThreadId) {
-        projectSidebarScrollIntentRef.current = "top"
-      }
+      if (!activeSessionThreadId) projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedProjectId(projectId)
       setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted })
@@ -12165,48 +12156,16 @@ function EnterpriseHarnessBoardView({
     threadsById
   ])
 
-  // Detail navigation expands its target without folding unrelated projects.
-  // Session selection preserves the user's sidebar expansion state.
-  const autoCollapseFeature = selectedFeature && !isViewingSession ? selectedFeature : null
-  const autoCollapseProjectId = autoCollapseFeature
-    ? autoCollapseFeature.projectId
-    : selectedProjectId && !selectedFeature && !selectedProjectSession && !isViewingSession
-      ? selectedProjectId
-      : null
-
-  const expandedDetailKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!autoCollapseProjectId) {
-      expandedDetailKeyRef.current = null
-      return
-    }
-    const targetSlug = autoCollapseFeature?.slug
-    const detailKey = JSON.stringify([autoCollapseProjectId, targetSlug])
-    if (expandedDetailKeyRef.current === detailKey) return
-    const targetGroup = projectSidebarGroups.find(
-      (group) => group.project.projectId === autoCollapseProjectId
+    localStorage.setItem(
+      COLLAPSED_HARNESS_GROUPS_STORAGE_KEY,
+      JSON.stringify([...collapsedGroupKeys])
     )
-    if (!targetGroup) return
-    const targetFeature = targetGroup.featureGroups.find((group) => group.slug === targetSlug)
-    if (targetSlug && !targetFeature) return
-    expandedDetailKeyRef.current = detailKey
-
-    setCollapsedFeatureKeys((current) => {
-      const next = new Set(current)
-      const projectChanged = next.delete(targetGroup.key)
-      const featureChanged = targetFeature ? next.delete(targetFeature.key) : false
-      return projectChanged || featureChanged ? next : current
-    })
-  }, [
-    autoCollapseFeature?.projectId,
-    autoCollapseFeature?.slug,
-    autoCollapseProjectId,
-    projectSidebarGroups
-  ])
+  }, [collapsedGroupKeys])
 
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
-    projectSidebarGroups.every((group) => collapsedFeatureKeys.has(group.key))
+    projectSidebarGroups.every((group) => collapsedGroupKeys.has(group.key))
 
   const togglePinnedProject = useCallback((projectId: string): void => {
     setPinnedProjectIds((current) =>
@@ -12221,7 +12180,7 @@ function EnterpriseHarnessBoardView({
   }, [])
 
   const toggleAllFeatureGroups = useCallback(() => {
-    setCollapsedFeatureKeys((current) => {
+    setCollapsedGroupKeys((current) => {
       const next = new Set(current)
       if (allFeatureGroupsCollapsed) {
         for (const group of projectSidebarGroups) {
@@ -12558,9 +12517,7 @@ function EnterpriseHarnessBoardView({
   )
 
   const handleSessionViewChange = useCallback((viewing: boolean): void => {
-    if (!viewing) {
-      projectSidebarScrollIntentRef.current = "top"
-    }
+    if (!viewing) projectSidebarScrollIntentRef.current = "top"
     setIsViewingSession(viewing)
   }, [])
 
@@ -12607,7 +12564,7 @@ function EnterpriseHarnessBoardView({
           <ProjectFeatureSidebar
             groups={projectSidebarGroups}
             managedScheduleRefreshRevision={managedScheduleRefreshRevision}
-            collapsedKeys={collapsedFeatureKeys}
+            collapsedKeys={collapsedGroupKeys}
             pinnedProjectIds={pinnedProjectIds}
             pinnedFeatureKeys={pinnedFeatureKeys}
             allCollapsed={allFeatureGroupsCollapsed}
@@ -12627,7 +12584,7 @@ function EnterpriseHarnessBoardView({
             scrollTopRef={projectSidebarScrollTopRef}
             scrollIntentRef={projectSidebarScrollIntentRef}
             onToggleCollapse={(key) =>
-              setCollapsedFeatureKeys((current) => {
+              setCollapsedGroupKeys((current) => {
                 const next = new Set(current)
                 if (next.has(key)) next.delete(key)
                 else next.add(key)
@@ -13294,6 +13251,7 @@ function EnterpriseHarnessBoardView({
         onInstallPlugin={handleInstallMarketPlugin}
         onOpenSystemConstraints={handleOpenSystemConstraints}
         onPickWorkspace={() => void handlePickWorkspace()}
+        onUseDefaultWorkspace={handleUseDefaultWorkspace}
         onSubmit={(approval) => void handleSubmit(approval)}
       />
       <ProjectEditDialog

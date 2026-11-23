@@ -80,8 +80,9 @@ export async function projectUseConsentFixture(root: string, plugins: () => Plug
     }
   })
   const owner = {}
-  const review = (input: HarnessProjectCreateInput) =>
-    authority.reviewProjectUse(
+  const review = (input: HarnessProjectCreateInput) => {
+    if (!input.workspacePath || !input.projectDir) throw Error("Missing project-use workspace")
+    return authority.reviewProjectUse(
       {
         adapterId: input.adapterId,
         adapterType: "plugin",
@@ -91,6 +92,7 @@ export async function projectUseConsentFixture(root: string, plugins: () => Plug
       },
       owner
     )
+  }
   const createReviewed = (input: HarnessProjectCreateInput, reviewed: HarnessProjectUseReview) =>
     service.createHarnessProject(
       {
