@@ -280,6 +280,8 @@ async function runProjectSearchScenarios(
   await searchButton.waitFor()
   assert.equal(await searchButton.count(), 1, "chat mode exposes one search button")
   const projectSidebar = page.locator("#harness-sidebar-portal")
+  const historyRecoveryNotice =
+    "此会话暂时只读。你可以从左侧「项目列表」重新进入项目。确认项目可用后，再打开此会话继续对话。"
   const expectSidebarAnchor = async (threadId: string) => {
     await page.waitForFunction((id) => {
       const row = document.querySelector<HTMLElement>(
@@ -549,9 +551,8 @@ async function runProjectSearchScenarios(
   await dialog.locator('[data-search-thread="' + grouped.ids.project + '"]').click()
   await dialog.waitFor({ state: "hidden" })
   const archivedChat = page.locator('[data-chat-thread-id="' + grouped.ids.project + '"]')
-  const archivedComposer = archivedChat.getByPlaceholder("所属项目已归档，当前会话只读。", { exact: true })
-  await archivedComposer.waitFor()
-  assert(await archivedComposer.isDisabled(), "archiving disables the project composer")
+  await archivedChat.getByText("所属项目已归档，当前会话只读。", { exact: true }).waitFor()
+  assert.equal(await archivedChat.locator("textarea:enabled").count(), 0, "archiving disables the project composer")
   await expectVisibleMatch(page, "PROJECT_SCOPE_SHARED_MARKER", "project-search-5")
   pass("a cached active project reopens read-only after registry archive")
 
@@ -641,16 +642,30 @@ async function runProjectSearchScenarios(
   renameSync(onlineDirectory, renamedDirectory)
   try {
     await delayedTarget.release()
-    const composer = otherChat.getByPlaceholder("当前项目无法确认实时状态，仅可查看历史会话。", { exact: true })
-    await composer.waitFor()
-    assert(await composer.isDisabled())
+    await otherChat.getByText(historyRecoveryNotice, { exact: true }).waitFor({ timeout: 15_000 })
+    assert.equal(await otherChat.locator("textarea:enabled").count(), 0)
     await expectSidebarAnchor(grouped.ids.other)
   } finally {
     renameSync(renamedDirectory, onlineDirectory)
   }
   pass("directory loss after confirmation keeps the exact destination read-only")
 
+  await projectSidebar.getByRole("button", { name: "项目列表", exact: true }).click()
+  await otherChat.waitFor({ state: "hidden" })
+  const projectFilter = page.getByPlaceholder("搜索项目、系统编号或插件", { exact: true })
+  await projectFilter.fill(basename(onlineDirectory))
+  const projectCard = page.locator('article[role="button"]').filter({
+    has: page.getByText(basename(onlineDirectory), { exact: true })
+  })
+  await projectCard.click({ timeout: 15_000 })
+  await projectFilter.waitFor({ state: "hidden", timeout: 15_000 })
+  await projectSidebar.locator(`[data-sidebar-thread-id="${grouped.ids.other}"]`).click({ timeout: 15_000 })
+  await otherChat.locator("textarea.composer-textarea:enabled").waitFor({ timeout: 15_000 })
+  assert.equal(await otherChat.getByText(historyRecoveryNotice, { exact: true }).count(), 0)
+  pass("reopening the session via the sidebar restores the composer when its project is available")
+
   await page.getByRole("navigation").getByRole("button", { name: "项目列表", exact: true }).click()
+  await projectFilter.fill("")
   const settings = page.getByRole("tab", { name: "工程与精益配置", exact: true })
   await settings.waitFor()
   const interruptedOpening = await armProjectSearchDelay(app, grouped.ids.other)
@@ -816,9 +831,8 @@ async function runProjectSearchScenarios(
     await result.click()
     await dialog.waitFor({ state: "hidden" })
     const chat = page.locator(`[data-chat-thread-id="${id}"]`)
-    const composer = chat.getByPlaceholder("当前项目无法确认实时状态，仅可查看历史会话。", { exact: true })
-    await composer.waitFor()
-    assert(await composer.isDisabled(), "offline history is read-only")
+    await chat.getByText(historyRecoveryNotice, { exact: true }).waitFor({ timeout: 15_000 })
+    assert.equal(await chat.locator("textarea:enabled").count(), 0, "offline history is read-only")
     await expectSidebarAnchor(id)
     await expectVisibleMatch(page, offlineMarker, `${key}-search-5`)
     await page.getByPlaceholder("在当前会话中搜索").press("Escape")

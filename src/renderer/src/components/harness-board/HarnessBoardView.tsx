@@ -6241,7 +6241,7 @@ function ProjectSessionPage({
   const title = thread ? getThreadTitle(thread) : "项目会话"
   const readOnlyReason = deleted ? "所属项目已删除，当前会话只读。"
     : project.lifecycle.status === "archived" ? "所属项目已归档，当前会话只读。"
-      : historyOnly ? "当前项目无法确认实时状态，仅可查看历史会话。"
+      : historyOnly ? "此会话暂时只读。你可以从左侧「项目列表」重新进入项目。确认项目可用后，再打开此会话继续对话。"
         : searchAccessPending ? "正在确认项目状态，请稍候。" : null
 
   return (

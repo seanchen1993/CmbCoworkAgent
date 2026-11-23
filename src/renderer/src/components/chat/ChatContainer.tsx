@@ -9473,12 +9473,12 @@ export function ChatContainer({
                     onScrollToBottom={scrollToConversationBottom}
                   />
                   {historyOnly ? (
-                    <textarea
-                      disabled
-                      rows={1}
-                      placeholder={resolvedReadOnlyReason ?? "仅可查看历史会话"}
-                      className="w-full resize-none rounded-md border border-border bg-muted px-3 py-2 text-sm"
-                    />
+                    <p
+                      role="status"
+                      className="rounded-md border border-border bg-muted px-3 py-2 text-sm leading-relaxed"
+                    >
+                      {resolvedReadOnlyReason ?? "仅可查看历史会话"}
+                    </p>
                   ) : managedTurn?.composerHeader}
                 </div>
               ) : (
