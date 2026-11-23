@@ -80,10 +80,22 @@ describe("Pro model runtime availability", () => {
       vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
       const send = vi.fn<typeof fetch>(async () => reply(purpose === "context-compaction"))
       vi.stubGlobal("fetch", send)
-      const model = getModelInstance(config, undefined, 2, purpose, "thread")
+      const thinkingConfig = {
+        ...config,
+        enableThinking: true,
+        enableThinkingEffort: true,
+        thinkingEffort: "high" as const
+      }
+      const model = getModelInstance(thinkingConfig, undefined, 2, purpose, "thread")
       expect((await model.invoke("daytime request")).content).toBe("ok")
       expect(send).toHaveBeenCalledTimes(1)
-      expect(JSON.parse(String(send.mock.calls[0][1]?.body)).model).toBe("pro")
+      const payload = JSON.parse(String(send.mock.calls[0][1]?.body))
+      expect(payload.model).toBe("pro")
+      expect(payload.chat_template_kwargs).toEqual(
+        purpose === "agent"
+          ? { enable_thinking: true, reasoning_effort: "high" }
+          : { enable_thinking: false }
+      )
     }
   )
 

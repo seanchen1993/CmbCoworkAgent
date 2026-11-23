@@ -285,6 +285,9 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
             ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS
             : IDLE_MODEL_MAX_TOKENS,
         apiKey: environment.apiKey,
+        enableThinking: true,
+        enableThinkingEffort: true,
+        thinkingEffort: "high",
         tier: "premium"
       },
       "local"
