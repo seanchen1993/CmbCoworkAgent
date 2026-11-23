@@ -163,6 +163,10 @@ import {
   mergeCheckpointAuthorityTranscriptMessages,
   truncateCheckpointMessagesAfter
 } from "../../shared/checkpoint-transcript"
+import {
+  alignReplayedToolExchanges,
+  findReplayedToolExchangeAliases
+} from "../../shared/tool-transcript-replay"
 import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
 import {
   getMessageProviderOccurrenceIdentity,
@@ -329,6 +333,8 @@ interface CheckpointMessage {
   tool_calls?: Array<{ id?: string; name?: string; args?: unknown }>
   tool_call_id?: string
   name?: string
+  status?: string
+  is_error?: boolean
   additional_kwargs?: Record<string, unknown>
   kwargs?: {
     id?: string
@@ -337,6 +343,8 @@ interface CheckpointMessage {
     tool_calls?: Array<{ id?: string; name?: string; args?: unknown }>
     tool_call_id?: string
     name?: string
+    status?: string
+    is_error?: boolean
     additional_kwargs?: Record<string, unknown>
   }
 }
@@ -2775,7 +2783,11 @@ function checkpointMessagesToThreadMessages(
     if (isWorkflowPlumbingTranscriptContent(rawText)) return []
     const additionalKwargs = getCheckpointMessageAdditionalKwargs(msg)
     const providerTuple =
-      role === "assistant" ? getMessageProviderTupleFromMetadata(additionalKwargs) : undefined
+      role === "assistant" || role === "tool"
+        ? getMessageProviderTupleFromMetadata(additionalKwargs)
+        : undefined
+    const status = msg.status ?? msg.kwargs?.status
+    const isError = msg.is_error === true || msg.kwargs?.is_error === true || status === "error"
     return {
       id,
       ...providerTuple,
@@ -2795,6 +2807,8 @@ function checkpointMessagesToThreadMessages(
       ...(role === "tool" && getCheckpointMessageName(msg)
         ? { name: getCheckpointMessageName(msg) }
         : {}),
+      ...(role === "tool" && status ? { status } : {}),
+      ...(role === "tool" && isError ? { is_error: true } : {}),
       created_at: now
     }
   })
@@ -2828,17 +2842,24 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
   persistedMessages: Message[]
 ): Message[] {
   const checkpointTranscriptIndex = checkpoint ? deriveCheckpointTranscriptIndex(checkpoint) : null
-  const checkpointMessages = checkpointMessagesToThreadMessages(
-    getCheckpointChannelMessages(checkpoint),
-    checkpointTranscriptIndex
-      ? {
-          visibleRawIndices: checkpointTranscriptIndex.visibleMessages.flatMap((message) =>
-            typeof message.rawIndex === "number" ? [message.rawIndex] : []
-          )
-        }
-      : {}
+  const rawCheckpointMessages = getCheckpointChannelMessages(checkpoint)
+  const visibleRawIndices = checkpointTranscriptIndex?.visibleMessages.flatMap((message) =>
+    typeof message.rawIndex === "number" ? [message.rawIndex] : []
   )
-  return mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
+  const checkpointMessages = checkpointMessagesToThreadMessages(
+    rawCheckpointMessages,
+    { visibleRawIndices }
+  )
+  const visibleIndices = new Set(visibleRawIndices)
+  const hasHiddenTurn = rawCheckpointMessages?.some((message, index) =>
+    !visibleIndices.has(index) && message && getMessageRole(message) === "user"
+  )
+  const alignedCheckpoint = hasHiddenTurn
+    ? checkpointMessages
+    : alignReplayedToolExchanges(persistedMessages, checkpointMessages)
+  const merged = mergeThreadMessageTranscripts(alignedCheckpoint, persistedMessages)
+  const aliases = findReplayedToolExchangeAliases(merged)
+  return aliases.size ? merged.filter((message) => !aliases.has(message.id)) : merged
 }
 
 function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {

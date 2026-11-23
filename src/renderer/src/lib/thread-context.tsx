@@ -102,6 +102,7 @@ import {
   isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
+import { alignReplayedToolExchanges } from "../../../shared/tool-transcript-replay"
 import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
@@ -7070,7 +7071,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               goalTranscriptPageRange !== undefined
             )
       const restoredTranscript = mergePersistedMessagesIntoTranscript(
-        checkpointTranscript,
+        rawRestoredMessages.some((message) =>
+          message.role === "user" && !isVisibleCheckpointTranscriptMessage(message)
+        )
+          ? checkpointTranscript
+          : alignReplayedToolExchanges(visiblePersistedThreadMessages, checkpointTranscript),
         visiblePersistedThreadMessages
       )
       const restoredTranscriptMessages = restoreVisibleCheckpointMessageTimes(

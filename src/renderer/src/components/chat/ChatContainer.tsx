@@ -262,6 +262,7 @@ import {
   formatGoalEventMessage,
   isVisibleCheckpointTranscriptMessage
 } from "@/lib/goal-transcript"
+import { findReplayedToolExchangeAliases } from "../../../../shared/tool-transcript-replay"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
 import {
@@ -1188,6 +1189,7 @@ interface ThreadDisplayBaselineCacheEntry {
   sourceTailSnapshot: Message | undefined
   sourceTailProjected: boolean
   baseline: Message[]
+  replayAliases: ReadonlyMap<string, string>
 }
 
 const threadDisplayBaselineCache = new WeakMap<
@@ -1195,9 +1197,12 @@ const threadDisplayBaselineCache = new WeakMap<
   ThreadDisplayBaselineCacheEntry
 >()
 
-function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: number): Message[] {
+function getThreadDisplayBaseline(
+  messages: readonly Message[],
+  contentVersion: number
+): ThreadDisplayBaselineCacheEntry {
   const cached = threadDisplayBaselineCache.get(messages)
-  if (cached?.contentVersion === contentVersion) return cached.baseline
+  if (cached?.contentVersion === contentVersion) return cached
   const sourceTail = messages.at(-1)
   if (
     cached &&
@@ -1205,6 +1210,7 @@ function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: 
     cached.sourceTailSnapshot &&
     sourceTail &&
     sourceTail.role !== "user" &&
+    sourceTail.role !== "tool" &&
     cached.sourceTailSnapshot.id === sourceTail.id &&
     cached.sourceTailSnapshot.role === sourceTail.role &&
     cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
@@ -1217,7 +1223,7 @@ function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: 
     if (!cached.sourceTailProjected && projectedTail.length === 0) {
       cached.contentVersion = contentVersion
       cached.sourceTailSnapshot = sourceTail
-      return cached.baseline
+      return cached
     }
     if (
       cached.sourceTailProjected &&
@@ -1227,21 +1233,23 @@ function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: 
       cached.baseline[cached.baseline.length - 1] = projectedTail[0]
       cached.contentVersion = contentVersion
       cached.sourceTailSnapshot = sourceTail
-      return cached.baseline
+      return cached
     }
   }
   const baseline = filterCoordinatorNoiseMessages(
     excludeDuplicateGoalSidecars(messages.filter(isVisibleCheckpointTranscriptMessage))
       .map(cleanUserAttachmentMarkupForDisplay)
   )
-  threadDisplayBaselineCache.set(messages, {
+  const entry = {
     contentVersion,
     sourceLength: messages.length,
     sourceTailSnapshot: sourceTail,
     sourceTailProjected: Boolean(sourceTail && baseline.at(-1)?.id === sourceTail.id),
-    baseline
-  })
-  return baseline
+    baseline,
+    replayAliases: findReplayedToolExchangeAliases(messages)
+  }
+  threadDisplayBaselineCache.set(messages, entry)
+  return entry
 }
 
 type ForkDestinationMode = "local" | "workspace"
@@ -3612,7 +3620,7 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [appleIntelligenceGlowEnabled, isLoading])
 
-  const threadDisplayBaseline = useMemo(
+  const { baseline: threadDisplayBaseline, replayAliases } = useMemo(
     () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
     [messagesContentVersion, threadMessages]
   )
@@ -3907,16 +3915,18 @@ export function ChatContainer({
   })
   const visibleMessageIndexes = useMemo(
     () =>
-      hiddenMessageIds.size || (!searchExpandsExecutionDetails && foldedMessageIds.size)
+      hiddenMessageIds.size || replayAliases.size || (!searchExpandsExecutionDetails && foldedMessageIds.size)
         ? unfilteredVisibleMessageIndexes.filter(
             (index) =>
               !hiddenMessageIds.has(displayMessages[index].id) &&
+              !replayAliases.has(displayMessages[index].id) &&
               (searchExpandsExecutionDetails || !foldedMessageIds.has(displayMessages[index].id))
           )
         : unfilteredVisibleMessageIndexes,
     [
       unfilteredVisibleMessageIndexes,
       hiddenMessageIds,
+      replayAliases,
       foldedMessageIds,
       searchExpandsExecutionDetails,
       displayMessages,
@@ -4117,6 +4127,7 @@ export function ChatContainer({
         const startIndex = Math.max(0, threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
         const addDocument = (messageIndex: number): boolean => {
           const message = threadDisplayBaseline[messageIndex]
+          if (replayAliases.has(message.id)) return true
           const sortIndex = displayMessageProjection.indexById.get(message.id)
           if (sortIndex === undefined) return true
           const detached = messageIndex < contiguousTailStartIndex
@@ -4284,6 +4295,7 @@ export function ChatContainer({
       liveDisplayMessages,
       historyGapBeforeRawMessageId,
       messagesContentVersion,
+      replayAliases,
       threadMessages,
       threadDisplayBaseline
     ]
@@ -4437,8 +4449,12 @@ export function ChatContainer({
       const message = displayMessages[messageIndex]
       if (message) indexById.set(message.id, visibleIndex)
     })
+    for (const [alias, canonical] of replayAliases) {
+      const visibleIndex = indexById.get(canonical)
+      if (visibleIndex !== undefined) indexById.set(alias, visibleIndex)
+    }
     return indexById
-  }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
+  }, [displayMessages, displayMessagesStructureVersion, replayAliases, visibleMessageIndexes])
   const [releasedHistoryRevealRevision, setReleasedHistoryRevealRevision] = useState(0)
   const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
     visibleMessageIndexes.length
@@ -4971,7 +4987,7 @@ export function ChatContainer({
       cancelActiveSearchNavigation()
       invalidateDurableMessageReveal()
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
-      const targetElement = contentMessageRefs.current.get(messageId)
+      const targetElement = contentMessageRefs.current.get(replayAliases.get(messageId) ?? messageId)
       const viewport = getViewport()
       const topInset = chatScrollInsets(viewport).top
       if (targetElement && viewport) {
@@ -4985,7 +5001,7 @@ export function ChatContainer({
       }
       virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: virtualBehavior, offset: -topInset })
     },
-    [cancelActiveSearchNavigation, dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
+    [cancelActiveSearchNavigation, dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, replayAliases, visibleMessageIndexById]
   )
   const revealMessage = useCallback(
     (messageId: string): void => {
@@ -4995,11 +5011,11 @@ export function ChatContainer({
         invalidateDurableMessageReveal()
         dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       }
-      const targetElement = contentMessageRefs.current.get(messageId)
+      const targetElement = contentMessageRefs.current.get(replayAliases.get(messageId) ?? messageId)
       if (targetElement?.isConnected) return
       virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
     },
-    [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
+    [dispatchChatScrollEvent, invalidateDurableMessageReveal, replayAliases, visibleMessageIndexById]
   )
   const replySelection = useRef(0)
   const cancelBotReply = useCallback(() => {
@@ -5175,6 +5191,7 @@ export function ChatContainer({
     if (!messageId || historyPageLoading || !scrollParent) return
     const index = visibleMessageIndexById.get(messageId)
     if (index === undefined) return
+    const visibleId = replayAliases.get(messageId) ?? messageId
     // A replacement window has its own measurement cache. Keep the seek
     // alive across its first height measurements until the real row mounts.
     const deadline = performance.now() + 3_000
@@ -5188,7 +5205,7 @@ export function ChatContainer({
         return
       }
       const { scrollHeight, scrollTop } = scrollParent
-      if (!contentMessageRefs.current.get(messageId)?.isConnected &&
+      if (!contentMessageRefs.current.get(visibleId)?.isConnected &&
           (scrollHeight !== previousHeight || scrollTop !== previousTop)) {
         previousHeight = scrollHeight
         previousTop = scrollTop
@@ -5202,6 +5219,7 @@ export function ChatContainer({
     historyPageLoading,
     historyWindowRevision,
     releasedHistoryRevealRevision,
+    replayAliases,
     scrollParent,
     setPendingDurableRevealMessageId,
     visibleMessageIndexById
