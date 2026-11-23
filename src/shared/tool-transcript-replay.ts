@@ -176,6 +176,35 @@ function resultReplayKey(result: TranscriptMessage): string {
   return JSON.stringify([getMessageProviderSourceId(result), result.tool_call_id])
 }
 
+function createPayloadIds(): (value: unknown) => number {
+  // Intern scalar values so keys need not serialize full tool output.
+  const ids = new Map<unknown, number>()
+  return (value) => {
+    if (value !== null && typeof value === "object") return 0
+    const existing = ids.get(value)
+    if (existing !== undefined) return existing
+    const id = ids.size + 1
+    ids.set(value, id)
+    return id
+  }
+}
+
+function hasRawCheckpointToolBindings(
+  exchange: ToolExchange<TranscriptMessage>,
+  turns: CheckpointReplayTurns
+): boolean {
+  return (
+    turns.uniqueMessageIds.has(exchange.assistant.id) &&
+    exchange.results.every(
+      (result, index) =>
+        turns.uniqueMessageIds.has(result.id) &&
+        turns.rawResultByCall.get(
+          getWorkerToolUiKey(exchange.assistant.id, exchange.calls[index].id, index)
+        ) === result.id
+    )
+  )
+}
+
 function rememberVersion<T>(
   index: Map<string, T[]>,
   key: string,
@@ -214,6 +243,7 @@ export function hasToolReplayCandidates(messages: readonly TranscriptMessage[]):
 
 function indexAnchoredExchanges<T extends TranscriptMessage>(
   messages: readonly T[],
+  payloadId: (value: unknown) => number,
   includeLeadingHidden: boolean,
   checkpointTurns?: CheckpointReplayTurns
 ) {
@@ -224,9 +254,13 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
     anchor: T | undefined
     hasPhysicalResults: boolean
   }
-  const byAnchor = new Map<string, Candidate | null>()
-  const addCandidate = (key: string, candidate: Candidate | null) => {
-    byAnchor.set(key, byAnchor.has(key) ? null : candidate)
+  const byAnchor = new Map<string, Candidate[]>()
+  let hasCompetingPhysicalRows = false
+  const addCandidate = (key: string, candidate: Candidate) => {
+    const group = byAnchor.get(key) ?? []
+    if (candidate.hasPhysicalResults && group.length) hasCompetingPhysicalRows = true
+    group.push(candidate)
+    byAnchor.set(key, group)
   }
   let anchor: T | undefined
   let position = 0
@@ -242,35 +276,33 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
       const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
       const evidenceKey = [
         exchangeKey(exchange),
-        hasPhysicalResults ? exchange.results.map(resultReplayKey) : null
+        hasPhysicalResults
+          ? [
+              payloadId(exchange.assistant.content),
+              exchange.results.map((result) => [resultReplayKey(result), payloadId(result.content)])
+            ]
+          : null
       ]
       const candidate = { exchange, position, anchor, hasPhysicalResults }
       const requiresRawProof =
         checkpointTurns && (!anchor || checkpointTurns.hiddenAnchors.has(anchor.id))
       const unsafe =
         requiresRawProof &&
-        (!hasPhysicalResults ||
-          !checkpointTurns.uniqueMessageIds.has(message.id) ||
-          exchange.results.some(
-            (result, index) =>
-              !checkpointTurns.uniqueMessageIds.has(result.id) ||
-              checkpointTurns.rawResultByCall.get(
-                getWorkerToolUiKey(message.id, exchange.calls[index].id, index)
-              ) !== result.id
-          ))
-      if (anchor)
-        addCandidate(JSON.stringify([anchor.id, ...evidenceKey]), unsafe ? null : candidate)
-      if (
-        includeLeadingHidden &&
-        hasPhysicalResults &&
-        (!checkpointTurns || (!anchor && checkpointTurns.leadingHiddenAssistants.has(message.id)))
-      ) {
-        addCandidate(JSON.stringify([null, ...evidenceKey]), unsafe ? null : candidate)
+        (!hasPhysicalResults || !hasRawCheckpointToolBindings(exchange, checkpointTurns))
+      if (!unsafe) {
+        if (anchor) addCandidate(JSON.stringify([anchor.id, ...evidenceKey]), candidate)
+        if (
+          includeLeadingHidden &&
+          hasPhysicalResults &&
+          (!checkpointTurns || (!anchor && checkpointTurns.leadingHiddenAssistants.has(message.id)))
+        ) {
+          addCandidate(JSON.stringify([null, ...evidenceKey]), candidate)
+        }
       }
     }
     position++
   }
-  return byAnchor
+  return { byAnchor, hasCompetingPhysicalRows }
 }
 
 function applyCheckpointAlignments<T extends TranscriptMessage>(
@@ -340,41 +372,75 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   const includeLeadingHidden = Boolean(checkpointTurns?.leadingHiddenAssistants.size)
   const minimumRows = includeLeadingHidden ? 2 : 3
   if (canonical.length < minimumRows || replay.length < minimumRows) return replay
-  const candidates = indexAnchoredExchanges(canonical, includeLeadingHidden)
-  if (candidates.size === 0) return replay
+  const payloadId = createPayloadIds()
+  const indexSource = (messages: readonly T[], turns?: CheckpointReplayTurns) =>
+    indexAnchoredExchanges(messages, payloadId, includeLeadingHidden, turns)
+  const durable = indexSource(canonical)
+  if (durable.byAnchor.size === 0) return replay
+  const checkpoint = indexSource(replay, checkpointTurns)
+  const durableAliases = durable.hasCompetingPhysicalRows
+    ? findReplayedToolExchangeAliases(canonical, { completePhysicalExchangesOnly: true })
+    : noAliases
+  const checkpointAliases = checkpoint.hasCompetingPhysicalRows
+    ? findReplayedToolExchangeAliases(replay, {
+        completePhysicalExchangesOnly: true,
+        checkpointTurns
+      })
+    : noAliases
+  const canonicalWithoutCopies = durableAliases.size
+    ? canonical.filter(({ id }) => !durableAliases.has(id))
+    : canonical
+  const replayWithoutCopies = checkpointAliases.size
+    ? replay.filter(({ id }) => !checkpointAliases.has(id))
+    : replay
+  const targets =
+    canonicalWithoutCopies === canonical
+      ? durable.byAnchor
+      : indexSource(canonicalWithoutCopies).byAnchor
+  const incoming =
+    replayWithoutCopies === replay
+      ? checkpoint.byAnchor
+      : indexSource(replayWithoutCopies, checkpointTurns).byAnchor
   const groups: Array<Array<[copy: T, durable: T]>> = []
-  for (const [key, candidate] of indexAnchoredExchanges(
-    replay,
-    includeLeadingHidden,
-    checkpointTurns
-  )) {
-    const target = candidates.get(key)
+  for (const [key, copies] of incoming) {
+    const possible = targets.get(key)
     if (
-      !target ||
-      !candidate ||
-      (target.position !== candidate.position && !hasExecutionIdentity(target.exchange)) ||
-      (candidate.anchor &&
-        (!target.anchor ||
-          !sameRow(target.anchor, candidate.anchor, target.hasPhysicalResults) ||
-          (getMessageProviderOccurrence(target.anchor) ?? 1) !==
-            (getMessageProviderOccurrence(candidate.anchor) ?? 1))) ||
-      !isSameExchange(target.exchange, candidate.exchange, target.hasPhysicalResults)
+      !possible ||
+      (!copies[0].hasPhysicalResults && (copies.length !== 1 || possible.length !== 1))
     )
       continue
-    const rows: Array<[copy: T, durable: T]> = [
-      [candidate.exchange.assistant, target.exchange.assistant]
-    ]
-    for (const [index, result] of candidate.exchange.results.entries()) {
-      rows.push([result, target.exchange.results[index]])
+    for (const candidate of copies) {
+      const matches = possible.filter(
+        (target) =>
+          (target.position === candidate.position || hasExecutionIdentity(target.exchange)) &&
+          (!candidate.anchor ||
+            (target.anchor &&
+              sameRow(target.anchor, candidate.anchor, target.hasPhysicalResults) &&
+              (getMessageProviderOccurrence(target.anchor) ?? 1) ===
+                (getMessageProviderOccurrence(candidate.anchor) ?? 1))) &&
+          isSameExchange(target.exchange, candidate.exchange, target.hasPhysicalResults)
+      )
+      if (matches.length !== 1) continue
+      const [target] = matches
+      const rows: Array<[copy: T, durable: T]> = [
+        [candidate.exchange.assistant, target.exchange.assistant]
+      ]
+      for (const [index, result] of candidate.exchange.results.entries()) {
+        rows.push([result, target.exchange.results[index]])
+      }
+      const changes = rows.filter(
+        ([copy, durable]) =>
+          copy.id !== durable.id ||
+          getMessageProviderOccurrence(copy) !== getMessageProviderOccurrence(durable)
+      )
+      if (changes.length) groups.push(changes)
     }
-    const changes = rows.filter(
-      ([copy, durable]) =>
-        copy.id !== durable.id ||
-        getMessageProviderOccurrence(copy) !== getMessageProviderOccurrence(durable)
-    )
-    if (changes.length) groups.push(changes)
   }
-  return applyCheckpointAlignments(replay, groups)
+  if (!groups.length) return replay
+  // Only commit checkpoint removals if an alignment also succeeded. The full
+  // durable transcript is still merged by the caller, retaining search IDs.
+  const aligned = applyCheckpointAlignments(replayWithoutCopies, groups)
+  return aligned === replayWithoutCopies ? replay : aligned
 }
 
 interface UnsafeBindings {
@@ -445,22 +511,16 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
 /** Identify copies using the same result bindings that are used in chat. */
 export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   messages: readonly T[],
-  completedAssistantIds?: Set<string>
+  options?: {
+    completedAssistantIds?: Set<string>
+    completePhysicalExchangesOnly?: boolean
+    checkpointTurns?: CheckpointReplayTurns
+  }
 ): ReadonlyMap<string, string> {
   if (!hasToolReplayCandidates(messages)) return noAliases
   const ownership = resolveToolResultOwnership(messages)
   const aliases = new Map<string, string>()
-  // Intern scalar payloads instead of serializing potentially large outputs
-  // into every key. Structured blocks still require exact comparison.
-  const payloadIds = new Map<unknown, number>()
-  const payloadId = (value: unknown): number => {
-    if (value !== null && typeof value === "object") return 0
-    const existing = payloadIds.get(value)
-    if (existing !== undefined) return existing
-    const id = payloadIds.size + 1
-    payloadIds.set(value, id)
-    return id
-  }
+  const payloadId = createPayloadIds()
   const resultVersionKey = (result: T) => [resultReplayKey(result), payloadId(result.content)]
   const sameTurn = new Map<string, ToolExchange<T>[]>()
   const physical = new Map<string, ToolExchange<T>[]>()
@@ -468,11 +528,19 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     if (message.role === "user" || message.role === "system") sameTurn.clear()
     const exchange = readExchange(message, ownership)
     if (!exchange || !hasExecutionIdentity(exchange)) continue
-    completedAssistantIds?.add(message.id)
+    const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
+    if (
+      options?.completePhysicalExchangesOnly &&
+      (!hasPhysicalResults ||
+        (options.checkpointTurns &&
+          !hasRawCheckpointToolBindings(exchange, options.checkpointTurns)))
+    )
+      continue
+    options?.completedAssistantIds?.add(message.id)
 
     // Transport replay can append records after the next visible user turn.
     // Only separately generated result UUIDs support matching across that boundary.
-    const index = exchange.results.every(hasToolResultExecutionId) ? physical : sameTurn
+    const index = hasPhysicalResults ? physical : sameTurn
     const key = JSON.stringify([
       exchangeKey(exchange),
       payloadId(exchange.assistant.content),
@@ -493,6 +561,8 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       if (canonical.id !== result.id) aliases.set(result.id, canonical.id)
     }
   }
+  if (options?.completePhysicalExchangesOnly)
+    return preserveReplayToolBindings(messages, aliases, ownership)
 
   // Compare result identity independently of FIFO: a replay could have already
   // occupied a newer call that happened to reuse the original ID.

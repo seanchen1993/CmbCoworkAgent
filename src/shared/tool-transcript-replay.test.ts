@@ -95,7 +95,6 @@ describe("tool transcript replay", () => {
     for (const unmatched of [
       [...exchange(2)],
       [{ ...user, id: "hidden-goal-boundary" }, ...exchange(2)],
-      [user, ...exchange(2), ...exchange(3)],
       [user, ...exchange(2, { path: "different" })],
       [user, ...exchange(2, { path: "fixture" }, "new result")],
       [user, exchange(2)[0]],
@@ -176,8 +175,57 @@ describe("tool transcript replay", () => {
       channel_values: { messages: [hiddenTeam, ...checkpointRows(checkpoint)] }
     })
     expect(alignReplayedToolExchanges(canonical, checkpoint, turns)).toEqual(exchange(2))
-    const ambiguous = [...canonical, { ...user, id: "later" }, ...exchange(3)]
+    const [first, firstTool] = exchange(2)
+    const [second, secondTool] = exchange(3)
+    const ambiguous = [
+      user,
+      { ...first, reasoning: "First evidence" },
+      firstTool,
+      { ...user, id: "later" },
+      { ...second, reasoning: "Other evidence" },
+      secondTool
+    ]
     expect(alignReplayedToolExchanges(ambiguous, checkpoint, turns)).toBe(checkpoint)
+  })
+
+  it.each([
+    [true, false],
+    [false, true],
+    [true, true]
+  ])(
+    "aligns before merging already-replayed tool groups (durable %s, checkpoint %s)",
+    (durableHasCopy, checkpointHasCopy) => {
+      const earlierResponse = {
+        ...exchange()[0],
+        content: "Older reply",
+        tool_calls: undefined
+      }
+      const canonical = [
+        { ...user, id: "earlier-user" },
+        earlierResponse,
+        user,
+        ...exchange(2),
+        ...(durableHasCopy ? exchange(3) : [])
+      ]
+      const checkpoint = [user, ...exchange(), ...(checkpointHasCopy ? exchange(2) : [])]
+      const raw = checkpointRows(checkpoint)
+      const turns = readCheckpointReplayTurns({
+        channel_values: { messages: [raw[0], hiddenTeam, ...raw.slice(1)] }
+      })
+      const aligned = alignReplayedToolExchanges(canonical, checkpoint, turns)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(aligned, canonical)
+      const aliases = findReplayedToolExchangeAliases(merged)
+      expect(merged.filter(({ id }) => !aliases.has(id))).toEqual(canonical.slice(0, 5))
+    }
+  )
+
+  it("selects the exact matching payload when both sources retained different versions", () => {
+    const original = exchange(2, { path: "fixture" }, "Earlier output")
+    const updated = exchange(3)
+    const canonical = [user, ...original, ...updated]
+    const checkpoint = [user, ...exchange(1, { path: "fixture" }, "Earlier output")]
+    const aligned = alignReplayedToolExchanges(canonical, checkpoint)
+    expect(mergeCheckpointAuthorityTranscriptMessages(aligned, canonical)).toEqual(canonical)
   })
 
   it("does not align collapsed ownership that the raw hidden boundary disproves", () => {

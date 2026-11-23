@@ -170,7 +170,9 @@ async function seedHistory(): Promise<number> {
     setOccurrence(shifted[0][0], 2),
     shifted[0][1],
     setOccurrence(shifted[1][0], 3),
-    shifted[1][1]
+    shifted[1][1],
+    setOccurrence(shifted[0][0], 4),
+    setOccurrence(shifted[0][1], 2)
   ]
   await db.initializeDatabase()
   try {
@@ -207,7 +209,13 @@ async function seedHistory(): Promise<number> {
           content: "Hidden Team notification before the tool exchanges",
           additional_kwargs: { cmb_internal_coordinator_notification: true }
         },
-        ...[...shifted[0], setOccurrence(shifted[1][0], 2), shifted[1][1]].map(toCheckpointMessage)
+        ...[
+          ...shifted[0],
+          setOccurrence(shifted[1][0], 2),
+          shifted[1][1],
+          setOccurrence(shifted[0][0], 3),
+          setOccurrence(shifted[0][1], 2)
+        ].map(toCheckpointMessage)
       ]
     },
     channel_versions: { messages: 1 },
@@ -295,9 +303,7 @@ async function main(): Promise<void> {
       }
       const archivePath = path.join(output, `${phase}.zip`)
       const page = await app.firstWindow()
-      await app.evaluate(({ BrowserWindow, dialog, ipcMain }, target) => {
-        // Mount the fixture in one viewport regardless of the test desktop's display size.
-        BrowserWindow.getAllWindows()[0]?.webContents.setZoomFactor(0.35)
+      await app.evaluate(({ dialog, ipcMain }, target) => {
         dialog.showSaveDialog = async () => ({ canceled: false, filePath: target })
         const channel = "threads:search-target-window"
         const handlers = (
@@ -319,6 +325,10 @@ async function main(): Promise<void> {
       await page.getByText(title, { exact: true }).first().click({ timeout: 30_000 })
       const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
       await chat.getByText(lastReply, { exact: true }).waitFor({ timeout: 30_000 })
+      // Resize the mounted fixture viewport without changing the sidebar hit targets.
+      const browserWindow = await app.browserWindow(page)
+      await browserWindow.evaluate((window) => window.webContents.setZoomFactor(0.35))
+      await chat.locator('[data-chat-message-id="provider-0"]').waitFor({ state: "attached" })
       const result = await page.evaluate(
         (id) => (window as unknown as TestWindow).api.threads.exportSession(id),
         threadId
