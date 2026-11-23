@@ -3,13 +3,17 @@ import { flushSync } from "react-dom"
 import { AppErrorBoundary } from "../../src/renderer/src/components/app/AppErrorBoundary"
 import { ModelSwitcher } from "../../src/renderer/src/components/chat/ModelSwitcher"
 import { CustomModelDialog } from "../../src/renderer/src/components/chat/CustomModelDialog"
-import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../src/shared/model-catalog"
+import {
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
+  IDLE_MODEL_UAT_NOTICE
+} from "../../src/shared/model-catalog"
 import * as store from "./model-switcher-store"
 
 const root = createRoot(document.getElementById("root")!)
 let idleAvailable = true
+let useUat = false
 const modelChangeListeners = new Set<() => void>()
-const settingsWrites = { names: [] as string[], defaults: [] as string[] }
+const settingsWrites = { names: [] as string[], defaults: [] as string[], maxTokens: [] as number[] }
 const idle = {
   id: "idle-ultra",
   ref: "builtin:idle-ultra" as const,
@@ -23,8 +27,7 @@ const idle = {
   maxOutputTokens: 8192,
   temperature: 0.1,
   topP: 0.95,
-  topK: 40,
-  lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"] as const
+  topK: 40
 }
 const fixture = {
   idleCatalog(available = true) {
@@ -42,7 +45,8 @@ const fixture = {
     ])
     for (const listener of modelChangeListeners) listener()
   },
-  showIdleSettings() {
+  showIdleSettings(uat = false) {
+    useUat = uat
     flushSync(() => root.render(null))
     root.render(<CustomModelDialog open selectedModelId={idle.ref} onOpenChange={() => {}} />)
   },
@@ -79,13 +83,16 @@ Object.assign(window, {
       getBuiltinConfigs: async () => [
         {
           ...idle,
+          lockedFields: ["baseUrl", "model", "apiKey", ...(useUat ? [] : ["maxTokens"])],
+          notice: useUat ? IDLE_MODEL_UAT_NOTICE : undefined,
           unavailableReason: idleAvailable ? undefined : IDLE_MODEL_SAP_REQUIRED_MESSAGE
         }
       ],
       getCustomConfigs: async () => [],
       getDefault: async () => idle.ref,
-      updateBuiltinConfig: async (_id: string, config: { name: string }) => {
+      updateBuiltinConfig: async (_id: string, config: { name: string; maxTokens: number }) => {
         settingsWrites.names.push(config.name)
+        settingsWrites.maxTokens.push(config.maxTokens)
       },
       setDefault: async (id: string) => {
         settingsWrites.defaults.push(id)
