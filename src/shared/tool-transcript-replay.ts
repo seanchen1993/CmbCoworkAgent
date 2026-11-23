@@ -80,17 +80,35 @@ export function getAssistantReplayContent<T extends TranscriptMessage>(
   read: (id: string) => T | undefined
 ): ReadonlyMap<string, T["content"]> {
   const content = new Map<string, T["content"]>()
+  const copiesByCanonical = new Map<string, T[]>()
   for (const [id, canonicalId] of aliases) {
     const copy = read(id)
     if (copy?.role !== "assistant") continue
+    const copies = copiesByCanonical.get(canonicalId) ?? []
+    copies.push(copy)
+    copiesByCanonical.set(canonicalId, copies)
+  }
+  for (const [canonicalId, copies] of copiesByCanonical) {
     const canonical = read(canonicalId)
-    const current = content.get(canonicalId) ?? canonical?.content
-    if (
-      canonical?.role === "assistant" &&
-      isReplayContentExtension(copy.content, current)
-    ) {
-      content.set(canonicalId, copy.content)
+    if (canonical?.role !== "assistant") continue
+    let current = canonical
+    let equivalent = [canonical]
+    // An equivalent indexed snapshot can prove later changes that a
+    // flattened canonical body alone cannot track.
+    const ranked = copies.map((copy) => ({
+      copy,
+      length: replayProseLength(readReplayProse(copy.content))
+    }))
+    ranked.sort((left, right) => left.length - right.length)
+    for (const { copy } of ranked) {
+      if (sameReplayBodies(copy.content, current.content)) {
+        if (!sameValue(copy.content, current.content)) equivalent.push(copy)
+      } else if (equivalent.some((before) => isReplayContentExtension(copy.content, before.content))) {
+        current = copy
+        equivalent = [copy]
+      }
     }
+    if (current !== canonical) content.set(canonicalId, current.content)
   }
   return content
 }
@@ -662,6 +680,12 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       const identical = sameValue(assistant.content, original.batch.assistant.content)
       const copies = plainSingleTool && identical ? exactSingleToolCopies : exactCopies
       copies.set(batch, original.batch)
+      if (!identical) {
+        const layout = indexedProse(assistant)
+        if (layout !== body && !sameReplayProse(layout, indexedProse(original.batch.assistant))) {
+          indexPresentation(keys, original.batch, layout, true)
+        }
+      }
       continue
     }
     if (hasReplayProse(assistant.content)) {
@@ -686,10 +710,10 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (variants.length < 2) continue
     const span = findReplayProseIndexSpan(variants.map(({ match }) => match))
     const part = (variant: (typeof variants)[number]) => variant.match.text[span]
-    const initial = variants[0].match.text
+    const initial = variants[0]
     const mayHaveMultipleParents = variants.some(({ prose, match }) =>
-      prose.annotations.length > 0 ||
-      match.text.some((text, index) => index !== span && text !== initial[index])
+      !sameValue(prose.annotations, initial.prose.annotations) ||
+      match.text.some((text, index) => index !== span && text !== initial.match.text[index])
     )
     variants.sort((left, right) => {
       const first = part(left)
@@ -1640,6 +1664,16 @@ function sameReplayProse(left: ReplayProse, right: ReplayProse): boolean {
   )
 }
 
+function sameReplayBodies(left: unknown, right: unknown): boolean {
+  if (sameValue(left, right)) return true
+  if (typeof left === "string" && typeof right === "string") return false
+  return (
+    hasReplayProse(left) &&
+    hasReplayProse(right) &&
+    sameReplayProse(readReplayProse(left), readReplayProse(right))
+  )
+}
+
 function readIndexedReplayProse(content: unknown, fallback: ReplayProse): ReplayProse {
   if (!Array.isArray(content)) return fallback
   const indexedBlocks = content.filter((block) =>
@@ -2495,10 +2529,47 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       sameReplayProse(readAssistantProse(left), readAssistantProse(right)))
   const resultVersionKey = (result: T) => [resultReplayKey(result), payloadId(result.content)]
   const sameTurn = new Map<string, ToolExchange<T>[]>()
-  const physical = new Map<string, ToolExchange<T>[]>()
+  type ObservedPresentation = { exchange: ToolExchange<T>; canonical: ToolExchange<T> }
+  const physical = new Map<string, ObservedPresentation[]>()
+  const canonicalByPresentation = new Map<string, ToolExchange<T>>()
+  const sameAssistantReasoning = (left: ToolExchange<T>, right: ToolExchange<T>) =>
+    (left.assistant.reasoning || "") === (right.assistant.reasoning || "")
+  const rememberPhysical = (exchange: ToolExchange<T>, canonical: ToolExchange<T>) => {
+    const presentation = exchange.assistant
+    const presentationKey = typeof presentation.content === "string"
+      ? [payloadId(presentation.content)]
+      : readAssistantProse(presentation).text.map(payloadId)
+    const key = JSON.stringify([
+      exchangeKey(exchange),
+      presentationKey,
+      exchange.results.map(resultVersionKey)
+    ])
+    return rememberVersion(
+      physical,
+      key,
+      { exchange, canonical },
+      (left, right) =>
+        sameAssistantReasoning(left.exchange, right.exchange) &&
+        samePhysicalPresentation(left.exchange.assistant, right.exchange.assistant) &&
+        isSameExchange(left.exchange, right.exchange, false, false)
+    ).canonical
+  }
   for (const message of messages) {
     if (message.role === "user" || message.role === "system") sameTurn.clear()
-    if (aliases.has(message.id)) continue
+    if (aliases.has(message.id)) {
+      const presentationId = slotCopies.verified.get(message.id)
+      const canonical = presentationId && canonicalByPresentation.get(presentationId)
+      if (canonical) {
+        const observed = readExchange(message, ownership)
+        if (
+          observed &&
+          !observed.results.some((result) => disputed.has(result)) &&
+          sameAssistantReasoning(canonical, observed) &&
+          isSameExchange(canonical, observed, false, false)
+        ) rememberPhysical(observed, canonical)
+      }
+      continue
+    }
     const batch = readExchange(message, ownership)
     if (!batch || !hasExecutionIdentity(batch)) continue
     // The local copy plan may have already established a distinct continuation.
@@ -2511,33 +2582,29 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
 
     // Transport replay can append records after the next visible user turn.
     // Only separately generated result UUIDs support matching across that boundary.
-    const index = hasPhysicalResults ? physical : sameTurn
-    const presentation = exchange.assistant
-    const presentationKey = hasPhysicalResults
-      ? typeof presentation.content === "string"
-        ? [payloadId(presentation.content)]
-        : readAssistantProse(presentation).text.map(payloadId)
-      : payloadId(presentation.content)
-    const key = JSON.stringify([
-      exchangeKey(exchange),
-      presentationKey,
-      exchange.results.map(resultVersionKey)
-    ])
-    const previous = rememberVersion(
-      index,
-      key,
-      exchange,
-      (left, right) =>
-        (left.assistant.reasoning || "") === (right.assistant.reasoning || "") &&
-        (hasPhysicalResults
-          ? samePhysicalPresentation(left.assistant, right.assistant) &&
-            isSameExchange(left, right, false, false)
-          : isSameExchange(left, right))
-    )
+    const previous = hasPhysicalResults
+      ? rememberPhysical(exchange, exchange)
+      : rememberVersion(
+          sameTurn,
+          JSON.stringify([
+            exchangeKey(exchange),
+            payloadId(exchange.assistant.content),
+            exchange.results.map(resultVersionKey)
+          ]),
+          exchange,
+          (left, right) => sameAssistantReasoning(left, right) && isSameExchange(left, right)
+        )
+    const disputedResult = exchange.results.some((result) => disputed.has(result))
+    if (hasPhysicalResults && !disputedResult) {
+      // Keep the exact presentations already seen for this completed batch.
+      // A delayed replay can still carry a draft earlier than its continuation.
+      if (content !== undefined) rememberPhysical(batch, previous)
+      canonicalByPresentation.set(message.id, previous)
+    }
     if (previous.assistant.id === exchange.assistant.id) continue
     // A replay occupying a new call can make the entire assistant look old.
     // Keep that call until the separate physical result can claim its slot.
-    if (exchange.results.some((result) => disputed.has(result))) continue
+    if (disputedResult) continue
     aliases.set(exchange.assistant.id, previous.assistant.id)
     for (const [index, result] of exchange.results.entries()) {
       const canonical = previous.results[index]

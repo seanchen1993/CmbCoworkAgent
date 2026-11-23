@@ -637,6 +637,81 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it("keeps equivalent indexed block evidence for a later earlier-span update", () => {
+    const [first, firstResult] = exchange()
+    const [alternate, alternateResult] = exchange(2)
+    const [later, laterResult] = exchange(3)
+    const blocks = [
+      { type: "text", index: 0, text: "Directory listing" },
+      { type: "text", index: 1, text: "Read results" }
+    ]
+    const updated = [{ ...blocks[0], text: "Directory listing confirmed" }, blocks[1]]
+    const rows = [
+      user,
+      { ...first, content: "Directory listing\nRead results" },
+      firstResult,
+      { ...alternate, content: blocks },
+      alternateResult,
+      { ...later, content: updated },
+      laterResult
+    ]
+    const aliases = findReplayedToolExchangeAliases(rows)
+    expect(aliases).toEqual(new Map([
+      [alternate.id, first.id],
+      [alternateResult.id, firstResult.id],
+      [later.id, first.id],
+      [laterResult.id, firstResult.id]
+    ]))
+    expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id)).get(
+      first.id
+    )).toBe(updated)
+  })
+
+  it.each(["draft", "intermediate", "fresh-result", "independent-continuation"])(
+    "uses exact observed physical drafts after a local structured upgrade (%s)",
+    (mode) => {
+      const [first, firstResult] = exchange()
+      const [middle, middleResult] = exchange(2)
+      const [final, finalResult] = exchange(3)
+      const [later, laterResult] = exchange(4)
+      const [continued, continuedResult] = exchange(5)
+      const nextUser = { ...user, id: "next-user" }
+      const middleText = "Checking the directory"
+      const revised = {
+        ...final,
+        content: [
+          { type: "text", text: middleText },
+          { type: "image", source: { type: "url", url: "https://example.com/report.png" } }
+        ]
+      }
+      const replay = { ...later, content: mode === "intermediate" ? middleText : first.content }
+      const copiedResult =
+        mode === "fresh-result"
+          ? { ...laterResult, id: "9c09fdd9-e146-4c2c-9b12-cac648551576",
+              provider_source_id: undefined }
+          : laterResult
+      const rows = [
+        user, first, firstResult, { ...middle, content: middleText }, middleResult,
+        revised, finalResult, nextUser, replay, copiedResult,
+        ...(mode === "independent-continuation"
+          ? [{ ...continued, content: "Checking a different directory" }, continuedResult]
+          : [])
+      ]
+      const aliases = findReplayedToolExchangeAliases(rows)
+      expect(aliases.get(final.id)).toBe(first.id)
+      if (mode === "draft" || mode === "intermediate") {
+        expect(aliases.get(later.id)).toBe(first.id)
+        expect(aliases.get(copiedResult.id)).toBe(firstResult.id)
+      } else {
+        expect(aliases.has(later.id)).toBe(false)
+        expect(aliases.has(copiedResult.id)).toBe(false)
+      }
+      expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id)).get(
+        first.id
+      )).toBe(revised.content)
+    }
+  )
+
   it.each([false, true])(
     "keeps separate hidden replies with the same outcome (prefix %s)",
     (prefix) => {
