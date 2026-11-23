@@ -1008,9 +1008,14 @@ describe("tool transcript replay", () => {
     expect(merged.find(({ id }) => id === current.id)?.content).toBe("")
   })
 
-  it.each([false, true])(
-    "omits a proved older whole exchange from a current checkpoint (current first %s)",
-    (currentFirst) => {
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true]
+  ])(
+    "omits a proved older whole exchange (current first %s, revised prior prose %s)",
+    (currentFirst, revised) => {
       const [earlier, originalResult] = exchange()
       const [current] = exchange(2)
       const fresh = { ...current, content: "Updated current reply" }
@@ -1023,7 +1028,10 @@ describe("tool transcript replay", () => {
       const newUser = { ...user, id: "current-user" }
       const durable = [user, earlier, originalResult, newUser, current, currentResult]
       const currentRows = [fresh, currentResult]
-      const earlierReplay = [earlier, originalResult]
+      const earlierReplay = [
+        revised ? { ...earlier, content: "Replayed older prose revised" } : earlier,
+        originalResult
+      ]
       const checkpoint = [
         newUser,
         ...(currentFirst ? [...currentRows, ...earlierReplay] : [...earlierReplay, ...currentRows])
@@ -1035,72 +1043,97 @@ describe("tool transcript replay", () => {
         { useStableProviderOccurrences: true }
       )
       expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
+      expect(merged[1].content).toBe(earlier.content)
       expect(merged[4].content).toBe(fresh.content)
     }
   )
 
-  it.each(["only-read", "stale-before-read", "only-ls-after-stale", "hidden-partial"])(
-    "reconciles a partial parallel batch using a witnessed durable result (%s)",
-    (variant) => {
-      const [earlier, oldResult] = exchange()
-      const currentUser = { ...user, id: "current-user" }
-      const [current, replay] = exchange(2)
-      const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
-      const realRead = {
-        ...oldResult,
-        id: "1c711082-5111-4632-976d-7c05ee064c33",
-        provider_source_id: undefined,
-        content: "Current read output"
-      }
-      const realLs = {
-        ...oldResult,
-        id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
-        provider_source_id: undefined,
-        tool_call_id: "ls-call",
-        name: "ls",
-        content: "Current ls output"
-      }
-      const durable = [
-        user,
-        earlier,
-        oldResult,
-        currentUser,
-        { ...current, tool_calls: calls },
-        realRead,
-        realLs
-      ]
-      const newAssistant = { ...earlier, tool_calls: calls, content: "Authoritative current batch" }
-      const observed =
-        variant === "only-read"
-          ? [realRead]
-          : variant === "only-ls-after-stale"
-            ? [replay, realLs]
-            : [replay, realRead]
-      const checkpoint =
-        variant === "hidden-partial"
-          ? [newAssistant, ...observed]
-          : [currentUser, newAssistant, ...observed]
-      const turns =
-        variant === "hidden-partial"
-          ? readCheckpointReplayTurns({
-              channel_values: {
-                messages: [hiddenTeam, ...checkpointRows(checkpoint)]
-              }
-            })
-          : undefined
-      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
-      const merged = mergeCheckpointAuthorityTranscriptMessages(
-        prepared.checkpoint,
-        prepared.durable,
-        { useStableProviderOccurrences: true }
-      )
-      expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
-      expect(merged[4].content).toBe(newAssistant.content)
-      const bindings = resolveToolResultOwnership(merged)
-      expect(bindings.get(getWorkerToolUiKey(current.id, "shared-call", 0))?.id).toBe(realRead.id)
-      expect(bindings.get(getWorkerToolUiKey(current.id, "ls-call", 1))?.id).toBe(realLs.id)
+  it.each([
+    "only-read",
+    "stale-before-read",
+    "only-ls-after-stale",
+    "hidden-partial",
+    "both-missing-ls",
+    "both-missing-read",
+    "mcp-file-link"
+  ])("reconciles a partial parallel batch using a witnessed durable result (%s)", (variant) => {
+    const [earlier, oldResult] = exchange()
+    const currentUser = { ...user, id: "current-user" }
+    const [current, replay] = exchange(2)
+    const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+    const realRead = {
+      ...oldResult,
+      id: "1c711082-5111-4632-976d-7c05ee064c33",
+      provider_source_id: undefined,
+      content:
+        variant === "mcp-file-link"
+          ? [{ type: "text", text: "Current read output" }]
+          : "Current read output"
     }
-  )
+    const realLs = {
+      ...oldResult,
+      id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      provider_source_id: undefined,
+      tool_call_id: "ls-call",
+      name: "ls",
+      content: "Current ls output"
+    }
+    const durable = [
+      user,
+      earlier,
+      oldResult,
+      currentUser,
+      { ...current, tool_calls: calls },
+      ...(variant === "both-missing-read" ? [] : [realRead]),
+      ...(variant === "both-missing-ls" ? [] : [realLs])
+    ]
+    const newAssistant = { ...earlier, tool_calls: calls, content: "Authoritative current batch" }
+    const observed =
+      variant === "only-read"
+        ? [realRead]
+        : variant === "only-ls-after-stale" || variant === "both-missing-read"
+          ? [replay, realLs]
+          : variant === "mcp-file-link"
+            ? [
+                replay,
+                {
+                  ...realRead,
+                  content: [
+                    { type: "text", text: "Current read output" },
+                    { type: "file", source_type: "url", url: "file:///fixture.txt" }
+                  ]
+                }
+              ]
+            : [replay, realRead]
+    const checkpoint =
+      variant === "hidden-partial"
+        ? [newAssistant, ...observed]
+        : [currentUser, newAssistant, ...observed]
+    const turns =
+      variant === "hidden-partial"
+        ? readCheckpointReplayTurns({
+            channel_values: {
+              messages: [hiddenTeam, ...checkpointRows(checkpoint)]
+            }
+          })
+        : undefined
+    const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
+    const merged = mergeCheckpointAuthorityTranscriptMessages(
+      prepared.checkpoint,
+      prepared.durable,
+      { useStableProviderOccurrences: true }
+    )
+    expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
+    expect(merged[4].content).toBe(newAssistant.content)
+    const bindings = resolveToolResultOwnership(merged)
+    const read = bindings.get(getWorkerToolUiKey(current.id, "shared-call", 0))
+    const ls = bindings.get(getWorkerToolUiKey(current.id, "ls-call", 1))
+    expect(read?.id).toBe(variant === "both-missing-read" ? undefined : realRead.id)
+    expect(ls?.id).toBe(variant === "both-missing-ls" ? undefined : realLs.id)
+    if (variant === "mcp-file-link") {
+      expect(read?.content).toEqual(observed[1].content)
+    }
+  })
 
   it("uses durable page evidence when both the earlier tool and its assistant are outside the window", () => {
     const [, original] = exchange()
@@ -1112,8 +1145,16 @@ describe("tool transcript replay", () => {
       content: "New result"
     }
     const proven = { ...stale, historical_tool_replay_id: original.id }
+    const [, next] = exchange(3)
+    const nextCopy = { ...next, historical_tool_replay_id: original.id }
     const loaded = [user, current, proven, latest]
     expect(findReplayedToolExchangeAliases(loaded)).toEqual(new Map([[stale.id, original.id]]))
+    expect(findReplayedToolExchangeAliases([user, current, proven, nextCopy, latest])).toEqual(
+      new Map([
+        [stale.id, original.id],
+        [nextCopy.id, original.id]
+      ])
+    )
     expect(findReplayedToolExchangeAliases([user, current, stale, latest]).size).toBe(0)
     const changed = mergeCheckpointAuthorityTranscriptMessages(
       [{ ...proven, content: "" }],

@@ -5,6 +5,7 @@ import {
   type QueuedStreamTranscriptMessage
 } from "./stream-transcript-flush"
 import { getMessageProviderTupleFromMetadata } from "../../shared/message-role-collision"
+import { extractPersistedMessageContent } from "../../shared/stream-transcript-content"
 import {
   streamToolCallContentModeFromMessageMode,
   type StreamToolCallChunk
@@ -20,17 +21,6 @@ function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined
-}
-
-function extractPersistedMessageContent(content: unknown): Message["content"] {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  const blocks = content.filter((block) => {
-    if (!block || typeof block !== "object" || Array.isArray(block)) return false
-    const type = (block as { type?: unknown }).type
-    return type === "text" || type === "image" || type === "tool_use" || type === "tool_result"
-  })
-  return blocks.length > 0 ? (blocks as Message["content"]) : ""
 }
 
 export function getSerializedMessageRole(msgChunk: unknown): Message["role"] | null {
@@ -82,7 +72,9 @@ export function persistedMessageFromStreamPayload(
 
   const record = msgChunk as { content?: unknown; kwargs?: Record<string, unknown> }
   const kwargs = asPlainRecord(record.kwargs) ?? {}
-  const content = extractPersistedMessageContent(kwargs.content ?? record.content)
+  const content = extractPersistedMessageContent(
+    kwargs.content ?? record.content
+  ) as Message["content"]
   const toolCalls = Array.isArray(kwargs.tool_calls)
     ? (kwargs.tool_calls as Message["tool_calls"])
     : undefined

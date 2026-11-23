@@ -27,15 +27,22 @@ it("verifies exact older tool output outside the page, excluding variants and fr
       .prepare("INSERT INTO thread_message_fragment_states VALUES ('thread', 'fragment-replay')")
       .run()
     type Row = { id: string; ordinal: number; provider_occurrence?: number }
+    const plans: string[] = []
     const lookup = (rows: Row[]) =>
       readPriorToolReplayIds(
         "thread",
         rows.map((row) => ({ ...row, role: "tool" })),
-        (sql, thread, ids, cutoff) =>
-          database
+        (sql, thread, ids, cutoff) => {
+          for (const { detail } of database
+            .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+            .all(thread, ids, cutoff)) {
+            plans.push(String(detail))
+          }
+          return database
             .prepare(sql)
             .all(thread, ids, cutoff)
             .map(({ message_id, earlier_id }) => [message_id, earlier_id])
+        }
       )
     const page = [
       { id: "exact-replay", ordinal: 12, provider_occurrence: 2 },
@@ -44,6 +51,10 @@ it("verifies exact older tool output outside the page, excluding variants and fr
     ]
     expect(lookup(page)).toEqual(new Map([["exact-replay", "older"]]))
     expect(lookup([{ id: "older", ordinal: 1 }, ...page]).size).toBe(0)
+    const requested = plans.findIndex((detail) => detail.includes("SCAN requested"))
+    const copy = plans.findIndex((detail) => detail.includes("SEARCH copy"))
+    expect(requested).toBeGreaterThanOrEqual(0)
+    expect(copy).toBeGreaterThan(requested)
   } finally {
     database.close()
   }
