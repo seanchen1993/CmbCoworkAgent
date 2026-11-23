@@ -336,6 +336,69 @@ describe("tool transcript replay", () => {
     expect(alignReplayedToolExchanges(durable, checkpoint)).toBe(checkpoint)
   })
 
+  it.each([
+    { trimmed: false, content: "Checking the updated file" },
+    { trimmed: true, content: "" },
+    {
+      trimmed: false,
+      content: [
+        { type: "reasoning", reasoning: "Inspect the file first" },
+        { type: "text", text: "Checking" }
+      ]
+    }
+  ])(
+    "reuses the completed tool execution for checkpoint assistant revisions ($trimmed, $content)",
+    ({ trimmed, content }) => {
+      const oldReply = {
+        ...exchange()[0],
+        content: "Unrelated earlier reply",
+        tool_calls: undefined
+      }
+      const assistant = { ...exchange()[0], content }
+      const tool = exchange()[1]
+      const durable = [{ ...user, id: "earlier" }, oldReply, user, exchange(2)[0], tool]
+      const checkpoint = trimmed ? [assistant, tool] : [user, assistant, tool]
+      const serialized = checkpointRows(checkpoint)
+      const raw = trimmed
+        ? [hiddenTeam, ...serialized]
+        : [serialized[0], hiddenTeam, ...serialized.slice(1)]
+      const turns = readCheckpointReplayTurns({ channel_values: { messages: raw } })
+      const aligned = alignReplayedToolExchanges(durable, checkpoint, turns)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(aligned, durable, {
+        useStableProviderOccurrences: true
+      })
+      expect(
+        merged.filter(({ role, tool_calls }) => role === "assistant" && tool_calls?.length)
+      ).toEqual([expect.objectContaining({ id: durable[3].id, content })])
+      expect(merged.filter(({ role }) => role === "tool")).toHaveLength(1)
+      expect(merged.find(({ id }) => id === oldReply.id)).toEqual(oldReply)
+    }
+  )
+
+  it("does not split a bare same-turn tool execution when the assistant changes presentation", () => {
+    const [assistant, tool] = exchange()
+    const durable = [user, assistant, tool]
+    for (const updated of [
+      { ...assistant, content: "Extended wording" },
+      { ...assistant, content: "" },
+      { ...assistant, reasoning: "Reasoning arrived later" }
+    ]) {
+      const checkpoint = [user, updated, tool]
+      expect(alignReplayedToolExchanges(durable, checkpoint)).toBe(checkpoint)
+    }
+  })
+
+  it("folds multiple checkpoint presentations when they resolve to one completed call", () => {
+    const [first, result] = exchange()
+    const [copy, copiedResult] = exchange(2)
+    const revised = { ...copy, content: "The latest wording" }
+    const durable = [user, copy, result]
+    const checkpoint = [user, first, result, revised, copiedResult]
+    const aligned = alignReplayedToolExchanges(durable, checkpoint)
+    expect(aligned.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
+    expect(aligned[1].content).toBe(revised.content)
+  })
+
   it.each([true, false])(
     "keeps distinct versions when one occupies the intended occurrence (%s)",
     (matchesFirst) => {

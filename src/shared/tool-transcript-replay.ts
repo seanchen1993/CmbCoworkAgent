@@ -39,6 +39,7 @@ interface AnchoredToolExchange<T> {
   position: number
   anchor?: T
   hasPhysicalResults: boolean
+  outcomeKey?: string
 }
 
 const noAliases: ReadonlyMap<string, string> = new Map()
@@ -113,7 +114,8 @@ function sameValue(left: unknown, right: unknown, depth = 0): boolean {
 function sameRow(
   left: TranscriptMessage,
   right: TranscriptMessage,
-  checkpointScopeMayBeMissing = false
+  checkpointScopeMayBeMissing = false,
+  comparePresentation = true
 ): boolean {
   const status = (row: TranscriptMessage) => row.status || (row.role === "tool" ? "success" : "")
   const failed = (row: TranscriptMessage) => row.is_error ?? row.status === "error"
@@ -131,18 +133,25 @@ function sameRow(
     (left.name || "") === (right.name || "") &&
     status(left) === status(right) &&
     failed(left) === failed(right) &&
-    sameValue(left.content, right.content) &&
-    (!left.reasoning || !right.reasoning || left.reasoning === right.reasoning)
+    (!comparePresentation ||
+      (sameValue(left.content, right.content) &&
+        (!left.reasoning || !right.reasoning || left.reasoning === right.reasoning)))
   )
 }
 
 function isSameExchange(
   left: ToolExchange<TranscriptMessage>,
   right: ToolExchange<TranscriptMessage>,
-  checkpointScopeMayBeMissing = false
+  checkpointScopeMayBeMissing = false,
+  compareAssistantPresentation = true
 ): boolean {
   return (
-    sameRow(left.assistant, right.assistant, checkpointScopeMayBeMissing) &&
+    sameRow(
+      left.assistant,
+      right.assistant,
+      checkpointScopeMayBeMissing,
+      compareAssistantPresentation
+    ) &&
     left.calls.length === right.calls.length &&
     left.calls.every(
       (call, index) =>
@@ -152,6 +161,16 @@ function isSameExchange(
         sameRow(left.results[index], right.results[index], checkpointScopeMayBeMissing)
     )
   )
+}
+
+function isSameCompletedExecution(
+  durable: ToolExchange<TranscriptMessage>,
+  checkpoint: ToolExchange<TranscriptMessage>,
+  checkpointScopeMayBeMissing = false
+): boolean {
+  // A model can revise its prose while the ordered calls and physical results
+  // continue to describe the same completed tool execution.
+  return isSameExchange(durable, checkpoint, checkpointScopeMayBeMissing, false)
 }
 
 function isExactToolExchangeReplay(
@@ -164,6 +183,23 @@ function isExactToolExchangeReplay(
       (result, index) => (result.reasoning || "") === (right.results[index]?.reasoning || "")
     ) &&
     isSameExchange(left, right)
+  )
+}
+
+function sameReplayAnchor(
+  durable: TranscriptMessage | undefined,
+  checkpoint: TranscriptMessage | undefined,
+  checkpointScopeMayBeMissing = false
+): boolean {
+  return (
+    durable === checkpoint ||
+    Boolean(
+      durable &&
+      checkpoint &&
+      sameRow(durable, checkpoint, checkpointScopeMayBeMissing) &&
+      (getMessageProviderOccurrence(durable) ?? 1) ===
+        (getMessageProviderOccurrence(checkpoint) ?? 1)
+    )
   )
 }
 
@@ -277,6 +313,7 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
   const ownership = resolveToolResultOwnership(messages)
   const byAnchor = new Map<string, AnchoredToolExchange<T>[]>()
   const byPhysicalGroup = new Map<string, AnchoredToolExchange<T>[]>()
+  const byOutcome = new Map<string, AnchoredToolExchange<T> | null>()
   const assistantAnchors = new Map<string, T | undefined>()
   const addCandidate = (
     index: Map<string, AnchoredToolExchange<T>[]>,
@@ -292,9 +329,19 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
   const addAnchoredCandidate = (
     scope: string | null,
     evidence: unknown[],
+    outcome: unknown[] | undefined,
     candidate: AnchoredToolExchange<T>
   ) => {
     const key = JSON.stringify([scope, ...evidence])
+    if (foldEquivalentTargets && outcome) {
+      const outcomeKey = JSON.stringify([scope, ...outcome])
+      const previous = byOutcome.get(outcomeKey)
+      const equivalent =
+        previous &&
+        (scope === null || sameReplayAnchor(previous.anchor, candidate.anchor)) &&
+        isSameCompletedExecution(previous.exchange, candidate.exchange)
+      byOutcome.set(outcomeKey, previous === undefined || equivalent ? candidate : null)
+    }
     if (
       foldEquivalentTargets &&
       candidate.hasPhysicalResults &&
@@ -303,13 +350,7 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
         ?.some(
           (previous) =>
             isExactToolExchangeReplay(previous.exchange, candidate.exchange) &&
-            (scope === null ||
-              previous.anchor === candidate.anchor ||
-              (previous.anchor &&
-                candidate.anchor &&
-                sameRow(previous.anchor, candidate.anchor) &&
-                (getMessageProviderOccurrence(previous.anchor) ?? 1) ===
-                  (getMessageProviderOccurrence(candidate.anchor) ?? 1)))
+            (scope === null || sameReplayAnchor(previous.anchor, candidate.anchor))
         )
     )
       return
@@ -327,37 +368,39 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
     const exchange = readExchange(message, ownership)
     if (exchange) {
       const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
+      const identity = exchangeKey(exchange)
+      const outcome = hasPhysicalResults
+        ? [
+            identity,
+            exchange.results.map((result) => [resultReplayKey(result), payloadId(result.content)])
+          ]
+        : undefined
       const evidenceKey = [
-        exchangeKey(exchange),
-        hasPhysicalResults
-          ? [
-              payloadId(exchange.assistant.content),
-              exchange.results.map((result) => [resultReplayKey(result), payloadId(result.content)])
-            ]
-          : null
+        identity,
+        outcome ? [payloadId(exchange.assistant.content), outcome[1]] : null
       ]
-      const candidate = { exchange, position, anchor, hasPhysicalResults }
+      const outcomeKey = outcome ? JSON.stringify([anchor?.id ?? null, ...outcome]) : undefined
+      const candidate = { exchange, position, anchor, hasPhysicalResults, outcomeKey }
       const requiresRawProof =
         checkpointTurns && (!anchor || checkpointTurns.hiddenAnchors.has(anchor.id))
       const unsafe =
         requiresRawProof &&
         (!hasPhysicalResults || !hasRawCheckpointToolBindings(exchange, checkpointTurns))
       if (!unsafe) {
-        if (anchor) addAnchoredCandidate(anchor.id, evidenceKey, candidate)
+        if (anchor) addAnchoredCandidate(anchor.id, evidenceKey, outcome, candidate)
         if (
           includeLeadingHidden &&
           hasPhysicalResults &&
           (!checkpointTurns || (!anchor && checkpointTurns.leadingHiddenAssistants.has(message.id)))
         ) {
-          addAnchoredCandidate(null, evidenceKey, candidate)
+          addAnchoredCandidate(null, evidenceKey, outcome, candidate)
         }
-        if (hasPhysicalResults)
-          addCandidate(byPhysicalGroup, JSON.stringify(evidenceKey), candidate)
+        if (outcome) addCandidate(byPhysicalGroup, JSON.stringify(outcome), candidate)
       }
     }
     position++
   }
-  return { byAnchor, byPhysicalGroup, ownership, assistantAnchors }
+  return { byAnchor, byPhysicalGroup, byOutcome, ownership, assistantAnchors }
 }
 
 function selectCheckpointReplayAliases<T extends TranscriptMessage>(
@@ -369,28 +412,40 @@ function selectCheckpointReplayAliases<T extends TranscriptMessage>(
   for (const copies of checkpoint.byPhysicalGroup.values()) {
     const handled = new Set<AnchoredToolExchange<T>>()
     for (const candidate of copies) {
-      if (!targets.has(candidate) || handled.has(candidate)) continue
+      const target = targets.get(candidate)
+      if (!target || handled.has(candidate)) continue
+      const matchesTarget = (copy: AnchoredToolExchange<T>) =>
+        targets.get(copy)?.exchange.assistant.id === target.exchange.assistant.id &&
+        isSameCompletedExecution(candidate.exchange, copy.exchange)
+      // Keep the checkpoint's latest presentation of a matched execution.
+      const retained =
+        copies.findLast(
+          (copy) =>
+            !handled.has(copy) &&
+            matchesTarget(copy) &&
+            !isExactToolExchangeReplay(candidate.exchange, copy.exchange)
+        ) ?? candidate
       const equivalent = copies.filter(
         (copy) =>
-          copy !== candidate &&
+          copy !== retained &&
           !handled.has(copy) &&
-          isExactToolExchangeReplay(candidate.exchange, copy.exchange)
+          (matchesTarget(copy) || isExactToolExchangeReplay(retained.exchange, copy.exchange))
       )
       if (!equivalent.length) continue
       const aliases: Array<[string, string]> = []
-      handled.add(candidate)
+      handled.add(retained)
       for (const { exchange } of equivalent) {
-        if (exchange.assistant.id === candidate.exchange.assistant.id) continue
-        aliases.push([exchange.assistant.id, candidate.exchange.assistant.id])
+        if (exchange.assistant.id === retained.exchange.assistant.id) continue
+        aliases.push([exchange.assistant.id, retained.exchange.assistant.id])
         exchange.results.forEach(({ id }, index) => {
-          const retained = candidate.exchange.results[index].id
-          if (id !== retained) aliases.push([id, retained])
+          const retainedId = retained.exchange.results[index].id
+          if (id !== retainedId) aliases.push([id, retainedId])
         })
       }
       for (const copy of equivalent) handled.add(copy)
       if (aliases.length)
         groups.push({
-          ids: candidate.exchange.calls.map(({ id }) => getRawWorkerToolCallId(id)),
+          ids: retained.exchange.calls.map(({ id }) => getRawWorkerToolCallId(id)),
           aliases
         })
     }
@@ -530,7 +585,8 @@ function reserveCheckpointVersionIds<T extends TranscriptMessage>(
       assistant.id === source &&
       (durableOccurrences.get(`assistant\u0000${source}`) ?? 1) > 1
     const differentExecution =
-      currentExecution && !isSameExchange(currentExecution.exchange, candidate.exchange, true)
+      currentExecution &&
+      !isSameCompletedExecution(currentExecution.exchange, candidate.exchange, true)
     const matchedVersionExists = matchedExecutions.has(executionKey(candidate))
     if (!differentTurn && !earlierHiddenOccurrence && !differentExecution && !matchedVersionExists)
       continue
@@ -640,21 +696,14 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   })
   const targets = new Map<AnchoredToolExchange<T>, AnchoredToolExchange<T>>()
   for (const [key, copies] of checkpoint.byAnchor) {
-    const possible = durable.byAnchor.get(key)
-    if (
-      !possible ||
-      (!copies[0].hasPhysicalResults && (copies.length !== 1 || possible.length !== 1))
-    )
-      continue
+    const possible = durable.byAnchor.get(key) ?? []
+    if (!copies[0].hasPhysicalResults && (copies.length !== 1 || possible.length !== 1)) continue
     for (const candidate of copies) {
       const matches = possible.filter(
         (target) =>
           (target.position === candidate.position || hasExecutionIdentity(target.exchange)) &&
           (!candidate.anchor ||
-            (target.anchor &&
-              sameRow(target.anchor, candidate.anchor, target.hasPhysicalResults) &&
-              (getMessageProviderOccurrence(target.anchor) ?? 1) ===
-                (getMessageProviderOccurrence(candidate.anchor) ?? 1))) &&
+            sameReplayAnchor(target.anchor, candidate.anchor, target.hasPhysicalResults)) &&
           isSameExchange(target.exchange, candidate.exchange, target.hasPhysicalResults)
       )
       const [target] = matches
@@ -662,8 +711,20 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
         target &&
         (matches.length === 1 ||
           matches.every((match) => isExactToolExchangeReplay(target.exchange, match.exchange)))
-      )
+      ) {
         targets.set(candidate, target)
+        continue
+      }
+      if (!matches.length && candidate.outcomeKey) {
+        const sameOutcome = durable.byOutcome.get(candidate.outcomeKey)
+        if (
+          sameOutcome &&
+          (!candidate.anchor || sameReplayAnchor(sameOutcome.anchor, candidate.anchor, true)) &&
+          isSameCompletedExecution(sameOutcome.exchange, candidate.exchange, true)
+        ) {
+          targets.set(candidate, sameOutcome)
+        }
+      }
     }
   }
   const checkpointAliases = selectCheckpointReplayAliases(replay, checkpoint, targets)

@@ -197,7 +197,19 @@ async function seedHistory(): Promise<number> {
           content: "Hidden notification fixture",
           additional_kwargs: { cmb_internal_coordinator_notification: true }
         },
-        ...[...nextWithLateResult, ...mismatch, final].map(toCheckpointMessage),
+        ...[
+          ...nextWithLateResult,
+          mismatch[0],
+          {
+            ...mismatch[1],
+            content: [
+              { type: "reasoning", reasoning: "Inspect the fixture before replying" },
+              { type: "text", text: "Checking fixture 2" }
+            ]
+          },
+          mismatch[2],
+          final
+        ].map(toCheckpointMessage),
         {
           ...toCheckpointMessage(legacy),
           tool_calls: { length: 1 }
