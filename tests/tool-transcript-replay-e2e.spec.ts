@@ -423,10 +423,15 @@ async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> 
   }))
   const beforeCopy = splitSearch ? fill("before-legacy-copy", 80) : []
   const afterCopy = splitSearch ? fill("after-legacy-copy", 140) : []
+  const laterExecution: Message[] = splitSearch ? [
+    { ...end, id: "native-later-tool-user", content: "Read the later file" },
+    { ...assistant, id: "native-later-tool-assistant", content: "Checking a different file" },
+    { ...tool, id: resultIds[1], content: "Independent later file contents" }
+  ] : []
   const durable = [
     user, assistant, { ...tool, content: body }, setOccurrence(revised, 2),
     setOccurrence({ ...tool, content: body }, 2), ...beforeCopy,
-    ...(legacy ? [copy] : []), end, ...afterCopy
+    ...(legacy ? [copy] : []), end, ...afterCopy, ...laterExecution
   ]
   const checkpointId = `${id}-checkpoint`
   await db.initializeDatabase()
@@ -440,7 +445,8 @@ async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> 
       db.getDb().run(`INSERT INTO legacy_checkpoint_transcript_migrations
         (thread_id, checkpoint_id, total_messages, next_index, status, updated_at, search_projection_state)
         VALUES (?, ?, ?, ?, 'complete', ?, 'complete')`,
-      [id, checkpointId, durable.length + 1, durable.length + 1, Date.now()])
+      [id, checkpointId, durable.length + 1 - laterExecution.length,
+        durable.length + 1 - laterExecution.length, Date.now()])
       db.getDb().run(`INSERT INTO legacy_checkpoint_transcript_imports
         (thread_id, message_id, content_key, published_checkpoint_id)
         VALUES (?, ?, ?, ?)`, [id, copy.id, "test legacy assistant import", checkpointId])
@@ -473,7 +479,7 @@ async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> 
       await saver.put(saved, {
         ...checkpoint,
         id: `${checkpointId}-successor`,
-        channel_values: { messages: [...visible, end, ...afterCopy].map(toCheckpointMessage) },
+        channel_values: { messages: [...visible, end, ...afterCopy, ...laterExecution].map(toCheckpointMessage) },
         channel_versions: { messages: 2 }
       }, { source: "loop", step: 2, writes: {}, parents: {} })
     }

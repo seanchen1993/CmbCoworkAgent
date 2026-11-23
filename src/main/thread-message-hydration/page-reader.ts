@@ -24,8 +24,13 @@ import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "./order-sql"
 import { readPriorToolReplayIds } from "./tool-replay-evidence"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
-import { readLegacyImportedCheckpointReplayAliases } from "../../shared/tool-transcript-replay"
-import { getRawWorkerToolCallId, getWorkerToolUiKey, resolveToolResultOwnership } from "../../shared/tool-result-ownership"
+import { readLegacyImportedCheckpointReplayEvidence } from "../../shared/tool-transcript-replay"
+import {
+  getRawWorkerToolCallId,
+  getWorkerToolUiKey,
+  resolveToolResultOwnership,
+  type ToolOwnershipMessage
+} from "../../shared/tool-result-ownership"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -1151,16 +1156,20 @@ function readPageLegacyReplayAliases(
     typeof id !== "string" || !byId.has(id)
   )) return aliases
   const missingSlots = resolveToolResultOwnership(ordered)
-  const outsideResult = database.prepare(`SELECT 1 FROM thread_messages
-    WHERE thread_id = ? AND role = 'tool' AND tool_call_id IN (?, ?) AND ordinal > ? LIMIT 1`)
+  const laterOwnerFences = new Map<string, number>()
   for (const row of rows) {
     if (typeof row.message_id !== "string" || typeof row.published_checkpoint_id !== "string" ||
         row.published_checkpoint_id === NATIVE_DURABLE_CHECKPOINT_ID) continue
     const stored = byId.get(row.message_id)
-    if (row.role === "assistant" && stored?.tool_calls?.some(({ id }, index) =>
-      !missingSlots.has(getWorkerToolUiKey(stored.id, id, index)) &&
-      outsideResult.get(threadId, id, getRawWorkerToolCallId(id), last)
-    )) continue
+    if (row.role === "assistant" && stored?.tool_calls?.some(({ id }, index) => {
+      if (missingSlots.has(getWorkerToolUiKey(stored.id, id, index))) return false
+      let fence = laterOwnerFences.get(id)
+      if (fence === undefined) {
+        fence = proveLaterToolResultOwners(database, threadId, id, first, last, cancellation)
+        laterOwnerFences.set(id, fence)
+      }
+      return fence <= (stored.ordinal ?? last)
+    })) continue
     const group = groups.get(row.published_checkpoint_id) ?? { ids: new Set(), assistant: false }
     group.assistant ||= row.role === "assistant"
     group.ids.add(row.message_id)
@@ -1184,7 +1193,8 @@ function readPageLegacyReplayAliases(
       }
       const checkpoint = original ?? (ancestors?.has(source) ? latest : undefined)
       if (!checkpoint) continue
-      for (const [id, retained] of readLegacyImportedCheckpointReplayAliases(ordered, checkpoint.checkpoint, group.ids)) {
+      const evidence = readLegacyImportedCheckpointReplayEvidence(ordered, checkpoint.checkpoint, group.ids)
+      for (const [id, retained] of evidence.aliases) {
         if (visibleIds.has(id)) aliases.set(id, retained)
       }
     } catch {
@@ -1193,6 +1203,69 @@ function readPageLegacyReplayAliases(
     }
   }
   return aliases
+}
+
+function proveLaterToolResultOwners(
+  database: DatabaseSync, threadId: string, callId: string, first: number, last: number,
+  cancellation: Int32Array
+): number {
+  // Return the oldest positively identified user turn with a matching result.
+  // An empty suffix cannot receive the old call. An unresolved suffix can.
+  const limit = 64
+  const byCall = database.prepare(`SELECT message_id, ordinal FROM thread_messages
+    WHERE thread_id = ? AND role = 'tool' AND tool_call_id = ? AND ordinal > ?
+    ORDER BY ordinal LIMIT ?`)
+  const results = [...new Set([callId, getRawWorkerToolCallId(callId)])]
+    .flatMap((id) => byCall.all(threadId, id, last, limit + 1))
+  if (!results.length) return Infinity
+  if (results.length > limit) return -Infinity
+  const nearestUser = database.prepare(`SELECT ordinal FROM thread_messages
+    WHERE thread_id = ? AND role = 'user' AND ordinal < ? ORDER BY ordinal DESC LIMIT 1`)
+  const turns = new Map<number, { end: number; resultIds: Set<string> }>()
+  for (const { message_id: id, ordinal } of results) {
+    throwIfCancelled(cancellation)
+    if (typeof id !== "string" || typeof ordinal !== "number") return -Infinity
+    const user = nearestUser.get(threadId, ordinal)?.ordinal
+    if (typeof user !== "number" || user <= first) return -Infinity
+    const turn = turns.get(user) ?? { end: ordinal, resultIds: new Set<string>() }
+    turn.end = Math.max(turn.end, ordinal)
+    turn.resultIds.add(id)
+    turns.set(user, turn)
+  }
+  const lastResult = Math.max(...[...turns.values()].map(({ end }) => end))
+  // Scoped worker rows can reset the resolver's turn counter. A skipped
+  // interval containing any such row cannot prove a newer main-agent turn.
+  if (database.prepare(`SELECT 1 FROM thread_messages WHERE thread_id = ?
+    AND message_id >= 'worker-turn-' AND message_id < 'worker-turn.'
+    AND ordinal BETWEEN ? AND ? LIMIT 1`).get(threadId, first, lastResult)) return -Infinity
+  const readTurn = database.prepare(`SELECT message_id, role, tool_call_id,
+      CASE WHEN length(CAST(tool_calls_json AS BLOB)) <= 65536 THEN tool_calls_json END AS tool_calls,
+      length(CAST(tool_calls_json AS BLOB)) > 65536 AS incomplete
+    FROM thread_messages WHERE thread_id = ? AND ordinal BETWEEN ? AND ?
+    ORDER BY ordinal, created_at, message_id LIMIT ?`)
+  let remainingBytes = 512 * 1024
+  for (const [user, { end, resultIds }] of turns) {
+    throwIfCancelled(cancellation)
+    const rows = readTurn.all(threadId, user, end, limit + 1)
+    if (rows.length > limit || rows[0]?.role !== "user" ||
+        rows.slice(1).some(({ incomplete, role }) => incomplete || role === "user")) return -Infinity
+    remainingBytes -= rows.reduce((sum, row) => sum +
+      (typeof row.tool_calls === "string" ? Buffer.byteLength(row.tool_calls) : 0), 0)
+    if (remainingBytes < 0) return -Infinity
+    const messages: ToolOwnershipMessage[] = rows.flatMap((row) => {
+      if (typeof row.message_id !== "string" || typeof row.role !== "string") return []
+      const calls = parseJsonValue(row.tool_calls, cancellation)
+      return [{
+        id: row.message_id,
+        role: row.role,
+        tool_calls: Array.isArray(calls) ? calls : undefined,
+        tool_call_id: typeof row.tool_call_id === "string" ? row.tool_call_id : undefined
+      }]
+    })
+    const owned = new Set([...resolveToolResultOwnership(messages).values()].map(({ id }) => id))
+    if ([...resultIds].some((id) => !owned.has(id))) return -Infinity
+  }
+  return Math.min(...turns.keys())
 }
 
 function readLegacyReplayPageContext(

@@ -17,6 +17,7 @@ import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electro
 import { constants as fsConstants } from "fs"
 import { copyFile, lstat, mkdir } from "fs/promises"
 import path from "path"
+import { isDeepStrictEqual } from "node:util"
 import AdmZip from "adm-zip"
 import { v4 as uuid } from "uuid"
 import {
@@ -163,13 +164,15 @@ import {
   readCheckpointReplayTurns,
   isWorkflowPlumbingTranscriptContent,
   mergeCheckpointAuthorityTranscriptMessages,
-  truncateCheckpointMessagesAfter
+  truncateCheckpointMessagesAfter,
+  type CheckpointAuthorityTranscriptMessage
 } from "../../shared/checkpoint-transcript"
 import {
   prepareToolTranscriptReplayMerge,
-  readLegacyImportedCheckpointReplayAliases,
+  readLegacyImportedCheckpointReplayEvidence,
   findReplayedToolExchangeAliases,
-  getAssistantReplayContent
+  getAssistantReplayContent,
+  type LegacyCheckpointReplayEvidence
 } from "../../shared/tool-transcript-replay"
 import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
 import {
@@ -2853,7 +2856,7 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
   checkpoint: unknown,
   persistedMessages: Message[],
   legacyImportedIds?: ReadonlySet<string>,
-  verifiedLegacyAliases?: ReadonlyMap<string, string>
+  legacyEvidence?: LegacyCheckpointReplayEvidence
 ): Message[] {
   const checkpointTranscriptIndex = checkpoint ? deriveCheckpointTranscriptIndex(checkpoint) : null
   const rawCheckpointMessages = getCheckpointChannelMessages(checkpoint)
@@ -2869,7 +2872,7 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
     checkpointMessages,
     readCheckpointReplayTurns(checkpoint),
     legacyImportedIds,
-    verifiedLegacyAliases
+    legacyEvidence
   )
   const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable, {
     useStableProviderOccurrences: true
@@ -2889,8 +2892,10 @@ function readSessionLegacyReplayEvidence(threadId: string, checkpointId: string,
   const sources = getLegacyImportedToolOccurrenceSources(threadId)
   const ids = new Set(sources.get(checkpointId))
   const aliases = new Map<string, string>()
+  const resultContents = new Map<CheckpointAuthorityTranscriptMessage, unknown>()
+  const evidence = { aliases, resultContents }
   sources.delete(checkpointId)
-  if (!sources.size) return { ids, aliases }
+  if (!sources.size) return { ids, evidence }
 
   const checkpointPath = getThreadCheckpointPath(threadId)
   let ancestors: Set<string>
@@ -2899,10 +2904,11 @@ function readSessionLegacyReplayEvidence(threadId: string, checkpointId: string,
       checkpointPath, getDbPath(), threadId, checkpointId, [...sources.keys()]
     )
   } catch {
-    return { ids, aliases }
+    return { ids, evidence }
   }
 
   const cancellation = new Int32Array(1)
+  const conflictingResults = new Set<CheckpointAuthorityTranscriptMessage>()
   for (const source of ancestors) {
     const imported = sources.get(source)
     if (!imported) continue
@@ -2911,13 +2917,21 @@ function readSessionLegacyReplayEvidence(threadId: string, checkpointId: string,
       // The current head can omit this raw replay after retaining its earlier
       // exchange. Audit the exact source that published the durable copy.
       const original = readLegacyReplayCheckpoint(checkpointPath, threadId, source, cancellation)
-      for (const [id, canonical] of readLegacyImportedCheckpointReplayAliases(durable, original?.checkpoint, imported))
+      const proven = readLegacyImportedCheckpointReplayEvidence(durable, original?.checkpoint, imported)
+      for (const [id, canonical] of proven.aliases)
         aliases.set(id, canonical)
+      for (const [row, content] of proven.resultContents) {
+        if (conflictingResults.has(row)) continue
+        if (resultContents.has(row) && !isDeepStrictEqual(resultContents.get(row), content)) {
+          conflictingResults.add(row)
+          resultContents.delete(row)
+        } else resultContents.set(row, content)
+      }
     } catch {
       // Export can still reconcile evidence present in the latest checkpoint.
     }
   }
-  return { ids, aliases }
+  return { ids, evidence }
 }
 
 function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
@@ -4495,7 +4509,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
               latestCheckpoint?.checkpoint,
               persisted,
               legacy?.ids,
-              legacy?.aliases
+              legacy?.evidence
             )
           )
 

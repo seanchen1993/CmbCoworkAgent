@@ -60,6 +60,11 @@ interface AnchoredToolSlots<T> {
   anchor?: T
 }
 
+export interface LegacyCheckpointReplayEvidence {
+  aliases: ReadonlyMap<string, string>
+  resultContents: ReadonlyMap<CheckpointAuthorityTranscriptMessage, unknown>
+}
+
 const noAliases: ReadonlyMap<string, string> = new Map()
 const toolResultUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const langGraphToolResultPrefix =
@@ -2766,13 +2771,13 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
   checkpoint: readonly T[],
   importedIds: ReadonlySet<string> | undefined,
   checkpointTurns?: CheckpointReplayTurns
-): { messages: readonly T[]; aliases: ReadonlyMap<string, string> } {
+): { messages: readonly T[] } & LegacyCheckpointReplayEvidence {
   const needsRawProjection = checkpoint.some((row) =>
     row.role === "tool" && Array.isArray(row.content) &&
     !sameValue(row.content, extractPersistedMessageContent(row.content))
   )
   if ((!importedIds?.size && !needsRawProjection) || !hasToolReplayCandidates(checkpoint))
-    return { messages: durable, aliases: noAliases }
+    return { messages: durable, aliases: noAliases, resultContents: new Map() }
   const replayAliases = findExactCheckpointToolReplays(checkpoint, undefined, checkpointTurns)
   const rawOwnership = resolveToolResultOwnership(checkpoint)
   const rawTurns = checkpointTurns && indexAssistantTurns(checkpointTurns.rawToolTranscript)
@@ -2821,7 +2826,7 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
     group.push(match)
     projectionGroups.set(key, group)
   }
-  const restored = new Map<T, T>()
+  const restored = new Map<T, unknown>()
   for (const versions of projectionGroups.values()) {
     const first = versions[0]
     if (!versions.some(({ raw, stored }) =>
@@ -2834,7 +2839,7 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
       if (!isSameCompletedExecution(first.stored, stored)) continue
       stored.results.forEach((result, index) => {
         if (!sameValue(result.content, raw.results[index].content))
-          restored.set(result, { ...result, content: raw.results[index].content })
+          restored.set(result, raw.results[index].content)
       })
     }
   }
@@ -2845,7 +2850,8 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
     const retained = witnessed.get(retainedId)?.stored
     const rawRow = rawById.get(id)
     if (!storedRow || !retained || !rawRow || storedRow.goal_id || storedRow.active_window_id ||
-        !sameRow(retained.assistant, storedRow, false, false)) continue
+        !sameRow(retained.assistant, storedRow, false, false) ||
+        (storedRow.reasoning && storedRow.reasoning !== retained.assistant.reasoning)) continue
     const anchor = storedAnchors.get(storedRow)
     if (
       !anchor || anchor !== storedAnchors.get(retained.assistant) ||
@@ -2858,7 +2864,8 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
         !copy.results.every((result, index) => !result || (
           result.id === raw.results[index].id && importedIds.has(result.id) &&
           !result.goal_id && !result.active_window_id && sameRow(result, raw.results[index], true) &&
-          sameRow(retained.results[index], result, false, false)
+          sameRow(retained.results[index], result, false, false) &&
+          (!result.reasoning || result.reasoning === retained.results[index].reasoning)
         ))) continue
     // The legacy importer could append the declaration by itself when the
     // corresponding tool slot was already represented by a durable result.
@@ -2870,23 +2877,26 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
   const verified = preserveReplayToolBindings(durable, aliases, storedOwnership)
   return {
     messages: verified.size || restored.size
-      ? durable.flatMap((row) => verified.has(row.id) ? [] : [restored.get(row) ?? row])
+      ? durable.flatMap((row) => verified.has(row.id) ? [] : [
+          restored.has(row) ? { ...row, content: restored.get(row) } : row
+        ])
       : durable,
-    aliases: verified
+    aliases: verified,
+    resultContents: restored
   }
 }
 
-export function readLegacyImportedCheckpointReplayAliases(
+export function readLegacyImportedCheckpointReplayEvidence(
   durable: readonly TranscriptMessage[],
   checkpoint: unknown,
   importedIds: ReadonlySet<string>
-): ReadonlyMap<string, string> {
+): LegacyCheckpointReplayEvidence {
   const versions = nameCheckpointReplayOccurrences(
     readCheckpointToolReplayMessages(checkpoint), readCheckpointReplayTurns(checkpoint)
   )
   return reconcileExactCheckpointReplays(
     durable, versions.messages, importedIds, versions.checkpointTurns
-  ).aliases
+  )
 }
 
 /** Both sources can number and render the same completed execution differently. */
@@ -2895,7 +2905,7 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   checkpointRows: T[],
   rawCheckpointTurns?: CheckpointReplayTurns,
   legacyImportedIds?: ReadonlySet<string>,
-  verifiedLegacyAliases?: ReadonlyMap<string, string>
+  legacyEvidence?: LegacyCheckpointReplayEvidence
 ): { checkpoint: T[]; durable: readonly T[] } {
   const rawAssistantTurns =
     rawCheckpointTurns && indexAssistantTurns(rawCheckpointTurns.rawToolTranscript)
@@ -2943,10 +2953,14 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
       return turn === undefined ? row : { ...row, [checkpointToolTurn]: turn }
     })
   }
-  const legacyAliases = verifiedLegacyAliases?.size
-    ? preserveReplayToolBindings(durableRows, verifiedLegacyAliases) : noAliases
-  const stored = legacyAliases.size
-    ? durableRows.filter(({ id }) => !legacyAliases.has(id)) : durableRows
+  const legacyAliases = legacyEvidence?.aliases.size
+    ? preserveReplayToolBindings(durableRows, legacyEvidence.aliases) : noAliases
+  const stored = legacyAliases.size || legacyEvidence?.resultContents.size
+    ? durableRows.flatMap((row) => legacyAliases.has(row.id) ? [] : [
+        legacyEvidence?.resultContents.has(row)
+          ? { ...row, content: legacyEvidence.resultContents.get(row) }
+          : row
+      ]) : durableRows
   if (!stored.length || checkpointRows.length < 2)
     return { checkpoint: keepHiddenToolScope(checkpointRows, checkpointRows), durable: stored }
   const checkpointVersions = nameCheckpointReplayOccurrences(checkpointRows, rawCheckpointTurns)

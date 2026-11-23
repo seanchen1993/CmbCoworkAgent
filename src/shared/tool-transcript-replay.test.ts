@@ -9,7 +9,7 @@ import {
   findReplayedToolExchangeAliases,
   getAssistantReplayContent,
   prepareToolTranscriptReplayMerge,
-  readLegacyImportedCheckpointReplayAliases
+  readLegacyImportedCheckpointReplayEvidence
 } from "./tool-transcript-replay"
 import { getWorkerToolUiKey, resolveToolResultOwnership } from "./tool-result-ownership"
 import { normalizeMessageContent } from "./thread-message-content"
@@ -50,7 +50,7 @@ function exchange(occurrence = 1, args = { path: "fixture" }, content = "ok"): M
 describe("tool transcript replay", () => {
   it.each([
     "projected", "imported-assistant", "imported-batch", "imported-hidden-afterward",
-    "imported-later-goal", "pending", "same-prose", "same-prose-independent"
+    "imported-later-goal", "imported-later-reasoning", "pending", "same-prose", "same-prose-independent"
   ])(
     "keeps distinct raw result versions that share a stored projection (%s)",
     (mode) => {
@@ -66,7 +66,8 @@ describe("tool transcript replay", () => {
       const rawCopy = { ...copy, content: secondAssistant.content }
       const storedCopy = mode === "imported-later-goal"
         ? { ...rawCopy, goal_id: "continued-goal", active_window_id: "continued-window" }
-        : rawCopy
+        : mode === "imported-later-reasoning"
+          ? { ...rawCopy, reasoning: "New durable reasoning" } : rawCopy
       const copiedResult = mode === "same-prose-independent" ? resource("fixture://third") : secondRaw
       const next = { ...user, id: "next-user" }
       const durable = [
@@ -89,7 +90,7 @@ describe("tool transcript replay", () => {
       const turns = readCheckpointReplayTurns(source)
       const replay = prepareToolTranscriptReplayMerge(durable, checkpoint, turns, imported)
       const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
-      const keepCopy = mode === "pending" || mode === "imported-later-goal"
+      const keepCopy = mode === "pending" || mode.startsWith("imported-later-")
       expect(merged.map(({ id }) => id)).toEqual([
         user.id, first.id, result.id, second.id, secondResult.id,
         ...(mode === "same-prose-independent" ? [copy.id, copyResult.id] : keepCopy ? [copy.id] : []),
@@ -98,11 +99,38 @@ describe("tool transcript replay", () => {
       expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content))
         .toEqual([firstRaw, secondRaw, ...(mode === "same-prose-independent" ? [copiedResult] : [])])
       if (imported) {
-        const aliases = readLegacyImportedCheckpointReplayAliases(durable, source, imported)
+        const { aliases } = readLegacyImportedCheckpointReplayEvidence(durable, source, imported)
         expect(aliases.get(copy.id)).toBe(keepCopy ? undefined : second.id)
       }
+      if (mode === "imported-later-reasoning")
+        expect(merged.find(({ id }) => id === copy.id)?.reasoning).toBe(storedCopy.reasoning)
     }
   )
+
+  it("preserves distinct historical raw results when a later checkpoint omits the tool turn", () => {
+    const [first, result] = exchange()
+    const [second, secondResult] = exchange(2)
+    const [copy, copyResult] = exchange(3)
+    const projected = [{ type: "text", text: "Same stored text" }]
+    const one = [...projected, { type: "resource_link", uri: "fixture://one" }]
+    const two = [...projected, { type: "resource_link", uri: "fixture://two" }]
+    const durable = [user, first, { ...result, content: projected }, second, {
+      ...secondResult, content: projected
+    }, copy]
+    const original = { channel_values: { messages: checkpointRows([
+      user, first, { ...result, content: one }, second, { ...secondResult, content: two },
+      copy, { ...copyResult, content: two }
+    ]) } }
+    const imported = new Set([copy.id])
+    const legacy = readLegacyImportedCheckpointReplayEvidence(durable, original, imported)
+    const latest = [
+      { ...user, id: "compacted-later-user" }, { ...user, id: "compacted-latest-user" }
+    ]
+    const replay = prepareToolTranscriptReplayMerge(durable, latest, undefined, imported, legacy)
+    const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
+    expect(merged.map(({ id }) => id)).not.toContain(copy.id)
+    expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content)).toEqual([one, two])
+  })
 
   it("aligns a complete cross-source exchange despite conflicting occurrence numbers", () => {
     const durable = [user, ...exchange(2)]
