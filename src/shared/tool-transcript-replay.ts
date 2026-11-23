@@ -1686,9 +1686,23 @@ function replayProseLength(prose: ReplayProse): number {
 }
 
 function sameAnnotationPrefix(complete: ReplayProse, prefix: ReplayProse): boolean {
-  return prefix.annotations.every((annotation, index) =>
-    sameValue(annotation, complete.annotations[index])
-  )
+  let index = 0
+  for (const annotation of prefix.annotations) {
+    // A later chunk can add citations to an earlier indexed text block.
+    // Preserve ordered prefixes within each block independently.
+    while (index < complete.annotations.length) {
+      const current = complete.annotations[index]
+      if (current.span < annotation.span ||
+        (current.span === annotation.span && current.block < annotation.block)) {
+        index++
+      } else {
+        break
+      }
+    }
+    if (!sameValue(annotation, complete.annotations[index])) return false
+    index++
+  }
+  return true
 }
 
 function hasReplayProse(content: unknown): content is string | unknown[] {

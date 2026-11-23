@@ -490,6 +490,7 @@ describe("tool transcript replay", () => {
     "stable-annotation",
     "added-annotation",
     "annotation-only",
+    "citation-before-existing",
     "new-index",
     "string-to-indexed"
   ])("retains the original row and exact structured continuation when proved (%s)", (mode) => {
@@ -498,13 +499,24 @@ describe("tool transcript replay", () => {
     const image = { type: "image", source: { type: "url", url: "https://example.com/first.png" } }
     const hasImage = mode.endsWith("image")
     const gainsIndex = mode === "new-index" || mode === "string-to-indexed"
-    const indexed = mode === "early-indexed-block" || mode === "indexed-before-image" || gainsIndex
+    const earlierCitation = mode === "citation-before-existing"
+    const indexed =
+      mode === "early-indexed-block" || mode === "indexed-before-image" || gainsIndex || earlierCitation
     const hasLaterParagraph = indexed || mode.endsWith("before-image")
     const annotations = [{ type: "citation", source: "url_citation", url: "https://example.com" }]
-    const laterParagraph = { type: "text", index: 2, text: "File details" }
+    const laterParagraph = {
+      type: "text",
+      index: 2,
+      text: "File details",
+      ...(earlierCitation
+        ? { annotations: [{ ...annotations[0], url: "https://example.com/details" }] }
+        : {})
+    }
     const oldText = mode === "equal-split-block" ? "Checking\nFile details" : "Checking"
     const nextText =
-      mode.startsWith("equal-") || mode === "annotation-only" ? "Checking" : "Checking version and status"
+      mode.startsWith("equal-") || mode === "annotation-only" || earlierCitation
+        ? "Checking"
+        : "Checking version and status"
     const earlier = {
       ...assistant,
       content:
@@ -531,7 +543,9 @@ describe("tool transcript replay", () => {
           type: "text",
           text: nextText,
           ...(indexed ? { index: 0 } : {}),
-          ...(mode.endsWith("annotation") || mode === "annotation-only" ? { annotations } : {})
+          ...(mode.endsWith("annotation") || mode === "annotation-only" || earlierCitation
+            ? { annotations }
+            : {})
         },
         ...(mode === "different-image"
           ? [{ ...image, source: { ...image.source, url: "https://example.com/second.png" } }]
