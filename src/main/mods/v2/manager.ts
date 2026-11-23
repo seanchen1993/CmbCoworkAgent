@@ -267,6 +267,7 @@ interface SessionEntry {
   ownedMcp?: Map<FunctionPlugin, import("../../mcp/owned-connections").OwnedMcpConnections>
   constructionOwner?: FunctionOperationScope
   runtimeSourceToken?: RuntimePluginSourceToken
+  displayRefillEpoch?: string
   assertRuntimeSourceContent?: () => void
   hostSourceBound?: boolean
   /** Set only by the original Host after its run/workflow/MCP physical settlement. */
@@ -2350,14 +2351,37 @@ export class FunctionModsManager {
       return
     const epoch = `${entry.epoch}:${this.pluginCatalogRevision}`
     const prepared = this.warmDisplayRuntime.take(entry.workspace, epoch)
-    if (prepared) entry.client = prepared
+    if (prepared) {
+      entry.client = prepared
+      entry.displayRefillEpoch = epoch
+      return
+    }
+    this.startWarmDisplayRuntime(entry.workspace, epoch)
+  }
+
+  private startWarmDisplayRuntime(workspace: string, epoch: string): void {
     // Leave room for one ordinary admission while the spare is idle.
     if (this.warmDisplayRuntime.occupied || this.runtimeOccupancy() >= 5) return
     const client = this.createClient()
     if (!(client instanceof FunctionRuntimeClient)) return
     // A source hint can only prepare an empty process. The original load admits the guest.
-    this.warmDisplayRuntime.start(entry.workspace, epoch, client,
+    this.warmDisplayRuntime.start(workspace, epoch, client,
       () => client.prepareEmpty(), () => client.stopAndDrain())
+  }
+
+  private refillAfterDisplayRead(key: string, signal?: AbortSignal): void {
+    const entry = this.sessions.get(key)
+    const epoch = entry?.displayRefillEpoch
+    if (!entry || !epoch) return
+    entry.displayRefillEpoch = undefined
+    // Wait until the protected drawing can return to the renderer before starting
+    // another process and its QuickJS/SDK initialization.
+    setImmediate(() => {
+      if (signal?.aborted || this.closed || this.sessions.get(key) !== entry ||
+        !entry.loaded || entry.catalogInvalidated || !this.host.enabled(entry.workspace) ||
+        epoch !== `${this.epoch(entry.workspace)}:${this.pluginCatalogRevision}`) return
+      this.startWarmDisplayRuntime(entry.workspace, epoch)
+    }).unref()
   }
 
   private pureProbeBlocker(entry: SessionEntry): string | undefined {
@@ -7778,14 +7802,18 @@ export class FunctionModsManager {
       presentationId, messageId, expectedRequestId,
       lease.path === "projection-v1" && peerProtocol[1] !== true, supportsPassiveData, signal)
     try {
-      const resident = this.sessions.get(JSON.stringify([workspace, threadId]))
+      const key = JSON.stringify([workspace, threadId])
+      const resident = this.sessions.get(key)
       const token = resident?.loaded && resident.session?.plugins.length ? resident.runtimeSourceToken : undefined
-      if (!token) return await read()
-      const ambient = captureRuntimePluginSourceToken()
-      if (ambient && ambient !== token) throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
       // As for the existing site mount, retain only the real admitted source token.
       // Cache data cannot mint one or reconstruct project authority from display IDs.
-      return await withRuntimePluginSource(token, read)
+      const ambient = token && captureRuntimePluginSourceToken()
+      if (ambient && ambient !== token) throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+      const outcome = token ? await withRuntimePluginSource(token, read) : await read()
+      if ((component === "UserMessage" || component === "AssistantMessage") &&
+        (outcome.state === "projected" || (outcome.state === "mounted" && outcome.snapshot)))
+        this.refillAfterDisplayRead(key, signal)
+      return outcome
     }
     finally { lease.completePhysical() }
   }

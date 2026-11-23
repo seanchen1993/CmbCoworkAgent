@@ -100,8 +100,11 @@ it.each([
   { title: "a literal AssistantMessage match in a project", selector: assistant,
     usage: "project" as const, match: true, extra: false },
   { title: "a literal AssistantMessage match in ordinary chat", selector: assistant,
-    usage: "chat" as const, match: true, extra: true }
-])("uses the expected empty-host budget for $title", async ({ selector, usage, match, extra }) => {
+    usage: "chat" as const, match: true, extra: true },
+  { title: "an ordinary chat invalidated after its protected drawing", selector: assistant,
+    usage: "chat" as const, match: true, extra: true, invalidateBeforeRefill: true }
+])("uses the expected empty-host budget for $title", async (scenario) => {
+  const { selector, usage, match, extra } = scenario
   const workspace = await mkdtemp(join(directory, "case-"))
   const source = join(workspace, "installed")
   await mkdir(join(source, "mods"), { recursive: true })
@@ -184,11 +187,33 @@ it.each([
   await Promise.all(prepared.map(host => host.ready))
   expect(prepared.map(host => host.requests)).toEqual(extra ? [[]] : [])
   if (extra) {
-    const second = await read("next-thread")
+    const rendering = Promise.withResolvers<void>()
+    const allowDraw = Promise.withResolvers<void>()
+    const render = current.siteRender.bind(current)
+    const renderSpy = vi.spyOn(current, "siteRender").mockImplementationOnce(async (...args) => {
+      rendering.resolve()
+      await allowDraw.promise
+      return render(...args)
+    })
+    const secondRead = read("next-thread")
+    try {
+      await Promise.race([rendering.promise, secondRead])
+      expect(prepared[0].requests.filter(request => request === "load")).toHaveLength(1)
+      expect(launches).toHaveLength(approvalLaunches + 2)
+    } finally {
+      allowDraw.resolve()
+      renderSpy.mockRestore()
+    }
+    const second = await secondRead
     expect(JSON.stringify(second)).toContain("MATCHED BODY")
-    expect(prepared[0].requests.filter(request => request === "load")).toHaveLength(1)
-    expect(launches.slice(approvalLaunches).filter(host => !host.empty)).toHaveLength(1)
+    if ("invalidateBeforeRefill" in scenario) {
+      current.invalidate(workspace)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(launches).toHaveLength(approvalLaunches + 2)
+      return
+    }
 
+    await vi.waitFor(() => expect(launches).toHaveLength(approvalLaunches + 3))
     const replacement = launches.at(-1)!
     expect(replacement).not.toBe(prepared[0])
     expect(replacement.empty).toBe(true)
