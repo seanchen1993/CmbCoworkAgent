@@ -58,7 +58,7 @@ export function createChatReplayAliasProjector(): (
   let previousStructureVersion = -1
   let previousById = new Map<string, Message>()
   let repeatedSources = new Set<string>()
-  let completedAssistantIds = new Set<string>()
+  let toolReplayAssistantIds = new Set<string>()
   let aliases = noReplayAliases
 
   return ({ messages, changedMessages, structureVersion }) => {
@@ -76,7 +76,7 @@ export function createChatReplayAliasProjector(): (
         previousById.set(message.id, message)
         if (!source) continue
         evidenceChanged ||= (repeatedSources.has(source) &&
-          (message.role === "tool" || completedAssistantIds.has(message.id))) ||
+          (message.role === "tool" || toolReplayAssistantIds.has(message.id))) ||
           previous.tool_call_id !== message.tool_call_id ||
           previous.historical_tool_replay_id !== message.historical_tool_replay_id ||
           (message.role === "tool" && previous.name !== message.name) ||
@@ -99,8 +99,8 @@ export function createChatReplayAliasProjector(): (
       }
     }
     if (rebuildSources || evidenceChanged) {
-      completedAssistantIds = new Set()
-      const nextAliases = findReplayedToolExchangeAliases(messages, completedAssistantIds)
+      toolReplayAssistantIds = new Set()
+      const nextAliases = findReplayedToolExchangeAliases(messages, toolReplayAssistantIds)
       if (nextAliases.size !== aliases.size ||
           [...nextAliases].some(([id, target]) => aliases.get(id) !== target)) {
         aliases = nextAliases
