@@ -76,6 +76,12 @@ async function seedHistory(): Promise<number> {
   const repeated = [2, 3].flatMap((occurrence) =>
     first.slice(1).map((row) => setOccurrence(row, occurrence))
   )
+  const firstFinal: Message = {
+    id: "first-final",
+    role: "assistant",
+    content: "First fixture finished",
+    created_at: first[0].created_at
+  }
   const interleaved = [
     first[0],
     first[1],
@@ -85,6 +91,8 @@ async function seedHistory(): Promise<number> {
   ]
   const durable = [
     ...interleaved,
+    firstFinal,
+    setOccurrence(first[2], 4),
     ...next,
     mismatch[0],
     ...mismatch.slice(1).map((row) => setOccurrence(row, 2)),
@@ -106,13 +114,20 @@ async function seedHistory(): Promise<number> {
     channel_values: {
       messages: [
         ...interleaved.map(toCheckpointMessage),
+        toCheckpointMessage(firstFinal),
         {
           id: "hidden-team-turn",
           type: "human",
           content: "Hidden notification fixture",
           additional_kwargs: { cmb_internal_coordinator_notification: true }
         },
-        ...[...next, ...mismatch, final].map(toCheckpointMessage)
+        ...[...next, ...mismatch, final].map(toCheckpointMessage),
+        {
+          id: "legacy-text",
+          type: "ai",
+          content: "Readable legacy response",
+          tool_calls: { length: 1 }
+        }
       ]
     },
     channel_versions: { messages: 1 },
@@ -257,6 +272,7 @@ async function main(): Promise<void> {
           ]
         )
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)
+        assert.match(markdown, /Readable legacy response/)
         assert.equal(stored.length, rawRowCount)
         assert.equal(await chat.getByText("INTERRUPTED", { exact: true }).count(), 0)
         const search = page.getByRole("dialog", { name: "搜索会话" })

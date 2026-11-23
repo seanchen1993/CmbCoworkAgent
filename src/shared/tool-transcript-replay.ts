@@ -25,7 +25,12 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 function readCallIds(assistant: TranscriptMessage): ReadonlySet<string> | undefined {
-  if (assistant.role !== "assistant" || !assistant.tool_calls?.length) return
+  if (
+    assistant.role !== "assistant" ||
+    !Array.isArray(assistant.tool_calls) ||
+    !assistant.tool_calls.length
+  )
+    return
 
   const calls = new Set<string>()
   for (const value of assistant.tool_calls) {
@@ -45,6 +50,7 @@ function readExchange<T extends TranscriptMessage>(
   if (!calls) return
   const results = new Map<string, T>()
   let replayResults: Map<string, string> | undefined
+  let precedingCalls: ReadonlySet<string> | null | undefined
   let end = start + 1
   while (end < messages.length && messages[end].role === "tool") {
     const result = messages[end++]
@@ -55,7 +61,9 @@ function readExchange<T extends TranscriptMessage>(
       results.set(id, result)
       continue
     }
-    const precedingCalls = start > 0 ? readCallIds(messages[start - 1]) : undefined
+    if (precedingCalls === undefined) {
+      precedingCalls = start > 0 ? (readCallIds(messages[start - 1]) ?? null) : null
+    }
     if (
       precedingCalls?.has(id) ||
       !hasToolResultExecutionId(original) ||
@@ -104,6 +112,8 @@ function sameValue(left: unknown, right: unknown, depth = 0): boolean {
 }
 
 function sameRow(left: TranscriptMessage, right: TranscriptMessage): boolean {
+  const status = (row: TranscriptMessage) => row.status || (row.role === "tool" ? "success" : "")
+  const failed = (row: TranscriptMessage) => row.is_error ?? row.status === "error"
   return (
     hasSameReplayId(left, right) &&
     left.goal_id === right.goal_id &&
@@ -114,8 +124,8 @@ function sameRow(left: TranscriptMessage, right: TranscriptMessage): boolean {
     !left.content_is_projection &&
     !right.content_is_projection &&
     (left.name || "") === (right.name || "") &&
-    (left.status || "") === (right.status || "") &&
-    Boolean(left.is_error) === Boolean(right.is_error) &&
+    status(left) === status(right) &&
+    failed(left) === failed(right) &&
     sameValue(left.content, right.content) &&
     (!left.reasoning || !right.reasoning || left.reasoning === right.reasoning)
   )
@@ -161,20 +171,24 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
     { exchange: ToolExchange<T>; position: number; anchor: T } | null
   >()
   let anchor: T | undefined
+  const unmatchedCallIds = new Set<string>()
   let position = 0
   for (let index = 0; index < messages.length; ) {
     const message = messages[index]
     if (message.role === "user" || message.role === "system") {
       anchor = message.role === "user" && !unsafeAnchors?.has(message.id) ? message : undefined
       position = 0
+      if (message.role === "user") unmatchedCallIds.clear()
     }
     const exchange =
       anchor && message.role === "assistant" ? readExchange(messages, index) : undefined
     if (anchor && exchange) {
       const key = JSON.stringify([anchor.id, exchangeKey(exchange)])
-      exchanges.set(key, exchanges.has(key) ? null : { exchange, position, anchor })
+      const ambiguous = [...exchange.results.keys()].some((id) => unmatchedCallIds.has(id))
+      exchanges.set(key, ambiguous || exchanges.has(key) ? null : { exchange, position, anchor })
       index = exchange.end
     } else {
+      for (const id of readCallIds(message) ?? []) unmatchedCallIds.add(id)
       index++
     }
     if (message.role === "assistant") position++
@@ -235,6 +249,10 @@ const generatedAssistantId = /^current-run-assistant:[0-9a-f-]{36}$/i
 function hasToolResultExecutionId(result: TranscriptMessage): boolean {
   const source = getMessageProviderSourceId(result)
   return source !== result.tool_call_id && toolResultUuid.test(source)
+}
+
+function resultReplayKey(result: TranscriptMessage): string {
+  return JSON.stringify([getMessageProviderSourceId(result), result.tool_call_id])
 }
 
 function hasExecutionIdentity(exchange: ToolExchange<TranscriptMessage>): boolean {
@@ -316,17 +334,39 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
 ): ReadonlyMap<string, string> {
   const aliases = new Map<string, string>()
   const seen = new Map<string, ToolExchange<T>>()
+  const completedResults = new Map<string, T>()
+  const unmatchedCallIds = new Set<string>()
   for (let index = 0; index < messages.length; ) {
     const message = messages[index]
-    if (message.role === "user" || message.role === "system") seen.clear()
+    if (message.role === "user" || message.role === "system") {
+      seen.clear()
+      completedResults.clear()
+    }
+    if (message.role === "user") unmatchedCallIds.clear()
     const exchange = readExchange(messages, index)
     const exchanges = exchange ? [exchange] : readInterleavedReplays(messages, index)
     if (!exchanges) {
+      if (
+        message.role === "tool" &&
+        message.tool_call_id &&
+        !unmatchedCallIds.has(message.tool_call_id) &&
+        hasToolResultExecutionId(message)
+      ) {
+        const resolved = completedResults.get(resultReplayKey(message))
+        if (resolved && resolved.id !== message.id && sameRow(resolved, message)) {
+          aliases.set(message.id, resolved.id)
+        }
+      }
+      for (const id of readCallIds(message) ?? []) unmatchedCallIds.add(id)
       index++
       continue
     }
     for (const current of exchanges) {
+      if ([...current.results.keys()].some((id) => unmatchedCallIds.has(id))) continue
       for (const [alias, canonical] of current.replayResults ?? []) aliases.set(alias, canonical)
+      for (const result of current.results.values()) {
+        if (hasToolResultExecutionId(result)) completedResults.set(resultReplayKey(result), result)
+      }
       if (!hasExecutionIdentity(current)) continue
       const key = JSON.stringify([
         exchangeKey(current),
@@ -335,14 +375,13 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
           .map((id) => getMessageProviderSourceId(current.results.get(id)!))
       ])
       const previous = seen.get(key)
-      if (!previous) {
+      if (!previous || !isSameExchange(previous, current)) {
         seen.set(key, current)
         continue
       }
       if (
         previous.assistant.id === current.assistant.id ||
-        (previous.assistant.reasoning || "") !== (current.assistant.reasoning || "") ||
-        !isSameExchange(previous, current)
+        (previous.assistant.reasoning || "") !== (current.assistant.reasoning || "")
       )
         continue
       aliases.set(current.assistant.id, previous.assistant.id)

@@ -26,16 +26,26 @@ const noReplayAliases: ReadonlyMap<string, string> = new Map()
 export function resolveChatReplayAliases(
   replayAliases: ReadonlyMap<string, string>,
   liveMessages: readonly Message[],
-  display: ChatMessageProjection
+  display: ChatMessageProjection,
+  liveMessageIds?: ReadonlySet<string>
 ): ReadonlyMap<string, string> {
   if (replayAliases.size === 0) return replayAliases
+  const carriesUniqueReasoning = (id: string, canonical: string): boolean => {
+    const index = display.indexById.get(id)
+    const canonicalIndex = display.indexById.get(canonical)
+    if (index === undefined || canonicalIndex === undefined) return false
+    const reasoning = display.messages[index].reasoning
+    return Boolean(reasoning && display.messages[canonicalIndex].reasoning !== reasoning)
+  }
+  if (liveMessageIds && replayAliases.size < liveMessages.length) {
+    for (const [id, canonical] of replayAliases) {
+      if (liveMessageIds.has(id) && carriesUniqueReasoning(id, canonical)) return noReplayAliases
+    }
+    return replayAliases
+  }
   for (const live of liveMessages) {
     const canonical = replayAliases.get(live.id)
-    if (!canonical || !live.reasoning) continue
-    const index = display.indexById.get(canonical)
-    if (index !== undefined && display.messages[index].reasoning !== live.reasoning) {
-      return noReplayAliases
-    }
+    if (canonical && carriesUniqueReasoning(live.id, canonical)) return noReplayAliases
   }
   return replayAliases
 }

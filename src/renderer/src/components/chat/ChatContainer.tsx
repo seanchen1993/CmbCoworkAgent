@@ -3653,7 +3653,8 @@ export function ChatContainer({
   const replayAliases = resolveChatReplayAliases(
     baselineReplayAliases,
     liveDisplayMessages,
-    displayMessageProjection
+    displayMessageProjection,
+    liveDisplayProjection.messageIds
   )
   const resolveDisplayMessageId = useCallback(
     (messageId: string) => replayAliases.get(messageId) ?? messageId,

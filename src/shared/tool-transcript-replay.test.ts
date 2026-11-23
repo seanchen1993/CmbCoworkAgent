@@ -38,6 +38,15 @@ describe("tool transcript replay", () => {
     expect(checkpoint[1].id).toBe("shared-response")
   })
 
+  it("aligns an older result with no saved status to its explicit success snapshot", () => {
+    const [assistant, tool] = exchange(2)
+    const durable = [user, assistant, { ...tool, status: "success" }]
+    const checkpoint = [user, ...exchange()]
+    expect(alignReplayedToolExchanges(durable, checkpoint).map(({ id }) => id)).toEqual(
+      durable.map(({ id }) => id)
+    )
+  })
+
   it("requires a shared anchor, aligned position and only one matching cycle per source", () => {
     const checkpoint = [user, ...exchange()]
     for (const unmatched of [
@@ -188,6 +197,37 @@ describe("tool transcript replay", () => {
     )
     const otherAssistant = { ...assistant, id: "other-execution" }
     expect(findReplayedToolExchangeAliases([otherAssistant, assistant, tool, copy]).size).toBe(0)
+    const separator: Message = { id: "separator", role: "assistant", content: "Still working" }
+    expect(findReplayedToolExchangeAliases([assistant, tool, separator, copy])).toEqual(
+      new Map([[copy.id, tool.id]])
+    )
+    expect(
+      findReplayedToolExchangeAliases([otherAssistant, separator, assistant, tool, copy]).size
+    ).toBe(0)
+  })
+
+  it("retains partial evidence and folds subsequent exact complete copies", () => {
+    const first = exchange(1, { path: "fixture" }, "partial data")
+    const final = exchange(2)
+    const replay = exchange(3)
+    expect(findReplayedToolExchangeAliases([...first, ...final, ...replay])).toEqual(
+      new Map([
+        [replay[0].id, final[0].id],
+        [replay[1].id, final[1].id]
+      ])
+    )
+  })
+
+  it("does not throw on non-array historical tool-call payloads", () => {
+    const invalid = {
+      id: "legacy",
+      role: "assistant",
+      content: "Readable",
+      tool_calls: { length: 1 }
+    } as unknown as Message
+    const messages = [user, invalid, ...exchange()]
+    expect(findReplayedToolExchangeAliases(messages).size).toBe(0)
+    expect(alignReplayedToolExchanges(messages, messages)).toBe(messages)
   })
 
   it("keeps independent turns, result IDs, error states and unseen payloads", () => {
