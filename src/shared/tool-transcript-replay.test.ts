@@ -223,6 +223,109 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it.each(["both-stale", "stale-read", "stale-list", "revised-result"])(
+    "rebinds only new result versions in a clipped parallel batch (%s)",
+    (mode) => {
+      const [initial, read] = exchange()
+      const [completion, readCopy] = exchange(2)
+      const list: Message = {
+        id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+        role: "tool",
+        name: "ls",
+        tool_call_id: "list",
+        content: "Earlier listing"
+      }
+      const assistant = {
+        ...initial,
+        tool_calls: [...initial.tool_calls!, { id: "list", name: "ls", args: {} }]
+      }
+      const latest = {
+        ...assistant,
+        id: completion.id,
+        provider_occurrence: 2,
+        content: "Checking and displaying results"
+      }
+      const nextUser = { ...user, id: "next-user" }
+      const durable = [
+        user, assistant, read, list, latest, readCopy,
+        { ...list, id: `${list.id}::cmb-same-role-duplicate:tool:2` }, nextUser
+      ]
+      const fresh = {
+        ...read,
+        id: mode === "revised-result" ? read.id : "9c09fdd9-e146-4c2c-9b12-cac648551576",
+        provider_source_id: mode === "revised-result" ? undefined : "9c09fdd9-e146-4c2c-9b12-cac648551576",
+        provider_occurrence: undefined,
+        content: "Current file contents"
+      }
+      const checkpoint = [
+        nextUser,
+        assistant,
+        ...(mode === "stale-list" ? [fresh, list] : [
+          mode === "revised-result" ? { ...read, provider_source_id: undefined } : read,
+          ...(mode === "both-stale" ? [list] : []),
+          fresh
+        ])
+      ]
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable, {
+        useStableProviderOccurrences: true
+      })
+      const aliases = findReplayedToolExchangeAliases(merged)
+      const visible = merged.filter(({ id }) => !aliases.has(id))
+      expect(visible.map(({ role }) => role)).toEqual([
+        "user", "assistant", "tool", "tool", "user", "assistant", "tool"
+      ])
+      expect(visible[4].id).toBe(nextUser.id)
+      const ownership = resolveToolResultOwnership(visible)
+      expect(ownership.get(getWorkerToolUiKey(visible[5].id, "shared-call", 0))?.content)
+        .toBe(fresh.content)
+      expect(ownership.has(getWorkerToolUiKey(visible[5].id, "list", 1))).toBe(false)
+    }
+  )
+
+  it.each([false, true])(
+    "suppresses multiple observed results ahead of a later checkpoint call (fresh %s)",
+    (hasFresh) => {
+      const [first, read] = exchange()
+      const [revision, oldRead] = exchange(2)
+      const [middle] = exchange(3)
+      const middleUser = { ...user, id: "middle-user" }
+      const nextUser = { ...user, id: "next-user" }
+      const previous = {
+        ...read,
+        id: "9c09fdd9-e146-4c2c-9b12-cac648551576",
+        provider_source_id: undefined,
+        content: "Another completed execution"
+      }
+      const fresh = {
+        ...previous,
+        id: "81cbcdce-733b-4d6f-86b5-261cb3d89d22",
+        content: "Latest result"
+      }
+      const durable = [
+        user, first, read, { ...revision, content: "Checking directory" }, oldRead,
+        middleUser, { ...middle, content: "Checking a separate file" }, previous, nextUser
+      ]
+      const checkpoint = [nextUser, first, read, previous, ...(hasFresh ? [fresh] : [])]
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable, {
+        useStableProviderOccurrences: true
+      })
+      const aliases = findReplayedToolExchangeAliases(merged)
+      const visible = merged.filter(({ id }) => !aliases.has(id))
+      expect(visible.map(({ role }) => role)).toEqual([
+        "user", "assistant", "tool", "user", "assistant", "tool", "user",
+        ...(hasFresh ? ["assistant", "tool"] : [])
+      ])
+      expect(visible[6].id).toBe(nextUser.id)
+      if (hasFresh) {
+        const ownership = resolveToolResultOwnership(visible)
+        expect(ownership.get(getWorkerToolUiKey(visible[7].id, "shared-call", 0))?.id)
+          .toBe(fresh.id)
+      }
+    }
+  )
+
   it.each(["durable-view", "checkpoint-only", "fresh-result", "stale-before-fresh"])(
     "reconciles old observed drafts before checkpoint ordering (%s)",
     (mode) => {
@@ -281,6 +384,7 @@ describe("tool transcript replay", () => {
       expect(visible[1].content).toEqual(final.content)
       expect(visible[3].id).toBe(nextUser.id)
       if (mode === "stale-before-fresh") {
+        expect(durable.some(({ id }) => id === visible[4].id)).toBe(false)
         const bindings = resolveToolResultOwnership(visible)
         expect(bindings.get(getWorkerToolUiKey(visible[4].id, "shared-call", 0))?.id).toBe(fresh.id)
       }
