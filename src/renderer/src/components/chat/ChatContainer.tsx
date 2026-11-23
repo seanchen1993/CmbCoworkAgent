@@ -29,6 +29,7 @@ import {
   ChatActivityPresentationContext,
   ChatExecutionCardCallIdsContext,
   ChatExecutionDetailsContext,
+  ChatFoldedToolCallsContext,
   ChatDesktopWorkIdContext,
   ChatToolPresentationContext
 } from "./chat-presentation-context"
@@ -3864,7 +3865,7 @@ export function ChatContainer({
       }
     })
 
-  const foldedMessageIds = useMemo(
+  const { hiddenMessages: foldedMessageIds, foldedTools } = useMemo(
     () =>
       surface === "bot" && !showExecutionDetails
         ? projectBotExecution(
@@ -3873,9 +3874,10 @@ export function ChatContainer({
             executionCardCallIds,
             inlineQuestionCallId,
             toolCallDisplayStates,
-            desktopWorkId
-          ).hiddenMessages
-        : new Set<string>(),
+            desktopWorkId,
+            { results: toolResults, approvalKeys: pendingApprovalToolCallKeys }
+          )
+        : { hiddenMessages: new Set<string>(), foldedTools: new Set<string>() },
     [
       surface,
       showExecutionDetails,
@@ -3886,6 +3888,8 @@ export function ChatContainer({
       dynamicVisibilityProjection.version,
       inlineQuestionCallId,
       toolCallDisplayStates,
+      toolResults,
+      pendingApprovalToolCallKeys,
       desktopWorkId,
       isLoading
     ]
@@ -9001,6 +9005,7 @@ export function ChatContainer({
                   <ChatExecutionDetailsContext.Provider
                     value={showExecutionDetails || searchExpandsExecutionDetails}
                   >
+                    <ChatFoldedToolCallsContext.Provider value={foldedTools}>
                     <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
                       <ChatMessageVirtualList
                         historyWindowRevision={historyWindowRevision}
@@ -9064,6 +9069,7 @@ export function ChatContainer({
                         footer={chatMessageListFooter}
                       />
                     </ChatToolPresentationContext.Provider>
+                    </ChatFoldedToolCallsContext.Provider>
                   </ChatExecutionDetailsContext.Provider>
                 </div>
               </div>

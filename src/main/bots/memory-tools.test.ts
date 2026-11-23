@@ -21,6 +21,17 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 const bot = { id: "a" } as BotDefinition
+it("retains memory read results in their normal format and settles only the matching retry", async () => {
+  const tool = createBotMemoryTools(bot, memory, new AbortController().signal).find(t => t.name === "bot_memory_list")!
+  const read = (id: string) => tool.invoke({ type: "tool_call", id, name: tool.name, args: {} })
+  vi.spyOn(memory, "list").mockImplementationOnce(() => { throw Error("temporarily unavailable") })
+  const failed = await read("first")
+  expect(failed.status).toBe("error")
+  const next = await read("second")
+  expect(next.id).toBe(failed.id.replace("bot-attempt-", "bot-recovery-"))
+  expect(JSON.parse(next.content)).toEqual([])
+})
+
 it("exposes only shared and current-group facts and preserves error receipts on cross-scope writes", async () => {
   const own = memory.writeInContext("a", { name: "Own", content: "Group fact" }, { groupId: "g" })
   const shared = memory.write("a", {

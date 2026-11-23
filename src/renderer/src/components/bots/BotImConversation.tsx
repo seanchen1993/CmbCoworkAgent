@@ -59,7 +59,7 @@ const stateLabels: Record<string, string> = {
   pending: "等待回传",
   sending: "正在回传",
   blocked: "回传已停止",
-  unknown: "送达待核对",
+  unknown: "送达未确认，请查看招乎会话",
   outcome_unknown: "结果待核对"
 }
 const imConversationStatus = (value: Conversation) =>
@@ -409,6 +409,9 @@ export function BotImConversation({
           </div>
         )}
         {ordered.map((entry, i) => {
+          let stateLabel = stateLabels[entry.state]
+          if (entry.retrying) stateLabel = "正在重试发送"
+          else if (entry.kind === "bot" && entry.state === "failed") stateLabel = "发送失败，请检查招乎连接"
           const date = new Date(entry.createdAt).toLocaleDateString()
           const newDate =
             i === 0 || new Date(ordered[i - 1].createdAt).toLocaleDateString() !== date
@@ -479,10 +482,10 @@ export function BotImConversation({
                       ))}
                     </div>
                   ) : null}
-                  {(entry.workId || stateLabels[entry.state]) && (
+                  {(entry.workId || (stateLabel && !entry.files?.length)) && (
                     <div className="bot-im-message-meta">
-                      {!entry.files?.length && stateLabels[entry.state] && (
-                        <span>{stateLabels[entry.state]}</span>
+                      {!entry.files?.length && stateLabel && (
+                        <span>{stateLabel}</span>
                       )}
                       {entry.workId && (
                         <button onClick={() => onWork(entry.workId!)}>

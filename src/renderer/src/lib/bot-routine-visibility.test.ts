@@ -37,6 +37,11 @@ const turn: Message[] = [
   }
 ]
 describe("quiet Bot routine visibility", () => {
+  it("keeps silent routine calls inspectable when execution details are opened", () => {
+    const origins = new Map([[source.requestId, source]])
+    expect(hiddenBotTaskMessageIds(turn, origins)).toEqual(new Set(turn.map(m => m.id)))
+    expect(hiddenBotTaskMessageIds(turn, origins, true)).toEqual(new Set(["scheduled", "final"]))
+  })
   it("hides feedback input before hydration and keeps useful reaction replies and interactive cards", () => {
     const requestId = `notification:thread:reaction:${"12345678-1234-1234-1234-123456789abc"}`
     const feedback: BotMessageOrigin = {

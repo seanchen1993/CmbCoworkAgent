@@ -96,6 +96,7 @@ export interface BotMockOutbox {
   createdAt: number
 }
 export interface BotMockFeedEntry {
+  retrying?: true
   files?: import("./file-delivery").BotDeliveredFile[]
   threadId?: string
   delivery?: BotFileDeliveryStatus
@@ -122,6 +123,7 @@ export type BotMockTask = BotTask & { mockSource: BotMockSource }
 
 /** Local projection; never contains platform URLs or recipient credentials. */
 export interface BotFileDeliveryStatus {
+  retrying?: true
   id: string
   file: import("./file-delivery").BotDeliveredFile
   state: BotMockOutbox["state"]

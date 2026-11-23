@@ -1,6 +1,23 @@
 import type { ToolCall, ToolCallStatus, ToolResult } from "@/types"
 import { hasFailedCommandResult } from "../../../shared/command-result"
 
+/** Short descriptions for unresolved operations in the compact Bot chat. */
+export function botExecutionIssueLabel(tool: Pick<ToolCall, "name">, interrupted: boolean): string {
+  if (interrupted) return "操作已中断，可查看执行详情"
+  switch (tool.name) {
+    case "bot_deliver_files":
+    case "bot_return_files": return "附件交付遇到问题，查看原因"
+    case "bot_send_message": return "消息发送未确认，请核对目标会话"
+    case "bot_work_create":
+    case "bot_work_send":
+    case "bot_delegate":
+    case "bot_skill_dispatch": return "任务交办遇到问题，查看原因"
+    case "bot_schedule": return "例行任务操作遇到问题，查看原因"
+    case "bot_browser": return "网页操作遇到问题，查看原因"
+    default: return "执行遇到问题，查看原因"
+  }
+}
+
 const mcpBridgeTools = new Set(["search_tool", "inspect_tool", "invoke_deferred_tool"])
 export const isBotMcpBridgeTool = (name: string): boolean => mcpBridgeTools.has(name)
 const isRecord = (value: unknown): value is Record<string, unknown> =>

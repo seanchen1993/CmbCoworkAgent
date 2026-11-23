@@ -11,10 +11,13 @@ import {
 /** Preserve invisible task boundaries even before source lookup or after history hydration. */
 export function hiddenBotTaskMessageIds(
   messages: readonly Message[],
-  origins: ReadonlyMap<string, BotMessageOrigin>
+  origins: ReadonlyMap<string, BotMessageOrigin>,
+  showExecutionDetails = false
 ): ReadonlySet<string> {
   const hidden = new Set(quietBotTurnMessageIds(messages, origins))
-  for (const message of messages)
+  for (const message of messages) {
+    if (showExecutionDetails && (message.role === "tool" || (message.role === "assistant" && message.tool_calls?.length)))
+      hidden.delete(message.id)
     if (
       message.role === "user" &&
       (botContinuationTaskId(message.id) ||
@@ -22,6 +25,7 @@ export function hiddenBotTaskMessageIds(
         isBotReactionNotificationMessageId(message.id))
     )
       hidden.add(message.id)
+  }
   return hidden
 }
 

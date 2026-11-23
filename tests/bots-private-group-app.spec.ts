@@ -164,11 +164,14 @@ async function main() {
         if (user.includes(completed)) reply = groupSummary
         else if (user.includes("STEER_AFTER_BOUNDARY")) reply = "已按两次补充完成任务。"
         else if (user.includes(incomplete)) {
-          if (!used.includes("bot_work_result_continue"))
+          if (!used.includes("execute"))
+            call = { name: "execute", args: { command: "echo review_guard_probe" } }
+          else if (!used.includes("bot_work_result_continue"))
             call = { name: "bot_work_result_continue", args: { gap: "需求清单缺少验收条件", instruction: "在原清单补齐各项验收条件。" } }
         } else {
           assert.ok(user.includes(dataResult), "the Bot must receive the worker's actual conclusion")
-          reply = dataResult
+          if (!used.includes("execute")) call = { name: "execute", args: { command: "echo report_guard_probe" } }
+          else reply = dataResult
         }
       } else if (all.includes("You are ALREADY inside independent task")) {
         assert.ok(!all.includes("PRIVATE_SECRET"), "task must not inherit private history")
@@ -607,6 +610,20 @@ async function main() {
     assert.ok(workTurns[0].workId && workTurns[0].workId === workTurns[1].workId)
     assert.equal(workTurns[0].threadId, workTurns[1].threadId)
     await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
+    const chat = page.locator(".bots-conversation")
+    await chat.getByText(groupSummary, { exact: true }).waitFor()
+    assert.equal(await chat.locator(".bot-execution-issue").count(), 0, "recovered review has no error banner")
+    assert.doesNotMatch(await chat.innerText(), /review_guard_probe|This call did not execute/)
+    assert.doesNotMatch(JSON.stringify(replies), /review_guard_probe|This call did not execute|bot-tool-control/)
+    const reviewGuard = await page.evaluate(async (id) => {
+      const conversation = (await (window as any).api.bots.snapshot()).imConversations.find((c: any) => c.id === id)
+      const history = await (window as any).api.threads.getMessages(conversation.threadId)
+      return history.find((m: any) => m.role === "tool" && String(m.content).includes('"reason":"result_review_scope"'))
+    }, groupId)
+    assert.ok(reviewGuard?.is_error && reviewGuard.id.startsWith("bot-control-"), "the nonexecuted review attempt is retained")
+    await page.getByRole("button", { name: "查看执行过程", exact: true }).click()
+    await chat.getByText(/review_guard_probe/).first().waitFor()
+    await page.getByRole("button", { name: "收起执行过程", exact: true }).click()
     await page.getByRole("button", { name: "进入任务：群内需求清单", exact: true }).click()
     await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).waitFor()
     await page
@@ -679,6 +696,15 @@ async function main() {
     console.log("PASS: unified App/IM acknowledgement; 4 executed probes, 1 nonexecuted continuation; accepted receipt skips post-dispatch model; real failure and new findings stay visible")
     dmBinding = { ...binding, id: "local-owner-dm-binding", kind: "dm", conversationKey: "local-private", peerLabel: "本人" }
     await app.evaluate(async (_, id) => (globalThis as any).__handoffApp.service.list(id), bots.service.id)
+    await page.getByRole("button", { name: "前往私人主对话", exact: true }).click()
+    await settle()
+    const issueProbe = await chat.evaluateHandle(element => {
+      const state = { flashed: false, observer: new MutationObserver(() => {
+        if (element.querySelector(".bot-execution-issue")) state.flashed = true
+      }) }
+      state.observer.observe(element, { childList: true, subtree: true })
+      return state
+    })
     const beforeDm = replies.length
     inject("owner-dm-event", "LIVE_OWNER_DM 核对数据并整理结果。", 1, dmBinding)
     await wait(() => replies.slice(beforeDm).some(r => r.message.content === dataResult), "owner DM receives result")
@@ -687,6 +713,10 @@ async function main() {
     assert.deepEqual(dmReplies.map(r => r.message.content), [dataConfirmation, dataResult])
     assert.ok(dmReplies.every(r => r.conversationKey === dmBinding.conversationKey))
     assert.equal(mainCalls("LIVE_OWNER_DM").length, 1)
+    await chat.getByText(dataResult, { exact: true }).last().waitFor()
+    assert.equal(await issueProbe.evaluate(state => { state.observer.disconnect(); return state.flashed }), false,
+      "a nonblocking host control must not flash while the original Bot conversation is open")
+    await issueProbe.dispose()
     await writeFile(join(out, "artifacts/feedback-validation.json"), JSON.stringify({
       mode: "controlled-model-real-electron-local-ws", normalDispatchModelCalls: 1,
       budgetMainModelCalls: mainCalls("LIVE_BUDGET").length, openingDeliveries: budgetReplies.filter(r => r.message.content === dataConfirmation).length,
@@ -747,8 +777,17 @@ async function main() {
         console.log("Real IM reply evidence:", evidence)
       }
     }
+    assert.equal(await chat.locator(".bot-execution-issue").count(), 0, "owner DM and App share a quiet default transcript")
+    assert.doesNotMatch(await chat.innerText(), /report_guard_probe|This call did not execute/)
+    await page.getByRole("button", { name: "查看执行过程", exact: true }).click()
+    await chat.getByText(/report_guard_probe/).first().waitFor()
+    await page.getByRole("button", { name: "收起执行过程", exact: true }).click()
+    await fill("LIVE_DISPATCH_FAIL 请在指定目录处理。")
+    await send()
+    await chat.getByText("指定目录不存在，任务未创建。请提供可用目录。", { exact: true }).waitFor()
+    await chat.getByRole("button", { name: /任务交办遇到问题/ }).waitFor()
+    await idle()
     if (process.env.BOT_FEEDBACK_ONLY === "1") { assert.deepEqual(errors, []); passed = true; return }
-    await page.getByRole("button", { name: "前往私人主对话", exact: true }).click()
     await page.getByText("私人助手", { exact: true }).first().click()
     await selectGroup("App 群聊", "LIVE_TO_APP 请交办到这个 App 群。")
     await send()

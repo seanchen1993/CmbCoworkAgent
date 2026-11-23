@@ -35,7 +35,7 @@ import {
 import { BotMessageActions } from "@/components/bots/BotMessageActions"
 import { BotDeliveredFiles } from "@/components/bots/BotDeliveredFile"
 import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
-import { botToolResultStatus } from "@/lib/bot-tool-result-status"
+import { botExecutionIssueLabel, botToolResultStatus } from "@/lib/bot-tool-result-status"
 import { isBotExecutionTool, visibleBotDelivery } from "@/lib/bot-execution-visibility"
 import {
   Reply,
@@ -1310,6 +1310,8 @@ function MessageBubbleImpl({
                   </React.Fragment>
                 )
 
+              if (presentation === "bot" && !showExecutionDetails && foldedToolCalls.has(toolId)) return null
+
               if (
                 presentation === "bot" &&
                 !showExecutionDetails &&
@@ -1326,7 +1328,7 @@ function MessageBubbleImpl({
                       onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
                     >
                       <Info size={14} aria-hidden="true" />
-                      <span>{inferredStatus === "failed" ? "执行遇到问题" : "执行已中断"}</span>
+                      <span>{botExecutionIssueLabel(resolvedToolCall, inferredStatus === "interrupted")}</span>
                       {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                       <span className="sr-only">查看执行详情</span>
                     </button>
@@ -1346,12 +1348,11 @@ function MessageBubbleImpl({
               if (
                 presentation === "bot" &&
                 !showExecutionDetails &&
-                ((isBotExecutionTool(resolvedToolCall, result) &&
+                isBotExecutionTool(resolvedToolCall, result) &&
                   (inferredStatus === "running" ||
                     inferredStatus === "completed" ||
                     inferredStatus === "queued" ||
-                    inferredStatus === "awaiting_approval")) ||
-                  (foldedToolCalls.has(toolId) && result && inferredStatus === "completed"))
+                    inferredStatus === "awaiting_approval")
               )
                 return null
 

@@ -1,7 +1,7 @@
 import { botGroupReceipt } from "./bot-group-receipt"
 import { botHistoryReceipt } from "./bot-history-receipt"
 import type { Message, ToolCall, ToolCallState, ToolResult } from "@/types"
-import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
+import { buildToolResultAssociations, getWorkerToolUiKey, type ToolResultAssociation } from "./worker-tool-result-key"
 import { splitBotInlineReasoning } from "./bot-inline-reasoning"
 import { botToolResultStatus } from "./bot-tool-result-status"
 import { botScheduleReceipt } from "./bot-schedule-view"
@@ -11,6 +11,7 @@ import { botBrowserHelpHistory } from "./bot-browser-help-history"
 import { delegatedTaskReceipt } from "./bot-exchange-view"
 import { parseBotWorkReceipt } from "./bot-work-receipt"
 import { parseBotFileDelivery, parseBotHistoryFileDelivery } from "../../../shared/bots/file-delivery"
+import { isBotToolControlError } from "../../../shared/bots/turn-feedback"
 
 export function visibleBotDelivery(content: unknown, scope: Message["botHistoryDeliveryScope"], desktopWorkId?: string) {
   return desktopWorkId ? parseBotHistoryFileDelivery(content, scope, desktopWorkId) : parseBotFileDelivery(content)
@@ -44,32 +45,62 @@ export function isBotExecutionTool(
   )
 }
 
-/** View projection only: preserve approvals, failures, deliveries, collaboration and custom cards. */
+/** Default Bot chat preserves user actions, unresolved issues and product cards. */
 export function projectBotExecution(
   messages: readonly Message[],
   keepActiveTurn: boolean,
   cardCallIds: ReadonlySet<string> = new Set(),
   pendingQuestionCallId: string | null = null,
   liveToolStates?: ReadonlyMap<string, Pick<ToolCallState, "status">>,
-  desktopWorkId?: string
+  desktopWorkId?: string,
+  { results = buildToolResultAssociations(messages), approvalKeys }: {
+    results?: ReadonlyMap<string, ToolResultAssociation>
+    approvalKeys?: ReadonlySet<string>
+  } = {}
 ): { hiddenMessages: Set<string>; foldedTools: Set<string> } {
   const hidden = new Set<string>()
   const foldedTools = new Set<string>()
-  const results = buildToolResultAssociations(messages)
-  messages.forEach((message) => {
+  const recovered = new Map<string, number>()
+  for (const { botReceipt, is_error } of results.values()) {
+    if (botReceipt?.kind === "recovery" && !is_error)
+      recovered.set(botReceipt.operation, Math.max(recovered.get(botReceipt.operation) ?? 0, botReceipt.attempt))
+  }
+  // Streaming can publish "failed" before the host's receipt reaches the transcript.
+  // Only defer that current step. A finished turn without a receipt stays inspectable.
+  let activeStart = -1
+  if (keepActiveTurn && !pendingQuestionCallId && !approvalKeys?.size) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const boundary = messages[i]
+      if (boundary.role === "user") {
+        activeStart = i
+        break
+      }
+      if (boundary.role === "assistant" && !boundary.tool_calls?.length && boundary.content?.length) break
+    }
+  }
+  messages.forEach((message, index) => {
     if (message.role !== "assistant") return
     const calls = message.tool_calls ?? []
     for (const [toolIndex, tool] of calls.entries()) {
       if (cardCallIds.has(tool.id)) continue
       const key = getWorkerToolUiKey(message.id, tool.id, toolIndex)
+      const status = liveToolStates?.get(key)?.status
+      if (approvalKeys?.has(key) || status === "awaiting_approval") continue
       const result = results.get(key)
+      const attempt = result?.botReceipt
+      const retryableFailure = result?.is_error && attempt?.kind === "attempt"
+      const awaitingOutcome = activeStart >= 0 && index > activeStart && ((!result && status === "failed") || retryableFailure)
+      const confirmedRecovery = retryableFailure && (recovered.get(attempt.operation) ?? 0) >= attempt.attempt
+      if (awaitingOutcome || confirmedRecovery || (result && isBotToolControlError(tool, result))) {
+        foldedTools.add(key)
+        continue
+      }
       if (!result && tool.name === "request_user_input" && tool.id === pendingQuestionCallId) {
         foldedTools.add(key)
         continue
       }
       // MessageBubble suppresses ordinary running tools too. Exclude their empty virtual
       // rows, but retain approval/failed/interrupted states and interactive or custom cards.
-      const status = liveToolStates?.get(key)?.status
       if (
         !result &&
         keepActiveTurn &&
