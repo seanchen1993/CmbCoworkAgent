@@ -9,9 +9,11 @@ export interface ThreadSearchNavigation {
   query: string
   route: ThreadSearchRoute
   navigationTicketId: string
+  searchReadOnly?: true
   stage: "board" | "board-mounting" | "chat"
   project?: HarnessProjectListItem
   onProjectReady?: () => void
+  onProjectAccessResolved?: (available: boolean) => void
   restoreSourceView?: () => void
 }
 
@@ -22,12 +24,27 @@ export type DurableSearchNavigation = ThreadSearchNavigation & {
 export const useThreadSearch = create<{
   open: boolean
   openingVersion: number
+  ordinarySidebarAnchor: { threadId: string } | null
   navigation: ThreadSearchNavigation | null
   failure: string
   projectId: string | null
   projectRoute: Exclude<ThreadSearchRoute, { kind: "ordinary" }> | null
+  projectSessionThreadId: string | null
+  readOnlyProjectThreadId: string | null
   origin: { projectMode: boolean; projectId: string | null } | null
-}>(() => ({ open: false, openingVersion: 0, navigation: null, failure: "", projectId: null, projectRoute: null, origin: null }))
+}>(() => ({
+  open: false, openingVersion: 0, ordinarySidebarAnchor: null, navigation: null, failure: "",
+  projectId: null, projectRoute: null, projectSessionThreadId: null,
+  readOnlyProjectThreadId: null, origin: null
+}))
+
+export function isReadOnlyProjectSearchThread(threadId: string): boolean {
+  const { readOnlyProjectThreadId, navigation } = useThreadSearch.getState()
+  return readOnlyProjectThreadId === threadId ||
+    (navigation?.result.threadId === threadId &&
+      navigation.route.kind !== "ordinary" &&
+      Boolean(navigation.searchReadOnly || navigation.onProjectAccessResolved))
+}
 
 let sequence = 0
 let ownedTransition: number | null = null
@@ -91,7 +108,7 @@ export function openThreadSearch(projectMode = false): void {
 export function reserveThreadSearchNavigation(source: string | null = null, target?: string): number {
   cancelThreadSearchNavigation()
   pendingTabs = target ? { source, target } : null
-  useThreadSearch.setState({ failure: "" })
+  useThreadSearch.setState({ failure: "", ordinarySidebarAnchor: null })
   return sequence
 }
 
@@ -100,9 +117,10 @@ export function isCurrentThreadSearchNavigation(id: number): boolean {
 }
 
 export function cancelThreadSearchForExternalRoute(): void {
-  if (!isOwnedThreadSearchTransition() && (pendingTabs || useThreadSearch.getState().navigation)) {
-    cancelThreadSearchNavigation()
-  }
+  if (isOwnedThreadSearchTransition()) return
+  const { navigation, ordinarySidebarAnchor } = useThreadSearch.getState()
+  if (ordinarySidebarAnchor) useThreadSearch.setState({ ordinarySidebarAnchor: null })
+  if (pendingTabs || navigation) cancelThreadSearchNavigation()
 }
 
 export function cancelThreadSearchOnTabChange(threadId: string): void {

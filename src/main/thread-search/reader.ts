@@ -155,8 +155,10 @@ const projectRouteProjection = `
 export function threadSearchRouteFromRow(row: Record<string, unknown>): ThreadSearchRoute | null {
   if (row.oversized_project_route === 1) return null
   return getProjectThreadSearchRoute({
-    harnessFeature: { projectId: row.feature_project_id, slug: row.feature_slug },
-    harnessProjectSession: { projectId: row.session_project_id, kind: row.session_kind }
+    harnessFeature: row.feature_marker && row.feature_marker !== "null"
+      ? { projectId: row.feature_project_id, slug: row.feature_slug } : undefined,
+    harnessProjectSession: row.project_marker && row.project_marker !== "null"
+      ? { projectId: row.session_project_id, kind: row.session_kind } : undefined
   }) ?? (row.ordinary_scope === 1 ? { kind: "ordinary" } : null)
 }
 
@@ -630,9 +632,12 @@ export function createThreadSearchReader(database: DatabaseSync) {
               if (scope.kind === "project" && scope.projectId !== found.projectId) continue
               const project = catalog.projects.get(found.projectId)
               if (!project) continue
-              if (found.kind === "featureSession" && !project.features?.has(found.slug)) {
-                if (!project.features) routeUnavailable = true
-                continue
+              if (found.kind === "featureSession") {
+                if (project.features === null) {
+                  routeUnavailable = true
+                  continue
+                }
+                if (project.features && !project.features.has(found.slug)) continue
               }
               projectLabel = project.label
               route = found

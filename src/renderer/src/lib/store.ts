@@ -2730,5 +2730,10 @@ useAppStore.subscribe((state, previous) => {
   if (isOwnedThreadSearchTransition()) return
   if (state.currentThreadId !== previous.currentThreadId ||
     (!previous.showCustomizeView && state.showCustomizeView) ||
-    state.mainView !== previous.mainView) cancelThreadSearchNavigation()
+    state.mainView !== previous.mainView) {
+    cancelThreadSearchNavigation()
+    if (useThreadSearch.getState().ordinarySidebarAnchor) {
+      useThreadSearch.setState({ ordinarySidebarAnchor: null })
+    }
+  }
 })

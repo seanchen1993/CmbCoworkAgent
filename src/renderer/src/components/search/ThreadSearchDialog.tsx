@@ -231,7 +231,7 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
         finishThreadSearchNavigation(id, "会话已变化或被删除，请重新搜索")
         return
       }
-      const { searchRoute: route, navigationTicketId, ...thread } = summary
+      const { searchRoute: route, navigationTicketId, searchReadOnly, ...thread } = summary
       const project = route.kind === "ordinary" ? undefined : (await window.api.harnessBoard.catalogPage({
         projectId: route.projectId,
         projectLimit: 1,
@@ -265,8 +265,10 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
         if (!project) activateChat()
         closedByNavigation.current = true
         useThreadSearch.setState({
+          ordinarySidebarAnchor: route.kind === "ordinary" ? { threadId: result.threadId } : null,
           navigation: {
-            id, result, query, route, navigationTicketId, project, stage: project ? "board" : "chat",
+            id, result, query, route, navigationTicketId, project, searchReadOnly,
+            stage: project ? "board" : "chat",
             onProjectReady: project ? activateChat : undefined, restoreSourceView
           },
           open: false

@@ -7,7 +7,12 @@ export const PROBE_OTHER_PROJECT_ID = "project-candidate-many"
 export const PROBE_EMPTY_PROJECT_ID = "project-candidate-empty"
 export const PROBE_FEATURE_SLUG = "search-fixture-feature"
 
-export function seedProbeProjects(dataRoot: string, workspacePath: string, count = 2048) {
+export function seedProbeProjects(
+  dataRoot: string,
+  workspacePath: string,
+  count = 2048,
+  unavailableProjectId?: string
+) {
   const ids = [
     ...Array.from({ length: count - 3 }, (_, i) => "project-catalog-noise-" + i),
     PROBE_PROJECT_ID,
@@ -20,7 +25,7 @@ export function seedProbeProjects(dataRoot: string, workspacePath: string, count
     projectId,
     name: "共享名称 · 项目历史 🧩",
     workspacePath,
-    projectDir,
+    projectDir: projectId === unavailableProjectId ? "missing-history-fixture" : projectDir,
     "harness-adapter": { id: "search-fixture", name: "search-fixture", type: "plugin" },
     lifecycle: { status: "active" },
     description: ""
@@ -44,6 +49,9 @@ export function projectProbeMetadata(index: number, threads: number, withFeature
   }
   if (index === 1 || index === threads - 2) {
     return { harnessProjectSession: { projectId: PROBE_PROJECT_ID, kind: "chat" } }
+  }
+  if (withFeatures && index % 6 === 4) {
+    return { harnessFeature: { projectId: PROBE_OTHER_PROJECT_ID, slug: "feature-history-" + index } }
   }
   if (index % 3 === 1) {
     return { harnessProjectSession: { projectId: PROBE_OTHER_PROJECT_ID, kind: "chat" } }

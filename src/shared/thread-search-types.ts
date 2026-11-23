@@ -36,6 +36,7 @@ export type ThreadSearchRoute =
 
 export type ThreadSearchSummary = Thread & {
   searchRoute?: ThreadSearchRoute
+  searchReadOnly?: true
   navigationTicketId?: string
 }
 
@@ -116,4 +117,7 @@ export type ThreadSearchWindow =
       structureEpoch: number
       goalEvent?: ThreadGoalHydrationEvent
     }
-  | { status: "threadOnly" | "notFound" | "staleIdentity" | "changed" | "failed" }
+  | {
+      status: "threadOnly" | "notFound" | "staleIdentity" | "changed" | "failed" |
+        "projectBecameUnavailable"
+    }

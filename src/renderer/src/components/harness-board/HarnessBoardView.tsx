@@ -1,4 +1,3 @@
-import { ThreadSearchButton } from "@/components/search/ThreadSearchDialog"
 import {
   cancelThreadSearchNavigation,
   cancelThreadSearchForExternalRoute,
@@ -97,6 +96,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
+import { revealSidebarThread } from "@/components/sidebar/sidebar-thread-anchor"
+import { selectBoundedSidebarWindow } from "@/components/sidebar/thread-sidebar-window"
 import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheckpointDialog"
 import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteDialog"
 import { KnowledgeBaseSelector } from "@/components/harness-board/KnowledgeBaseSelector"
@@ -292,7 +293,7 @@ const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
 const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
 const ENTERPRISE_PROJECT_DETAIL_QUERY_BATCH_SIZE = 32
 const ENTERPRISE_PROJECT_DETAIL_STATE_MAX_ENTRIES = 128
-type ProjectSidebarScrollIntent = "preserve" | "top" | null
+type ProjectSidebarScrollIntent = "preserve" | "top" | { threadId: string } | null
 const LEAN_TOKEN_VISIBLE_PREFIX_LENGTH = 6
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<
@@ -462,6 +463,8 @@ interface SelectedFeature {
   slug: string
   activeSessionThreadId?: string
   searchSessionThreadId?: string
+  historyOnly?: true
+  searchAccessId?: number
   deleted?: boolean
 }
 
@@ -470,6 +473,8 @@ interface SelectedProjectSession {
   threadId: string
   deleted?: boolean
   searchOwned?: boolean
+  historyOnly?: true
+  searchAccessId?: number
 }
 
 type PendingProjectAction = {
@@ -5383,11 +5388,15 @@ function FeatureConversationPanel({
   threadId,
   chatSurface = "harness-project",
   readOnlyReason,
+  historyOnly,
+  searchAccessPending,
   onHarnessSessionCreated,
 }: {
   threadId: string | null
   chatSurface?: "harness-project" | "harness-feature-session"
   readOnlyReason?: string | null
+  historyOnly?: boolean
+  searchAccessPending?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
 }): React.JSX.Element {
   return (
@@ -5400,6 +5409,8 @@ function FeatureConversationPanel({
             chatSurface={chatSurface}
             hideWelcomeSkillTabs
             readOnlyReason={readOnlyReason}
+            historyOnly={historyOnly}
+            searchAccessPending={searchAccessPending}
             onHarnessSessionCreated={onHarnessSessionCreated}
           />
         </div>
@@ -6210,6 +6221,9 @@ function ProjectSessionPage({
   project,
   thread,
   deleted,
+  historyOnly = false,
+  searchAccessPending = false,
+  featureSlug,
   onBackToList,
   onBackToProject,
   onHarnessSessionCreated,
@@ -6217,13 +6231,18 @@ function ProjectSessionPage({
   project: ProjectFeatureSidebarProject
   thread: Thread | null
   deleted?: boolean
+  historyOnly?: boolean
+  searchAccessPending?: boolean
+  featureSlug?: string
   onBackToList: () => void
   onBackToProject: () => void
   onHarnessSessionCreated?: (threadId: string) => void
 }): React.JSX.Element {
   const title = thread ? getThreadTitle(thread) : "项目会话"
   const readOnlyReason = deleted ? "所属项目已删除，当前会话只读。"
-    : project.lifecycle.status === "archived" ? "所属项目已归档，当前会话只读。" : null
+    : project.lifecycle.status === "archived" ? "所属项目已归档，当前会话只读。"
+      : historyOnly ? "当前项目无法确认实时状态，仅可查看历史会话。"
+        : searchAccessPending ? "正在确认项目状态，请稍候。" : null
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -6231,7 +6250,8 @@ function ProjectSessionPage({
         <div className={harnessPageHeaderContentClassName}>
           <div className="min-w-0 space-y-2">
             <HarnessBreadcrumb
-              project={project as HarnessProjectListItem}
+              project={project}
+              featureTitle={featureSlug}
               sessionTitle={title}
               onBack={onBackToProject}
               onProjectList={onBackToList}
@@ -6249,9 +6269,11 @@ function ProjectSessionPage({
       <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
         <FeatureConversationPanel
           threadId={thread?.thread_id ?? null}
-          chatSurface="harness-feature-session"
+          chatSurface={featureSlug ? "harness-project" : "harness-feature-session"}
           readOnlyReason={readOnlyReason}
-          onHarnessSessionCreated={onHarnessSessionCreated}
+          historyOnly={historyOnly}
+          searchAccessPending={searchAccessPending}
+          onHarnessSessionCreated={historyOnly || searchAccessPending ? undefined : onHarnessSessionCreated}
         />
       </div>
     </div>
@@ -6401,6 +6423,7 @@ function FeatureDetailPage({
   unbound,
   projectDeleted,
   projectArchived,
+  searchAccessPending,
   activeSessionThreadId,
   searchSessionThreadId,
   isViewingSession,
@@ -6421,6 +6444,7 @@ function FeatureDetailPage({
   unbound?: boolean
   projectDeleted?: boolean
   projectArchived?: boolean
+  searchAccessPending?: boolean
   activeSessionThreadId?: string
   searchSessionThreadId?: string
   isViewingSession: boolean
@@ -6566,7 +6590,7 @@ function FeatureDetailPage({
   const [activeDetailTab, setActiveDetailTab] = useState<"feature" | "session">(() =>
     isViewingSession && activeSessionThreadId ? "session" : "feature"
   )
-  const projectInteractionDisabled = Boolean(unbound || projectDeleted || projectArchived)
+  const projectInteractionDisabled = Boolean(unbound || projectDeleted || projectArchived || searchAccessPending)
   const featureImManagementAvailable =
     featureImRobotStatus?.settings.enabled === true &&
     featureImRobotStatus.connectionState === "online" &&
@@ -7207,14 +7231,14 @@ function FeatureDetailPage({
               onBack={
                 projectDeleted
                   ? onBackToList
-                  : effectiveActiveDetailTab === "session"
+                  : !searchAccessPending && effectiveActiveDetailTab === "session"
                     ? handleBackToFeature
                     : onBackToProject
               }
               onProjectList={onBackToList}
               onProject={projectDeleted ? undefined : onBackToProject}
               onFeature={
-                projectDeleted
+                projectDeleted || searchAccessPending
                   ? undefined
                   : effectiveActiveDetailTab === "session"
                     ? handleBackToFeature
@@ -7340,8 +7364,11 @@ function FeatureDetailPage({
         <div className="flex min-h-0 flex-1 flex-col pt-3">
           <FeatureConversationPanel
             threadId={activeSessionThreadIdForView}
-            readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话" : projectArchived ? "项目已归档，仅可查看历史会话" : null}
-            onHarnessSessionCreated={handleContextReminderSessionCreated}
+            readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话"
+              : projectArchived ? "项目已归档，仅可查看历史会话"
+                : searchAccessPending ? "正在确认项目状态，请稍候。" : null}
+            searchAccessPending={searchAccessPending}
+            onHarnessSessionCreated={searchAccessPending ? undefined : handleContextReminderSessionCreated}
           />
         </div>
       ) : projectDeleted ? (
@@ -7640,6 +7667,7 @@ function ProjectFeatureSidebar({
   selectedProjectId,
   selectedFeature,
   selectedProjectSession,
+  readOnlyProjectId,
   isViewingSession,
   unreadIds,
   exportingThreadId,
@@ -7679,6 +7707,7 @@ function ProjectFeatureSidebar({
   selectedProjectId: string | null
   selectedFeature: SelectedFeature | null
   selectedProjectSession: SelectedProjectSession | null
+  readOnlyProjectId: string | null
   isViewingSession: boolean
   unreadIds: Set<string>
   exportingThreadId: string | null
@@ -7797,6 +7826,13 @@ function ProjectFeatureSidebar({
       preserveScrollUntilRef.current = 0
       pendingScrollRestoreRef.current = null
       if (target || !targetProjectId) scrollIntentRef.current = null
+    } else if (scrollIntent && typeof scrollIntent === "object") {
+      if (highlightThreadId === scrollIntent.threadId && revealSidebarThread(viewport, scrollIntent.threadId)) {
+        scrollTopRef.current = viewport.scrollTop
+        preserveScrollUntilRef.current = 0
+        pendingScrollRestoreRef.current = null
+        scrollIntentRef.current = null
+      }
     } else if (scrollIntent === "preserve") {
       const targetScrollTop = pendingScrollRestoreRef.current ?? scrollTopRef.current
       if (targetScrollTop > 0) {
@@ -7829,6 +7865,7 @@ function ProjectFeatureSidebar({
     collapsedKeys,
     getSidebarViewport,
     groups,
+    highlightThreadId,
     isViewingSession,
     scrollIntentRef,
     scrollTopRef,
@@ -7843,7 +7880,7 @@ function ProjectFeatureSidebar({
     thread: Thread,
     hoverTitle: string,
     onSelect: () => void,
-    isManagedRunning = false
+    options: { isManagedRunning?: boolean; readOnly?: boolean } = {}
   ): React.JSX.Element => {
     const threadState = allThreadStates[thread.thread_id]
     const isLoading =
@@ -7864,9 +7901,10 @@ function ProjectFeatureSidebar({
         isExporting={exportingThreadId === thread.thread_id}
         isForking={forkingThreadId === thread.thread_id}
         isSelected={highlightThreadId === thread.thread_id}
-        isEditing={editingThreadId === thread.thread_id}
+        isEditing={!options.readOnly && editingThreadId === thread.thread_id}
         isUnread={unreadIds.has(thread.thread_id)}
-        isManagedRunning={isManagedRunning}
+        isManagedRunning={options.isManagedRunning}
+        readOnly={options.readOnly}
         hasPendingUserInput={hasPendingUserInput}
         editingTitle={editingTitle}
         hoverTitle={hoverTitle}
@@ -7874,7 +7912,9 @@ function ProjectFeatureSidebar({
           captureSidebarScrollTop()
           onSelect()
         }}
-        onRunFinished={() => onRunFinished(thread.thread_id)}
+        onRunFinished={() => {
+          if (!options.readOnly) onRunFinished(thread.thread_id)
+        }}
         onDelete={() => onDeleteSession(thread)}
         onExport={() => void onExportSession(thread)}
         onFork={() => onForkSession(thread)}
@@ -7916,9 +7956,10 @@ function ProjectFeatureSidebar({
   const renderSessionVisibilityControls = (
     key: string,
     visibleSessionCount: number,
-    sessionCount: number
+    sessionCount: number,
+    hiddenCount: number
   ): React.JSX.Element | null => {
-    const canExpandSessions = visibleSessionCount < sessionCount
+    const canExpandSessions = hiddenCount > 0
     const canCollapseSessions = visibleSessionCount > FEATURE_SESSION_INITIAL_VISIBLE_COUNT
 
     if (!canExpandSessions && !canCollapseSessions) return null
@@ -7983,6 +8024,7 @@ function ProjectFeatureSidebar({
               )
             const projectArchived = group.project.lifecycle.status === "archived"
             const projectDeleted = group.deleted === true
+            const readOnly = group.project.projectId === readOnlyProjectId
             const projectPinned = !projectDeleted && pinnedProjectIds.has(group.project.projectId)
             const groupSessionCount =
               group.projectSessions.length +
@@ -8095,6 +8137,7 @@ function ProjectFeatureSidebar({
                         variant="ghost"
                         size="icon-sm"
                         className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
+                        disabled={readOnly}
                         title={
                           hasRunningGroupSession
                             ? "删除项目会话（自动跳过运行中的任务）"
@@ -8128,28 +8171,31 @@ function ProjectFeatureSidebar({
                         projectSessionsKey,
                         group.projectSessions.length
                       )
-                      const visibleProjectSessions = group.projectSessions.slice(
-                        0,
-                        visibleProjectSessionCount
+                      const visibleProjectSessions = selectBoundedSidebarWindow(
+                        group.projectSessions, visibleProjectSessionCount,
+                        selectedProjectSession?.projectId === group.project.projectId
+                          ? group.projectSessions.findIndex((session) => session.threadId === highlightThreadId)
+                          : -1
                       )
 
                       return (
                         <>
-                          {visibleProjectSessions.map((session) => {
+                          {visibleProjectSessions.items.map((session) => {
                             const thread = threadsById.get(session.threadId)
                             if (!thread) return null
-                            return renderThreadItem(thread, getThreadTitle(thread), () =>
-                              onSelectProjectSession(
-                                group.project.projectId,
-                                thread.thread_id,
-                                projectDeleted
-                              )
+                            return renderThreadItem(
+                              thread, getThreadTitle(thread),
+                              () => onSelectProjectSession(
+                                group.project.projectId, thread.thread_id, projectDeleted
+                              ),
+                              { readOnly }
                             )
                           })}
                           {renderSessionVisibilityControls(
                             projectSessionsKey,
                             visibleProjectSessionCount,
-                            group.projectSessions.length
+                            group.projectSessions.length,
+                            visibleProjectSessions.hiddenCount
                           )}
                         </>
                       )
@@ -8184,7 +8230,12 @@ function ProjectFeatureSidebar({
                         featureGroup.key,
                         featureGroup.sessions.length
                       )
-                      const visibleSessions = featureGroup.sessions.slice(0, visibleSessionCount)
+                      const visibleSessions = selectBoundedSidebarWindow(
+                        featureGroup.sessions, visibleSessionCount,
+                        featureSelected && !featureCollapsed
+                          ? featureGroup.sessions.findIndex((session) => session.threadId === highlightThreadId)
+                          : -1
+                      )
 
                       return (
                         <div key={featureGroup.key} className="space-y-1">
@@ -8266,7 +8317,7 @@ function ProjectFeatureSidebar({
                                       size="icon-sm"
                                       className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
                                       title="新增会话"
-                                      disabled={creatingSession}
+                                      disabled={creatingSession || readOnly}
                                       onClick={(event) => {
                                         event.stopPropagation()
                                         void onCreateSession(group.project, featureGroup.slug)
@@ -8284,6 +8335,7 @@ function ProjectFeatureSidebar({
                                   variant="ghost"
                                   size="icon-sm"
                                   className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
+                                  disabled={readOnly}
                                   title={
                                     hasRunningFeatureSession
                                       ? "删除特性组会话（自动跳过运行中的任务）"
@@ -8318,7 +8370,7 @@ function ProjectFeatureSidebar({
                                 </div>
                               ) : (
                                 <>
-                                  {visibleSessions.map((session) => {
+                                  {visibleSessions.items.map((session) => {
                                     const thread = threadsById.get(session.threadId)
                                     if (!thread) return null
                                     return renderThreadItem(
@@ -8331,13 +8383,17 @@ function ProjectFeatureSidebar({
                                           thread.thread_id,
                                           projectDeleted
                                         ),
-                                      featureGroup.managedRunThreadId === thread.thread_id
+                                      {
+                                        isManagedRunning: featureGroup.managedRunThreadId === thread.thread_id,
+                                        readOnly
+                                      }
                                     )
                                   })}
                                   {renderSessionVisibilityControls(
                                     featureGroup.key,
                                     visibleSessionCount,
-                                    featureGroup.sessions.length
+                                    featureGroup.sessions.length,
+                                    visibleSessions.hiddenCount
                                   )}
                                 </>
                               )}
@@ -8675,6 +8731,23 @@ export function HarnessBoardView({
   deployUnitMappingsRef.current = deployUnitMappings
   leanTokenConfigRef.current = leanTokenConfig
   deletionThreadStatesRef.current = allThreadStates
+
+  const searchNavigation = useThreadSearch((state) => state.navigation)
+  const isOfflineHistoryOpen = useCallback(() =>
+    Boolean(
+      useThreadSearch.getState().navigation?.searchReadOnly ||
+      selectedFeatureRef.current?.historyOnly ||
+      selectedProjectSessionRef.current?.historyOnly ||
+      selectedFeatureRef.current?.searchAccessId !== undefined ||
+      selectedProjectSessionRef.current?.searchAccessId !== undefined
+    ), [])
+  const searchAccessId = selectedFeature?.searchAccessId ?? selectedProjectSession?.searchAccessId
+  const searchAccessPending = searchAccessId !== undefined && searchNavigation?.id === searchAccessId
+  const historyOnly = selectedFeature?.historyOnly || selectedProjectSession?.historyOnly ||
+    (searchAccessId !== undefined && !searchAccessPending)
+  const readOnlySearchSession = historyOnly || searchAccessPending
+  const historyProjectId = readOnlySearchSession
+    ? (selectedFeature?.projectId ?? selectedProjectSession?.projectId ?? null) : null
 
   const flushEnterpriseProjectDetailQueue = useCallback(() => {
     enterpriseProjectDetailTimerRef.current = null
@@ -9186,7 +9259,7 @@ export function HarnessBoardView({
   }, [])
 
   const drainProjectDetailQueue = useCallback(async (): Promise<void> => {
-    if (detailBatchInFlightRef.current) return
+    if (detailBatchInFlightRef.current || isOfflineHistoryOpen()) return
     const generation = detailLoadGenerationRef.current
     const projectIds = takeHarnessProjectDetailBatch(
       detailPriorityQueueRef.current,
@@ -9236,7 +9309,7 @@ export function HarnessBoardView({
         }
       }
     }
-  }, [scheduleProjectDetailDrain])
+  }, [isOfflineHistoryOpen, scheduleProjectDetailDrain])
   drainProjectDetailQueueRef.current = () => void drainProjectDetailQueue()
 
   const queueProjectDetails = useCallback(
@@ -9245,6 +9318,7 @@ export function HarnessBoardView({
       priority: "visible" | "background",
       options: { revalidate?: boolean } = {}
     ): void => {
+      if (isOfflineHistoryOpen()) return
       const queue =
         priority === "visible" ? detailPriorityQueueRef.current : detailBackgroundQueueRef.current
       for (const projectId of projectIds) {
@@ -9261,7 +9335,7 @@ export function HarnessBoardView({
       }
       scheduleProjectDetailDrain(priority === "visible" ? 0 : PROJECT_DETAIL_BACKGROUND_DELAY_MS)
     },
-    [scheduleProjectDetailDrain]
+    [isOfflineHistoryOpen, scheduleProjectDetailDrain]
   )
 
   const handleProjectCardVisible = useCallback(
@@ -9323,9 +9397,11 @@ export function HarnessBoardView({
           current &&
           (items.some((item) => item.projectId === current) ||
             (selectedFeatureRef.current?.projectId === current &&
-              (selectedFeatureRef.current.deleted || selectedFeatureRef.current.searchSessionThreadId)) ||
+              (selectedFeatureRef.current.deleted || selectedFeatureRef.current.historyOnly ||
+                selectedFeatureRef.current.searchSessionThreadId)) ||
             (selectedProjectSessionRef.current?.projectId === current &&
-              selectedProjectSessionRef.current.searchOwned))
+              (selectedProjectSessionRef.current.searchOwned ||
+                selectedProjectSessionRef.current.historyOnly)))
             ? current
             : null
         )
@@ -9465,7 +9541,7 @@ export function HarnessBoardView({
   )
 
   const refreshProjectDetailsInBackground = useCallback(async () => {
-    if (selectedProjectIdRef.current || selectedFeatureRef.current) return
+    if (selectedProjectIdRef.current || selectedFeatureRef.current || isOfflineHistoryOpen()) return
     if (projectDetailsRefreshInFlightRef.current) return
 
     const loadedProjectIds = projectsRef.current
@@ -9495,7 +9571,7 @@ export function HarnessBoardView({
     } finally {
       projectDetailsRefreshInFlightRef.current = false
     }
-  }, [])
+  }, [isOfflineHistoryOpen])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -9507,7 +9583,7 @@ export function HarnessBoardView({
 
   const refreshSelectedProjectDetailInBackground = useCallback(async () => {
     const projectId = selectedProjectIdRef.current
-    if (!projectId || selectedFeatureRef.current) return
+    if (!projectId || selectedFeatureRef.current || isOfflineHistoryOpen()) return
     if (selectedProjectRefreshInFlightRef.current) return
 
     selectedProjectRefreshInFlightRef.current = true
@@ -9520,7 +9596,7 @@ export function HarnessBoardView({
     } finally {
       selectedProjectRefreshInFlightRef.current = false
     }
-  }, [loadProjectDetail])
+  }, [isOfflineHistoryOpen, loadProjectDetail])
 
   const patchCachedProjectRuns = useCallback(
     (projectId: string, patchRun: (run: HarnessFeatureSummary) => HarnessFeatureSummary): void => {
@@ -9547,13 +9623,13 @@ export function HarnessBoardView({
   )
 
   useEffect(() => {
-    if (!selectedProjectId || selectedFeature) return
+    if (!selectedProjectId || selectedFeature || historyProjectId) return
     const timer = window.setInterval(() => {
       void refreshSelectedProjectDetailInBackground()
     }, PROJECT_STATUS_POLL_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
-  }, [refreshSelectedProjectDetailInBackground, selectedFeature, selectedProjectId])
+  }, [historyProjectId, refreshSelectedProjectDetailInBackground, selectedFeature, selectedProjectId])
 
   const selectedFeatureProjectDetail = selectedFeature
     ? detailsByProjectId[selectedFeature.projectId]
@@ -9573,7 +9649,8 @@ export function HarnessBoardView({
       setRunDetail(null)
       return
     }
-    if (selectedFeature.deleted) {
+    if (selectedFeature.deleted || selectedFeature.historyOnly ||
+        selectedFeature.searchAccessId !== undefined) {
       skipRunDetailLoadForSessionRef.current = null
       setRunDetail(null)
       setLoadingRun(false)
@@ -9639,6 +9716,7 @@ export function HarnessBoardView({
 
   useEffect(() => {
     return window.api.harnessBoard.onWatchRefsChanged((event) => {
+      if (isOfflineHistoryOpen()) return
       const currentFeature = selectedFeatureRef.current
       const projectMatch = event.scopeKey.match(/^project:(.+)$/)
       if (projectMatch) {
@@ -9668,7 +9746,7 @@ export function HarnessBoardView({
           })
       }
     })
-  }, [loadProjectDetail])
+  }, [isOfflineHistoryOpen, loadProjectDetail])
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunChanged((event) => {
@@ -9684,7 +9762,7 @@ export function HarnessBoardView({
         }
         return { ...run, managedRunStatus: event.run.status, managedRunThreadId }
       })
-      if (event.run.status !== "running") {
+      if (event.run.status !== "running" && !isOfflineHistoryOpen()) {
         void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
       }
 
@@ -9692,6 +9770,7 @@ export function HarnessBoardView({
       if (
         !currentFeature ||
         currentFeature.deleted ||
+        currentFeature.historyOnly ||
         currentFeature.projectId !== event.projectId ||
         currentFeature.slug !== event.featureId
       ) {
@@ -9714,7 +9793,7 @@ export function HarnessBoardView({
         }
       })
     })
-  }, [loadProjectDetail, patchCachedProjectRuns])
+  }, [isOfflineHistoryOpen, loadProjectDetail, patchCachedProjectRuns])
 
 
   const handleFeatureImManagementSaved = useCallback(
@@ -9735,7 +9814,8 @@ export function HarnessBoardView({
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {
       setManagedScheduleRefreshRevision((revision) => revision + 1)
-      if (!selectedFeature || selectedFeature.deleted) return
+      if (!selectedFeature || selectedFeature.deleted || selectedFeature.historyOnly ||
+          selectedFeature.searchAccessId !== undefined) return
       setLoadingRun(true)
       setLoadError(null)
       try {
@@ -10737,7 +10817,7 @@ export function HarnessBoardView({
   const selectedProjectDetail = selectedProjectId
     ? detailsByProjectId[selectedProjectId]
     : undefined
-  const selectedProjectCode = selectedProject
+  const selectedProjectCode = selectedProject && !historyProjectId
     ? normalizeEnterpriseProjectCode(selectedProject.projectCode)
     : ""
   const selectedProjectArchived = selectedProject?.lifecycle.status === "archived"
@@ -10894,7 +10974,7 @@ export function HarnessBoardView({
   const openFeatureDetail = useCallback(
     (
       projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean,
-      searchSessionThreadId?: string
+      searchSessionThreadId?: string, historyOnly?: true, searchAccessId?: number
     ): void => {
       if (!searchSessionThreadId) cancelThreadSearchNavigation()
       if (!activeSessionThreadId) {
@@ -10902,9 +10982,12 @@ export function HarnessBoardView({
       }
       setSelectedProjectSession(null)
       setSelectedProjectId(projectId)
-      setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted, searchSessionThreadId })
+      setSelectedFeature({
+        projectId, slug, activeSessionThreadId, deleted, searchSessionThreadId, historyOnly, searchAccessId
+      })
       setIsViewingSession(!!activeSessionThreadId)
-      if (!deleted && !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+      if (!deleted && !historyOnly && searchAccessId === undefined &&
+          !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
         void loadProjectDetail(projectId)
       }
     },
@@ -10923,38 +11006,51 @@ export function HarnessBoardView({
   }, [botDestination, openFeatureDetail, selectThread, markRead])
 
   const openProjectSession = useCallback(
-    (projectId: string, threadId: string, deleted?: boolean, searchOwned = false): void => {
+    (
+      projectId: string, threadId: string, deleted?: boolean,
+      searchOwned = false, historyOnly?: true, searchAccessId?: number
+    ): void => {
       if (!searchOwned) cancelThreadSearchNavigation()
       setSelectedProjectId(projectId)
       setSelectedFeature(null)
-      setSelectedProjectSession({ projectId, threadId, deleted, searchOwned })
+      setSelectedProjectSession({ projectId, threadId, deleted, searchOwned, historyOnly, searchAccessId })
       setIsViewingSession(true)
-      if (!deleted && !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+      if (!deleted && !historyOnly && searchAccessId === undefined &&
+          !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
         void loadProjectDetail(projectId)
       }
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
 
-  const searchNavigation = useThreadSearch((state) => state.navigation)
   const searchProjectId = selectedFeature?.projectId ?? selectedProjectSession?.projectId ?? selectedProjectId
+  const searchProjectThreadId = isViewingSession
+    ? (selectedFeature?.activeSessionThreadId ?? selectedProjectSession?.threadId ?? null) : null
   useLayoutEffect(() => {
     useThreadSearch.setState({
       projectId: searchProjectId,
+      projectSessionThreadId: searchProjectThreadId,
+      readOnlyProjectThreadId: readOnlySearchSession ? searchProjectThreadId : null,
       projectRoute: isViewingSession && selectedFeature
         ? { kind: "featureSession", projectId: selectedFeature.projectId, slug: selectedFeature.slug }
         : isViewingSession && selectedProjectSession
           ? { kind: "projectSession", projectId: selectedProjectSession.projectId } : null
     })
-  }, [searchProjectId, isViewingSession, selectedFeature, selectedProjectSession])
+  }, [
+    searchProjectId, searchProjectThreadId, isViewingSession,
+    readOnlySearchSession, selectedFeature, selectedProjectSession
+  ])
   useLayoutEffect(() => () => {
-    useThreadSearch.setState({ projectId: null, projectRoute: null })
+    useThreadSearch.setState({
+      projectId: null, projectRoute: null,
+      projectSessionThreadId: null, readOnlyProjectThreadId: null
+    })
   }, [])
   const confirmingSearchNavigationId = useRef<number | null>(null)
   useLayoutEffect(() => {
     if (!searchNavigation || searchNavigation.stage !== "board" ||
         searchNavigation.route.kind === "ordinary" || !searchNavigation.project) return
-    const { id, project, route, result, navigationTicketId } = searchNavigation
+    const { id, project, route, result, navigationTicketId, searchReadOnly } = searchNavigation
     if (confirmingSearchNavigationId.current === id) return
     confirmingSearchNavigationId.current = id
     void window.api.threads.searchConfirmRoute({
@@ -10966,18 +11062,54 @@ export function HarnessBoardView({
         return
       }
       withOwnedThreadSearchTransition(id, () => {
+        const accessId = !searchReadOnly && result.navigation === "exact" ? id : undefined
+        if (searchReadOnly || accessId !== undefined) onActiveSessionThreadChange?.(null)
+        projectSidebarScrollIntentRef.current = { threadId: result.threadId }
+        setCollapsedFeatureKeys((current) => {
+          const next = new Set(current)
+          const projectExpanded = next.delete(`project:${route.projectId}`)
+          const featureExpanded = route.kind === "featureSession" &&
+            next.delete(`feature:${route.projectId}:${route.slug}`)
+          return projectExpanded || featureExpanded ? next : current
+        })
         if (project.lifecycle.status === "archived") setSearchArchivedProjectId(project.projectId)
         setSidebarProjectsById((current) => ({ ...current, [project.projectId]: project }))
         if (route.kind === "featureSession") {
-          openFeatureDetail(route.projectId, route.slug, result.threadId, false, result.threadId)
+          openFeatureDetail(
+            route.projectId, route.slug, result.threadId, false, result.threadId, searchReadOnly, accessId
+          )
         } else {
-          openProjectSession(route.projectId, result.threadId, false, true)
+          openProjectSession(route.projectId, result.threadId, false, true, searchReadOnly, accessId)
         }
         searchNavigation.onProjectReady?.()
-        useThreadSearch.setState({ navigation: { ...searchNavigation, stage: "board-mounting" } })
+        const onProjectAccessResolved = accessId === undefined ? undefined : (available: boolean) => {
+          withOwnedThreadSearchTransition(id, () => {
+            const current = useThreadSearch.getState().navigation
+            if (current?.id !== id || current.stage !== "chat" ||
+                current.result.threadId !== result.threadId) return
+            if (route.kind === "featureSession") {
+              const selected = selectedFeatureRef.current
+              if (selected?.searchAccessId !== id || selected.activeSessionThreadId !== result.threadId ||
+                  selected.projectId !== route.projectId || selected.slug !== route.slug) return
+              setSelectedFeature({ ...selected, searchAccessId: undefined, historyOnly: available ? undefined : true })
+            } else {
+              const selected = selectedProjectSessionRef.current
+              if (selected?.searchAccessId !== id || selected.threadId !== result.threadId ||
+                  selected.projectId !== route.projectId) return
+              setSelectedProjectSession({
+                ...selected, searchAccessId: undefined, historyOnly: available ? undefined : true
+              })
+            }
+            if (available && !detailsByProjectIdRef.current[route.projectId] &&
+                !loadingDetailIdsRef.current.has(route.projectId)) void loadProjectDetail(route.projectId)
+          })
+        }
+        useThreadSearch.setState({
+          navigation: { ...searchNavigation, stage: "board-mounting", onProjectAccessResolved }
+        })
       })
     }).catch(() => finishThreadSearchNavigation(id, "暂时无法打开所属项目"))
-  }, [searchNavigation, openFeatureDetail, openProjectSession])
+  }, [searchNavigation, loadProjectDetail, onActiveSessionThreadChange, openFeatureDetail, openProjectSession])
   useLayoutEffect(() => {
     if (searchNavigation?.stage !== "board-mounting" || !isViewingSession) return
     const { route, result, id } = searchNavigation
@@ -11627,7 +11759,6 @@ export function HarnessBoardView({
   const sidebarPortal = sidebarPortalNode
     ? createPortal(
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="shrink-0 px-2"><ThreadSearchButton /></div>
           <div className="px-2 pb-2">
             <Button
               variant="ghost"
@@ -11659,6 +11790,7 @@ export function HarnessBoardView({
             selectedProjectId={selectedProjectId}
             selectedFeature={selectedFeature}
             selectedProjectSession={selectedProjectSession}
+            readOnlyProjectId={historyProjectId}
             isViewingSession={isViewingSession}
             unreadIds={unreadIds}
             exportingThreadId={exportingThreadId}
@@ -11682,12 +11814,17 @@ export function HarnessBoardView({
               void handleCreateSidebarSession(project, slug)
             }}
             onSelectProjectSession={(projectId, threadId, deleted) => {
-              openProjectSession(projectId, threadId, deleted)
+              openProjectSession(
+                projectId, threadId, deleted, false, historyProjectId === projectId ? true : undefined
+              )
               markRead(threadId)
               void selectThread(threadId, { preserveView: true })
             }}
             onSelectSession={(projectId, slug, threadId, deleted) => {
-              openFeatureDetail(projectId, slug, threadId, deleted)
+              openFeatureDetail(
+                projectId, slug, threadId, deleted, undefined,
+                historyProjectId === projectId ? true : undefined
+              )
               markRead(threadId)
               void selectThread(threadId, { preserveView: true })
             }}
@@ -11725,9 +11862,33 @@ export function HarnessBoardView({
     (run) => run.slug === selectedFeature?.slug
   )
   useEffect(() => {
+    if (historyProjectId) {
+      onActiveSessionThreadChange?.(null)
+      return
+    }
     if (selectedFeature) return
     onActiveSessionThreadChange?.(selectedProjectSession?.threadId ?? null)
-  }, [onActiveSessionThreadChange, selectedFeature, selectedProjectSession?.threadId])
+  }, [historyProjectId, onActiveSessionThreadChange, selectedFeature, selectedProjectSession?.threadId])
+
+  if (selectedFeature && historyOnly) {
+    const thread = threadsById.get(selectedFeature.activeSessionThreadId ?? "") ?? null
+    return (
+      <>
+        <ProjectSessionPage
+          project={selectedProject ?? makeDeletedProjectSidebarItem(
+            selectedFeature.projectId, readThreadHarnessProjectName(thread)
+          )}
+          thread={thread}
+          deleted={selectedFeature.deleted}
+          historyOnly
+          featureSlug={selectedFeature.slug}
+          onBackToList={handleBackToProjectList}
+          onBackToProject={handleBackToProject}
+        />
+        {sidebarPortal}
+      </>
+    )
+  }
 
   if (selectedFeature) {
     const selectedFeatureDeleted = selectedFeature.deleted === true
@@ -11735,11 +11896,12 @@ export function HarnessBoardView({
     return (
       <>
         <FeatureDetailPage
-          detail={runDetailWithSessions}
+          detail={searchAccessPending ? null : runDetailWithSessions}
           loading={loadingRun}
           unbound={showingUnboundRunDetail}
           projectDeleted={selectedFeatureDeleted}
           projectArchived={selectedProjectArchived}
+          searchAccessPending={searchAccessPending}
           searchSessionThreadId={selectedFeature.searchSessionThreadId === selectedFeature.activeSessionThreadId
             ? selectedFeature.searchSessionThreadId : undefined}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
@@ -11758,7 +11920,7 @@ export function HarnessBoardView({
           onFeatureImManagementSaved={handleFeatureImManagementSaved}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
-          onActiveSessionThreadChange={onActiveSessionThreadChange}
+          onActiveSessionThreadChange={searchAccessPending ? undefined : onActiveSessionThreadChange}
         />
         <FeatureCreateDialog
           mode={featureDialogMode}
@@ -11800,6 +11962,8 @@ export function HarnessBoardView({
           project={selectedProjectSessionProject}
           thread={selectedProjectSessionThread}
           deleted={selectedProjectSession.deleted}
+          historyOnly={historyOnly}
+          searchAccessPending={searchAccessPending}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onHarnessSessionCreated={handleActiveProjectSessionChange}

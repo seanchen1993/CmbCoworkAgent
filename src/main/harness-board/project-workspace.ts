@@ -1,6 +1,18 @@
 import { constants } from "node:fs"
 import { access, readdir, stat } from "node:fs/promises"
-import { basename, dirname } from "node:path"
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+
+export function resolveHarnessProjectDirectory(
+  workspace: string,
+  projectDir: string
+): string | null {
+  if (!workspace.trim() || !projectDir) return null
+  const workspacePath = resolve(workspace)
+  const projectPath = resolve(workspacePath, projectDir)
+  const relativePath = relative(workspacePath, projectPath)
+  return relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath) &&
+    basename(projectPath) === projectDir ? projectPath : null
+}
 
 export async function validateProjectDirectorySelection(projectPath: string): Promise<{
   workspacePath: string

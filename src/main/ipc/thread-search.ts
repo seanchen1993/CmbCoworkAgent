@@ -11,7 +11,8 @@ import {
   isProjectSearchRouteCurrent,
   onProjectSearchCatalogChange,
   projectSearchCatalogGeneration,
-  readProjectSearchCatalog
+  readProjectSearchCatalog,
+  readProjectSearchNavigationAccess
 } from "../thread-search/project-catalog"
 import type { Worker } from "node:worker_threads"
 import type { IpcMain } from "electron"
@@ -61,6 +62,7 @@ const navigationTickets = new Map<number, {
   id: string
   expires: number
   consumed: boolean
+  readOnly: boolean
 }>()
 const summaryRequests = new Map<number, symbol>()
 const sessionTtl = 5 * 60_000
@@ -292,6 +294,14 @@ function currentProjectDestination(request: SearchDestination): boolean {
   return request.route.kind === "ordinary" || currentDestination(request)
 }
 
+function projectDestinationAccess(request: SearchDestination) {
+  return request.route.kind === "ordinary"
+    ? Promise.resolve("live" as const)
+    : request.catalogGeneration
+      ? readProjectSearchNavigationAccess(request.catalogGeneration, request.route)
+      : Promise.resolve(null)
+}
+
 function validatedScope(request: ThreadSearchStartRequest): ThreadSearchScope {
   const workspaceValid = (value: unknown) => value == null ||
     (typeof value === "string" && Buffer.byteLength(value) <= 32768)
@@ -450,19 +460,24 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
     summaryRequests.set(owner, token)
     try {
       const summary = await readSearchThread(owner, request, true)
-      if (
+      const stillCurrent = () => !(
         summaryRequests.get(owner) !== token ||
-        !summary ||
         getSession(owner) !== handle ||
         getThreadRowLifetime(request.threadId) !== lifetime ||
         isThreadPublicationPending(candidate.threadId) ||
         !currentProjectDestination(request)
       )
-        return null
+      if (!summary || !stillCurrent()) return null
+      const access = request.route.kind === "ordinary" ? "live" : await projectDestinationAccess(request)
+      if (!access || (request.route.kind !== "ordinary" && !stillCurrent())) return null
+      const readOnly = access === "history"
       const id = randomUUID()
-      const response = { ...summary, searchRoute: request.route, navigationTicketId: id }
+      const response = {
+        ...summary, searchRoute: request.route, navigationTicketId: id,
+        ...(readOnly ? { searchReadOnly: true as const } : {})
+      }
       if (Buffer.byteLength(JSON.stringify(response)) > 32 * 1024) return null
-      navigationTickets.set(owner, { id, request, expires: Date.now() + 30_000, consumed: false })
+      navigationTickets.set(owner, { id, request, expires: Date.now() + 30_000, consumed: false, readOnly })
       return response
     } finally {
       if (summaryRequests.get(owner) === token) summaryRequests.delete(owner)
@@ -476,7 +491,13 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
     if (!ticket || isThreadPublicationPending(candidate.threadId)) return false
     const lifetime = getThreadRowLifetime(ticket.request.threadId)
     const identity = lifetime !== null && await readSearchThread(sender.id, ticket.request, false)
-    if (!identity || lifetime !== getThreadRowLifetime(ticket.request.threadId) ||
+    if (!identity) return false
+    if (!ticket.readOnly && ticket.request.route.kind !== "ordinary" &&
+        await projectDestinationAccess(ticket.request) !== "live") {
+      if (navigationTickets.get(sender.id) === ticket) navigationTickets.delete(sender.id)
+      return false
+    }
+    if (lifetime !== getThreadRowLifetime(ticket.request.threadId) ||
         admittedTicket(sender.id, candidate) !== ticket || isThreadPublicationPending(candidate.threadId))
       return false
     if (!ticket.request.target) navigationTickets.delete(sender.id)
@@ -496,8 +517,19 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
         navigationTickets.delete(sender.id)
         return { status: "staleIdentity" }
       }
+      const writableProject = !ticket.readOnly && request.route.kind !== "ordinary"
+      const recheckWritableProject = async () => {
+        const access = await projectDestinationAccess(request)
+        if (!current() || getThreadRowLifetime(request.threadId) !== lifetime || !access)
+          return "staleIdentity" as const
+        return access === "history" ? "projectBecameUnavailable" as const : null
+      }
       return whileHistoryIsPaused(request.threadId, async () => {
         if (!current()) return { status: "staleIdentity" }
+        if (writableProject) {
+          const status = await recheckWritableProject()
+          if (status) return { status }
+        }
         const firstIdentity = await readSearchThread(sender.id, request, false)
         if (!current() || !firstIdentity) return { status: "staleIdentity" }
         const target = request.target
@@ -542,6 +574,10 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
         const finalIdentity = await readSearchThread(sender.id, request, false)
         if (!current() || !finalIdentity) return { status: "staleIdentity" }
         if (getThreadRowLifetime(request.threadId) !== lifetime) return { status: "staleIdentity" }
+        if (writableProject) {
+          const status = await recheckWritableProject()
+          if (status) return { status }
+        }
         const [structureEpoch, messageVersion] = readTargetVersion(request.threadId, messageId)
         if (structureEpoch !== epochBeforeRead || messageVersion !== versionBeforeRead) {
           return { status: "changed" }

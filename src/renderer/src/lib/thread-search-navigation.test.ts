@@ -4,6 +4,7 @@ import {
   cancelThreadSearchOnTabChange,
   isCurrentThreadSearchNavigation,
   isOwnedThreadSearchTransition,
+  isReadOnlyProjectSearchThread,
   isThreadSearchSurface,
   openThreadSearch,
   reserveThreadSearchNavigation,
@@ -86,5 +87,32 @@ describe("cross-conversation search panel", () => {
     expect(isThreadSearchSurface(committed, "thread", "harness-project", {
       ...route, slug: "other"
     })).toBe(false)
+  })
+
+  it("protects only the exact project thread while access is pending or history is open", () => {
+    const route = { kind: "projectSession", projectId: "project" } as const
+    const request: ThreadSearchNavigation = {
+      id: 1, query: "test", navigationTicketId: "ticket", route, stage: "chat",
+      result: {
+        route, matchedBy: "title", navigation: "threadOnly", target: null,
+        threadId: "thread", incarnation: { token: null, legacyCreatedAt: 1 },
+        title: "test", workspacePath: null, frozenUpdatedAt: 1, snippet: "test", snippetRanges: []
+      }
+    }
+    try {
+      useThreadSearch.setState({ navigation: request })
+      expect(isReadOnlyProjectSearchThread("thread")).toBe(false)
+      useThreadSearch.setState({ navigation: { ...request, searchReadOnly: true } })
+      expect(isReadOnlyProjectSearchThread("thread")).toBe(true)
+      useThreadSearch.setState({ navigation: { ...request, onProjectAccessResolved: () => {} } })
+      expect(isReadOnlyProjectSearchThread("thread")).toBe(true)
+      expect(isReadOnlyProjectSearchThread("other")).toBe(false)
+      useThreadSearch.setState({ navigation: null, readOnlyProjectThreadId: "thread" })
+      expect(isReadOnlyProjectSearchThread("thread")).toBe(true)
+      useThreadSearch.setState({ readOnlyProjectThreadId: null })
+      expect(isReadOnlyProjectSearchThread("thread")).toBe(false)
+    } finally {
+      useThreadSearch.setState({ navigation: null, readOnlyProjectThreadId: null })
+    }
   })
 })

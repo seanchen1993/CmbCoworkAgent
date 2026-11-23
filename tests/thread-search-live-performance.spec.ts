@@ -1,5 +1,6 @@
 /** Real Electron search and normal chat performance. Build before running with tsx. */
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { createRequire } from "node:module"
@@ -11,6 +12,7 @@ import { sqliteRecoveryFamilyKey } from "../src/main/db/sqlite-recovery-family"
 
 import type { ThreadSearchStartRequest } from "../src/shared/thread-search-types"
 import {
+  PROBE_PROJECT_ID,
   projectProbeCases,
   projectProbeMarker,
   projectProbeMetadata,
@@ -22,6 +24,7 @@ import { installProjectSearchHarnessAdapter } from "./support/project-search-har
 const unknownFeaturePressure = process.env.CMB_THREAD_SEARCH_PROBE_UNKNOWN_FEATURES === "1"
 const mixedProjects = unknownFeaturePressure || process.env.CMB_THREAD_SEARCH_PROBE_PROJECTS === "1"
 const coldIpc = process.env.CMB_THREAD_SEARCH_PROBE_IPC_COLD === "1"
+const persistedEvidence = process.env.CMB_THREAD_SEARCH_PROBE_PERSISTED_EVIDENCE === "1"
 const coldCase = process.env.CMB_THREAD_SEARCH_PROBE_IPC_CASE
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const require = createRequire(import.meta.url)
@@ -40,28 +43,58 @@ const oldest = "oldest-text-live-perf"
 const newest = "recent-text-live-perf"
 const title = "recent-title-live-perf"
 const fixtureWorkspace = join(artifactDir, "historical-workspace")
+const excludedHistory = {
+  projectId: "project-catalog-noise-0",
+  threadId: "known-excluded-feature-history",
+  slug: "excluded-history-slug",
+  title: "known-excluded-history-perf"
+}
+
+function seedPersistedEvidence(projectIds: string[]): number {
+  // Use the on-disk format here so Electron must load and validate it on each cold launch.
+  const slugsByProject = new Map(projectIds.map((id) => [id, ["feature-evidence-" + "x".repeat(355)]]))
+  for (let index = 0; index < threadCount; index += 1) {
+    const feature = projectProbeMetadata(index, threadCount, true).harnessFeature
+    if (feature) slugsByProject.get(feature.projectId)!.push(feature.slug)
+  }
+  const contents = JSON.stringify(Array.from(slugsByProject, ([id, slugs]) =>
+    [createHash("sha256").update(id).digest("hex"), slugs]
+  ))
+  const bytes = Buffer.byteLength(contents)
+  assert(bytes >= 850_000 && bytes <= 1024 * 1024, "Persisted evidence must exercise near-capacity load")
+  writeFileSync(join(dataRoot, "thread-search-feature-evidence.json"), contents)
+  return bytes
+}
 
 async function main() {
   assert(Number.isSafeInteger(rounds) && rounds > 0 && rounds <= 30)
   assert(Number.isSafeInteger(threadCount) && threadCount >= 12 && threadCount <= 10000)
+  assert(!persistedEvidence || (mixedProjects && coldIpc && !unknownFeaturePressure),
+    "Persisted evidence requires mixed-project cold IPC")
   mkdirSync(checkpointDirectory, { recursive: true })
   mkdirSync(workspace)
   writeFileSync(join(dataRoot, "userinfo-models.json"), JSON.stringify({
     sapId: "localhost-fixture", userName: "Local fixture"
   }))
 
-  const registry = mixedProjects ? seedProbeProjects(dataRoot, fixtureWorkspace) : undefined
+  const registry = mixedProjects
+    ? seedProbeProjects(dataRoot, fixtureWorkspace, 2048, PROBE_PROJECT_ID)
+    : undefined
   let offlineAdapterLog: string | undefined
   if (unknownFeaturePressure) {
     const path = join(dataRoot, "harness-board-projects.json")
     const catalog = JSON.parse(readFileSync(path, "utf8")) as {
-      projects: Array<{ projectDir?: string }>
+      projects: Array<{ projectId: string; projectDir?: string }>
     }
-    for (const project of catalog.projects) project.projectDir = "offline-fixture"
+    for (const project of catalog.projects) {
+      project.projectDir = project.projectId === "project-catalog-noise-0"
+        ? "offline-fixture" : "missing-offline-fixture"
+    }
     mkdirSync(join(fixtureWorkspace, "offline-fixture"), { recursive: true })
     const stored = JSON.stringify(catalog)
     assert(Buffer.byteLength(stored) <= 4 * 1024 * 1024)
     writeFileSync(path, stored)
+    if (registry) registry.bytes = Buffer.byteLength(stored)
     offlineAdapterLog = installProjectSearchHarnessAdapter(dataRoot, "not-authorized")
     writeFileSync(join(dirname(offlineAdapterLog), "inspect.cjs"), [
       'const fs = require("node:fs")',
@@ -71,11 +104,12 @@ async function main() {
     ].join("\n"))
   }
   const projectIds = registry ? [...registry.projects.keys()] : []
+  const persistedEvidenceBytes = persistedEvidence ? seedPersistedEvidence(projectIds) : undefined
   const projectRows = mixedProjects
     ? Array.from({ length: threadCount }, (_, index) => ({
       metadata: unknownFeaturePressure
         ? { harnessFeature: { projectId: projectIds[index], slug: "unknown-feature-" + index } }
-        : projectProbeMetadata(index, threadCount),
+        : projectProbeMetadata(index, threadCount, true),
       title: projectProbeTitle(index),
       first: projectProbeMarker(index, 0),
       last: projectProbeMarker(index, 9)
@@ -86,16 +120,21 @@ async function main() {
     query: string
     expectedIndex: number | null
     expectedCandidates: number
+    expectedOffline?: "featureSession" | "projectSession"
     scope?: ThreadSearchStartRequest["scope"]
     hot: number
     cold?: number
     verifyScan: boolean
-  }> = unknownFeaturePressure ? [] : mixedProjects ? projectProbeCases(threadCount).map((test) => ({
+  }> = unknownFeaturePressure ? [] : mixedProjects ? projectProbeCases(threadCount, true).map((test) => ({
     ...test,
     key: [test.scope.kind, test.scope.kind === "project" ? test.scope.projectId : "", test.label]
       .filter(Boolean).join(":"),
     expectedCandidates: test.expectedCandidates +
       (test.scope.kind === "all" || test.scope.kind === "ordinary" ? 1 : 0),
+    expectedOffline: test.expectedIndex !== null &&
+      projectProbeMetadata(test.expectedIndex, threadCount, true).harnessFeature ? "featureSession"
+      : test.expectedIndex === 1 ? "projectSession"
+      : undefined,
     verifyScan: test.label === "oldest" || test.label === "noMatch"
   })) : [
     { key: title, query: title, expectedIndex: threadCount - 1, expectedCandidates: threadCount,
@@ -202,7 +241,7 @@ async function main() {
     }, { baseUrl: `http://127.0.0.1:${port}/v1`, workspace })
     await app.evaluate((_electron, options) => {
       const { databasePath, threadCount, payload, oldest, newest, title, template, checkpointDirectory,
-        fixtureWorkspace, projectRows } = options
+        fixtureWorkspace, projectRows, excludedHistory } = options
       const sqlite = process.getBuiltinModule("node:sqlite") as typeof import("node:sqlite")
       const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs")
       const path = process.getBuiltinModule("node:path") as typeof import("node:path")
@@ -242,13 +281,19 @@ async function main() {
           if ((sequence + 1) % 250 === 0 || sequence + 1 === threadCount) db.exec("COMMIT")
           if ((sequence + 1) % 1000 === 0) db.exec("PRAGMA wal_checkpoint(TRUNCATE)")
         }
+        if (excludedHistory) {
+          const { projectId, slug, threadId, title } = excludedHistory
+          thread.run(threadId, threadCount, threadCount, title,
+            JSON.stringify({ workspacePath: fixtureWorkspace, harnessFeature: { projectId, slug } }))
+        }
       } finally {
         db.close()
       }
     }, {
       databasePath: join(dataRoot, "cmbcoworkagent.sqlite"),
       template: join(artifactDir, "checkpoint-template.sqlite"),
-      checkpointDirectory, threadCount, payload, oldest, newest, title, fixtureWorkspace, projectRows
+      checkpointDirectory, threadCount, payload, oldest, newest, title, fixtureWorkspace, projectRows,
+      excludedHistory: persistedEvidence ? excludedHistory : undefined
     })
     const sourceKeys = Array.from({ length: threadCount }, (_, sequence) => {
       const id = `perf-${sequence}`
@@ -324,6 +369,17 @@ async function main() {
               }
               sample.scanned = reply.scannedThreads
               sample.timings.push(performance.now() - started)
+              if (test.expectedOffline) {
+                const hit = reply.results[0]
+                if (hit?.route.kind !== test.expectedOffline) {
+                  throw new Error(test.key + ": wrong route for the offline history hit")
+                }
+                const summary = await globalThis.window.api.threads.searchSummary(hit)
+                if (!summary?.searchReadOnly || !summary.navigationTicketId) {
+                  throw new Error(test.key + ": offline history did not yield a read-only ticket")
+                }
+                await globalThis.window.api.threads.searchCancelNavigation(summary.navigationTicketId)
+              }
             } finally {
               await globalThis.window.api.threads.searchCancel(sessionId)
             }
@@ -356,6 +412,9 @@ async function main() {
             await coldPage.waitForFunction(() => Boolean(window.api?.threads))
             await coldPage.evaluate("globalThis.__name = (value) => value")
             const { records } = await measure(coldPage, [test], 1)
+            if (persistedEvidence) {
+              await assertPersistedExclusion(coldPage)
+            }
             const durationMs = records[test.key].timings[0]
             scanned = records[test.key].scanned
             timings.push(durationMs)
@@ -371,7 +430,8 @@ async function main() {
         }
         const p95 = [...timings].sort((a, b) => a - b)[Math.ceil(timings.length * 0.95) - 1]
         const row = { mode: "cold IPC", key: test.key, rounds, expectedCandidates: test.expectedCandidates,
-          scanned, p95, catalogProjects: registry?.projects.size, catalogBytes: registry?.bytes }
+          expectedOffline: test.expectedOffline, scanned, p95, catalogProjects: registry?.projects.size,
+          catalogBytes: registry?.bytes, persistedEvidenceBytes }
         appendFileSync(join(artifactDir, "cold-ipc-results.jsonl"), JSON.stringify(row) + "\n")
         console.log(JSON.stringify(row))
         assert(p95 <= test.cold!, test.key + " cold p95=" + p95 + "ms")
@@ -424,7 +484,7 @@ async function main() {
       assert(!coldIpc)
       assert.equal(registry?.projects.size, 2048)
       assert(offlineAdapterLog)
-      await runUnknownFeaturePressure(app, page, offlineAdapterLog, () => {
+      await runUnknownFeaturePressure(app, page, offlineAdapterLog, projectIds.at(-1)!, () => {
         assert(finishStream, "Local model must be streaming")
         finishStream()
       })
@@ -473,8 +533,8 @@ async function main() {
     const report = { threadCount, messages: threadCount * 10, rounds, chunks, processPriority,
       chatEventsDuringSearch: samples.progress, p95, mainEventLoop: delay, mixedProjects,
       catalogProjects: registry?.projects.size, catalogBytes: registry?.bytes,
-      scopes: cases.map(({ key, scope, expectedCandidates }) => ({
-        key, scope, expectedCandidates, scanned: samples.records[key].scanned
+      scopes: cases.map(({ key, scope, expectedCandidates, expectedOffline }) => ({
+        key, scope, expectedCandidates, expectedOffline, scanned: samples.records[key].scanned
       })) }
     writeFileSync(join(artifactDir, "results.json"), JSON.stringify(report, null, 2))
     console.log(JSON.stringify(report))
@@ -514,6 +574,30 @@ async function waitForPersistedFixtureReply(app: ElectronApplication, page: Page
   throw new Error("Live chat did not settle with its streamed reply persisted")
 }
 
+async function assertPersistedExclusion(page: Page): Promise<void> {
+  await page.evaluate(async ({ projectId, title }) => {
+    let reply = await window.api.threads.searchStart({
+      query: title, scope: { kind: "project", projectId }, limit: 1
+    })
+    const { sessionId } = reply
+    try {
+      for (;;) {
+        if (reply.results.length || reply.coverage.reasons.length) {
+          throw new Error("Persisted Feature exclusion was not applied")
+        }
+        if (!reply.nextCursor) break
+        reply = await window.api.threads.searchContinue(reply.nextCursor)
+      }
+      if (reply.scanStatus !== "complete" || reply.coverage.completeness !== "complete" ||
+          reply.scannedThreads !== 0) {
+        throw new Error("The known-excluded Feature must not enter the candidate list")
+      }
+    } finally {
+      await window.api.threads.searchCancel(sessionId)
+    }
+  }, excludedHistory)
+}
+
 async function assertLiveAuditOwnership(app: ElectronApplication, page: Page): Promise<void> {
   const liveThreadId = await page.evaluate(() => (globalThis as { liveThreadId?: string }).liveThreadId)
   const audited = await app.evaluate(() =>
@@ -528,6 +612,7 @@ async function runUnknownFeaturePressure(
   app: ElectronApplication,
   chatPage: Page,
   adapterLog: string,
+  missingDirectoryProjectId: string,
   finishStream: (() => void) | undefined
 ): Promise<void> {
   // Neither search window opens the Board. The registered adapter fails when explicitly invoked.
@@ -587,22 +672,27 @@ async function runUnknownFeaturePressure(
 
     const started = await chatPage.evaluate(() => (globalThis as { liveProgress?: number }).liveProgress ?? 0)
     const startSearch = (page: Page) => page.evaluate(() =>
-      window.api.threads.searchStart({ query: "project-", scope: { kind: "all" }, limit: 1 })
+      window.api.threads.searchStart({
+        query: "no-match-project-history-pressure", scope: { kind: "all" }, limit: 1
+      })
     )
     const [first, second] = await Promise.all([startSearch(chatPage), startSearch(secondWindow)])
     assert.notEqual(first.sessionId, second.sessionId)
-    const assertCoverage = (coverage: typeof first.coverage) => {
-      assert.equal(coverage.completeness, "partial")
-      assert.deepEqual(coverage.reasons.filter((reason) => reason !== "legacy-pending"), [
-        "project-route-unavailable"
-      ])
+    const assertCoverage = (coverage: typeof first.coverage, complete: boolean) => {
       assert.equal(coverage.failedThreads, 0)
       assert.equal(coverage.skippedRows, 0)
-      assert(coverage.pendingThreads <= 1, "only the single active chat can be pending")
+      if (coverage.pendingThreads) {
+        assert.equal(coverage.pendingThreads, 1, "only the active ordinary chat may need an audit")
+        assert.deepEqual(coverage.reasons, ["legacy-pending"])
+        assert.equal(coverage.completeness, "partial")
+      } else {
+        assert.deepEqual(coverage.reasons, [])
+        assert.equal(coverage.completeness, complete ? "complete" : "unknown")
+      }
     }
     for (const reply of [first, second]) {
       assert.deepEqual(reply.results, [])
-      assertCoverage(reply.coverage)
+      assertCoverage(reply.coverage, false)
       assert(reply.nextCursor && reply.scanStatus === "running")
     }
     await chatPage.waitForFunction((before) =>
@@ -617,13 +707,41 @@ async function runUnknownFeaturePressure(
       secondWindow.evaluate((cursor) => window.api.threads.searchContinue(cursor), second.nextCursor!),
       /SEARCH_CURSOR_EXPIRED/
     )
-    const completed = await chatPage.evaluate((cursor) => window.api.threads.searchContinue(cursor), first.nextCursor!)
-    assert.equal(completed.sessionId, first.sessionId)
+    let completed = first
+    while (completed.nextCursor) {
+      completed = await chatPage.evaluate((cursor) => window.api.threads.searchContinue(cursor), completed.nextCursor)
+      assert.equal(completed.sessionId, first.sessionId)
+      assert.deepEqual(completed.results, [])
+      assertCoverage(completed.coverage, completed.scanStatus === "complete")
+    }
     assert.equal(completed.scanStatus, "complete")
-    assert.equal(completed.scannedThreads, 1)
-    assert.deepEqual(completed.results, [])
-    assertCoverage(completed.coverage)
+    assert.equal(completed.scannedThreads, threadCount + 1)
     await chatPage.evaluate((id) => window.api.threads.searchCancel(id), first.sessionId)
+
+    await secondWindow.evaluate(async ({ projectId, query, expected }) => {
+      let reply = await window.api.threads.searchStart({
+        query, scope: { kind: "project", projectId }, limit: 1
+      })
+      const { sessionId } = reply
+      try {
+        while (!reply.results.length && reply.nextCursor) {
+          reply = await window.api.threads.searchContinue(reply.nextCursor)
+        }
+        const hit = reply.results[0]
+        if (reply.coverage.reasons.length || hit?.threadId !== expected ||
+            hit.route.kind !== "featureSession" || hit.route.projectId !== projectId) {
+          throw new Error("Missing verified local Feature history under directory pressure")
+        }
+        const summary = await window.api.threads.searchSummary(hit)
+        if (!summary?.searchReadOnly || !summary.navigationTicketId) {
+          throw new Error("Offline Feature history should require a read-only navigation ticket")
+        }
+        await window.api.threads.searchCancelNavigation(summary.navigationTicketId)
+      } finally {
+        await window.api.threads.searchCancel(sessionId)
+      }
+    }, { projectId: missingDirectoryProjectId, query: projectProbeMarker(threadCount - 1, 9),
+      expected: "perf-" + (threadCount - 1) })
 
     const pressure = await app.evaluate(() => {
       const { counters, delay } = (globalThis as {
@@ -643,8 +761,11 @@ async function runUnknownFeaturePressure(
     finishStream()
     await waitForPersistedFixtureReply(app, chatPage)
     const progress = await chatPage.evaluate(() => (globalThis as { liveProgress?: number }).liveProgress ?? 0)
+    assert(progress > started, "Normal chat must keep streaming while searching offline history")
     const report = {
-      ...pressure, adapterStarts: 0, projects: 2048, unknownFeatures: 2048, independentWindows: 2,
+      ...pressure, adapterStarts: 0, projects: threadCount, unknownFeatures: threadCount,
+      missingProjectDirectories: threadCount - 1,
+      independentWindows: 2, scannedThreads: completed.scannedThreads,
       chatEventsDuringSearch: progress - started
     }
     writeFileSync(join(artifactDir, "unknown-feature-pressure.json"), JSON.stringify(report, null, 2))

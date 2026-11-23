@@ -1,5 +1,7 @@
 type CatalogListener = (projectId: string, featureSlugs: ReadonlySet<string>) => void
-type CatalogReadObserver = () => CatalogListener
+type CatalogReadObserver = () => (
+  projectId: string, featureSlugs: ReadonlySet<string>, isCurrent: () => boolean
+) => void | Promise<void>
 const listeners = new Set<CatalogListener>()
 const readObservers = new Set<CatalogReadObserver>()
 const currentReads = new Map<string, symbol>()
@@ -38,11 +40,12 @@ export function beginHarnessFeatureCatalogRead(projectIds: readonly string[]) {
   const observations = [...readObservers].map((observe) => observe())
   for (const id of projectIds) currentReads.set(id, token)
   return {
-    observed(projectId: string, runs: { slug: string }[]) {
-      if (currentReads.get(projectId) !== token || (!listeners.size && !observations.length)) return
+    async observed(projectId: string, runs: { slug: string }[]): Promise<void> {
+      const isCurrent = () => currentReads.get(projectId) === token
+      if (!isCurrent() || (!listeners.size && !observations.length)) return
       const slugs = new Set(runs.map((run) => run.slug))
       publish(projectId, slugs)
-      for (const observe of observations) observe(projectId, slugs)
+      await Promise.all(observations.map((observe) => observe(projectId, slugs, isCurrent)))
     },
     finish() {
       for (const id of projectIds) if (currentReads.get(id) === token) currentReads.delete(id)

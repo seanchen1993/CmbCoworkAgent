@@ -3,7 +3,11 @@ import type { ThreadSearchStartRequest, ThreadSearchPage, ThreadSearchRoute } fr
 
 export interface ProjectSearchCatalog {
   generation: string
-  projects: ReadonlyMap<string, { label: string; features?: ReadonlySet<string> }>
+  projects: ReadonlyMap<string, {
+    label: string
+    // undefined means unobserved, null means the current evidence could not be retained.
+    features?: ReadonlySet<string> | null
+  }>
 }
 
 export type SearchCommand =

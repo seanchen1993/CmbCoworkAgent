@@ -67,7 +67,7 @@ function insertThread(threadId: string) {
 }
 
 describe("isolated thread search read path", () => {
-  it("uses a physical boundary through sparse projects without including unverified features", () => {
+  it("uses a physical boundary through sparse projects and keeps durable offline Feature history", () => {
     const insert = sqlite.prepare(
       "INSERT INTO threads(thread_id, created_at, updated_at, metadata, title) VALUES (?, 1, ?, ?, ?)"
     )
@@ -80,6 +80,8 @@ describe("isolated thread search read path", () => {
     insert.run("removed", 5, JSON.stringify(feature("target", "removed")), "Removed")
     insert.run("ambiguous", 6, JSON.stringify({ ...project("target"), ...feature("target", "known") }), "Ambiguous")
     insert.run("ordinary", 7, "{}", "Ordinary")
+    insert.run("conflict", 8, JSON.stringify({ ...feature("uncertain", "unknown"),
+      harnessProjectSession: { projectId: "another-project" } }), "Conflicting markers")
     const catalog = {
       generation: "current",
       projects: new Map([
@@ -96,7 +98,14 @@ describe("isolated thread search read path", () => {
     ])
     const all = reader.captureCandidates(undefined, flag, { kind: "all" }, catalog)
     expect(all.routeUnavailable).toBe(true)
-    expect(all.candidates.map(({ threadId }) => threadId)).toEqual(["ordinary", "verified", "project"])
+    expect(all.candidates.map(({ threadId }) => threadId)).toEqual(
+      ["ordinary", "unknown", "verified", "project"]
+    )
+    const withoutEvidence = reader.captureCandidates(
+      undefined, flag, { kind: "project", projectId: "uncertain" },
+      { generation: "new", projects: new Map([["uncertain", { label: "Project", features: null }]]) }
+    )
+    expect(withoutEvidence).toMatchObject({ routeUnavailable: true, candidates: [] })
     const unavailable = reader.captureCandidates(undefined, flag, { kind: "all" })
     expect(unavailable.catalogUnavailable).toBe(true)
     expect(unavailable.candidates.map(({ threadId }) => threadId)).toEqual(["ordinary"])

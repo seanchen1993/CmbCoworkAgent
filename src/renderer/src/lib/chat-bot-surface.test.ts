@@ -177,6 +177,7 @@ describe("Bot and Harness chat surface boundaries", () => {
       const binding = bound ? { projectId: "project" } : null
       const preferredPlugin = bound ? { id: "bound", name: "Bound" } : null
       const bindings = {
+        historyOnly: false,
         useAppStore: { getState: () => ({ threads: [], pluginVersion: 1 }) },
         getHarnessFeatureBinding: () => binding,
         getCachedHarnessPreferredPlugin: () => preferredPlugin,

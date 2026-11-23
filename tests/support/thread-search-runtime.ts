@@ -14,7 +14,7 @@ import {
   totalmem
 } from "node:os"
 import { dirname, join } from "node:path"
-import { monitorEventLoopDelay } from "node:perf_hooks"
+import { monitorEventLoopDelay, PerformanceObserver, type PerformanceEntry } from "node:perf_hooks"
 import { DatabaseSync } from "node:sqlite"
 import type { Worker } from "node:worker_threads"
 import createWorker from "../../src/main/thread-search/thread-search-worker?nodeWorker"
@@ -23,7 +23,6 @@ import { installThreadSearchSchema } from "../../src/main/thread-search/schema"
 import { sqliteRecoveryFamilyKey } from "../../src/main/db/sqlite-recovery-family"
 
 import {
-  PROBE_FEATURE_SLUG,
   PROBE_PROJECT_ID,
   projectProbeCases,
   projectProbeMarker,
@@ -33,6 +32,12 @@ import {
 } from "./project-thread-search-fixture"
 
 type StartCommand = Extract<SearchCommand, { type: "start" }>
+type LoopPhase = {
+  phase: string
+  scope?: StartCommand["request"]["scope"]
+  case?: string
+  iteration?: number
+}
 
 const mixedProjects = process.env.CMB_THREAD_SEARCH_PROBE_PROJECTS === "1"
 const SEED = 1729
@@ -405,14 +410,12 @@ async function main(file: string) {
     assert(threads >= 6)
     assert.notEqual(process.env.CMB_THREAD_SEARCH_PROBE_WRITES, "1")
   }
-  const registry = mixedProjects ? seedProbeProjects(dirname(file), dirname(file)) : undefined
+  const registry = mixedProjects
+    ? seedProbeProjects(dirname(file), dirname(file), 2048, PROBE_PROJECT_ID)
+    : undefined
   const catalog: StartCommand["catalog"] = registry && {
     generation: "project-probe-v1",
-    projects: new Map([...registry.projects].map(([projectId, entry]) => [
-      projectId, projectId === PROBE_PROJECT_ID
-        ? { ...entry, features: new Set([PROBE_FEATURE_SLUG]) }
-        : entry
-    ]))
+    projects: registry.projects
   }
   const bytes = seedFixture(file, threads)
   seedCompletedCheckpointFiles(file, threads)
@@ -444,6 +447,34 @@ async function main(file: string) {
     : undefined
   const performanceFailures: string[] = []
   const delay = monitorEventLoopDelay({ resolution: 10 })
+  const diagnoseLoop = process.env.CMB_THREAD_SEARCH_PROBE_DELAY_DIAGNOSTICS === "1"
+  const loopMaxIncreases: Array<LoopPhase & { observedAtMs: number; maxNs: number }> = []
+  let phase: LoopPhase = { phase: "benchmark-setup" }
+  let observedMax = 0
+  const markLoopPhase = diagnoseLoop ? (next: LoopPhase) => {
+    const maxNs = delay.max
+    // Sample the accumulated histogram at phase boundaries without resetting it.
+    if (maxNs > observedMax) {
+      observedMax = maxNs
+      loopMaxIncreases.push({ ...phase, observedAtMs: performance.now(), maxNs })
+    }
+    phase = next
+  } : undefined
+  const mainGc = { count: 0, totalMs: 0, maxMs: 0, maxStartedAtMs: 0 }
+  const recordGc = (entries: PerformanceEntry[]) => {
+    for (const entry of entries) {
+      mainGc.count += 1
+      mainGc.totalMs += entry.duration
+      if (entry.duration > mainGc.maxMs) {
+        mainGc.maxMs = entry.duration
+        mainGc.maxStartedAtMs = entry.startTime
+      }
+    }
+  }
+  const gcObserver = diagnoseLoop
+    ? new PerformanceObserver((list) => recordGc(list.getEntries()))
+    : null
+  gcObserver?.observe({ entryTypes: ["gc"] })
   delay.enable()
   const baselineRss = process.memoryUsage.rss()
   let peakRss = baselineRss
@@ -473,6 +504,7 @@ async function main(file: string) {
       rounds,
       concurrentWrites,
       mixedProjects,
+      offlineFeatureHistory: mixedProjects,
       catalogProjects: catalog?.projects.size,
       catalogBytes: registry?.bytes,
       seed: SEED,
@@ -490,6 +522,7 @@ async function main(file: string) {
   const warm = startWorker()
   try {
     const firstCase = cases[0]
+    markLoopPhase?.({ phase: "warmup", scope: firstCase.scope, case: firstCase.label })
     const warmup = await queryWorker(warm, firstCase.query, false, [], firstCase.scope, catalog)
     assert.equal(warmup.hit, firstCase.expected)
     for (const test of cases) {
@@ -497,6 +530,9 @@ async function main(file: string) {
       const cold: number[] = []
       let scanned = 0
       for (let iteration = 0; iteration < rounds; iteration += 1) {
+        markLoopPhase?.({
+          phase: "hot-query", scope: test.scope, case: test.label, iteration: iteration + 1
+        })
         const hotReply = await queryWorker(warm, test.query, false, [], test.scope, catalog)
         assert.equal(hotReply.hit, test.expected)
         if (mixedProjects && test.expected === String(threads - 2)) {
@@ -507,6 +543,9 @@ async function main(file: string) {
         if (test.label === "oldest" || test.expected === null) {
           assert.equal(scanned, test.expectedCandidates)
         }
+        markLoopPhase?.({
+          phase: "cold-query", scope: test.scope, case: test.label, iteration: iteration + 1
+        })
         const coldStartedAt = performance.now()
         const fresh = startWorker()
         try {
@@ -515,11 +554,16 @@ async function main(file: string) {
           )
           assert.equal(coldReply.hit, test.expected)
           assert.equal(coldReply.scanned, scanned)
+          assert.equal(coldReply.route, hotReply.route)
           cold.push(coldReply.ms)
         } finally {
+          markLoopPhase?.({
+            phase: "cold-worker-close", scope: test.scope, case: test.label, iteration: iteration + 1
+          })
           await closeWorker(fresh)
         }
       }
+      markLoopPhase?.({ phase: "case-summary", scope: test.scope, case: test.label })
       const hotP95 = p95(hot)
       const coldP95 = p95(cold)
       if (hotP95 > test.hot) performanceFailures.push(`${test.label} hot ${hotP95} ms`)
@@ -541,6 +585,9 @@ async function main(file: string) {
       (!mixedProjects || scope?.kind === "all") && label === "noMatch")!
     const cancelled = []
     for (let iteration = 0; iteration < rounds; iteration += 1) {
+      markLoopPhase?.({
+        phase: "cancel", scope: cancelCase.scope, case: cancelCase.label, iteration: iteration + 1
+      })
       const reply = await queryWorker(warm, cancelCase.query, true, [], cancelCase.scope, catalog)
       assert(reply.cancelled)
       cancelled.push(reply.ms)
@@ -552,6 +599,9 @@ async function main(file: string) {
       const empty = cases.at(-1)!
       const directoryInterrupts = []
       for (let iteration = 0; iteration < rounds; iteration += 1) {
+        markLoopPhase?.({
+          phase: "directory-cancel", scope: empty.scope, case: empty.label, iteration: iteration + 1
+        })
         const reply = await queryWorker(warm, empty.query, "directory", [], empty.scope, catalog)
         assert(reply.cancelled)
         directoryInterrupts.push(reply.ms)
@@ -565,18 +615,28 @@ async function main(file: string) {
   } finally {
     if (writeTimer) clearInterval(writeTimer)
     clearInterval(rssTimer)
+    markLoopPhase?.({ phase: "benchmark-end" })
     delay.disable()
+    if (gcObserver) {
+      recordGc(gcObserver.takeRecords())
+      gcObserver.disconnect()
+    }
     writer?.close()
     await closeWorker(warm)
   }
-  const mainLoopP95 = Math.round(delay.percentile(95) / 100_000) / 10
-  const mainLoopMax = Math.round(delay.max / 100_000) / 10
+  const mainLoopP95Ns = delay.percentile(95)
+  const mainLoopMaxNs = delay.max
+  const mainLoopP95 = Math.round(mainLoopP95Ns / 100_000) / 10
+  const mainLoopMax = Math.round(mainLoopMaxNs / 100_000) / 10
   const rssGrowthMiB = Math.round((peakRss - baselineRss) / 1024 ** 2)
   if (mainLoopP95 > 50) performanceFailures.push(`main-loop p95 ${mainLoopP95} ms`)
   if (mainLoopMax > 100) performanceFailures.push(`main-loop maximum ${mainLoopMax} ms`)
   if (rssGrowthMiB > 384) performanceFailures.push(`process RSS growth ${rssGrowthMiB} MiB`)
   if (concurrentWrites) assert(commits > 0)
   console.log(JSON.stringify({ mainLoopP95, mainLoopMax, rssGrowthMiB, commits, longestWriterCommitMs }))
+  if (diagnoseLoop) {
+    console.log(JSON.stringify({ mainLoopP95Ns, mainLoopMaxNs, loopMaxIncreases, mainGc }))
+  }
   assert.deepEqual(performanceFailures, [], "Thread search performance thresholds")
 }
 

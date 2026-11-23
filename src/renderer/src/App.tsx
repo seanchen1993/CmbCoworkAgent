@@ -199,10 +199,12 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
 
 function AnimatedThreadSidebar({
   hidden,
+  allowSearchAnchor = false,
   width,
   onResize
 }: {
   hidden: boolean
+  allowSearchAnchor?: boolean
   width: number
   onResize: (totalDelta: number) => void
 }): React.JSX.Element {
@@ -216,7 +218,7 @@ function AnimatedThreadSidebar({
       style={{ width: hidden ? 0 : width + LEFT_RESIZE_HANDLE_WIDTH }}
     >
       <div style={{ width }} className="shrink-0">
-        <ThreadSidebar />
+        <ThreadSidebar allowSearchAnchor={allowSearchAnchor && !hidden} />
       </div>
       <ResizeHandle onDrag={onResize} />
     </div>
@@ -1197,6 +1199,7 @@ function App(): React.JSX.Element {
                 {renderedMainView !== "bots" && !sidebarCollapsed && !isAgentFocusActive && (
                   <AnimatedThreadSidebar
                     hidden={browserFullscreen}
+                    allowSearchAnchor={renderedMainView === "thread"}
                     width={leftWidth}
                     onResize={handleLeftResize}
                   />

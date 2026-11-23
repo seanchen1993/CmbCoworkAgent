@@ -1711,7 +1711,7 @@ function testPreparingGuidesParticipateInReconciliation(): void {
   const rendererReconcileBody = chat.slice(rendererReconcileStart, rendererReconcileStart + 4200)
   assertIncludes(
     rendererReconcileBody,
-    "if (!cancelled) setQueuePumpTick((tick) => tick + 1)",
+    "if (canReconcile()) setQueuePumpTick((tick) => tick + 1)",
     "reload reconciliation retries while main still owns a preparing or pending handoff"
   )
   const reconcileCatchStart = rendererReconcileBody.indexOf(".catch((error) => {")
@@ -2311,7 +2311,7 @@ function testSteerAcknowledgementIsDurableAndReconciled(): void {
   )
   assertSourceOrder(
     durableDraftReconcileBody,
-    "await syncDurableTranscript(missingDurableIds)",
+    "await syncDurableTranscript(missingDurableIds, canReconcile)",
     "deleteQueuedMessage(queued.id)",
     "a missing durable bubble is merged by DB ordinal before its handed-off draft is removed"
   )

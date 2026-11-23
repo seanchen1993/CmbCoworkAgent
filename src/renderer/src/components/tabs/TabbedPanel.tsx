@@ -23,6 +23,8 @@ interface TabbedPanelProps {
   chatSurface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
+  historyOnly?: boolean
+  searchAccessPending?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
 }
 
@@ -40,6 +42,7 @@ function OrdinaryChatWithDraft({ threadId, ...props }: ChatProps) {
   const [error, setError] = useState<string | null>(null)
   const [attempt, retry] = useState(0)
   useEffect(() => {
+    if (props.historyOnly) return undefined
     let disposed = false
     let unbind: (() => void) | undefined
     void window.api.threads.get(threadId).then(row => {
@@ -50,8 +53,8 @@ function OrdinaryChatWithDraft({ threadId, ...props }: ChatProps) {
       if (!disposed) setError("暂时无法恢复原任务的草稿，请重试。")
     }).finally(() => { if (!disposed) setLoading(false) })
     return () => { disposed = true; unbind?.() }
-  }, [context, threadId, attempt])
-  if (loading) return <div className="flex flex-1 items-center justify-center">
+  }, [context, threadId, attempt, props.historyOnly])
+  if (loading && !props.historyOnly) return <div className="flex flex-1 items-center justify-center">
     <Loader2 aria-label="恢复原草稿" className="size-5 animate-spin" />
   </div>
   const resident = error && context.getThreadState(threadId)
@@ -76,13 +79,16 @@ export function TabbedPanel({
   chatSurface = "default",
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
+  historyOnly = false,
+  searchAccessPending = false,
   onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
   const row = useAppStore((state) => state.threads.find((thread) => thread.thread_id === threadId))
-  const managedCandidate = isManagedLocalWorkConversation(row)
+  const interactionDisabled = historyOnly || searchAccessPending
+  const managedCandidate = !interactionDisabled && isManagedLocalWorkConversation(row)
   const linked = useBotConversationLink(threadId, managedCandidate)
   const mayAssociate = Boolean(
-    window.api.bots?.conversations &&
+    !interactionDisabled && window.api.bots?.conversations &&
     isRegularChatThread(row) &&
     resolveAgentModeFromMetadata(row?.metadata) === "normal" &&
     !isRemoteInboxThread(row) &&
@@ -108,6 +114,7 @@ export function TabbedPanel({
   const lastAutoFocusedApprovalIdRef = useRef<string | null>(null)
 
   useEffect(() => {
+    if (interactionDisabled) return
     if (!pendingApproval) {
       lastAutoFocusedApprovalIdRef.current = null
       return
@@ -118,10 +125,10 @@ export function TabbedPanel({
     if (activeTab !== "agent" && setActiveTab) {
       setActiveTab("agent")
     }
-  }, [activeTab, pendingApproval, setActiveTab])
+  }, [activeTab, interactionDisabled, pendingApproval, setActiveTab])
 
   // Determine what to render based on active tab
-  const isAgentTab = activeTab === "agent"
+  const isAgentTab = interactionDisabled || activeTab === "agent"
   const activeFile = openFiles.find((f) => f.path === activeTab)
   const activeFilePreviewMode = activeFile
     ? workspaceFilePreviewModeForPath(activeFile.path)
@@ -157,7 +164,16 @@ export function TabbedPanel({
             </button>
           </div>
         ) : isAgentTab ? (
-          linked.value ? (
+          historyOnly ? (
+            <ChatContainer
+              key={threadId}
+              threadId={threadId}
+              surface={chatSurface}
+              hideWelcomeSkillTabs
+              readOnlyReason={readOnlyReason}
+              historyOnly
+            />
+          ) : linked.value ? (
             <LinkedBotConversation key={threadId} link={linked.value} />
           ) : (
             <OrdinaryChat
@@ -166,6 +182,7 @@ export function TabbedPanel({
               surface={chatSurface}
               hideWelcomeSkillTabs={hideWelcomeSkillTabs}
               readOnlyReason={readOnlyReason}
+              historyOnly={searchAccessPending}
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
           )

@@ -61,6 +61,7 @@ export function isRegularChatThread(thread: ThreadClassification | null | undefi
 /** Read the same trimmed identity fields as the project board, with no ambiguous routes. */
 export function getProjectThreadSearchRoute(metadata: unknown): ThreadSearchRoute | null {
   const record = readMetadataObject(metadata)
+  if (record?.harnessFeature != null && record.harnessProjectSession != null) return null
   const feature = readMetadataObject(record?.harnessFeature)
   const session = readMetadataObject(record?.harnessProjectSession)
   const projectId = (value: unknown) => typeof value === "string" ? value.trim() : ""

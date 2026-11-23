@@ -6,7 +6,7 @@ import type { BotGroupInputControl } from "@/components/bots/BotGroupMentionInpu
 import { parseBotMessageMentions } from "../../../../shared/bots/message-mentions"
 import type { BotDefinition, BotMessageReply } from "../../../../shared/bots/contracts"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
-import { finishThreadSearchNavigation, isCurrentThreadSearchNavigation, isThreadSearchSurface, useThreadSearch, type DurableSearchNavigation } from "@/lib/thread-search-navigation"
+import { finishThreadSearchNavigation, isCurrentThreadSearchNavigation, isReadOnlyProjectSearchThread, isThreadSearchSurface, useThreadSearch, type DurableSearchNavigation } from "@/lib/thread-search-navigation"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
@@ -983,6 +983,7 @@ interface ChatContainerProps {
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
+  historyOnly?: boolean
   /** Group execution records may answer existing requests while their composer stays read-only. */
   allowUserInputInReadOnly?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
@@ -1775,6 +1776,7 @@ export function ChatContainer({
   surface = "default",
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
+  historyOnly = false,
   allowUserInputInReadOnly = false,
   onHarnessSessionCreated,
   managedTurn,
@@ -1799,12 +1801,14 @@ export function ChatContainer({
   const initialChatScrollSession = initialChatScrollView.session
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
-  const readOnly = Boolean(resolvedReadOnlyReason)
-  const composerReadOnly = Boolean(managedTurn?.composerReadOnlyReason)
+  const readOnly = historyOnly || Boolean(resolvedReadOnlyReason)
+  const composerReadOnly = historyOnly || Boolean(managedTurn?.composerReadOnlyReason)
   const showBotTaskComposerControls =
     managedTurn?.ownerConversation === true && managedTurn.userOwnsComposer === true
   const managedTurnRef = useRef(managedTurn)
   managedTurnRef.current = managedTurn
+  const historyOnlyRef = useRef(historyOnly)
+  historyOnlyRef.current = historyOnly
   const readOnlyRef = useRef(readOnly)
   readOnlyRef.current = readOnly
   const canAnswerUserInput = !readOnly || (surface === "bot" && allowUserInputInReadOnly)
@@ -2110,7 +2114,7 @@ export function ChatContainer({
 
   useEffect(() => {
     const runId = harnessFeatureBinding?.runId
-    if (!runId) {
+    if (!harnessFeatureBinding || !runId || historyOnly) {
       setIsManagedRunSessionActive(false)
       return
     }
@@ -2151,7 +2155,7 @@ export function ChatContainer({
       cancelled = true
       unsubscribe()
     }
-  }, [harnessFeatureBinding, threadId])
+  }, [harnessFeatureBinding, historyOnly, threadId])
 
   const decideHumanGate = useCallback(
     async (decision: "approve" | "reject"): Promise<void> => {
@@ -2284,6 +2288,7 @@ export function ChatContainer({
   // Keep a stable callback for both plugin-version effects and the application-level
   // skills:changed bridge. The shared cache makes concurrent Chat/RightPanel reads one request.
   const loadSkills = useCallback(async (): Promise<void> => {
+    if (historyOnly) return
     const requestId = ++skillsLoadRequestIdRef.current
     const binding = harnessFeatureBindingRef.current
     const harnessScoped =
@@ -2367,7 +2372,7 @@ export function ChatContainer({
       console.error("[ChatContainer] Failed to load skills:", error)
       if (requestId === skillsLoadRequestIdRef.current) setSkillsLoading(false)
     }
-  }, [])
+  }, [historyOnly])
 
   // Get persisted thread state and actions from context
   const {
@@ -2490,6 +2495,7 @@ export function ChatContainer({
   const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
 
   useEffect(() => {
+    if (historyOnly) return
     let cancelled = false
     window.api.agent
       .canPreviewSystemPrompt()
@@ -2502,12 +2508,12 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [historyOnly])
 
   useEffect(() => {
-    if (!pendingHarnessDialogTips) return
+    if (historyOnly || !pendingHarnessDialogTips) return
     setHarnessNextActionDialogTips(pendingHarnessDialogTips)
-  }, [pendingHarnessDialogTips, setHarnessNextActionDialogTips])
+  }, [historyOnly, pendingHarnessDialogTips, setHarnessNextActionDialogTips])
 
   useEffect(() => {
     if (shouldShowNextActionDialogTips && nextActionDialogTips) {
@@ -2774,14 +2780,14 @@ export function ChatContainer({
   }, [mentionedFiles])
   useEffect(() => {
     // The draft and transcript can arrive before the workspace is hydrated.
-    if (historyLoading || !workspacePath || !mentionedFilesRef.current.length) return
+    if (historyOnly || historyLoading || !workspacePath || !mentionedFilesRef.current.length) return
     setMentionedFiles((current) => {
       const retained = retainMentionedWorkspaceFilesForWorkspace(current, workspacePath)
       if (retained.length === current.length) return current
       mentionedFilesRef.current = retained
       return retained
     })
-  }, [workspacePath, historyLoading, mentionedFiles, setMentionedFiles])
+  }, [workspacePath, historyLoading, historyOnly, mentionedFiles, setMentionedFiles])
   useEffect(
     () => () => {
       for (const requestToken of activeAtFilePreviewTokensRef.current) {
@@ -3106,13 +3112,14 @@ export function ChatContainer({
   }, [])
 
   useEffect(() => {
+    if (historyOnly) return
     fetchYoloMode()
     const unsubscribe = window.api.sandbox.onChanged(fetchYoloMode)
     return () => {
       yoloModeLoadRequestRef.current += 1
       unsubscribe()
     }
-  }, [fetchYoloMode])
+  }, [fetchYoloMode, historyOnly])
 
   const handleSetYoloMode = useCallback(
     async (nextYoloMode: boolean): Promise<boolean> => {
@@ -3160,7 +3167,7 @@ export function ChatContainer({
 
   const uploadLoChatDataForThread = useCallback(
     async (targetThreadId: string, batch: ChatReportBatch, attempt = 0) => {
-      if (chatReportDisposedRef.current) return
+      if (chatReportDisposedRef.current || historyOnlyRef.current) return
       if (chatReportAbortControllersRef.current[targetThreadId]) {
         // Per thread, retain only the newest pending report while one bounded request is active.
         chatReportPendingBatchesRef.current[targetThreadId] = { batch, attempt }
@@ -3232,7 +3239,7 @@ export function ChatContainer({
       if (existingTimer) window.clearTimeout(existingTimer)
       chatReportUploadTimersRef.current[targetThreadId] = window.setTimeout(() => {
         delete chatReportUploadTimersRef.current[targetThreadId]
-        if (chatReportDisposedRef.current) return
+        if (chatReportDisposedRef.current || historyOnlyRef.current) return
         void uploadLoChatDataForThread(targetThreadId, batch)
       }, CHAT_REPORT_UPLOAD_DEBOUNCE_MS)
     },
@@ -3258,15 +3265,17 @@ export function ChatContainer({
       chatReportPendingBatchesRef.current = {}
       chatReportAbortControllersRef.current = {}
     }
-  }, [])
+  }, [historyOnly])
 
   // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
   // "none", so this remains dormant unless the setup flow is re-enabled later.
   useEffect(() => {
+    if (historyOnly) return undefined
+    let disposed = false
     window.api.sandbox
       .isNuxNeeded()
       .then((needed) => {
-        if (!needed) return
+        if (!needed || disposed || historyOnlyRef.current) return
         setShowNux(true)
         setNuxLoading(true)
         setNuxError(null)
@@ -3279,7 +3288,10 @@ export function ChatContainer({
           })
       })
       .catch((e) => console.warn("[NUX] Failed to check:", e))
-  }, [])
+    return () => {
+      disposed = true
+    }
+  }, [historyOnly])
 
   // Cycle loading step messages while NUX is configuring
   useEffect(() => {
@@ -3325,18 +3337,18 @@ export function ChatContainer({
   }, [isLoading, streamData.messages.length])
 
   useEffect(() => {
-    if (historyLoading) return
+    if (historyOnly || historyLoading) return
     if (!isLoading) {
       scheduleChatReportUpload(threadId, threadMessages)
     }
-  }, [historyLoading, isLoading, scheduleChatReportUpload, threadId, threadMessages])
+  }, [historyLoading, historyOnly, isLoading, scheduleChatReportUpload, threadId, threadMessages])
 
   // Guards against a rapid double-click on the git_push approve button firing two
   // workspace:pushWorktree calls before the pending approval is cleared on re-render.
   const gitPushInFlightRef = useRef<Set<string>>(new Set())
   const handleApprovalDecision = useCallback(
     async (decision: ChatApprovalDecision): Promise<void> => {
-      if (!pendingApproval) return
+      if (historyOnly || !pendingApproval) return
 
       // Check if this is an orchestrator-sourced approval (has requestId)
       const approvalAny = pendingApproval as unknown as Record<string, unknown>
@@ -3455,6 +3467,7 @@ export function ChatContainer({
     [
       currentModel,
       agentMode,
+      historyOnly,
       pendingApproval,
       setToolCallState,
       removePendingApproval,
@@ -3464,12 +3477,12 @@ export function ChatContainer({
   )
 
   useEffect(() => {
-    if (!autoApproveGitPush || !pendingApproval) return
+    if (historyOnly || !autoApproveGitPush || !pendingApproval) return
     const approvalRecord = pendingApproval as unknown as Record<string, unknown>
     if (approvalRecord._orchestratorRequestId && approvalRecord.operation === "git_push") {
       void handleApprovalDecision("approve")
     }
-  }, [autoApproveGitPush, handleApprovalDecision, pendingApproval])
+  }, [autoApproveGitPush, handleApprovalDecision, historyOnly, pendingApproval])
 
   // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
   const agentCommitApproval = useMemo(() => {
@@ -3767,13 +3780,14 @@ export function ChatContainer({
   const { assistantDurationMsById, userSendTimeLabelById } =
     threadProjectionRuntime.projectTimingMeta(displayMessages, displayMessagesStructureVersion)
 
+  const presentedApproval = historyOnly ? null : pendingApproval
   const { toolCallDisplayStates, pendingApprovalToolCallKeys } =
     threadProjectionRuntime.projectToolCallDisplayState({
       messages: toolDerivationMessages,
       projectionVersion: toolDerivationProjection.version,
       toolResults,
       toolCallStates,
-      pendingApproval,
+      pendingApproval: presentedApproval,
       isLoading,
       compute: () => {
         const orderedToolCalls: Array<{
@@ -3796,12 +3810,12 @@ export function ChatContainer({
         for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
 
         const currentApprovalIds = new Set<string>()
-        if (pendingApproval?.pendingToolCallIds?.length) {
-          for (const id of pendingApproval.pendingToolCallIds) {
+        if (presentedApproval?.pendingToolCallIds?.length) {
+          for (const id of presentedApproval.pendingToolCallIds) {
             if (id) currentApprovalIds.add(id)
           }
-        } else if (pendingApproval?.tool_call?.id) {
-          currentApprovalIds.add(pendingApproval.tool_call.id)
+        } else if (presentedApproval?.tool_call?.id) {
+          currentApprovalIds.add(presentedApproval.tool_call.id)
         }
         const approvalKeys = new Set<string>()
         for (const id of currentApprovalIds) {
@@ -4699,6 +4713,7 @@ export function ChatContainer({
     navigation?.result.navigation === "exact" &&
     (consumedSearchNavigationId === navigation.id || (navigationReady && !historyRestorationFailed))
     ? { ...navigation, target: navigation.result.target } : undefined
+  const confirmedProjectTargetAccess = useRef<number | null>(null)
   useEffect(() => {
     if (!navigation) return
     const isNewAttempt = historyNavigationAttempt.current !== navigation.id
@@ -4744,10 +4759,17 @@ export function ChatContainer({
         const resolved = await window.api.threads.searchTargetWindow({
           ...request.result, target: request.target, navigationTicketId: request.navigationTicketId, residentMessageIds
         })
-        return chatViewMountedRef.current &&
-          durableMessageWindowGenerationRef.current === revealGeneration &&
-          isCurrentThreadSearchNavigation(request.id) && resolved.status === "resolved"
-          ? resolved : null
+        if (!chatViewMountedRef.current ||
+            durableMessageWindowGenerationRef.current !== revealGeneration ||
+            !isCurrentThreadSearchNavigation(request.id)) return null
+        if (resolved.status === "projectBecameUnavailable") {
+          request.onProjectAccessResolved?.(false)
+          finishThreadSearchNavigation(request.id, "项目状态已变化，当前会话只读，请重新搜索定位。")
+          return null
+        }
+        if (resolved.status !== "resolved") return null
+        if (request.onProjectAccessResolved) confirmedProjectTargetAccess.current = request.id
+        return resolved
       } : undefined)
       if (
         !chatViewMountedRef.current ||
@@ -5602,6 +5624,7 @@ export function ChatContainer({
   )
 
   useEffect(() => {
+    if (historyOnly) return
     const nextAction = pendingHarnessNextAction
     const userMessage = nextAction?.userMessage?.trim() ?? ""
     const slashSkill = nextAction?.slashSkill?.trim() ?? ""
@@ -5639,6 +5662,7 @@ export function ChatContainer({
     enabledSkillsForSlash,
     harnessFeatureBinding,
     historyLoading,
+    historyOnly,
     input,
     isProjectModeAgentContext,
     pendingHarnessNextAction,
@@ -7326,19 +7350,19 @@ export function ChatContainer({
   // selected model and workspace are usable, clear only those known errors so
   // the parked draft can resume; unrelated run failures still block auto-drain.
   useEffect(() => {
-    if (!threadError || !RECOVERABLE_QUEUE_ERRORS.has(threadError)) return
+    if (historyOnly || !threadError || !RECOVERABLE_QUEUE_ERRORS.has(threadError)) return
     const selectedModel = currentModel
       ? models.find((model) => model.id === currentModel)
       : undefined
     if (selectedModel?.available && workspacePath) clearError()
-  }, [clearError, currentModel, models, threadError, workspacePath])
+  }, [clearError, currentModel, historyOnly, models, threadError, workspacePath])
 
   // Reconcile handed-off drafts against main-process state instead of guessing
   // from an idle transition. Durable messages leave the draft queue, messages
   // still owned by the run stay handed off, and only unconsumed messages return
   // to normal auto-drain. This also repairs a lost injection event or reload.
   useEffect(() => {
-    if (managedTurn?.submitDraft) return
+    if (historyOnly || managedTurn?.submitDraft) return
     if (isLoading || pendingApproval || historyLoading) return
     const handedOff = queuedMessages.filter(
       (queued) => queued.handoffRequestedAt && !queued.botHandoffTarget && !queued.botExplicitSkill
@@ -7347,9 +7371,12 @@ export function ChatContainer({
 
     let cancelled = false
     let retryTimer: ReturnType<typeof setTimeout> | undefined
+    const canReconcile = (): boolean =>
+      !cancelled && !historyOnlyRef.current && !isReadOnlyProjectSearchThread(threadId)
+    if (!canReconcile()) return
     const scheduleRetry = (): void => {
       retryTimer = setTimeout(() => {
-        if (!cancelled) setQueuePumpTick((tick) => tick + 1)
+        if (canReconcile()) setQueuePumpTick((tick) => tick + 1)
       }, 1000)
     }
     void window.api.agent
@@ -7358,7 +7385,7 @@ export function ChatContainer({
         handedOff.map((queued) => queued.id)
       )
       .then(async ({ pendingIds, injectedIds, durableIds }) => {
-        if (cancelled) return
+        if (!canReconcile()) return
         const pending = new Set([...pendingIds, ...injectedIds])
         const durable = new Set(durableIds)
         const visibleIds = new Set(threadMessages.map((message) => message.id))
@@ -7367,8 +7394,8 @@ export function ChatContainer({
           .map((queued) => queued.id)
         const missingDurableIdSet = new Set(missingDurableIds)
         if (missingDurableIds.length > 0) {
-          const synced = await syncDurableTranscript(missingDurableIds)
-          if (cancelled) return
+          const synced = await syncDurableTranscript(missingDurableIds, canReconcile)
+          if (!canReconcile()) return
           if (!synced) {
             scheduleRetry()
             return
@@ -7393,7 +7420,7 @@ export function ChatContainer({
         if (shouldRetry) scheduleRetry()
       })
       .catch((error) => {
-        if (cancelled) return
+        if (!canReconcile()) return
         console.warn("[ChatContainer] Failed to reconcile guided drafts:", error)
         // A transient IPC failure must not strand an ambiguous handoff forever.
         // Keep it blocked from auto-drain, then retry authoritative reconciliation.
@@ -7407,6 +7434,7 @@ export function ChatContainer({
   }, [
     deleteQueuedMessage,
     historyLoading,
+    historyOnly,
     isLoading,
     managedTurn,
     pendingApproval,
@@ -7522,14 +7550,14 @@ export function ChatContainer({
   const reconcileBotDrafts = managedTurn?.reconcileDrafts
   const botDraftReceiptRevision = managedTurn?.draftReceiptRevision
   useEffect(() => {
-    if (!reconcileBotDrafts || historyLoading) return
+    if (historyOnly || !reconcileBotDrafts || historyLoading) return
     const reconcile = (): void => {
-      void reconcileBotDrafts(queuedMessages)
+      if (!historyOnlyRef.current) void reconcileBotDrafts(queuedMessages)
     }
     reconcile()
     window.addEventListener("focus", reconcile)
     return () => window.removeEventListener("focus", reconcile)
-  }, [reconcileBotDrafts, botDraftReceiptRevision, queuedMessages, historyLoading])
+  }, [reconcileBotDrafts, botDraftReceiptRevision, queuedMessages, historyLoading, historyOnly])
 
   const handleKeyDown = (e: React.KeyboardEvent | KeyboardEvent): void => {
     if (managedTurnRef.current?.composerReadOnlyReason) return
@@ -7775,12 +7803,13 @@ export function ChatContainer({
   }
 
   useEffect(() => {
+    if (historyOnly) return
     void loadSkills()
     return () => {
       skillsLoadRequestIdRef.current += 1
       void window.api.harnessBoard.cancelCatalogRequests("chat-binding").catch(() => undefined)
     }
-  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId, surface])
+  }, [historyOnly, loadSkills, pluginVersion, harnessFeatureBinding?.projectId, surface])
 
   // One application-lifetime bridge translates skills:changed into one cache
   // revision. ChatContainer and RightPanel then share the same refresh promise.
@@ -8406,7 +8435,7 @@ export function ChatContainer({
   // Inlined as JSX (not components) to avoid React remounting on every parent render —
   // declaring a component inside the parent creates a new function reference each render,
   // which causes children to lose focus/animation state.
-  const skillIntentBanner = !skillIntentRequest ? null : (
+  const skillIntentBanner = historyOnly || !skillIntentRequest ? null : (
     <div data-chat-notice className="shrink-0 flex items-center gap-3 px-4 py-2.5 bg-violet-500/10 border-b border-violet-500/20 text-xs">
       <Sparkles className="size-3.5 text-violet-500 shrink-0" />
       <div className="flex-1 text-violet-700 dark:text-violet-300 leading-snug">
@@ -8644,7 +8673,7 @@ export function ChatContainer({
           )}
         </div>
       )}
-      {managedTurn && !showExecutionDetails ? (
+      {historyOnly ? null : managedTurn && !showExecutionDetails ? (
         workflowRun ? (
           <BackgroundTaskStatus
             run={workflowRun}
@@ -8660,7 +8689,7 @@ export function ChatContainer({
       ) : hasWorkflowPanelCapability(currentThread?.metadata) ? (
         <WorkflowHistoryButton threadId={threadId} />
       ) : null}
-      {hookInterruption && !isLoading && (
+      {!historyOnly && hookInterruption && !isLoading && (
         <div className="flex items-start gap-3 rounded-md border border-status-warning/30 bg-status-warning/10 p-4">
           <ShieldCheck className="mt-0.5 size-5 shrink-0 text-status-warning-foreground" />
           <div className="min-w-0 flex-1">
@@ -8696,7 +8725,7 @@ export function ChatContainer({
           </button>
         </div>
       )}
-      {threadError && !isLoading && (
+      {!historyOnly && threadError && !isLoading && (
         <>
           <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError} />
           {managedTurn?.configureModel &&
@@ -8769,6 +8798,10 @@ export function ChatContainer({
         externalNavigation={externalNavigation}
         onExternalNavigationFinished={(id, success) => {
           if (!isCurrentThreadSearchNavigation(id)) return
+          const current = useThreadSearch.getState().navigation
+          if (current?.id === id) {
+            current.onProjectAccessResolved?.(confirmedProjectTargetAccess.current === id)
+          }
           setSearchOpen(true)
           finishThreadSearchNavigation(id, success === false ? "命中内容已变化，或无法定位。请重新搜索" : "")
         }}
@@ -8792,20 +8825,20 @@ export function ChatContainer({
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
-        visible={!showCustomizeView}
+        visible={!historyOnly && !showCustomizeView}
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
 
       <YoloEnableConfirmDialog
-        open={yoloEnableConfirmOpen}
+        open={!historyOnly && yoloEnableConfirmOpen}
         pending={yoloModePending}
         onOpenChange={setYoloEnableConfirmOpen}
         onConfirm={() => void handleConfirmEnableYoloMode()}
       />
 
       <Dialog
-        open={!!messageForkTarget && !showCustomizeView}
+        open={!historyOnly && !!messageForkTarget && !showCustomizeView}
         onOpenChange={(open) => {
           if (!open && !isMessageForkBusy) resetMessageForkDialog()
         }}
@@ -9026,13 +9059,13 @@ export function ChatContainer({
                         toolResults={toolResults}
                         toolCallStates={toolCallDisplayStates}
                         pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-                        pendingApproval={pendingApproval}
+                        pendingApproval={presentedApproval}
                         autoApproveGitPush={autoApproveGitPush}
                         onApprovalDecision={handleApprovalDecision}
                         onEditUserMessage={composerReadOnly ? undefined : handleEditUserMessage}
-                        onSetGoalFromMessage={managedTurn ? undefined : handleSetGoalFromMessage}
+                        onSetGoalFromMessage={historyOnly || managedTurn ? undefined : handleSetGoalFromMessage}
                         onForkFromMessage={
-                          managedTurn && !managedTurn.ownerConversation
+                          historyOnly || (managedTurn && !managedTurn.ownerConversation)
                             ? undefined
                             : handleForkFromMessage
                         }
@@ -9065,7 +9098,7 @@ export function ChatContainer({
               </div>
             </ScrollArea>
             <div data-chat-footer className="contents">
-            {bizRetry && (
+            {!historyOnly && bizRetry && (
               <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="mx-auto w-full max-w-3xl">
                   <BizRetryDecisionCard
@@ -9078,7 +9111,7 @@ export function ChatContainer({
                 </div>
               </div>
             )}
-            {humanGate && (
+            {!historyOnly && humanGate && (
               <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2.5">
                   <PauseCircle className="size-4 shrink-0 text-status-warning" />
@@ -9111,7 +9144,7 @@ export function ChatContainer({
               </div>
             )}
             {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
-            {pendingApproval &&
+            {!historyOnly && pendingApproval &&
               Boolean(
                 (pendingApproval as unknown as Record<string, unknown>)._orchestratorRequestId
               ) &&
@@ -9391,7 +9424,7 @@ export function ChatContainer({
                   })()}
                 </div>
               )}
-            <ContextReminderController
+            {!historyOnly && <ContextReminderController
               enabled={isHarnessContextReminderEnabled}
               isLoading={isLoading}
               historyLoading={historyLoading}
@@ -9409,7 +9442,7 @@ export function ChatContainer({
               createThread={createThread}
               reserveLeftSpace={reserveLeftSpace}
               onHarnessSessionCreated={onHarnessSessionCreated}
-            />
+            />}
             {goalUi.goal && (
               <div className={cn("px-4 pb-1", reserveLeftSpace && "md:pl-[20px]")}>
                 <GoalStatusPanel
@@ -9430,16 +9463,23 @@ export function ChatContainer({
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
-              <GitChangeNotice threadId={threadId} />
+              {!historyOnly && <GitChangeNotice threadId={threadId} />}
               {composerReadOnly ? (
                 <div className="bot-task-readonly-footer max-w-3xl mx-auto relative">
                   <ChatScrollToBottomButton
-                    visible={chatScrollUiState.mode === "detached"}
+                    visible={chatScrollUiState.mode === "detached" || (historyOnly && hasTargetedHistoryWindow)}
                     hasUnread={chatScrollUiState.hasUnread}
                     unreadCount={chatScrollUiState.unreadCount}
                     onScrollToBottom={scrollToConversationBottom}
                   />
-                  {managedTurn?.composerHeader}
+                  {historyOnly ? (
+                    <textarea
+                      disabled
+                      rows={1}
+                      placeholder={resolvedReadOnlyReason ?? "仅可查看历史会话"}
+                      className="w-full resize-none rounded-md border border-border bg-muted px-3 py-2 text-sm"
+                    />
+                  ) : managedTurn?.composerHeader}
                 </div>
               ) : (
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
