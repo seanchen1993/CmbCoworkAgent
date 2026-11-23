@@ -616,6 +616,7 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
 
 export interface CheckpointReplayTurns {
   hiddenAnchors: ReadonlySet<string>
+  hiddenAssistants: ReadonlySet<string>
   leadingHiddenAssistants: ReadonlySet<string>
   uniqueMessageIds: ReadonlySet<string>
   rawResultByCall: ReadonlyMap<string, string>
@@ -624,9 +625,10 @@ export interface CheckpointReplayTurns {
 /** Use original user turns to confirm ownership when their visible projection omits a boundary. */
 export function readCheckpointReplayTurns(checkpoint: unknown): CheckpointReplayTurns | undefined {
   const hiddenAnchors = new Set<string>()
+  const hiddenAssistants = new Set<string>()
   const leadingHiddenAssistants = new Set<string>()
   let visibleAnchor: string | undefined
-  let leadingHidden = false
+  let inHiddenTurn = false
   const messages = getCheckpointMessages(checkpoint)
   messages.forEach((message, index) => {
     if (!isRecord(message)) return
@@ -634,17 +636,19 @@ export function readCheckpointReplayTurns(checkpoint: unknown): CheckpointReplay
     if (role === "user") {
       const content = getMessageContent(message)
       if (isInternalNotificationMessage(message) || !isVisibleTranscriptMessage("user", content)) {
+        inHiddenTurn = true
         if (visibleAnchor) hiddenAnchors.add(visibleAnchor)
-        else leadingHidden = true
       } else {
         visibleAnchor = getMessageId(message, index)
-        leadingHidden = false
+        inHiddenTurn = false
       }
     } else if (role === "system") {
       visibleAnchor = undefined
-      leadingHidden = false
-    } else if (leadingHidden && role === "assistant") {
-      leadingHiddenAssistants.add(getMessageId(message, index))
+      inHiddenTurn = false
+    } else if (inHiddenTurn && role === "assistant") {
+      const id = getMessageId(message, index)
+      hiddenAssistants.add(id)
+      if (!visibleAnchor) leadingHiddenAssistants.add(id)
     }
   })
   if (!hiddenAnchors.size && !leadingHiddenAssistants.size) return
@@ -673,6 +677,7 @@ export function readCheckpointReplayTurns(checkpoint: unknown): CheckpointReplay
   })
   return {
     hiddenAnchors,
+    hiddenAssistants,
     leadingHiddenAssistants,
     uniqueMessageIds,
     rawResultByCall: resolveToolResultOwnership(rawRows, (message) => message.id)

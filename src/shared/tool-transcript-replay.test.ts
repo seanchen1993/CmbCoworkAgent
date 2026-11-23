@@ -270,6 +270,72 @@ describe("tool transcript replay", () => {
     expect(merged.find(({ id }) => id === original.id)).toEqual(original)
   })
 
+  it("retains verified checkpoint folding when the matching occurrence already has the right ID", () => {
+    const original = { ...exchange()[0], content: "Older reply", tool_calls: undefined }
+    const later = { ...user, id: "later" }
+    const canonical = [{ ...user, id: "earlier" }, original, user, later, ...exchange(2)]
+    const checkpoint = [user, ...exchange(), later, ...exchange(2)]
+    const aligned = alignReplayedToolExchanges(canonical, checkpoint)
+    expect(aligned).toEqual([user, later, ...exchange(2)])
+    const merged = mergeCheckpointAuthorityTranscriptMessages(aligned, canonical, {
+      useStableProviderOccurrences: true
+    })
+    expect(merged.find(({ id }) => id === original.id)).toEqual(original)
+  })
+
+  it.each([
+    [true, false],
+    [false, false],
+    [false, true]
+  ])(
+    "keeps an older reply alongside checkpoint-only tool data (different execution %s, trimmed %s)",
+    (differentExecution, trimmed) => {
+      const original = { ...exchange()[0], content: "Older reply", tool_calls: undefined }
+      const [existing, existingTool] = exchange(2, { path: "fixture" }, "Persisted output")
+      const canonical = [{ ...user, id: "earlier" }, original, user, existing, existingTool]
+      const [assistant, tool] = exchange(1, { path: "fixture" }, "Checkpoint output")
+      // SQLite can still be on the prior version of the same result while the
+      // checkpoint contains the new payload under the bare provider ID.
+      const displayedTool = differentExecution
+        ? { ...tool, id: "1c711082-5111-4632-976d-7c05ee064c33", provider_source_id: undefined }
+        : tool
+      const existingToolInDatabase = { ...existingTool, id: resultId, provider_occurrence: 1 }
+      canonical[canonical.length - 1] = existingToolInDatabase
+      const checkpoint = trimmed ? [assistant, displayedTool] : [user, assistant, displayedTool]
+      const raw = checkpointRows(checkpoint)
+      const turns = readCheckpointReplayTurns({
+        channel_values: {
+          messages: trimmed ? [hiddenTeam, ...raw] : [raw[0], hiddenTeam, ...raw.slice(1)]
+        }
+      })
+      const aligned = alignReplayedToolExchanges(canonical, checkpoint, turns)
+      const restored = mergeCheckpointAuthorityTranscriptMessages(aligned, canonical, {
+        useStableProviderOccurrences: true
+      })
+      expect(restored.find(({ id }) => id === original.id)).toEqual(original)
+      expect(restored.filter(({ role }) => role === "user").map(({ id }) => id)).toEqual([
+        "earlier",
+        user.id
+      ])
+      expect(restored.findIndex(({ id }) => id === original.id)).toBeLessThan(
+        restored.findIndex(({ content }) => content === "Checkpoint output")
+      )
+      expect(
+        restored
+          .filter(({ role }) => role === "tool")
+          .map(({ content }) => content)
+          .sort()
+      ).toEqual(["Checkpoint output", "Persisted output"])
+    }
+  )
+
+  it("allows a same-turn checkpoint to complete an unfinished durable call", () => {
+    const [assistant] = exchange()
+    const checkpoint = [user, ...exchange()]
+    const durable = [user, { ...assistant, content: "Partial assistant output" }]
+    expect(alignReplayedToolExchanges(durable, checkpoint)).toBe(checkpoint)
+  })
+
   it.each([true, false])(
     "keeps distinct versions when one occupies the intended occurrence (%s)",
     (matchesFirst) => {
@@ -776,5 +842,25 @@ describe("tool transcript replay", () => {
     expect(aliases.size).toBe(1_000)
     expect(aliases.get(versions[999][1].id)).toBe(versions[999][0].id)
     expect(payloadReads).toBeLessThan(16_000)
+  })
+
+  it("compares replay-heavy durable groups once per checkpoint copy", () => {
+    let argumentReads = 0
+    const build = (first: number) => [
+      user,
+      ...Array.from({ length: 200 }, (_, index) =>
+        exchange(first + index, {
+          get path() {
+            argumentReads++
+            return "fixture"
+          }
+        })
+      ).flat()
+    ]
+    const durable = build(2)
+    const checkpoint = build(1)
+    const aligned = alignReplayedToolExchanges(durable, checkpoint)
+    expect(aligned.map(({ id }) => id)).toEqual(durable.slice(0, 3).map(({ id }) => id))
+    expect(argumentReads).toBeLessThan(3_000)
   })
 })
