@@ -570,9 +570,10 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each(["missing-first", "empty-late"])(
+  it.each(["missing-first", "empty-late", "different-result", "error", "no-witness"])(
     "keeps separate hidden replies with sparse checkpoint results (%s)",
     (mode) => {
+      const lateEmpty = mode !== "missing-first"
       const [older, olderResult] = exchange()
       const [current] = exchange(2)
       const currentUser = { ...user, id: "current-user" }
@@ -607,21 +608,32 @@ describe("tool transcript replay", () => {
         {
           ...current,
           tool_calls: calls,
-          content: mode === "empty-late" ? next.content : first.content
+          content: lateEmpty ? next.content : first.content
         },
         read,
         ls,
         boundary
       ]
-      const firstResults = mode === "empty-late" ? [read, ls] : []
+      const firstResults = lateEmpty ? [read, ls] : []
+      const latestReadId =
+        mode === "different-result" ? "81cbcdce-733b-4d6f-86b5-261cb3d89d22" : resultId
       const nextResults = [
         {
           ...read,
-          id: `${resultId}::cmb-same-role-duplicate:tool:2`,
-          provider_occurrence: 2,
-          content: mode === "empty-late" ? "" : read.content
+          id:
+            mode === "different-result"
+              ? latestReadId
+              : `${resultId}::cmb-same-role-duplicate:tool:2`,
+          provider_source_id: latestReadId,
+          provider_occurrence: mode === "different-result" ? 1 : 2,
+          content: lateEmpty ? "" : read.content,
+          ...(mode === "error" ? { status: "error", is_error: true } : {})
         },
-        { ...ls, id: `${lsId}::cmb-same-role-duplicate:tool:2` }
+        {
+          ...ls,
+          id: `${lsId}::cmb-same-role-duplicate:tool:2`,
+          content: mode === "no-witness" ? "" : ls.content
+        }
       ]
       const checkpoint = [currentUser, first, ...firstResults, boundary, next, ...nextResults]
       const turns = readCheckpointReplayTurns({
@@ -643,12 +655,20 @@ describe("tool transcript replay", () => {
       )
       const aliases = findReplayedToolExchangeAliases(merged)
       const text = getAssistantReplayContent(aliases, (id) => merged.find((row) => row.id === id))
+      const visible = merged.filter(({ id }) => !aliases.has(id))
       expect(
-        merged
-          .filter(({ id, role }) => !aliases.has(id) && role === "assistant")
+        visible
+          .filter(({ role }) => role === "assistant")
           .map((row) => text.get(row.id) ?? row.content)
           .slice(-3)
       ).toEqual([first.content, boundary.content, next.content])
+      if (lateEmpty) {
+        const reply = visible.findLast(({ role }) => role === "assistant")!
+        const result = resolveToolResultOwnership(visible).get(
+          getWorkerToolUiKey(reply.id, "shared-call", 0)
+        )
+        expect(result?.content).toBe(mode === "empty-late" ? read.content : "")
+      }
     }
   )
 

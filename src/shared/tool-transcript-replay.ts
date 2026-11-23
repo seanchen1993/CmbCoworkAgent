@@ -1528,6 +1528,52 @@ function keepDistinctCheckpointTurns<T extends TranscriptMessage>(
   }
 }
 
+function findContestedToolPresentations<T extends TranscriptMessage>(
+  replay: readonly T[],
+  checkpoint: ReturnType<typeof indexAnchoredExchanges<T>>,
+  targets: ReadonlyMap<AnchoredToolExchange<T>, AnchoredToolExchange<T>>,
+  rawTurns: ReadonlyMap<string, string>,
+  payloadId: (value: unknown) => number
+): ReadonlySet<AnchoredToolExchange<T>> {
+  const byPresentation = new Map<string, Array<AnchoredToolSlots<T>>>()
+  const key = (exchange: PartialToolExchange<T>, anchor?: T) =>
+    JSON.stringify([
+      anchor?.id ?? null,
+      exchangeKey(exchange),
+      payloadId(exchange.assistant.content)
+    ])
+  for (const assistant of replay) {
+    const exchange = readToolExchangeSlots(assistant, checkpoint.ownership)
+    if (!exchange) continue
+    const anchor = checkpoint.assistantAnchors.get(assistant.id)
+    const indexKey = key(exchange, anchor)
+    const claims = byPresentation.get(indexKey) ?? []
+    claims.push({ exchange, anchor })
+    byPresentation.set(indexKey, claims)
+  }
+  const contested = new Set<AnchoredToolExchange<T>>()
+  for (const [copy, target] of targets) {
+    const owner = rawTurns.get(copy.exchange.assistant.id)
+    if (
+      owner === undefined ||
+      !target.hasPhysicalResults ||
+      sameExchangeCalls(target.exchange, copy.exchange, true, true)
+    )
+      continue
+    const otherClaim = byPresentation.get(key(target.exchange, copy.anchor))?.some((other) => {
+      const turn = rawTurns.get(other.exchange.assistant.id)
+      return (
+        turn !== undefined &&
+        turn !== owner &&
+        sameReplayAnchor(copy.anchor, other.anchor, true) &&
+        sameExchangeCalls(target.exchange, other.exchange, true, true)
+      )
+    })
+    if (otherClaim) contested.add(copy)
+  }
+  return contested
+}
+
 type CheckpointAlignment<T> = Array<[copy: T, durable: T]>
 
 function reserveCheckpointVersionIds<T extends TranscriptMessage>(
@@ -1746,13 +1792,15 @@ function projectDurableToolPresentations<T extends TranscriptMessage>(
   checkpointMessages: readonly T[],
   durable: ReturnType<typeof indexAnchoredExchanges<T>>,
   targets: ReadonlyMap<AnchoredToolExchange<T>, AnchoredToolExchange<T>>,
-  checkpointAliases: ReadonlyMap<string, string>
+  checkpointAliases: ReadonlyMap<string, string>,
+  contestedPresentations?: ReadonlySet<AnchoredToolExchange<T>>
 ): readonly T[] {
   const revisions = [...targets].filter(([candidate, target]) => {
     const key = target.physicalKey
     return (
       key &&
-      (durable.byPhysicalGroup.get(key)?.length ?? 0) > 1 &&
+      (contestedPresentations?.has(candidate) ||
+        (durable.byPhysicalGroup.get(key)?.length ?? 0) > 1) &&
       !checkpointAliases.has(candidate.exchange.assistant.id) &&
       !isExactToolExchangeReplay(target.exchange, candidate.exchange)
     )
@@ -1765,12 +1813,15 @@ function projectDurableToolPresentations<T extends TranscriptMessage>(
     const assistant = checkpointById.get(target.exchange.assistant.id)
     const updated = assistant && readExchange(assistant, ownership)
     if (!updated || !isSameExchange(candidate.exchange, updated)) continue
-    const presentation = mergeCheckpointAuthorityTranscriptMessage(
-      updated.assistant,
-      target.exchange.assistant
-    )
+    const contested = contestedPresentations?.has(candidate)
+    // The persisted outcome belongs to this row. Its prose can belong to a
+    // different raw notification when the provider reused the assistant ID.
+    const presentation = contested
+      ? updated.assistant
+      : mergeCheckpointAuthorityTranscriptMessage(updated.assistant, target.exchange.assistant)
     for (const copy of durable.byPhysicalGroup.get(target.physicalKey!) ?? []) {
       if (!isExactToolExchangeReplay(target.exchange, copy.exchange)) continue
+      if (contested && !sameReplayAnchor(copy.anchor, target.anchor, true)) continue
       const row = copy.exchange.assistant
       projected.set(row, {
         ...row,
@@ -1961,6 +2012,10 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
     }
   }
   if (rawAssistantTurns) keepDistinctCheckpointTurns(targets, rawAssistantTurns)
+  const contestedPresentations =
+    rawAssistantTurns && targets.size
+      ? findContestedToolPresentations(replay, checkpoint, targets, rawAssistantTurns, payloadId)
+      : undefined
   const checkpointAliases = selectCheckpointReplayAliases(replay, checkpoint, targets)
   const replayWithoutCopies = checkpointAliases.size
     ? replay.filter(({ id }) => !checkpointAliases.has(id))
@@ -2020,7 +2075,8 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
       aligned,
       durable,
       targets,
-      checkpointAliases
+      checkpointAliases,
+      contestedPresentations
     )
   }
 }
