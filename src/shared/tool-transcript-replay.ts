@@ -595,7 +595,8 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       (left, right) => exactSlots(left.batch, right.batch, true)
     )
     if (original !== version) {
-      ;(plainSingleTool ? exactSingleToolCopies : exactCopies).set(batch, original.batch)
+      const copies = plainSingleTool ? exactSingleToolCopies : exactCopies
+      copies.set(batch, original.batch)
       continue
     }
     if (full && typeof assistant.content === "string") {
@@ -614,22 +615,52 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     }
   }
 
-  // A partial replay can point to a more complete recording of the same
-  // batch. Every occupied slot must agree and the target must be unique.
-  const containing = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+  const completeAliases = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+  const completePresentations = new Map<PartialToolExchange<T>, T>()
   for (const variants of completeTextVersions.values()) {
     if (variants.length < 2) continue
     variants.sort((left, right) => (left.text < right.text ? -1 : Number(left.text > right.text)))
     const prefixes: typeof variants = []
+    const parentByVersion = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+    const childrenByVersion = new Map<PartialToolExchange<T>, number>()
     for (const variant of variants) {
       while (prefixes.length && !variant.text.startsWith(prefixes.at(-1)!.text)) prefixes.pop()
       const previous = prefixes.findLast(
         ({ batch, text }) => text !== variant.text && exactSlots(variant.batch, batch, false)
       )
-      if (previous) containing.set(variant.batch, containing.get(previous.batch) ?? previous.batch)
+      if (previous) {
+        parentByVersion.set(variant.batch, previous.batch)
+        childrenByVersion.set(previous.batch, (childrenByVersion.get(previous.batch) ?? 0) + 1)
+      }
       prefixes.push(variant)
     }
+    // Keep each line of continuation independent below a shared prefix.
+    const rootByVersion = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+    const chains = new Map<PartialToolExchange<T>, PartialToolExchange<T>[]>()
+    for (const { batch } of variants) {
+      const parent = parentByVersion.get(batch)
+      const root =
+        parent && childrenByVersion.get(parent) === 1
+          ? (rootByVersion.get(parent) ?? parent)
+          : batch
+      rootByVersion.set(batch, root)
+      const chain = chains.get(root) ?? []
+      chain.push(batch)
+      chains.set(root, chain)
+    }
+    for (const chain of chains.values()) {
+      if (chain.length < 2) continue
+      const retained = chain.reduce((first, batch) =>
+        completeOrder.get(batch)! < completeOrder.get(first)! ? batch : first
+      )
+      completePresentations.set(retained, chain.at(-1)!.assistant)
+      for (const batch of chain) if (batch !== retained) completeAliases.set(batch, retained)
+    }
   }
+
+  // A partial replay can point to a more complete recording of the same
+  // batch. Every occupied slot must agree and the target must be unique.
+  const containing = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const samePresentation = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const partials = [...versions.values()]
     .flat()
@@ -652,16 +683,18 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     for (const group of candidates.groups) {
       for (const candidate of group) {
         const sameVersion = samePresentation.get(candidate.batch) ?? candidate.batch
+        const completeVersion = completeAliases.get(sameVersion) ?? sameVersion
         const retained = exactPresentation
           ? sameVersion
-          : (containing.get(sameVersion) ?? sameVersion)
+          : (containing.get(completeVersion) ?? completeVersion)
+        const retainedPresentation = completePresentations.get(retained) ?? retained.assistant
         const revised =
-          !exactPresentation && extendedText(version.batch.assistant, retained.assistant)
+          !exactPresentation && extendedText(version.batch.assistant, retainedPresentation)
         if (
           (!exactPresentation &&
             !revised &&
-            !sameValue(retained.assistant.content, version.batch.assistant.content) &&
-            !extendedText(retained.assistant, version.batch.assistant)) ||
+            !sameValue(retainedPresentation.content, version.batch.assistant.content) &&
+            !extendedText(retainedPresentation, version.batch.assistant)) ||
           !exactSlots(version.batch, retained, exactPresentation)
         )
           continue
@@ -686,7 +719,8 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   const longestPresentation = new Map<PartialToolExchange<T>, T>()
   const divergentPresentations = new Set<PartialToolExchange<T>>()
   for (const [copy, original] of containing) {
-    const longest = longestPresentation.get(original) ?? original.assistant
+    const longest =
+      longestPresentation.get(original) ?? completePresentations.get(original) ?? original.assistant
     if (extendedText(copy.assistant, longest)) longestPresentation.set(original, copy.assistant)
     else if (
       !sameValue(copy.assistant.content, longest.content) &&
@@ -703,37 +737,21 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       containing.delete(copy)
     }
   }
-  // Prefixes establish which presentations agree. The first complete row
-  // keeps its chronology and bindings even if a shorter copy arrived later.
-  const firstCompleteByGroup = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
-  for (const [copy, original] of containing) {
-    const position = completeOrder.get(copy)
-    if (position === undefined) continue
-    const first = firstCompleteByGroup.get(original) ?? original
-    if (position < (completeOrder.get(first) ?? Infinity)) firstCompleteByGroup.set(original, copy)
-  }
-  for (const [copy, original] of containing) {
-    const first = firstCompleteByGroup.get(original)
-    if (!first) continue
-    if (first === copy) containing.delete(copy)
-    else containing.set(copy, first)
-  }
-  for (const [original, first] of firstCompleteByGroup) containing.set(original, first)
-
   // Rejected cross-presentation transitions leave the proved continuity
   // inside each unchanged presentation intact.
   for (const [copy, original] of samePresentation) {
-    containing.set(copy, containing.get(original) ?? original)
+    containing.set(copy, containing.get(original) ?? completeAliases.get(original) ?? original)
   }
-  const withVerifiedText = new Set([...containing].flat())
+  const continuations = new Map([...containing, ...completeAliases])
+  const withVerifiedText = new Set([...continuations].flat())
   for (const [copy, original] of exactSingleToolCopies) {
     if (withVerifiedText.has(original)) exactCopies.set(copy, original)
   }
 
   const proposed = new Map<string, string>()
   const removedCallKeys = new Map<string, string[]>()
-  for (const [copy, original] of [...containing, ...exactCopies]) {
-    const retained = containing.get(original) ?? original
+  for (const [copy, original] of [...continuations, ...exactCopies]) {
+    const retained = continuations.get(original) ?? original
     const id = copy.assistant.id
     proposed.set(id, retained.assistant.id)
     removedCallKeys.set(

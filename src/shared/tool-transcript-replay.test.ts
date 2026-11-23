@@ -434,6 +434,49 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it("continues a completed text branch while preserving its common prefix and sibling", () => {
+    const texts = [
+      "Checking",
+      "Checking version",
+      "Checking version and status",
+      "Checking directory"
+    ]
+    const rows = [
+      user,
+      ...texts.flatMap((content, index) => {
+        const [assistant, result] = exchange(index + 1)
+        const secondId = "ad506755-5e42-4cef-834f-eb1be0f11d27"
+        const directory = {
+          id: index ? `${secondId}::cmb-same-role-duplicate:tool:${index + 1}` : secondId,
+          role: "tool",
+          tool_call_id: "ls-call",
+          name: "ls",
+          content: "Current directory"
+        }
+        return [
+          {
+            ...assistant,
+            content,
+            tool_calls: [...assistant.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+          },
+          result,
+          directory
+        ]
+      })
+    ]
+    const aliases = findReplayedToolExchangeAliases(rows)
+    expect(aliases).toEqual(
+      new Map([
+        [rows[7].id, rows[4].id],
+        [rows[8].id, rows[5].id],
+        [rows[9].id, rows[6].id]
+      ])
+    )
+    expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))).toEqual(
+      new Map([[rows[4].id, texts[2]]])
+    )
+  })
+
   it.each([false, true])(
     "finds the correct structured result variant for a prose revision (trimmed %s)",
     (trimmed) => {
