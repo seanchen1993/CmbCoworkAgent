@@ -1,6 +1,7 @@
-import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { extractVisibleText } from "./turn-completion-integrity"
+import { botToolControlMessage } from "../bots/tool-feedback"
 
 /** Supplied only by the local Bot host, never inferred from user text or thread metadata. */
 export interface BotTurnContext {
@@ -53,13 +54,7 @@ export function createBotResultReportMiddleware(review = false) {
       return AIMessage.isInstance(result) ? withoutBotToolNarration(result) : result
     },
     wrapToolCall: (request, handler) =>
-      review && BOT_REVIEW_TOOLS.has(request.toolCall.name) ? handler(request) : new ToolMessage({
-        name: request.toolCall.name,
-        tool_call_id: request.toolCall.id!,
-        status: "error",
-        content: review
-          ? "This call did not execute. Answer from the returned findings if sufficient. For a material gap, inspect this task's retained evidence with bot_work_result_read."
-          : "This call did not execute. Answer from the supplied outcome and receipts. Identify any unresolved fact that affects the conclusion."
-      })
+      review && BOT_REVIEW_TOOLS.has(request.toolCall.name) ? handler(request) :
+        botToolControlMessage(review ? "result_review_scope" : "result_report_scope", request.toolCall)
   })
 }

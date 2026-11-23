@@ -110,7 +110,7 @@ export function BotDeliveredFile({
               data-state={delivery.state}
               title={delivery.reasonCode}
             >
-              {delivery.state === "pending"
+              {delivery.retrying ? "正在重试发送" : delivery.state === "pending"
                 ? "等待发送到招乎"
                 : delivery.state === "sending"
                   ? delivery.progress < 100

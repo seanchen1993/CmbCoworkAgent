@@ -105,7 +105,11 @@ it.each([false, true])("preserves single choice, free text and desktop completio
 })
 
 it("shows every full option under its question before the group form, with matching selector numbers", () => {
-  const questions = Array.from({ length: 6 }, (_, index) => ({
+  const headings = [
+    "问题一", "问题二", "问题三", "问题四", "问题五",
+    "问题六", "问题七", "问题八", "问题九", "问题十"
+  ]
+  const questions = headings.map((_, index) => ({
     key: `q${index}`, header: `口径 ${index + 1}`, question: `第 ${index + 1} 题采用哪种口径？`,
     allowMultiple: index === 5,
     options: [{ label: "周期可含未来日期", description: "按日历周期统计，结束日期可以在当前日期之后".repeat(3) }, { label: "仅统计已发生数据" }]
@@ -114,8 +118,10 @@ it("shows every full option under its question before the group form, with match
   expect(card[3].list).toEqual([{ content: "显示不全？在本群 @机器人 发送 /文字模式 开" }])
   const form = card.at(-1)!
   expect(form.type).toBe("interactive")
+  const controls = form.inputControlArray as Record<string, unknown>[]
   for (const [index, question] of questions.entries()) {
-    expect(card[4 + 2 * index].list).toEqual([{ type: [1], content: `${index + 1}. ${question.header}` }])
+    const title = `${headings[index]}：${question.header}`
+    expect(card[4 + 2 * index].list).toEqual([{ type: [1], content: title }])
     expect(card[5 + 2 * index].list).toEqual([
       { content: question.question },
       { type: [1], content: "\n1. " },
@@ -123,8 +129,12 @@ it("shows every full option under its question before the group form, with match
       { type: [1], content: "\n2. " },
       { content: "仅统计已发生数据" }
     ])
-    const control = (form.inputControlArray as Record<string, unknown>[])[index * 2]
-    expect(control.feedbackKey).toBe(question.key)
+    const control = controls[index * 2]
+    expect(control).toMatchObject({ title, feedbackKey: question.key })
+    expect(controls[index * 2 + 1]).toMatchObject({
+      title: `${title} · 其他`,
+      feedbackKey: `${question.key}__other`
+    })
     if (question.allowMultiple) expect(control).toMatchObject({ subType: "inputBox", promptText: expect.stringContaining("多个编号") })
     else expect(control).toMatchObject({ subType: "listSelector", isMultiple: false, optionArray: [
       { text: "1. 周期可含未来日期", value: "0" }, { text: "2. 仅统计已发生数据", value: "1" }

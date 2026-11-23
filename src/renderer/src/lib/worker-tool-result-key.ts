@@ -1,11 +1,14 @@
 import type { Message } from "../types"
+import { parseBotToolReceiptId, type BotToolReceipt } from "../../../shared/bots/turn-feedback"
 
 export interface ToolResultAssociation {
   content: string | unknown
   is_error?: boolean
+  botReceipt?: BotToolReceipt
 }
 
 type PendingToolCall = {
+  name: string
   identity: string
   rawToolCallId: string
   key: string
@@ -154,6 +157,7 @@ export function buildToolResultAssociations(
         if (!identity) return
         const rawToolCallId = getRawWorkerToolCallId(toolCall.id)
         const pendingCall: PendingToolCall = {
+          name: toolCall.name,
           identity,
           rawToolCallId,
           key: getWorkerToolUiKey(message.id, toolCall.id, index),
@@ -209,9 +213,12 @@ export function buildToolResultAssociations(
     if (nextTurnCount > 0) bucket.activeCountByTurn.set(pendingCall.turn, nextTurnCount)
     else bucket.activeCountByTurn.delete(pendingCall.turn)
     if (bucket.activeCount === 0) pendingCallsByRawId.delete(rawToolCallId)
+    const nativeMessageId = messageScope ? message.id.slice(messageScope.prefix.length) : message.id
+    const botReceipt = parseBotToolReceiptId(nativeMessageId, pendingCall.name)
     results.set(pendingCall.key, {
       content: message.content,
-      is_error: message.is_error ?? message.status === "error"
+      is_error: message.is_error ?? message.status === "error",
+      ...(botReceipt ? { botReceipt } : {})
     })
   }
 

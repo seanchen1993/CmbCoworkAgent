@@ -9,6 +9,14 @@ import type { BotTask } from "../../shared/bots/contracts"
 import { BOT_SKILL_DISPATCH_TOOL } from "../agent/bot-skill-dispatch"
 import { botWorkOperationQuery } from "./desktop-operation"
 import { parseSchedule } from "../../shared/bots/validation"
+import { BotToolRetries, botToolControlMessage } from "./tool-feedback"
+import { acceptedBotDispatch } from "../agent/bot-dispatch-feedback"
+import { isBotHandoffCall } from "../../shared/bots/turn-feedback"
+
+const workQueries = new Set([
+  "bot_work_input", "bot_work_list", "bot_work_projects", "bot_work_read", "bot_work_search",
+  "bot_thread_read", "bot_thread_list", "bot_feature_read", "bot_feature_list"
+])
 
 /** Extends the ordinary beta Runtime. Final assistant replies remain normal chat. */
 export function createBotWorkTools(
@@ -18,6 +26,7 @@ export function createBotWorkTools(
   onWaiting?: (waiting: boolean) => void
 ): DynamicStructuredTool[] {
   const taskId = task.id
+  const retries = new BotToolRetries()
   // An introduction can receive a live user submission through steering. The
   // Host still checks that authority on invocation, including for introductions.
   const ordinaryConversationTools = !task.workId && !task.mockSource &&
@@ -56,10 +65,14 @@ export function createBotWorkTools(
   )
   const invoke = async (
     name: string,
-    config: { toolCall?: { id?: string } },
+    config: { toolCall?: { id?: string; args?: Record<string, unknown> } },
     action: (host: LocalBotHost) => unknown | Promise<unknown>
   ) => {
     const callId = config.toolCall?.id
+    const args = config.toolCall?.args
+    // The Host journals writes by requestKey. Queries are safe to repeat for the exact input.
+    const attempt = callId && args && !getHookAgentIdFromRequest(config) && (typeof args.requestKey === "string" || workQueries.has(name))
+      ? retries.begin(name, args, callId) : undefined
     try {
       signal.throwIfAborted()
       if (getHookAgentIdFromRequest(config))
@@ -69,11 +82,16 @@ export function createBotWorkTools(
       if (!callId) throw new Error("缺少可信工具调用标识，未执行工作操作")
       const host = getHost()
       host.workToolSource(taskId)
-      return JSON.stringify({
-        kind: "bot-work-receipt",
-        operation: name,
-        receipt: await action(host)
-      })
+      const receipt = await action(host)
+      const envelope = { kind: "bot-work-receipt", operation: name, receipt }
+      if (attempt?.isRetry) {
+        const outcome = receipt as { operation?: { state?: string; error?: unknown }; continued?: boolean; reviewPaused?: boolean; cleanupPending?: boolean } | null
+        let confirmed = outcome != null && outcome.continued !== false && outcome.reviewPaused !== false && !outcome.cleanupPending
+        if (isBotHandoffCall({ name, args })) confirmed = acceptedBotDispatch(name, args, JSON.stringify(envelope))
+        else if (name === "bot_feature_update") confirmed = outcome?.operation?.state === "finished" && !outcome.operation.error
+        if (confirmed) return attempt.confirmed(envelope)
+      }
+      return JSON.stringify(envelope)
     } catch (cause) {
       signal.throwIfAborted()
       const content = JSON.stringify({
@@ -83,7 +101,7 @@ export function createBotWorkTools(
           "The work operation did not succeed. Report the actual error; never claim a work was created, completed or continued without a successful receipt. Do not bypass these controls using files, SQL or shell."
       })
       return callId
-        ? new ToolMessage({ content, status: "error", tool_call_id: callId, name })
+        ? new ToolMessage({ id: attempt?.failed(), content, status: "error", tool_call_id: callId, name })
         : content
     }
   }
@@ -584,21 +602,31 @@ export function createBotWorkResultTools(
   task: BotTask, getHost: () => LocalBotHost, signal: AbortSignal,
   access?: ReturnType<typeof import("./work-result-runtime").createWorkResultEvidenceAccess>
 ): DynamicStructuredTool[] {
+  const retries = new BotToolRetries()
   const evidence = () => {
     if (!access) throw new Error("当前没有可核查的任务结果。")
     return access
   }
-  const invoke = async (name: string, config: { toolCall?: { id?: string } }, action: () => unknown | Promise<unknown>) => {
+  const invoke = async (name: string, config: { toolCall?: { id?: string; args?: Record<string, unknown> } }, action: () => unknown | Promise<unknown>) => {
     const callId = config.toolCall?.id
+    const args = config.toolCall?.args
+    const attempt = callId && args && task.origin.kind === "work_result" && task.origin.review?.phase === "review" &&
+      !getHookAgentIdFromRequest(config) && (name === "bot_work_result_read" || name === "bot_work_result_select_files")
+      ? retries.begin(name, args, callId) : undefined
     try {
       signal.throwIfAborted()
-      if (task.origin.kind !== "work_result" || task.origin.review?.phase !== "review" || !callId || getHookAgentIdFromRequest(config))
-        throw new Error("只有原主 Bot 的当前结果回合可以处理此结果。")
-      return JSON.stringify(await action())
+      if (!callId) throw new Error("只有原主 Bot 的当前结果回合可以处理此结果。")
+      if (task.origin.kind !== "work_result" || task.origin.review?.phase !== "review" || getHookAgentIdFromRequest(config))
+        return botToolControlMessage("result_tool_outside_review", { id: callId, name })
+      const receipt = await action()
+      if (attempt?.isRetry && receipt && typeof receipt === "object" &&
+          (args?.kind !== "evidence" || ("status" in receipt && receipt.status === "ok")))
+        return attempt.confirmed(receipt)
+      return JSON.stringify(receipt)
     } catch (error) {
       signal.throwIfAborted()
       const content = JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })
-      return callId ? new ToolMessage({ content, status: "error", tool_call_id: callId, name }) : content
+      return callId ? new ToolMessage({ id: attempt?.failed(), content, status: "error", tool_call_id: callId, name }) : content
     }
   }
   const metadata = { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true }

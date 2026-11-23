@@ -2,6 +2,7 @@ import { botWorkAttachmentHref } from "../../shared/bots/work-history"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, expect, it, vi } from "vitest"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
+import type { BotMockOutbox } from "../../shared/bots/mock-channel"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { LocalBotHost } from "./host"
 import { botImScopeId } from "./im-gateway-store"
@@ -40,6 +41,17 @@ function bindPersonalIm(store: BotStore, botId: string, realm = "fixture") {
   store.im.importImBinding({ id, botId, kind: "dm", label: "Owner", version: 1,
     channelKey: botImScopeId(realm, principal, conversationKey) })
   return id
+}
+
+// Model gateway acknowledgements in queue order. Text and files share a conversation's FIFO.
+function deliverQueuedText(store: BotStore) {
+  const sent: BotMockOutbox[] = []
+  let row: BotMockOutbox | null
+  while ((row = store.im.beginDelivery("text"))) {
+    store.im.delivered(row.id, "sent")
+    sent.push(row)
+  }
+  return sent
 }
 
 const publicationTask = (store: BotStore, workId: string) => store.recentTasks().find(
@@ -520,6 +532,8 @@ it.each([
   const text = store.im.beginDelivery("text")!
   expect(text).toMatchObject({ bindingId, workId: work.id, text: remaining
     ? `Reports verified\n\n原任务还有 ${remaining} 个文件可查看。请在 CmbCowork 中打开原任务。` : "Reports verified" })
+  expect(store.im.beginDelivery("file")).toBeNull()
+  store.im.delivered(text.id, "sent")
   const received: BotDeliveredFile[] = []
   for (let index = 0; index < expected.length; index++) {
     const row = store.im.beginDelivery("file")!
@@ -553,6 +567,7 @@ it("sends only the ninth file after an eight-file interrupted IM publication", (
     .toEqual(files.slice(1).reverse())
   expect(store.acknowledgeWorkResultPublication(interrupted.id)).toBe(true)
   store.settle(interrupted.id, "completed", null)
+  deliverQueuedText(store)
   for (let index = 0; index < 8; index++) {
     const row = store.im.beginDelivery("file")!
     store.im.delivered(row.id, "sent")
@@ -574,6 +589,7 @@ it("sends only the ninth file after an eight-file interrupted IM publication", (
   store.transition(final.id, "running")
   expect(store.getWorkResultPublication(final.id)?.attachments.map(item => item.file)).toEqual(files.slice().reverse())
   expect(store.acknowledgeWorkResultPublication(final.id)).toBe(true)
+  deliverQueuedText(store)
   expect(store.im.beginDelivery("file")).toMatchObject({ bindingId, sourceTaskId: final.id, files: [files[0]] })
   expect(store.im.beginDelivery("file")).toBeNull()
 })
@@ -606,20 +622,24 @@ it("exposes only acknowledged exact versions to the original attachment cards an
   expect(statuses()).toEqual(expect.arrayContaining([
     expect.objectContaining({ file, state: "pending" }), expect.objectContaining({ file: other, state: "pending" })
   ]))
-  const [first, second] = [store.im.beginDelivery("file")!, store.im.beginDelivery("file")!]
-  expect(first).toMatchObject({ sourceTaskId: publication.id, bindingId })
-  expect(second).toMatchObject({ sourceTaskId: publication.id, bindingId })
+  deliverQueuedText(store)
+  const [first, second] = Array.from({ length: 2 }, () => {
+    const row = store.im.beginDelivery("file")!
+    expect(row).toMatchObject({ sourceTaskId: publication.id, bindingId })
+    expect(store.im.beginDelivery("file")).toBeNull()
+    if (row.files?.[0].filePath === file.filePath) store.im.delivered(row.id, "failed", "FILE_REJECTED")
+    else store.im.delivered(row.id, "sent")
+    return row
+  })
   const failed = first.files?.[0].filePath === file.filePath ? first : second
   const untouched = failed === first ? second : first
-  store.im.delivered(failed.id, "failed", "FILE_REJECTED")
-  store.im.delivered(untouched.id, "sent")
   expect(statuses()).toEqual(expect.arrayContaining([
     expect.objectContaining({ id: failed.id, file, state: "failed", reasonCode: "FILE_REJECTED" }),
     expect.objectContaining({ id: untouched.id, file: other, state: "sent" })
   ]))
   store.im.retryFile(bot.id, failed.id)
   expect(statuses()).toEqual(expect.arrayContaining([
-    expect.objectContaining({ id: failed.id, file, state: "pending" }),
+    expect.objectContaining({ id: failed.id, file, state: "pending", retrying: true }),
     expect.objectContaining({ id: untouched.id, file: other, state: "sent" })
   ]))
   expect(store.im.beginDelivery("file")).toMatchObject({
@@ -684,17 +704,21 @@ it.each([
   }
 
   const interruption = publish("interrupted", mixed ? [latest, other] : [latest])
+  const sentText = deliverQueuedText(store)
   const initialFileId = `im-personal-${interruption.id}:file:0`
   if (previousState === "pending") {
     expect(store.im.beginDelivery("file")).toBeNull()
   } else {
-    const initialRows = Array.from({ length: mixed ? 2 : 1 }, () => store.im.beginDelivery("file"))
+    const initialRows = Array.from({ length: mixed ? 2 : 1 }, () => {
+      const row = store.im.beginDelivery("file")!
+      if (row.id !== initialFileId) store.im.delivered(row.id, otherState)
+      else if (previousState === "sending") store.im.progress(row.id, 37)
+      else store.im.delivered(row.id, previousState)
+      return row
+    })
     expect(initialRows).toContainEqual(expect.objectContaining({
       id: initialFileId, fileDeliveryId: initialFileId, sourceTaskId: interruption.id, bindingId, files: [latest]
     }))
-    if (previousState === "sending") store.im.progress(initialFileId, 37)
-    else store.im.delivered(initialFileId, previousState)
-    if (mixed) store.im.delivered(initialRows.find(row => row && row.id !== initialFileId)!.id, otherState)
   }
   expect(status(latestRef.callId, latest)).toMatchObject({ id: initialFileId, state: previousState })
   expect(status(draftRef.callId, draft)).toBeUndefined()
@@ -726,6 +750,7 @@ it.each([
   store.settle(review.id, "completed", null)
 
   const final = publish("ready", mixed ? [selected, other] : [selected])
+  sentText.push(...deliverQueuedText(store))
   expect(db.exec(`SELECT COUNT(*) FROM bot_im_outbox WHERE source_task_id=? AND file_delivery_id IS NOT NULL`,
     [final.id])[0].values).toEqual([[queuesFile ? 1 : 0]])
   if (queuesFile) {
@@ -749,6 +774,7 @@ it.each([
     if (previousState === "pending") {
       expect(store.im.beginDelivery("file")).toBeNull()
       store.im.setOnline(bot.id, bindingId, true)
+      sentText.push(...deliverQueuedText(store))
       expect(store.im.beginDelivery("file")).toMatchObject({
         id: initialFileId, fileDeliveryId: initialFileId, sourceTaskId: interruption.id, bindingId, files: [latest]
       })
@@ -757,6 +783,7 @@ it.each([
       const failed = status(latestRef.callId, latest)!
       expect(failed).toMatchObject({ id: initialFileId, state: "failed", reasonCode: "FILE_REJECTED" })
       store.im.retryFile(bot.id, failed.id)
+      sentText.push(...deliverQueuedText(store))
       expect(store.im.beginDelivery("file")).toMatchObject({
         id: initialFileId, fileDeliveryId: initialFileId, retryRequested: true, files: [latest]
       })
@@ -784,7 +811,7 @@ it.each([
   }
   expect(store.im.beginDelivery("file")).toBeNull()
   if (routeChange !== "revoked")
-    expect(Array.from({ length: 3 }, () => store.im.beginDelivery("text"))).toContainEqual(
+    expect([...sentText, ...deliverQueuedText(store)]).toContainEqual(
       expect.objectContaining({ sourceTaskId: final.id, bindingId: otherBindingId ?? bindingId, text: "Report verified." })
     )
 })
