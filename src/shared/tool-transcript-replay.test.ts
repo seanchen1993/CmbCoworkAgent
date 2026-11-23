@@ -259,8 +259,9 @@ describe("tool transcript replay", () => {
         ? durable
         : [
             nextUser,
-            replay,
-            ...(mode !== "fresh-result" ? [replayedResult] : []),
+            mode === "stale-before-fresh" ? { ...assistant, content: blocks } : replay,
+            ...(mode === "stale-before-fresh" ? [result] : []),
+            ...(mode === "checkpoint-only" ? [replayedResult] : []),
             ...(mode === "fresh-result" || mode === "stale-before-fresh" ? [fresh] : [])
           ]
       const turns = mode === "durable-view"
