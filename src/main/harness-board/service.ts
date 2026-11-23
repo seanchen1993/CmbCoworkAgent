@@ -3933,10 +3933,12 @@ export async function getHarnessProjectDetails(
       options.maxResponseBytes
     )
     throwIfHarnessDetailCancelled(request.signal)
-    for (const id of complete) {
+    await Promise.all([...complete].map((id) => {
       const detail = details[id]
-      if (detail && !detail.error) catalog.observed(id, detail.runs)
-    }
+      if (detail && !detail.error) return catalog.observed(id, detail.runs)
+      return undefined
+    }))
+    throwIfHarnessDetailCancelled(request.signal)
     return details
   } finally {
     catalog.finish()

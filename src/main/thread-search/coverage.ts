@@ -1,5 +1,6 @@
 import { getDb } from "../db"
-import { getDbPath, getThreadCheckpointPath } from "../storage"
+import { join } from "node:path"
+import { getDbPath, getOpenworkDir, getThreadCheckpointPath } from "../storage"
 import {
   CheckpointRuntimeProjectionClient,
   isCheckpointRuntimeProjectionCancelled
@@ -18,7 +19,13 @@ import {
   tryBackgroundThreadMutationLock
 } from "../ipc/thread-run-mutation-lock"
 import type { SearchBackfillCandidate } from "./protocol"
-import { THREAD_SEARCH_BACKFILL_SQL } from "./reader"
+import { sameThreadSearchRoute } from "../../shared/thread-search-scope"
+import { projectSearchCatalogGeneration } from "./project-catalog"
+import {
+  THREAD_SEARCH_BACKFILL_SQL,
+  THREAD_SEARCH_PROJECT_BACKFILL_SQL,
+  threadSearchRouteFromRow
+} from "./reader"
 
 type CoverageStatus =
   | "verified" | "notApplicable" | "failed" | "foreground-required"
@@ -105,14 +112,24 @@ function sameCandidate(left: SearchBackfillCandidate, right: SearchBackfillCandi
   return (
     left.threadId === right.threadId &&
     left.sourceKey === right.sourceKey &&
+    left.catalogGeneration === right.catalogGeneration &&
+    sameThreadSearchRoute(left.route ?? { kind: "ordinary" }, right.route ?? { kind: "ordinary" }) &&
     matchesThreadIncarnationSnapshot(left.incarnation, right.incarnation)
   )
+}
+
+function currentCatalog(candidate: SearchBackfillCandidate): boolean {
+  return !candidate.route || candidate.route.kind === "ordinary" ||
+    (!!candidate.catalogGeneration &&
+     (!candidate.catalogInvalidation || Atomics.load(new Int32Array(candidate.catalogInvalidation), 0) === 0) &&
+     candidate.catalogGeneration === projectSearchCatalogGeneration())
 }
 
 export function scheduleSearchBackfill(candidate: SearchBackfillCandidate) {
   if (
     process.env.CMB_DISABLE_THREAD_SEARCH === "1" ||
     !checkBusy ||
+    !currentCatalog(candidate) ||
     !/^[a-zA-Z0-9_-]+$/.test(candidate.threadId) ||
     (active && !active.cancellation.signal.aborted && sameCandidate(active.candidate, candidate))
   )
@@ -124,8 +141,8 @@ export function scheduleSearchBackfill(candidate: SearchBackfillCandidate) {
   schedule()
 }
 
-function readBackfillState(threadId: string) {
-  const stmt = getDb().prepare(THREAD_SEARCH_BACKFILL_SQL)
+function readBackfillState(threadId: string, sql: string) {
+  const stmt = getDb().prepare(sql)
   try {
     stmt.bind([threadId])
     return stmt.step() ? stmt.getAsObject() : null
@@ -142,8 +159,18 @@ async function run() {
     return
   }
   const { candidate } = next
-  const { threadId, sourceKey, ...guard } = candidate
-  const incarnation = guard.incarnation
+  const { threadId, sourceKey, route, catalogInvalidation, incarnation, catalogGeneration } = candidate
+  const catalogSource = catalogGeneration ? {
+    path: join(getOpenworkDir(), "harness-board-projects.json"),
+    signature: catalogGeneration.slice(0, catalogGeneration.lastIndexOf(":"))
+  } : undefined
+  const project = route !== undefined && route.kind !== "ordinary"
+  const stateSql = project ? THREAD_SEARCH_PROJECT_BACKFILL_SQL : THREAD_SEARCH_BACKFILL_SQL
+  const matchesRoute = (row: Record<string, unknown> | null) => {
+    if (!project) return true
+    const current = row && threadSearchRouteFromRow(row)
+    return !!current && sameThreadSearchRoute(current, route)
+  }
   pending.delete(threadId)
   const job: NonNullable<typeof active> = { candidate, cancellation: new AbortController() }
   active = job
@@ -152,10 +179,10 @@ async function run() {
   let retry = false
   try {
     const acquired = tryBackgroundThreadMutationLock(threadId, async () => {
-      if (signal.aborted || runGeneration !== generation) return
-      const row = readBackfillState(threadId)
+      if (signal.aborted || runGeneration !== generation || !currentCatalog(candidate)) return
+      const row = readBackfillState(threadId, stateSql)
       if (
-        !row ||
+        !row || !matchesRoute(row) ||
         (row.migration_status === "complete" && row.migration_source_key === sourceKey &&
           row.migration_search_projection_state != null &&
           row.migration_search_projection_state !== "overlap-unverified" && row.occurrence_evidence_changed !== 1) ||
@@ -182,14 +209,16 @@ async function run() {
         if (
           (signal.aborted && !timedOut) ||
           job.foregroundCancelled ||
-          runGeneration !== generation
+          runGeneration !== generation ||
+          !currentCatalog(candidate) ||
+          (project && !matchesRoute(readBackfillState(threadId, stateSql)))
         )
           return
         getDb().run(
           `INSERT INTO thread_search_coverage
           (thread_id, incarnation, source, epoch, status, checked_at, occurrence_version)
           SELECT ?, ?, ?, COALESCE((SELECT epoch FROM thread_search_structure_versions WHERE thread_id = ?), 0), ?, ?, ?
-          FROM (${THREAD_SEARCH_BACKFILL_SQL}) AS current
+          FROM (${stateSql}) AS current
           WHERE COALESCE(current.oversized_token, 0) = 0
             AND (CASE WHEN ? IS NULL THEN COALESCE(current.token, '') = '' AND current.created_at = ?
                  ELSE current.token = ? END)
@@ -232,7 +261,7 @@ async function run() {
           threadId,
           "",
           `thread-search-backfill:${threadId}`,
-          { guard: { ...guard, sourceKey }, signal }
+          { guard: { incarnation, sourceKey, route, catalogInvalidation, catalogSource }, signal }
         )
         const pendingCopy = row.migration_status && row.migration_status !== "complete"
         const projectionState = migrated.stats.searchProjectionState
@@ -268,7 +297,7 @@ async function run() {
     retry = true
   } finally {
     const interrupted = job.foregroundCancelled && !job.forgotten
-    if (runGeneration === generation && (interrupted || (!signal.aborted && retry)) &&
+    if (runGeneration === generation && currentCatalog(candidate) && (interrupted || (!signal.aborted && retry)) &&
         !pending.has(threadId)) {
       pending.set(threadId, { candidate, readyAt: Date.now() + 5000 })
     }

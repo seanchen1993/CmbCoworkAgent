@@ -1,3 +1,4 @@
+import type { ThreadSearchRoute } from "../../shared/thread-search-types"
 import type { ThreadIncarnationSnapshot } from "../../shared/thread-incarnation"
 import { legacySearchProjectionIssue } from "../checkpointer/runtime-projection-protocol"
 import { EMPTY_SQLITE_RECOVERY_FAMILY_KEY, sqliteRecoveryFamilyKey } from "../db/sqlite-recovery-family"
@@ -103,9 +104,15 @@ function queueBackfill(candidate: SearchBackfillCandidate, epoch: number, interr
 function audit(
   threadId: string,
   incarnation: ThreadIncarnationSnapshot,
-  epoch: number
+  epoch: number,
+  route?: ThreadSearchRoute,
+  catalogGeneration?: string,
+  catalogInvalidation?: SharedArrayBuffer
 ): "verified" | "pending" | "failed" | "foreground-required" | "projection-truncated" | "legacy-unverified" {
   if (!/^[a-zA-Z0-9_-]+$/.test(threadId)) return "verified"
+  if (route?.kind !== undefined && route.kind !== "ordinary" &&
+      (!catalogGeneration || (catalogInvalidation && Atomics.load(new Int32Array(catalogInvalidation), 0))))
+    return "failed"
   const migration = reader.checkpointMigration(threadId)
   const complete = migration?.status === "complete"
   const projectionIssue = legacySearchProjectionIssue(migration)
@@ -120,7 +127,14 @@ function audit(
     if (complete && migration.source_key === sourceKey && migration.search_projection_state != null && !proofChanged)
       return projectionIssue ?? "verified"
     if (reader.hasOversizedBackfillMetadata(threadId)) return "foreground-required"
-    const status = queueBackfill({ threadId, incarnation, sourceKey }, epoch,
+    const status = queueBackfill({
+      threadId,
+      incarnation,
+      sourceKey,
+      route,
+      ...(route?.kind !== undefined && route.kind !== "ordinary"
+        ? { catalogGeneration, catalogInvalidation } : {})
+    }, epoch,
       Boolean(migration && !complete), proofChanged)
     return status === "verified" && projectionIssue ? projectionIssue : status
   } catch {
@@ -154,7 +168,9 @@ port.on("message", (command: SearchCommand) => {
         command.request,
         reader,
         command.cancellation,
-        audit
+        (threadId, incarnation, epoch, route) =>
+          audit(threadId, incarnation, epoch, route, command.catalog?.generation, command.catalogInvalidation),
+        command.catalog
       )
       sessions.set(command.id, { session, lastAccess: Date.now() })
       reply = session.page(null)!

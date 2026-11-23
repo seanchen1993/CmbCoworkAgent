@@ -7,6 +7,11 @@ import { ensureThreadMessageFragmentStorage, hasThreadMessageFragmentGenerations
   publishedThreadMessageFragmentsSql } from "../db/thread-message-fragment-storage"
 import { hasSqliteRecoverySidecar, sqliteRecoveryFamilyKey } from "../db/sqlite-recovery-family"
 import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } from "./message-snapshot-schema"
+import {
+  getProjectThreadSearchRoute,
+  matchesOrdinaryThreadScope,
+  sameThreadSearchRoute
+} from "../../shared/thread-search-scope"
 import { hasScopedGraphTranscriptBoundary } from "../../shared/graph-transcript-boundary"
 import { migrateLegacyMessageTimes } from "./legacy-message-times"
 import { applyLegacyOrdinalReservationBatch, planLegacyOrdinalReservation, reserveLegacyOrdinalRanges,
@@ -4139,12 +4144,34 @@ function prepareLegacySearchThreadGuard(database: DatabaseSync): StatementSync {
     CASE WHEN COALESCE(octet_length(metadata), 0) <= ${SEARCH_BACKFILL_METADATA_BYTE_LIMIT}
       THEN json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
         '$.${THREAD_INCARNATION_METADATA_KEY}')
-    END AS token FROM threads WHERE thread_id = ?`)
+    END AS token,
+    CASE WHEN COALESCE(octet_length(metadata), 0) <= ${SEARCH_BACKFILL_METADATA_BYTE_LIMIT}
+      THEN metadata END AS route_metadata FROM threads WHERE thread_id = ?`)
 }
 
 function assertLegacySearchThread(read: StatementSync, threadId: string, guard: LegacySearchBootstrapGuard): void {
   const row = read.get(threadId)
   if (row?.oversized_metadata) throw searchBootstrapNeedsForeground()
+  if (guard.route) {
+    const metadata = typeof row?.route_metadata === "string" ? parseJsonValue(row.route_metadata) : null
+    if (guard.route.kind === "ordinary") {
+      if (!matchesOrdinaryThreadScope({
+        metadata: metadata && typeof metadata === "object" && !Array.isArray(metadata)
+          ? metadata as Record<string, unknown> : undefined
+      })) throw searchBootstrapSuperseded()
+    } else {
+      if (guard.catalogInvalidation && Atomics.load(new Int32Array(guard.catalogInvalidation), 0))
+        throw searchBootstrapSuperseded()
+      if (guard.catalogSource) {
+        const source = statSync(guard.catalogSource.path, { bigint: true, throwIfNoEntry: false })
+        const signature = source?.isFile()
+          ? [source.dev, source.ino, source.size, source.mtimeNs, source.ctimeNs].join(":") : null
+        if (signature !== guard.catalogSource.signature) throw searchBootstrapSuperseded()
+      }
+      const route = getProjectThreadSearchRoute(metadata)
+      if (!route || !sameThreadSearchRoute(guard.route, route)) throw searchBootstrapSuperseded()
+    }
+  }
   if (!row || row.status === "busy" || !matchesThreadIncarnationSnapshot({
     token: typeof row.token === "string" && row.token ? row.token : null,
     legacyCreatedAt: Number(row.created_at)

@@ -1,12 +1,15 @@
 import { EventEmitter } from "node:events"
 import type { IpcMain, WebContents } from "electron"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import type { ThreadSearchPage, ThreadSearchResult } from "../../shared/thread-search-types"
+import type { ThreadSearchPage, ThreadSearchResult, ThreadSearchSummary } from "../../shared/thread-search-types"
 import type { SearchCommand } from "../thread-search/protocol"
 import type { Thread } from "../types"
 import { getDb, getThreadRowLifetime } from "../db"
 import { readThreadMessagesPageInWorker } from "../thread-message-hydration/client"
 import { readThreadSearchHydrationInWorker } from "../thread-metadata-hydration/client"
+import {
+  isProjectSearchRouteCurrent, readProjectSearchCatalog, readProjectSearchNavigationAccess
+} from "../thread-search/project-catalog"
 import {
   isForegroundCheckpointOpening, registerBackgroundThreadMutationCancellation, stageThreadPublication
 } from "./thread-run-mutation-lock"
@@ -23,6 +26,13 @@ vi.mock("../thread-message-hydration/client", () => ({ readThreadMessagesPageInW
 vi.mock("../thread-search/coverage", () => ({
   scheduleSearchBackfill: vi.fn(),
   stopSearchBackfill: vi.fn()
+}))
+vi.mock("../thread-search/project-catalog", () => ({
+  isProjectSearchRouteCurrent: vi.fn(),
+  onProjectSearchCatalogChange: vi.fn(() => () => {}),
+  projectSearchCatalogGeneration: vi.fn(() => "current"),
+  readProjectSearchCatalog: vi.fn(),
+  readProjectSearchNavigationAccess: vi.fn()
 }))
 vi.mock("../thread-search/thread-search-worker?nodeWorker", async () => {
   const { EventEmitter } = await import("node:events")
@@ -82,6 +92,7 @@ describe("thread search window ownership", () => {
     const { first, request } = fixture()
     const hit = (threadId: string): ThreadSearchResult => ({
       threadId,
+      route: { kind: "ordinary" },
       title: "Saved",
       workspacePath: null,
       frozenUpdatedAt: 2,
@@ -115,12 +126,15 @@ describe("thread search window ownership", () => {
     try {
       await request(first, "start", { query: "needle" })
       const outdated = request(first, "summary", oldHit)
-      await expect(request(first, "summary", newHit)).resolves.toMatchObject({ thread_id: "new" })
+      const newSummary = await request(first, "summary", newHit) as ThreadSearchSummary
+      expect(newSummary).toMatchObject({ thread_id: "new" })
       oldSummary.resolve(summary("old"))
       await expect(outdated).resolves.toBeNull()
       await request(first, "cancel")
       vi.mocked(readThreadSearchHydrationInWorker).mockClear()
-      await expect(request(first, "target-window", newHit)).resolves.toEqual({ status: "staleIdentity" })
+      await expect(request(first, "target-window", {
+        ...newHit, navigationTicketId: newSummary.navigationTicketId
+      })).resolves.toEqual({ status: "staleIdentity" })
       expect(readThreadSearchHydrationInWorker).toHaveBeenCalledWith("new", first.id,
         expect.objectContaining({ includeSummary: false }))
     } finally {
@@ -131,7 +145,7 @@ describe("thread search window ownership", () => {
   it("rejects a title summary captured before another window deletes or replaces the row", async () => {
     const { first, request } = fixture()
     const hit: ThreadSearchResult = {
-      threadId: "old", incarnation: { token: null, legacyCreatedAt: 1 },
+      threadId: "old", route: { kind: "ordinary" }, incarnation: { token: null, legacyCreatedAt: 1 },
       title: "Saved", workspacePath: null, frozenUpdatedAt: 2, snippet: "Saved",
       snippetRanges: [{ start: 0, end: 5 }], matchedBy: "title", navigation: "threadOnly", target: null
     }
@@ -199,13 +213,16 @@ describe("thread search window ownership", () => {
       }).mockResolvedValueOnce(summary("new"))
     try {
       await request(first, "start", { query: "needle" })
-      await request(first, "summary", oldHit)
-      const old = request(first, "target-window", oldHit)
+      const oldTicket = await request(first, "summary", oldHit) as ThreadSearchSummary
+      const old = request(first, "target-window", {
+        ...oldHit, navigationTicketId: oldTicket.navigationTicketId
+      })
       await readingOldPage.promise
       await request(first, "start", { query: "new" })
-      await request(first, "summary", newHit)
+      const newTicket = await request(first, "summary", newHit) as ThreadSearchSummary
       await request(first, "cancel")
-      const latest = request(first, "target-window", newHit)
+      const target = { ...newHit, navigationTicketId: newTicket.navigationTicketId }
+      const latest = request(first, "target-window", target)
       await readingNewIdentity.promise
       oldPage.resolve(page("old"))
       pause.resolve()
@@ -213,7 +230,7 @@ describe("thread search window ownership", () => {
       expect(identity).toHaveBeenCalledTimes(waitingForBackground ? 3 : 4)
       newIdentity.resolve(summary("new"))
       await expect(latest).resolves.toMatchObject({ status: "resolved", page: page("new") })
-      await expect(request(first, "target-window", newHit)).resolves.toEqual({ status: "staleIdentity" })
+      await expect(request(first, "target-window", target)).resolves.toEqual({ status: "staleIdentity" })
     } finally {
       oldPage.resolve(page("old"))
       pause.resolve()
@@ -228,6 +245,7 @@ describe("thread search window ownership", () => {
     const publish = stageThreadPublication("staged")
     results.push({
       threadId: "staged",
+      route: { kind: "ordinary" },
       title: "Staged",
       workspacePath: null,
       frozenUpdatedAt: 1,
@@ -303,13 +321,15 @@ describe("thread search window ownership", () => {
       })
       try {
         await request(first, "start", { query: "needle" })
-        expect(await request(first, "summary", result)).toBeTruthy()
+        const summary = await request(first, "summary", result) as ThreadSearchSummary
+        expect(summary.navigationTicketId).toBeTruthy()
+        const target = { ...result, navigationTicketId: summary.navigationTicketId }
         if (changed === "background reservation") {
-          await expect(request(first, "target-window", result)).resolves.toMatchObject({
+          await expect(request(first, "target-window", target)).resolves.toMatchObject({
             status: "resolved", structureEpoch: 1
           })
         } else {
-          await expect(request(first, "target-window", result)).resolves.toEqual({ status: "changed" })
+          await expect(request(first, "target-window", target)).resolves.toEqual({ status: "changed" })
         }
         expect(isForegroundCheckpointOpening("saved")).toBe(false)
       } finally {
@@ -318,6 +338,68 @@ describe("thread search window ownership", () => {
       }
     }
   )
+
+  it("rejects stale, cross-window and wrong-target tickets before they can consume the current hit", async () => {
+    const { first, second, request } = fixture()
+    const hit: ThreadSearchResult = {
+      threadId: "saved",
+      route: { kind: "ordinary" },
+      title: "Saved",
+      workspacePath: null,
+      frozenUpdatedAt: 2,
+      snippet: "needle",
+      snippetRanges: [],
+      incarnation: { token: null, legacyCreatedAt: 1 },
+      matchedBy: "message",
+      navigation: "exact",
+      target: {
+        kind: "durableMessage", messageId: "message", ordinalHint: 0, structureEpoch: 0,
+        location: {
+          kind: "body", blockIndex: 0, sourceStart: 0, sourceEnd: 6, revision: "1",
+          start: 0, end: 6, segmentOccurrence: 0, context: "needle", contextStart: 0, contextEnd: 6
+        }
+      }
+    }
+    results.push(hit)
+    vi.mocked(readThreadSearchHydrationInWorker).mockResolvedValue({ thread_id: "saved" } as Thread)
+    try {
+      await request(first, "start", { query: "needle" })
+      const before = await request(first, "summary", hit) as ThreadSearchSummary
+      const after = await request(first, "summary", hit) as ThreadSearchSummary
+      expect(before.navigationTicketId).not.toBe(after.navigationTicketId)
+      await request(first, "cancel-navigation", before.navigationTicketId)
+      const target = { ...hit, navigationTicketId: after.navigationTicketId }
+      await expect(request(first, "target-window", hit)).resolves.toEqual({ status: "staleIdentity" })
+      await expect(request(first, "target-window", {
+        ...hit, navigationTicketId: before.navigationTicketId
+      })).resolves.toEqual({ status: "staleIdentity" })
+      await expect(request(second, "confirm-route", target)).resolves.toBe(false)
+      await expect(request(first, "target-window", {
+        ...target, target: { ...target.target, messageId: "other" }
+      })).resolves.toEqual({ status: "staleIdentity" })
+      await expect(request(first, "confirm-route", target)).resolves.toBe(true)
+      await request(first, "cancel-navigation", after.navigationTicketId)
+      await expect(request(first, "confirm-route", target)).resolves.toBe(false)
+    } finally {
+      first.emit("destroyed")
+      second.emit("destroyed")
+    }
+  })
+
+  it("rejects invalid project scopes and meaningful workspace combinations", async () => {
+    const { first, request } = fixture()
+    const invalid = [
+      { scope: {} },
+      { scope: { kind: "project", projectId: "   " } },
+      { scope: { kind: "project", projectId: "p" }, workspacePath: null },
+      { scope: { kind: "all", workspacePath: "/wrong" } },
+      { scope: { kind: "ordinary", workspacePath: "/new" }, workspacePath: "/old" }
+    ]
+    for (const requestFields of invalid) {
+      await expect(request(first, "start", { query: "needle", ...requestFields }))
+        .rejects.toThrow("SEARCH_INVALID")
+    }
+  })
 
   it("keeps continuations and cancellation with the initiating window", async () => {
     const { first, second, request } = fixture()
@@ -379,6 +461,124 @@ describe("thread search window ownership", () => {
         scanStatus: "running"
       })
       expect(workers).toHaveLength(2)
+    } finally {
+      first.emit("destroyed")
+    }
+  })
+})
+
+describe("project history navigation", () => {
+  const hit: ThreadSearchResult = {
+    threadId: "saved", title: "Saved", workspacePath: null, frozenUpdatedAt: 2, snippet: "Saved",
+    snippetRanges: [{ start: 0, end: 5 }], incarnation: { token: null, legacyCreatedAt: 1 },
+    route: { kind: "featureSession", projectId: "owner", slug: "feature" },
+    matchedBy: "title", navigation: "threadOnly", target: null
+  }
+
+  async function publishProjectHit(start: ReturnType<typeof fixture>, result: ThreadSearchResult = hit) {
+    const summary = { thread_id: "saved", metadata: {} } as Thread
+    vi.mocked(readThreadSearchHydrationInWorker).mockResolvedValue(summary)
+    vi.mocked(getDb).mockReturnValue({
+      prepare: () => ({
+        bind: () => {}, step: () => true, free: () => {},
+        getAsObject: () => ({
+          created_at: 1, token: null, feature_marker: "object",
+          feature_project_id: "owner", feature_slug: "feature"
+        })
+      }),
+      exec: () => [{ values: [[0, 0]] }]
+    } as unknown as ReturnType<typeof getDb>)
+    vi.mocked(readProjectSearchCatalog).mockResolvedValue({
+      generation: "current", projects: new Map([["owner", { label: "Owner" }]])
+    })
+    vi.mocked(isProjectSearchRouteCurrent).mockReturnValue(true)
+    results.push(result)
+    await expect(start.request(start.first, "start", { query: "Saved", scope: { kind: "projects" } }))
+      .resolves.toMatchObject({ results: [result] })
+  }
+
+  it("keeps the signed history route read-only when the directory comes back", async () => {
+    const start = fixture()
+    const { first, request } = start
+    try {
+      await publishProjectHit(start)
+      vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("history")
+      const summary = await request(first, "summary", hit) as ThreadSearchSummary
+      expect(summary.searchReadOnly).toBe(true)
+      vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("live")
+      const destination = { ...hit, navigationTicketId: summary.navigationTicketId }
+      await expect(request(first, "confirm-route", destination)).resolves.toBe(true)
+      expect(readProjectSearchNavigationAccess).toHaveBeenCalledTimes(1)
+      await expect(request(first, "confirm-route", destination)).resolves.toBe(false)
+    } finally {
+      first.emit("destroyed")
+    }
+  })
+
+  it("rejects an editable ticket if the directory became inaccessible after summary", async () => {
+    const start = fixture()
+    const { first, request } = start
+    try {
+      await publishProjectHit(start)
+      vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("live")
+      const summary = await request(first, "summary", hit) as ThreadSearchSummary
+      expect(summary.searchReadOnly).toBeUndefined()
+      vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("history")
+      const destination = { ...hit, navigationTicketId: summary.navigationTicketId }
+      await expect(request(first, "confirm-route", destination)).resolves.toBe(false)
+      vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("live")
+      await expect(request(first, "confirm-route", destination)).resolves.toBe(false)
+    } finally {
+      first.emit("destroyed")
+    }
+  })
+
+  it("invalidates history when authority is revoked while final identity is read", async () => {
+    const start = fixture()
+    const { first, request } = start
+    try {
+      await publishProjectHit(start)
+      vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("history")
+      const summary = await request(first, "summary", hit) as ThreadSearchSummary
+      const identity = Promise.withResolvers<Thread | null>()
+      vi.mocked(readThreadSearchHydrationInWorker).mockReturnValueOnce(identity.promise)
+      const confirmation = request(first, "confirm-route", {
+        ...hit, navigationTicketId: summary.navigationTicketId
+      })
+      vi.mocked(isProjectSearchRouteCurrent).mockReturnValue(false)
+      identity.resolve({ thread_id: "saved" } as Thread)
+      await expect(confirmation).resolves.toBe(false)
+    } finally {
+      first.emit("destroyed")
+    }
+  })
+
+  it("reports an unavailable project if its directory vanishes during exact navigation", async () => {
+    const start = fixture()
+    const { first, request } = start
+    const target: ThreadSearchResult = {
+      ...hit, matchedBy: "message", navigation: "exact",
+      target: {
+        kind: "durableMessage", messageId: "message", ordinalHint: 0, structureEpoch: 0,
+        location: {
+          kind: "body", blockIndex: 0, sourceStart: 0, sourceEnd: 5, revision: "1",
+          start: 0, end: 5, segmentOccurrence: 0, context: "Saved", contextStart: 0, contextEnd: 5
+        }
+      }
+    }
+    try {
+      await publishProjectHit(start, target)
+      vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("live")
+      const summary = await request(first, "summary", target) as ThreadSearchSummary
+      const destination = { ...target, navigationTicketId: summary.navigationTicketId }
+      await expect(request(first, "confirm-route", destination)).resolves.toBe(true)
+      vi.mocked(readThreadMessagesPageInWorker).mockImplementationOnce(async () => {
+        vi.mocked(readProjectSearchNavigationAccess).mockResolvedValue("history")
+        return { messages: [{ id: "message" }] } as Awaited<ReturnType<typeof readThreadMessagesPageInWorker>>
+      })
+      await expect(request(first, "target-window", destination))
+        .resolves.toEqual({ status: "projectBecameUnavailable" })
+      await expect(request(first, "target-window", destination)).resolves.toEqual({ status: "staleIdentity" })
     } finally {
       first.emit("destroyed")
     }

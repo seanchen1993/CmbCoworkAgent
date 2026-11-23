@@ -14,9 +14,11 @@ import type {
   SearchCoverageReason,
   ThreadSearchPage,
   ThreadSearchResult,
+  ThreadSearchRoute,
   ThreadSearchStartRequest
 } from "../../shared/thread-search-types"
 import type { createThreadSearchReader } from "./reader"
+import type { ProjectSearchCatalog } from "./protocol"
 
 type Reader = ReturnType<typeof createThreadSearchReader>
 type Cursor = NonNullable<ReturnType<Reader["readMessages"]>["next"]>
@@ -53,16 +55,21 @@ export class ThreadSearchSession {
     private readonly audit: (
       threadId: string,
       incarnation: ThreadIncarnationSnapshot,
-      epoch: number
-    ) => "verified" | "pending" | "failed" | "foreground-required" | "projection-truncated" | "legacy-unverified"
+      epoch: number,
+      route?: ThreadSearchRoute
+    ) => "verified" | "pending" | "failed" | "foreground-required" | "projection-truncated" | "legacy-unverified",
+    catalog?: ProjectSearchCatalog
   ) {
     const started = performance.now()
     this.flag = new Int32Array(cancellation)
     this.mayMatch = createChatSearchPlanQueryFilter(request.query)
     this.limit = request.limit ?? 20
-    const directory = reader.captureCandidates(request.workspacePath, this.flag)
+    const workspace = request.scope?.kind === "ordinary" ? request.scope.workspacePath : request.workspacePath
+    const directory = reader.captureCandidates(workspace, this.flag, request.scope, catalog)
     this.candidates = directory.candidates
     if (directory.limited) this.reasons.add("candidate-limit")
+    if (directory.catalogUnavailable) this.reasons.add("project-catalog-unavailable")
+    if (directory.routeUnavailable) this.reasons.add("project-route-unavailable")
     this.activeMs = performance.now() - started
   }
 
@@ -81,6 +88,11 @@ export class ThreadSearchSession {
     const results: ThreadSearchResult[] = []
     let bytes = 2048
     const add = (match: ThreadSearchResult): boolean => {
+      if (this.request.scope && this.request.scope.kind !== "ordinary" &&
+          !this.reader.matchesSearchRoute(match.threadId, match.route)) {
+        this.reasons.add("project-catalog-changed")
+        return true
+      }
       const cost = Buffer.byteLength(JSON.stringify(match)) + 1
       if (cost > 128 * 1024 - 2048) {
         this.reasons.add("projection-truncated")
@@ -147,7 +159,7 @@ export class ThreadSearchSession {
           this.retries = 0
         }
         const auditThread = (epoch: number) => {
-          const status = this.audit(candidate.threadId, candidate.incarnation, epoch)
+          const status = this.audit(candidate.threadId, candidate.incarnation, epoch, candidate.route)
           if (status === "pending") {
             this.pendingThreads += 1
             this.reasons.add("legacy-pending")

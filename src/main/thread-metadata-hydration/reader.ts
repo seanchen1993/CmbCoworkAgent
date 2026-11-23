@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite"
 import { matchesThreadIncarnationSnapshot } from "../../shared/thread-incarnation"
-import { THREAD_SEARCH_IDENTITY_CHECK_SQL, THREAD_SEARCH_IDENTITY_SQL } from "../thread-search/reader"
+import { threadSearchIdentitySql, threadSearchRouteFromRow } from "../thread-search/reader"
+import { sameThreadSearchRoute } from "../../shared/thread-search-scope"
 import {
   isVisibleGoalUserEventMessage,
   isStaleCheckpointBoundaryNoticeMessage
@@ -367,9 +368,16 @@ export function readThreadHydrationProjection(
   throwIfCancelled(cancellation)
   const search = request.search
   if (search) {
-    const row = database.prepare(
-      search.includeSummary ? THREAD_SEARCH_IDENTITY_SQL : THREAD_SEARCH_IDENTITY_CHECK_SQL
-    ).get(request.threadId)
+    const expectedRoute = search.route
+    const isProject = expectedRoute !== undefined && expectedRoute.kind !== "ordinary"
+    const row = database.prepare(threadSearchIdentitySql(search.includeSummary, isProject))
+      .get(request.threadId)
+    if (isProject && row && expectedRoute) {
+      const currentRoute = threadSearchRouteFromRow(row)
+      if (!currentRoute || !sameThreadSearchRoute(expectedRoute, currentRoute)) {
+        return { thread: null, stats: stats(startedAt, 0, 0) }
+      }
+    }
     throwIfCancelled(cancellation)
     const matches = row && !row.oversized_token && matchesThreadIncarnationSnapshot({
       token: typeof row.token === "string" && row.token ? row.token : null,

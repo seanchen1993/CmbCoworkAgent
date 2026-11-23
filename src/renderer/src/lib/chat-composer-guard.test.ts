@@ -33,6 +33,7 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     managedTurn: undefined,
     botReplyActions: undefined,
     draftBotReplyTo: null,
+    historyOnly: false,
     historyLoading: false,
     inputDisabled: false,
     composerControlsDisabled: false,

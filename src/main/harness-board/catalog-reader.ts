@@ -1,6 +1,6 @@
 import { getMarketContentStoredLimit, readContentFileSync } from "../services/market-content"
 import { existsSync, statSync } from "node:fs"
-import { basename, isAbsolute, join, relative, resolve } from "node:path"
+import { join } from "node:path"
 import { serialize } from "node:v8"
 import type { PluginMetadata } from "../types"
 import type {
@@ -39,6 +39,7 @@ import {
   HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
   requireCompleteHarnessDeployUnitContext
 } from "./context-integrity"
+import { resolveHarnessProjectDirectory } from "./project-workspace"
 
 const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
 const APP_BOARD_API_VERSION = 1
@@ -616,27 +617,12 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
   }
 }
 
-function isInsideDirectory(basePath: string, targetPath: string): boolean {
-  const relativePath = relative(resolve(basePath), resolve(targetPath))
-  return (
-    relativePath === "" ||
-    (Boolean(relativePath) && !relativePath.startsWith("..") && !isAbsolute(relativePath))
-  )
-}
-
 function projectDirectoryExists(project: HarnessProjectMetadata): boolean {
   try {
-    const workspacePath = resolve(project.workspacePath)
-    const projectDir = project.projectDir.trim() || project.projectCode.trim()
-    const projectPath = resolve(workspacePath, projectDir)
-    if (
-      projectPath === workspacePath ||
-      basename(projectPath) !== projectDir ||
-      !isInsideDirectory(workspacePath, projectPath)
-    ) {
-      return false
-    }
-    return existsSync(projectPath)
+    const projectPath = resolveHarnessProjectDirectory(
+      project.workspacePath, project.projectDir.trim() || project.projectCode.trim()
+    )
+    return projectPath !== null && existsSync(projectPath)
   } catch {
     return false
   }

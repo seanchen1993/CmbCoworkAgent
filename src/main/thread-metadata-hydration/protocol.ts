@@ -1,4 +1,5 @@
 import type { Thread, ThreadGroupSelectionEntry, ThreadGroupSelector } from "../types"
+import type { ThreadSearchRoute } from "../../shared/thread-search-types"
 import type { ThreadIncarnationSnapshot } from "../../shared/thread-incarnation"
 
 export const THREAD_METADATA_HYDRATION_CANCELLED = "THREAD_METADATA_HYDRATION_CANCELLED"
@@ -36,7 +37,7 @@ interface ThreadMetadataHydrationRequestBase {
 export interface ThreadMetadataHydrationReadThreadRequest extends ThreadMetadataHydrationRequestBase {
   type: "read-thread"
   threadId: string
-  search?: { incarnation: ThreadIncarnationSnapshot; includeSummary: boolean }
+  search?: { incarnation: ThreadIncarnationSnapshot; includeSummary: boolean; route?: ThreadSearchRoute }
 }
 
 export interface ThreadMetadataHydrationReadListPageRequest extends ThreadMetadataHydrationRequestBase {

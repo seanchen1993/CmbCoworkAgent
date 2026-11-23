@@ -1,4 +1,4 @@
-import type { ThreadMessagesPage } from "../main/types"
+import type { Thread, ThreadMessagesPage } from "../main/types"
 import type { ThreadGoalHydrationEvent } from "../main/thread-metadata-hydration/protocol"
 import type { ChatSearchLocation } from "./chat-search-types"
 import type { ThreadIncarnationSnapshot } from "./thread-incarnation"
@@ -23,7 +23,25 @@ export type ThreadSearchTarget =
       location: ChatSearchLocation
     }
 
+export type ThreadSearchScope =
+  | { kind: "ordinary"; workspacePath?: string | null }
+  | { kind: "project"; projectId: string }
+  | { kind: "projects" }
+  | { kind: "all" }
+
+export type ThreadSearchRoute =
+  | { kind: "ordinary" }
+  | { kind: "projectSession"; projectId: string }
+  | { kind: "featureSession"; projectId: string; slug: string }
+
+export type ThreadSearchSummary = Thread & {
+  searchRoute?: ThreadSearchRoute
+  searchReadOnly?: true
+  navigationTicketId?: string
+}
+
 export interface ThreadSearchStartRequest {
+  scope?: ThreadSearchScope
   query: string
   workspacePath?: string | null
   limit?: number
@@ -39,6 +57,9 @@ interface ThreadSearchResultSummary {
   title: string
   workspacePath: string | null
   remoteInbox?: boolean
+  route: ThreadSearchRoute
+  projectLabel?: string
+  featureLabel?: string
   frozenUpdatedAt: number
   snippet: string
   snippetRanges: Array<{ start: number; end: number }>
@@ -61,6 +82,9 @@ export type SearchCoverageReason =
   | "scan-budget"
   | "unavailable-source"
   | "changed-during-search"
+  | "project-catalog-unavailable"
+  | "project-route-unavailable"
+  | "project-catalog-changed"
 
 export interface ThreadSearchPage {
   sessionId: string
@@ -83,6 +107,7 @@ export interface ThreadSearchOpenRequest {
   incarnation: ThreadIncarnationSnapshot
   target?: ThreadSearchTarget | null
   residentMessageIds?: readonly string[]
+  navigationTicketId?: string
 }
 
 export type ThreadSearchWindow =
@@ -92,4 +117,7 @@ export type ThreadSearchWindow =
       structureEpoch: number
       goalEvent?: ThreadGoalHydrationEvent
     }
-  | { status: "threadOnly" | "notFound" | "staleIdentity" | "changed" | "failed" }
+  | {
+      status: "threadOnly" | "notFound" | "staleIdentity" | "changed" | "failed" |
+        "projectBecameUnavailable"
+    }

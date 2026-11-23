@@ -1,3 +1,4 @@
+import { publishThreadDirectoryIdentityChanged } from "./thread-directory-lifecycle"
 import { ensureManagedRunSchedulesSchema } from "./managed-run-schedules"
 import { installThreadSearchSchema } from "../thread-search/schema"
 import { publishedThreadMessageFragmentsSql } from "./thread-message-fragment-storage"
@@ -6349,6 +6350,8 @@ export function updateThread(
   database.run(`UPDATE threads SET ${setClauses.join(", ")} WHERE thread_id = ?`, values)
 
   saveToDisk()
+  if (serializedMetadata !== undefined && serializedMetadata !== existing.metadata)
+    publishThreadDirectoryIdentityChanged(threadId)
 
   return {
     ...existing,
@@ -6420,6 +6423,7 @@ export function deleteThread(threadId: string): void {
     throw error
   }
   saveToDisk()
+  publishThreadDirectoryIdentityChanged(threadId)
 }
 
 export interface ThreadGoalEventRow {

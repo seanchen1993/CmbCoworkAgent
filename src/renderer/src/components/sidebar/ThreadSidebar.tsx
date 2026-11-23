@@ -1,5 +1,4 @@
-import { ThreadSearchButton } from "@/components/search/ThreadSearchDialog"
-import { useState, useCallback, useEffect, useMemo, useRef, memo, lazy, Suspense } from "react"
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, memo, lazy, Suspense } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
   Plus,
@@ -81,6 +80,8 @@ import type { BotThreadOwner } from "../../../../shared/bots/conversation"
 import { useThreadBotOwners } from "../bots/use-thread-bot-owners"
 import { useLocalBotsUnread } from "../bots/use-bots"
 import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
+import { revealSidebarThread } from "./sidebar-thread-anchor"
+import { useThreadSearch } from "../../lib/thread-search-navigation"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
 import { collectChangedStreamingThreadIds } from "@/lib/thread-stream-activity"
 import { botDefaultWorkspaceOwner, botWorkspaceDisplay, botWorkOwnerLabel } from "@/lib/bot-workspace-display"
@@ -271,6 +272,7 @@ function ThreadListItemImpl({
   isSelected,
   isEditing,
   isUnread,
+  readOnly = false,
   isManagedRunning = false,
   editingTitle,
   onSelect,
@@ -300,6 +302,7 @@ function ThreadListItemImpl({
   isSelected: boolean
   isEditing: boolean
   isUnread: boolean
+  readOnly?: boolean
   isManagedRunning?: boolean
   editingTitle: string
   onSelect: () => void
@@ -350,6 +353,8 @@ function ThreadListItemImpl({
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
+          data-sidebar-thread-id={thread.thread_id}
+          aria-current={isSelected ? "true" : undefined}
           className={cn(
             "group relative flex cursor-pointer items-center gap-2 overflow-hidden rounded-md px-3 py-2 transition-colors",
             isSelected
@@ -468,10 +473,11 @@ function ThreadListItemImpl({
             !isRunning && <span className="size-2 rounded-full bg-status-info shrink-0" />
           )}
           <span className="relative ml-auto flex h-6 shrink-0 items-center justify-end overflow-hidden">
-            <span className="text-[10px] text-muted-foreground group-hover:hidden group-focus-within:hidden">
+            <span className={cn("text-[10px] text-muted-foreground",
+              !readOnly && "group-hover:hidden group-focus-within:hidden")}>
               {formatCompactTime(thread.updated_at)}
             </span>
-            <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:static group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:static group-focus-within:opacity-100">
+            {!readOnly && <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:static group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:static group-focus-within:opacity-100">
               <IconPopoverButton
                 icon={<Pencil className="size-3" />}
                 popoverContent="重命名会话"
@@ -490,15 +496,15 @@ function ThreadListItemImpl({
                 )}
                 onClick={onDelete}
               />
-            </span>
+            </span>}
           </span>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onClick={onStartEditing}>
+        {!readOnly && <ContextMenuItem onClick={onStartEditing}>
           <Pencil className="size-4 mr-2" />
           重命名
-        </ContextMenuItem>
+        </ContextMenuItem>}
         <ContextMenuItem onClick={onExport} disabled={isRunning || isExporting}>
           {isExporting ? (
             <Loader2 className="size-4 mr-2 animate-spin" />
@@ -507,7 +513,7 @@ function ThreadListItemImpl({
           )}
           {isRunning ? "运行中，无法导出" : isExporting ? "正在导出" : "导出会话"}
         </ContextMenuItem>
-        {onFork ? (
+        {!readOnly && onFork ? (
           <ContextMenuItem onClick={onFork} disabled={forkDisabled}>
             {isForking ? (
               <Loader2 className="size-4 mr-2 animate-spin" />
@@ -517,7 +523,7 @@ function ThreadListItemImpl({
             {isForking ? "正在 fork" : forkDisabled ? "当前状态无法 fork" : "Fork 当前会话"}
           </ContextMenuItem>
         ) : null}
-        {onForkFromCheckpoint ? (
+        {!readOnly && onForkFromCheckpoint ? (
           <ContextMenuItem onClick={onForkFromCheckpoint} disabled={forkDisabled}>
             {isForking ? (
               <Loader2 className="size-4 mr-2 animate-spin" />
@@ -527,11 +533,13 @@ function ThreadListItemImpl({
             从 checkpoint fork
           </ContextMenuItem>
         ) : null}
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning || managedWork}>
-          <Trash2 className="size-4 mr-2" />
-          {isRunning ? "运行中，无法删除" : "删除"}
-        </ContextMenuItem>
+        {!readOnly && <>
+          <ContextMenuSeparator />
+          <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning || managedWork}>
+            <Trash2 className="size-4 mr-2" />
+            {isRunning ? "运行中，无法删除" : "删除"}
+          </ContextMenuItem>
+        </>}
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -560,6 +568,7 @@ function areThreadListItemPropsEqual(
     prev.isSelected !== next.isSelected ||
     prev.isEditing !== next.isEditing ||
     prev.isUnread !== next.isUnread ||
+    prev.readOnly !== next.readOnly ||
     prev.isManagedRunning !== next.isManagedRunning ||
     Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
     prev.hoverTitle !== next.hoverTitle ||
@@ -602,7 +611,9 @@ function SidebarSettingsButton(): React.JSX.Element {
 }
 
 // Settings visibility only changes the footer button, not the task list.
-export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
+export const ThreadSidebar = memo(function ThreadSidebar({
+  allowSearchAnchor = false
+}: { allowSearchAnchor?: boolean }): React.JSX.Element {
   const {
     threads,
     currentThreadId,
@@ -1001,12 +1012,47 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     [persistCollapsedProjects]
   )
 
+  const threadScrollAreaRef = useRef<HTMLDivElement>(null)
+  const searchAnchor = useThreadSearch((state) => state.ordinarySidebarAnchor)
+  useLayoutEffect(() => {
+    if (!allowSearchAnchor || activeSidebarTab !== "chat" || !searchAnchor) return undefined
+    const consume = () => {
+      if (useThreadSearch.getState().ordinarySidebarAnchor === searchAnchor) {
+        useThreadSearch.setState({ ordinarySidebarAnchor: null })
+      }
+    }
+    if (currentThreadId !== searchAnchor.threadId) {
+      consume()
+      return undefined
+    }
+    if (currentProjectKey && collapsedProjectKeys.has(currentProjectKey)) {
+      const frame = requestAnimationFrame(() => {
+        if (useThreadSearch.getState().ordinarySidebarAnchor === searchAnchor &&
+            useAppStore.getState().currentThreadId === searchAnchor.threadId) {
+          expandProject(currentProjectKey)
+        }
+      })
+      return () => cancelAnimationFrame(frame)
+    }
+    const viewport = threadScrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    )
+    if (viewport && revealSidebarThread(viewport, searchAnchor.threadId)) consume()
+    return undefined
+  }, [
+    activeSidebarTab, allowSearchAnchor, collapsedProjectKeys, currentProjectKey, currentThreadId,
+    expandProject, searchAnchor, visibleProjectWindow
+  ])
+
   const allProjectsCollapsed = useMemo(
     () =>
       threadProjects.length > 0 &&
       threadProjects.every((project) => collapsedProjectKeys.has(project.key)),
     [collapsedProjectKeys, threadProjects]
   )
+  const toggleAllProjectsLabel = threadProjects.length === 0
+    ? "暂无工作区"
+    : allProjectsCollapsed ? "全部展开工作区" : "全部收起工作区"
 
   const toggleAllProjects = useCallback(() => {
     setCollapsedProjectKeys((prev) => {
@@ -1320,7 +1366,6 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
         className="p-1 pb-0.5 space-y-1.5"
         style={{ paddingTop: "max(4px, var(--sidebar-safe-padding, 0px))" }}
       >
-        <ThreadSearchButton />
         <div
           role="tablist"
           aria-label="侧边栏模式"
@@ -1393,7 +1438,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       {activeSidebarTab === "project" ? (
         <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
       ) : activeSidebarTab === "chat" ? (
-        <ScrollArea className="flex-1 min-h-0">
+        <ScrollArea ref={threadScrollAreaRef} className="flex-1 min-h-0">
           <div className="space-y-0.5 px-1 pb-1">
             <BotWorkspaceEntry setMainView={setMainView} />
             <Button
@@ -1477,13 +1522,8 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                   <Minimize2 className="size-3.5" />
                 )
               }
-              popoverContent={
-                threadProjects.length === 0
-                  ? "暂无工作区"
-                  : allProjectsCollapsed
-                    ? "全部展开工作区"
-                    : "全部收起工作区"
-              }
+              aria-label={toggleAllProjectsLabel}
+              popoverContent={toggleAllProjectsLabel}
               disabled={threadProjects.length === 0}
               className="size-6 shrink-0 rounded-sm p-0"
               onClick={toggleAllProjects}

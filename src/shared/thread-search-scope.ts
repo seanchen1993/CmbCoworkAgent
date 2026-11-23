@@ -1,5 +1,7 @@
 import { isRemoteInboxMetadata, REMOTE_INBOX_WORKSPACE_NAME } from "./remote-inbox-workspace"
 
+import type { ThreadSearchRoute } from "./thread-search-types"
+
 interface ThreadClassification {
   metadata?: Record<string, unknown> | null
 }
@@ -54,6 +56,34 @@ export function isRegularChatThread(thread: ThreadClassification | null | undefi
     !isHarnessProjectModeThread(thread) &&
     (!isBotThread(thread) || isLocalWorkConversation(thread))
   )
+}
+
+/** Read the same trimmed identity fields as the project board, with no ambiguous routes. */
+export function getProjectThreadSearchRoute(metadata: unknown): ThreadSearchRoute | null {
+  const record = readMetadataObject(metadata)
+  if (record?.harnessFeature != null && record.harnessProjectSession != null) return null
+  const feature = readMetadataObject(record?.harnessFeature)
+  const session = readMetadataObject(record?.harnessProjectSession)
+  const projectId = (value: unknown) => typeof value === "string" ? value.trim() : ""
+  const featureProject = projectId(feature?.projectId)
+  const sessionProject = projectId(session?.projectId)
+  const slug = projectId(feature?.slug)
+  const kind = projectId(session?.kind)
+  const validFeature = Boolean(featureProject && slug)
+  const validSession = Boolean(sessionProject && kind)
+  if (validFeature === validSession) return null
+  if (validFeature) return { kind: "featureSession", projectId: featureProject, slug }
+  return { kind: "projectSession", projectId: sessionProject }
+}
+
+export function sameThreadSearchRoute(left: ThreadSearchRoute, right: ThreadSearchRoute): boolean {
+  switch (left.kind) {
+    case "ordinary": return right.kind === "ordinary"
+    case "projectSession":
+      return right.kind === "projectSession" && left.projectId === right.projectId
+    case "featureSession":
+      return right.kind === "featureSession" && left.projectId === right.projectId && left.slug === right.slug
+  }
 }
 
 export function matchesOrdinaryThreadScope(

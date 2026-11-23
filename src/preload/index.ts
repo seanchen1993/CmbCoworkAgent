@@ -28,7 +28,7 @@ import type {
   ManagedRunScheduleIdentity,
   ManagedRunScheduleChange
 } from "../shared/managed-run-schedule"
-import type { ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest, ThreadSearchWindow } from "../shared/thread-search-types"
+import type { ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest, ThreadSearchSummary, ThreadSearchWindow } from "../shared/thread-search-types"
 import type {
   KnowledgeAccumulationData,
   KnowledgeOrgItem,
@@ -1191,7 +1191,15 @@ const api = {
     searchStart: (request: ThreadSearchStartRequest): Promise<ThreadSearchPage> => ipcRenderer.invoke("threads:search-start", request),
     searchContinue: (cursor: string): Promise<ThreadSearchPage> => ipcRenderer.invoke("threads:search-continue", cursor),
     searchCancel: (id?: string): Promise<void> => ipcRenderer.invoke("threads:search-cancel", id),
-    searchSummary: (request: ThreadSearchOpenRequest): Promise<Thread | null> => ipcRenderer.invoke("threads:search-summary", request),
+    searchCancelNavigation: (navigationTicketId: string): Promise<void> => ipcRenderer.invoke("threads:search-cancel-navigation", navigationTicketId),
+    searchSummary: (request: ThreadSearchOpenRequest): Promise<ThreadSearchSummary | null> => ipcRenderer.invoke("threads:search-summary", request),
+    searchConfirmRoute: (request: ThreadSearchOpenRequest): Promise<boolean> => ipcRenderer.invoke("threads:search-confirm-route", request),
+    onSearchProjectCatalogChanged: (callback: (sessionId: string) => void): (() => void) => {
+      const channel = "threads:search-project-catalog-changed"
+      const listener = (_event: Electron.IpcRendererEvent, sessionId: string) => callback(sessionId)
+      ipcRenderer.on(channel, listener)
+      return () => ipcRenderer.removeListener(channel, listener)
+    },
     searchTargetWindow: (request: ThreadSearchOpenRequest): Promise<ThreadSearchWindow> => ipcRenderer.invoke("threads:search-target-window", request),
     list: async (): Promise<Thread[]> => {
       const threads: Thread[] = []

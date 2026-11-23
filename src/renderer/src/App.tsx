@@ -1,5 +1,5 @@
 import { ProjectAgentWorkspaceHost } from "@/components/dashboard/ProjectAgentWorkspaceHost"
-import { ThreadSearchDialog } from "@/components/search/ThreadSearchDialog"
+import { ThreadSearchButton, ThreadSearchDialog } from "@/components/search/ThreadSearchDialog"
 import {
   useCallback,
   useDeferredValue,
@@ -199,10 +199,12 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
 
 function AnimatedThreadSidebar({
   hidden,
+  allowSearchAnchor = false,
   width,
   onResize
 }: {
   hidden: boolean
+  allowSearchAnchor?: boolean
   width: number
   onResize: (totalDelta: number) => void
 }): React.JSX.Element {
@@ -216,7 +218,7 @@ function AnimatedThreadSidebar({
       style={{ width: hidden ? 0 : width + LEFT_RESIZE_HANDLE_WIDTH }}
     >
       <div style={{ width }} className="shrink-0">
-        <ThreadSidebar />
+        <ThreadSidebar allowSearchAnchor={allowSearchAnchor && !hidden} />
       </div>
       <ResizeHandle onDrag={onResize} />
     </div>
@@ -1023,38 +1025,43 @@ function App(): React.JSX.Element {
         <div
           className={`${renderedMainView === "bots" && !showCustomizeView ? "hidden" : "flex"} h-9 w-full shrink-0 app-drag-region items-center border-b border-border`}
         >
-          {/* Left: sidebar toggle */}
+          {/* Left: sidebar toggle and conversation search */}
           <div
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
             {renderedMainView !== "bots" && !showCustomizeView && !isAgentFocusActive && (
-              <button
-                type="button"
-                className={`${panelToggleBaseClass} ${
-                  sidebarCollapsed
-                    ? "text-muted-foreground/90 hover:text-foreground hover:bg-muted/45"
-                    : "text-foreground bg-muted/35 hover:bg-muted/50"
-                }`}
-                onClick={toggleSidebar}
-                title={sidebarToggleText}
-                aria-label={sidebarToggleText}
-                aria-pressed={!sidebarCollapsed}
-              >
-                {sidebarCollapsed ? (
-                  <PanelLeftOpen
-                    size={18}
-                    className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
-                    strokeWidth={1.6}
-                  />
-                ) : (
-                  <PanelLeftClose
-                    size={18}
-                    className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
-                    strokeWidth={1.6}
-                  />
-                )}
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className={`${panelToggleBaseClass} ${
+                    sidebarCollapsed
+                      ? "text-muted-foreground/90 hover:text-foreground hover:bg-muted/45"
+                      : "text-foreground bg-muted/35 hover:bg-muted/50"
+                  }`}
+                  onClick={toggleSidebar}
+                  title={sidebarToggleText}
+                  aria-label={sidebarToggleText}
+                  aria-pressed={!sidebarCollapsed}
+                >
+                  {sidebarCollapsed ? (
+                    <PanelLeftOpen
+                      size={18}
+                      className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
+                      strokeWidth={1.6}
+                    />
+                  ) : (
+                    <PanelLeftClose
+                      size={18}
+                      className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
+                      strokeWidth={1.6}
+                    />
+                  )}
+                </button>
+                <ThreadSearchButton
+                  className={`${panelToggleBaseClass} text-muted-foreground/75 hover:bg-muted/45 hover:text-foreground`}
+                />
+              </div>
             )}
           </div>
           {/* Center: logo + title */}
@@ -1197,6 +1204,7 @@ function App(): React.JSX.Element {
                 {renderedMainView !== "bots" && !sidebarCollapsed && !isAgentFocusActive && (
                   <AnimatedThreadSidebar
                     hidden={browserFullscreen}
+                    allowSearchAnchor={renderedMainView === "thread"}
                     width={leftWidth}
                     onResize={handleLeftResize}
                   />

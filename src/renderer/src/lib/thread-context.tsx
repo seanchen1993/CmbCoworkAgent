@@ -1,3 +1,6 @@
+import {
+  cancelThreadSearchOnTabChange, isReadOnlyProjectSearchThread, useThreadSearch
+} from "./thread-search-navigation"
 import { isManagedLocalWorkConversation } from "./thread-classification"
 import { shouldClearCoordinatorNotificationError } from "./coordinator-notification-error"
 import type { ThreadMessagesPage } from "../../../main/types"
@@ -297,6 +300,45 @@ type LiveStreamAccumulator = {
     nativeTranscriptCommitted: boolean
   }>
 }
+
+type HistoryCheckpoint = {
+  checkpoint?: {
+    channel_values?: {
+      messages?: Array<{
+        id?: string | string[]
+        _getType?: () => string
+        type?: string
+        content?: string | unknown[]
+        tool_calls?: unknown[]
+        tool_call_id?: string
+        name?: string
+        additional_kwargs?: Record<string, unknown>
+        kwargs?: {
+          id?: string
+          type?: string
+          content?: string | unknown[]
+          tool_calls?: unknown[]
+          tool_call_id?: string
+          name?: string
+          additional_kwargs?: Record<string, unknown>
+        }
+      }>
+      todos?: Array<{ id?: string; content?: string; status?: string }>
+      __interrupt__?: Array<{
+        value?: {
+          actionRequests?: Array<{
+            action: string
+            args: Record<string, unknown>
+          }>
+          reviewConfigs?: Array<{
+            toolName: string
+            toolArgs: Record<string, unknown>
+          }>
+        }
+      }>
+    }
+  }
+} | null | undefined
 
 type GoalTranscriptEventsLoadResult =
   | { succeeded: true; events: GoalNoticeEvent[] }
@@ -952,7 +994,7 @@ type DraftFilesUpdate<T> = T[] | ((previous: T[]) => T[])
 
 export interface ThreadActions {
   appendMessage: (message: Message) => void
-  syncDurableTranscript: (requiredMessageIds?: string[]) => Promise<boolean>
+  syncDurableTranscript: (requiredMessageIds?: string[], canApply?: () => boolean) => Promise<boolean>
   removeLocalMessage: (messageId: string) => void
   setMessages: (messages: Message[]) => void
   loadEarlierMessages: () => Promise<number>
@@ -1873,6 +1915,10 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
 
 export function ThreadProvider({ children }: { children: ReactNode }) {
   const currentThreadId = useAppStore((state) => state.currentThreadId)
+  const projectSessionThreadId = useThreadSearch((state) => state.projectSessionThreadId)
+  const foregroundHistoryReadOnly = useThreadSearch(() =>
+    currentThreadId !== null && isReadOnlyProjectSearchThread(currentThreadId)
+  )
   const [foregroundHydrationGeneration] = useState(
     () => new ForegroundHydrationGeneration(currentThreadId)
   )
@@ -1973,6 +2019,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   >(() => {})
   const scheduleSubagentTranscriptsPersistRef = useRef<(threadId: string) => void>(() => {})
   const threadProviderMountedRef = useRef(true)
+  const deferredForegroundRecoveryRef = useRef(new Set<string>())
+  const deferredWorkflowHydrationRef = useRef(new Set<string>())
+  const deferredCheckpointRecoveryRef = useRef(new Map<string, () => void>())
+  const deferredSubagentHydrationRef = useRef(new Set<string>())
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
   const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
   const liveStreamAccumulatorsRef = useRef<Record<string, LiveStreamAccumulator>>({})
@@ -2900,9 +2950,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       seq: number,
       requiredMessageIds: readonly string[] = [],
       orderHintMessages?: ReadonlyArray<{ id?: string }>,
-      requiredMessageIdentities: readonly string[] = []
+      requiredMessageIdentities: readonly string[] = [],
+      canApply?: () => boolean
     ): Promise<boolean> => {
       const isCurrentIdleSync = (): boolean =>
+        (!canApply || canApply()) &&
         durableTranscriptSyncGateRef.current.isCurrent(threadId, seq) &&
         initializedThreadsRef.current.has(threadId) &&
         !threadStatesRef.current[threadId]?.historyLoading &&
@@ -3014,7 +3066,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // snapshot cannot overwrite a replacement run or recreate a cleaned task.
       let snapshotApplied = false
       updateThreadState(threadId, (state) => {
-        if (!durableTranscriptSyncGateRef.current.isCurrent(threadId, seq)) return {}
+        if (!isCurrentIdleSync()) return {}
         if (!initializedThreadsRef.current.has(threadId)) return {}
         if (state.historyLoading || streamDataRef.current[threadId]?.isLoading) return {}
         snapshotApplied = true
@@ -3531,7 +3583,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   saveSubagentTranscriptsRef.current = saveSubagentTranscripts
 
   const scheduleSubagentTranscriptsPersist = useCallback(
-    (threadId: string) => {
+    (threadId: string, canPersist?: () => boolean) => {
+      if (canPersist && !canPersist()) return
       const existingTimer = subagentTranscriptPersistTimersRef.current[threadId]
       if (existingTimer !== undefined) return
       if (subagentTranscriptPersistRetryTimersRef.current[threadId] !== undefined) return
@@ -3551,6 +3604,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const delayMs = Math.min(5_000, 600 + Math.floor(largestDirtyBucket / 500) * 400)
       subagentTranscriptPersistTimersRef.current[threadId] = window.setTimeout(() => {
         delete subagentTranscriptPersistTimersRef.current[threadId]
+        if (canPersist && !canPersist()) return
         if (!threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return
         const transcripts = subagentTranscriptsRef.current[threadId] ?? {}
         const changedIds = subagentTranscriptDirtyIdsRef.current[threadId]
@@ -3613,11 +3667,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [updateThreadState]
   )
 
+  const canRunHistoryRecovery = useCallback((threadId: string): boolean => {
+    if (!isReadOnlyProjectSearchThread(threadId)) return true
+    deferredForegroundRecoveryRef.current.add(threadId)
+    return false
+  }, [])
+
   const scheduleSubagentTranscriptHydrationRetry = useCallback(
     (
       threadId: string,
       loadGeneration: number,
-      foregroundToken: ForegroundHydrationToken | null
+      foregroundToken: ForegroundHydrationToken | null,
+      immediate = false
     ) => {
       const isCurrentLoad = (): boolean =>
         threadProviderMountedRef.current &&
@@ -3626,11 +3687,51 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         (foregroundToken === null ||
           (useAppStore.getState().currentThreadId === threadId &&
             foregroundHydrationGeneration.isCurrent(foregroundToken)))
-      if (!isCurrentLoad()) return
+      const canReadBaseline = (): boolean => {
+        if (!isCurrentLoad()) return false
+        if (canRunHistoryRecovery(threadId)) return true
+        deferredSubagentHydrationRef.current.add(threadId)
+        return false
+      }
+      if (!canReadBaseline()) return
       if (subagentTranscriptHydrationRetryTimersRef.current[threadId] !== undefined) return
 
+      const readTranscripts = (): void => {
+        if (!canReadBaseline() ||
+            threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return
+        void window.api.threads
+          .getSubagentTranscripts(
+            threadId,
+            foregroundToken ? { requestScope: "foreground-hydration" } : undefined
+          )
+          .then((rawTranscripts) => {
+            if (!canReadBaseline()) return
+            const persistedTranscripts = getSubagentTranscriptsFromThreadValues({
+              [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: rawTranscripts
+            })
+            if (
+              !mergeHydratedSubagentTranscripts(threadId, persistedTranscripts, loadGeneration)
+            ) {
+              return
+            }
+            // Main transcript readiness is independent. The holder remains
+            // unavailable through subagentTranscriptBaselineReady until this
+            // retry succeeds, without blocking first paint or initial scroll.
+            if (!canReadBaseline()) return
+            delete subagentTranscriptHydrationRetryCountsRef.current[threadId]
+            if (subagentTranscriptDirtyIdsRef.current[threadId]?.size) {
+              scheduleSubagentTranscriptsPersist(threadId, () => canRunHistoryRecovery(threadId))
+            }
+          })
+          .catch((error) => {
+            if (!canReadBaseline()) return
+            console.warn("[ThreadContext] Failed to retry subagent transcript hydration:", error)
+            scheduleAttempt()
+          })
+      }
+
       const scheduleAttempt = (): void => {
-        if (!isCurrentLoad()) return
+        if (!canReadBaseline()) return
         if (threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return
         const retryCount = subagentTranscriptHydrationRetryCountsRef.current[threadId] ?? 0
         const retrySchedule = getSubagentTranscriptHydrationRetrySchedule(retryCount)
@@ -3644,42 +3745,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
         subagentTranscriptHydrationRetryTimersRef.current[threadId] = window.setTimeout(() => {
           delete subagentTranscriptHydrationRetryTimersRef.current[threadId]
-          if (!isCurrentLoad()) return
-          void window.api.threads
-            .getSubagentTranscripts(
-              threadId,
-              foregroundToken ? { requestScope: "foreground-hydration" } : undefined
-            )
-            .then((rawTranscripts) => {
-              if (!isCurrentLoad()) return
-              const persistedTranscripts = getSubagentTranscriptsFromThreadValues({
-                [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: rawTranscripts
-              })
-              if (
-                !mergeHydratedSubagentTranscripts(threadId, persistedTranscripts, loadGeneration)
-              ) {
-                return
-              }
-              // Main transcript readiness is independent. The holder remains
-              // unavailable through subagentTranscriptBaselineReady until this
-              // retry succeeds, without blocking first paint or initial scroll.
-              if (!isCurrentLoad()) return
-              delete subagentTranscriptHydrationRetryCountsRef.current[threadId]
-              if (subagentTranscriptDirtyIdsRef.current[threadId]?.size) {
-                scheduleSubagentTranscriptsPersist(threadId)
-              }
-            })
-            .catch((error) => {
-              if (!isCurrentLoad()) return
-              console.warn("[ThreadContext] Failed to retry subagent transcript hydration:", error)
-              scheduleAttempt()
-            })
+          readTranscripts()
         }, retrySchedule.delayMs)
       }
 
-      scheduleAttempt()
+      if (immediate) readTranscripts()
+      else scheduleAttempt()
     },
     [
+      canRunHistoryRecovery,
       foregroundHydrationGeneration,
       mergeHydratedSubagentTranscripts,
       scheduleSubagentTranscriptsPersist,
@@ -3831,7 +3905,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
    * ran the turn; a deferred notification now waits on the lease that blocked
    * it, which is the only event that can change the answer.
    */
-  const scheduleWorkflowNotificationTurn = useCallback((threadId: string) => {
+  const scheduleWorkflowNotificationTurn = useCallback((threadId: string, canWake?: () => boolean) => {
+    if (canWake && !canWake()) return
     void window.api.workflows.requestPendingNotification(threadId).catch((error) => {
       console.warn("[ThreadContext] Failed to request the workflow summary turn:", error)
     })
@@ -3858,9 +3933,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     const refreshCoordinatorWorkers = async (): Promise<void> => {
       await Promise.all(
         unresolvedThreadIds.map(async (threadId) => {
+          if (!canRunHistoryRecovery(threadId)) return
           try {
             const workers = await requestCoordinatorWorkers(threadId, false)
-            if (cancelled) return
+            if (cancelled || !canRunHistoryRecovery(threadId)) return
             const previousWorkers = threadStatesRef.current[threadId]?.coordinatorWorkers ?? []
             const previousById = new Map(
               previousWorkers.map((worker) => [worker.worker_id, worker])
@@ -3906,6 +3982,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       window.clearInterval(timer)
     }
   }, [
+    canRunHistoryRecovery,
     requestCoordinatorWorkers,
     unresolvedCoordinatorThreadIdsKey,
     scheduleCoordinatorNotificationTurn,
@@ -5144,9 +5221,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
 
       const actions: ThreadActions = {
-        syncDurableTranscript: async (requiredMessageIds: string[] = []) => {
+        syncDurableTranscript: async (requiredMessageIds: string[] = [], canApply?: () => boolean) => {
+          if (canApply && !canApply()) return false
           const seq = durableTranscriptSyncGateRef.current.begin(threadId)
-          return applyDurableTranscriptSnapshot(threadId, seq, requiredMessageIds)
+          return applyDurableTranscriptSnapshot(threadId, seq, requiredMessageIds, undefined, [], canApply)
         },
         appendMessage: (message: Message) => {
           const normalizedMessage =
@@ -6037,6 +6115,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             })
         },
         openFile: (path: string, name: string) => {
+          cancelThreadSearchOnTabChange(threadId)
           updateThreadState(threadId, (state) => {
             if (state.openFiles.some((f) => f.path === path)) {
               return { activeTab: path }
@@ -6064,6 +6143,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           })
         },
         setActiveTab: (tab: "agent" | string) => {
+          if (tab !== "agent") cancelThreadSearchOnTabChange(threadId)
           updateThreadState(threadId, () => ({ activeTab: tab }))
         },
         setFileContents: (path: string, content: string) => {
@@ -6204,6 +6284,86 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     ]
   )
 
+  const reconcileHydratedThreadStream = useCallback((threadId: string) => {
+    const pendingGoalSubturnMessages =
+      liveStreamAccumulatorsRef.current[threadId]?.pendingGoalSubturnMessages.splice(0) ?? []
+    for (const pending of pendingGoalSubturnMessages) {
+      flushGoalSubturnComplete(threadId, pending.messages, pending.nativeTranscriptCommitted)
+    }
+
+    const currentStreamData = streamDataRef.current[threadId]
+    if (currentStreamData && (currentStreamData.isLoading || currentStreamData.messages.length > 0)) {
+      handleStreamUpdate(threadId, currentStreamData, {
+        ignoreHistoryLoading: true,
+        preserveExistingBaseline: true,
+        finalizeCachedSnapshot: !currentStreamData.isLoading
+      })
+    }
+  }, [flushGoalSubturnComplete, handleStreamUpdate])
+
+  const applyHistoryCheckpointRuntime = useCallback((
+    threadId: string,
+    latestCheckpoint: HistoryCheckpoint,
+    suppressApproval: boolean,
+    deferred = false
+  ) => {
+    const channelValues = latestCheckpoint?.checkpoint?.channel_values
+    if (!channelValues) return
+    const actions = getThreadActions(threadId)
+    if (Array.isArray(channelValues.todos) &&
+        (!deferred || !threadStatesRef.current[threadId]?.todos.length)) {
+      const todos: Todo[] = channelValues.todos.map((todo, index) => ({
+        id: todo.id || `todo-${index}`,
+        content: todo.content || "",
+        status: (todo.status as Todo["status"]) || "pending"
+      }))
+      actions.setTodos(todos)
+    }
+
+    const interruptData = channelValues?.__interrupt__
+    if (
+      !suppressApproval &&
+      interruptData &&
+      Array.isArray(interruptData) &&
+      interruptData.length > 0
+    ) {
+      const interruptValue = interruptData[0]?.value
+      const actionRequests = interruptValue?.actionRequests
+      const reviewConfigs = interruptValue?.reviewConfigs
+
+      if (deferred && threadStatesRef.current[threadId]?.pendingApprovals.length) return
+      if (actionRequests && actionRequests.length > 0) {
+        // New langchain HITL format
+        const req = actionRequests[0]
+        const hitlRequest: HITLRequest = {
+          id: crypto.randomUUID(),
+          tool_call: {
+            id: crypto.randomUUID(),
+            name: req.action,
+            args: req.args
+          },
+          allowed_decisions: ["approve", "reject", "edit"],
+          allowRuntimeRestoredCheckpointResume: false
+        }
+        actions.setPendingApproval(hitlRequest)
+      } else if (reviewConfigs && reviewConfigs.length > 0) {
+        // Alternative format
+        const config = reviewConfigs[0]
+        const hitlRequest: HITLRequest = {
+          id: crypto.randomUUID(),
+          tool_call: {
+            id: crypto.randomUUID(),
+            name: config.toolName,
+            args: config.toolArgs
+          },
+          allowed_decisions: ["approve", "reject", "edit"],
+          allowRuntimeRestoredCheckpointResume: false
+        }
+        actions.setPendingApproval(hitlRequest)
+      }
+    }
+  }, [getThreadActions])
+
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
       if (isThreadDeletionPending(threadId)) return
@@ -6231,6 +6391,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             foregroundHydrationGeneration.isCurrent(foregroundToken)))
       const isCurrentTranscriptHydration = (): boolean =>
         isCurrentLoad() && messageWindowIntentCoordinator.isCurrent(transcriptHydrationIntent)
+      const canMutateHistory = (): boolean => canRunHistoryRecovery(threadId)
+      canMutateHistory()
+      deferredCheckpointRecoveryRef.current.delete(threadId)
+      deferredSubagentHydrationRef.current.delete(threadId)
       const actions = getThreadActions(threadId)
       const preserveBotNotices = (messages: Message[]): Message[] => {
         const restored = hydrationAttempt.botNotices?.length
@@ -6254,7 +6418,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let rawRestoredMessages: Message[] = []
       let restoredMessages: Message[] = []
       let restoredGoalEvents: GoalNoticeEvent[] = []
-      let skipCheckpointPendingApproval = false
       let latestTrustedCheckpointMessageAt: Date | undefined
       let persistedThreadMessages: Message[] = []
       let visiblePersistedThreadMessages: Message[] = []
@@ -6308,13 +6471,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // runtime state or subagent restoration can enter the apply/parse path.
       const messagePageResult = await durableMessagePageLoad
       if (!isCurrentLoad()) return
+      const allowRuntimeRecovery = canMutateHistory()
       const shouldBootstrapLegacyTranscript =
         messagePageResult.succeeded &&
         shouldBootstrapLegacyCheckpointTranscript(messagePageResult.page)
       const shouldAwaitCheckpointPresence =
-        messagePageResult.succeeded &&
+        allowRuntimeRecovery && messagePageResult.succeeded &&
         shouldAwaitCheckpointConversationPresence(messagePageResult.page)
-      const keepMainTranscriptLoading = shouldKeepMainTranscriptLoadingAfterPage(
+      const keepMainTranscriptLoading = allowRuntimeRecovery && shouldKeepMainTranscriptLoadingAfterPage(
         messagePageResult.succeeded
           ? { succeeded: true, page: messagePageResult.page }
           : { succeeded: false }
@@ -6434,15 +6598,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           return result
         })
       pendingGoalTranscriptEventsRef.current[threadId] = goalEventsLoad
-      const subagentTranscriptLoad = window.api.threads
-        .getSubagentTranscripts(
-          threadId,
-          foregroundToken ? { requestScope: "foreground-hydration" } : undefined
-        )
-        .then((rawTranscripts) => ({ succeeded: true as const, rawTranscripts }))
-        .catch((error) => ({ succeeded: false as const, error, rawTranscripts: {} }))
-      const checkpointRuntimeLoad = (async () => {
-        const options = foregroundToken ? { requestScope: "foreground-hydration" as const } : undefined
+      const options = foregroundToken ? { requestScope: "foreground-hydration" as const } : undefined
+      const subagentTranscriptLoad = allowRuntimeRecovery
+        ? window.api.threads.getSubagentTranscripts(threadId, options)
+            .then((rawTranscripts) => ({ succeeded: true as const, rawTranscripts }))
+            .catch((error) => ({ succeeded: false as const, error }))
+        : null
+      const readCheckpointRuntime = async () => {
         try {
           if (shouldBootstrapLegacyTranscript) {
             const bootstrap = await window.api.threads.bootstrapLegacyCheckpointTranscript(
@@ -6462,7 +6624,36 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         } catch (error) {
           return { succeeded: false as const, error, legacyMessagePage: null }
         }
-      })()
+      }
+      // Both of these reads can write while repairing old runtime storage.
+      // Save only the runtime continuation; repeating transcript hydration
+      // would displace a durable search target that has just been revealed.
+      if (!allowRuntimeRecovery) {
+        deferredSubagentHydrationRef.current.add(threadId)
+        deferredCheckpointRecoveryRef.current.set(threadId, () => {
+          if (!isCurrentLoad() || !canMutateHistory()) return
+          deferredCheckpointRecoveryRef.current.delete(threadId)
+          void Promise.all([
+            window.api.threads.getLatestCheckpointRuntimeState(threadId, options),
+            goalEventsLoad
+          ]).then(([checkpoint, goals]) => {
+            if (!isCurrentLoad() || !canMutateHistory() ||
+                streamDataRef.current[threadId]?.isLoading ||
+                threadStatesRef.current[threadId]?.scheduledTaskLoading) return
+            applyHistoryCheckpointRuntime(
+              threadId,
+              checkpoint as HistoryCheckpoint,
+              !goals.succeeded || shouldSuppressCheckpointApprovalRestore(goals.events),
+              true
+            )
+          }).catch((error) => {
+            if (isCurrentLoad() && canMutateHistory()) {
+              console.warn("[ThreadContext] Failed to restore deferred checkpoint runtime:", error)
+            }
+          })
+        })
+      }
+      const checkpointRuntimeLoad = allowRuntimeRecovery ? readCheckpointRuntime() : null
       const routingModeLoad = window.api.routing.getMode().catch((error) => {
         console.warn(
           `[ThreadContext] Failed to load routing mode for thread ${threadId}; using pinned:`,
@@ -6547,7 +6738,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           // scans the persisted worker directory, which keeps obsolete task
           // hydration cancellable.
           const subscribeCoordinatorUpdates = useAppStore.getState().currentThreadId === threadId
-          requestCoordinatorWorkers(threadId, subscribeCoordinatorUpdates)
+          if (canMutateHistory()) void requestCoordinatorWorkers(threadId, subscribeCoordinatorUpdates)
             .then((workers) => {
               if (!isCurrentLoad()) return false
               updateThreadState(threadId, (prev) => {
@@ -6561,7 +6752,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               return window.api.agent.hasCoordinatorWorkerNotifications(threadId)
             })
             .then((hasPending) => {
-              if (!hasPending || !isCurrentLoad()) return
+              if (!hasPending || !isCurrentLoad() || !canMutateHistory()) return
               scheduleCoordinatorNotificationTurn(threadId)
             })
             .catch((error) => {
@@ -6588,10 +6779,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // was migrated, including interrupted and internal-only legacy histories.
       try {
         const checkpointRuntimeResult = await checkpointRuntimeLoad
-        if (!checkpointRuntimeResult.succeeded) throw checkpointRuntimeResult.error
+        if (checkpointRuntimeResult && !checkpointRuntimeResult.succeeded) {
+          throw checkpointRuntimeResult.error
+        }
         if (!isCurrentLoad()) return
         checkpointPresenceFallbackResolved = shouldAwaitCheckpointPresence
-        const legacyMessagePage = checkpointRuntimeResult.legacyMessagePage
+        const legacyMessagePage = checkpointRuntimeResult?.legacyMessagePage
         if (legacyMessagePage && messagePageResult.succeeded && shouldBootstrapLegacyTranscript) {
           rememberDurableMessageIds(threadId, legacyMessagePage.messages)
           latestDurableMessagePageIdentitiesRef.current[threadId] = threadMessagePageIdentitySet(
@@ -6645,45 +6838,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }))
           }
         }
-        const latestCheckpoint = checkpointRuntimeResult.checkpoint as {
-          checkpoint?: {
-            channel_values?: {
-              messages?: Array<{
-                id?: string | string[]
-                _getType?: () => string
-                type?: string
-                content?: string | unknown[]
-                tool_calls?: unknown[]
-                tool_call_id?: string
-                name?: string
-                additional_kwargs?: Record<string, unknown>
-                kwargs?: {
-                  id?: string
-                  type?: string
-                  content?: string | unknown[]
-                  tool_calls?: unknown[]
-                  tool_call_id?: string
-                  name?: string
-                  additional_kwargs?: Record<string, unknown>
-                }
-              }>
-              todos?: Array<{ id?: string; content?: string; status?: string }>
-              __interrupt__?: Array<{
-                value?: {
-                  actionRequests?: Array<{
-                    action: string
-                    args: Record<string, unknown>
-                  }>
-                  reviewConfigs?: Array<{
-                    toolName: string
-                    toolArgs: Record<string, unknown>
-                  }>
-                }
-              }>
-            }
-          }
-          pending_sends?: Array<unknown>
-        } | null
+        const latestCheckpoint = checkpointRuntimeResult?.checkpoint as HistoryCheckpoint
         if (!isCurrentLoad()) return
         if (latestCheckpoint) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
@@ -6852,62 +7007,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             restoredMessages = visibleRestoredMessages
           }
 
-          if (channelValues?.todos && Array.isArray(channelValues.todos)) {
-            const todos: Todo[] = channelValues.todos.map((todo, index) => ({
-              id: todo.id || `todo-${index}`,
-              content: todo.content || "",
-              status: (todo.status as Todo["status"]) || "pending"
-            }))
-            actions.setTodos(todos)
-          }
-
-          // Restore interrupt state if present
-          skipCheckpointPendingApproval =
-            hasPersistedVisibleTailAfterCheckpoint ||
-            shouldSuppressCheckpointApprovalRestore(
-              restoredGoalEvents,
-              latestTrustedCheckpointMessageAt
+          if (canMutateHistory()) {
+            applyHistoryCheckpointRuntime(
+              threadId,
+              latestCheckpoint,
+              hasPersistedVisibleTailAfterCheckpoint ||
+                shouldSuppressCheckpointApprovalRestore(
+                  restoredGoalEvents,
+                  latestTrustedCheckpointMessageAt
+                )
             )
-          const interruptData = channelValues?.__interrupt__
-          if (
-            !skipCheckpointPendingApproval &&
-            interruptData &&
-            Array.isArray(interruptData) &&
-            interruptData.length > 0
-          ) {
-            const interruptValue = interruptData[0]?.value
-            const actionRequests = interruptValue?.actionRequests
-            const reviewConfigs = interruptValue?.reviewConfigs
-
-            if (actionRequests && actionRequests.length > 0) {
-              // New langchain HITL format
-              const req = actionRequests[0]
-              const hitlRequest: HITLRequest = {
-                id: crypto.randomUUID(),
-                tool_call: {
-                  id: crypto.randomUUID(),
-                  name: req.action,
-                  args: req.args
-                },
-                allowed_decisions: ["approve", "reject", "edit"],
-                allowRuntimeRestoredCheckpointResume: false
-              }
-              actions.setPendingApproval(hitlRequest)
-            } else if (reviewConfigs && reviewConfigs.length > 0) {
-              // Alternative format
-              const config = reviewConfigs[0]
-              const hitlRequest: HITLRequest = {
-                id: crypto.randomUUID(),
-                tool_call: {
-                  id: crypto.randomUUID(),
-                  name: config.toolName,
-                  args: config.toolArgs
-                },
-                allowed_decisions: ["approve", "reject", "edit"],
-                allowRuntimeRestoredCheckpointResume: false
-              }
-              actions.setPendingApproval(hitlRequest)
-            }
           }
         }
       } catch (error) {
@@ -6932,7 +7041,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const goalTranscriptPageRange = messagePageResult.succeeded
         ? getGoalTranscriptPageRange(persistedThreadMessages, durableMessageHasMore)
         : undefined
-      if (checkpointMessagesLoaded) {
+      if (checkpointMessagesLoaded && canMutateHistory()) {
         const persistedMessagesByIdentity = new Map(
           persistedThreadMessages.map((message) => [
             getMessageProviderOccurrenceIdentity(message),
@@ -7065,6 +7174,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // submit the same user turn a second time.
       const restoredMessageIds = new Set(restoredTranscriptMessages.map((message) => message.id))
       updateThreadState(threadId, (state) => {
+        if (!canMutateHistory()) return {}
         const nextQueuedMessages = removeQueuedMessagesById(
           state.queuedMessages,
           restoredMessageIds
@@ -7075,12 +7185,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       const subagentTranscriptResult = await subagentTranscriptLoad
       if (!isCurrentLoad()) return
-      if (subagentTranscriptResult.succeeded) {
+      if (subagentTranscriptResult && !canMutateHistory()) {
+        deferredSubagentHydrationRef.current.add(threadId)
+      } else if (subagentTranscriptResult?.succeeded) {
         persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues({
           [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: subagentTranscriptResult.rawTranscripts
         })
         subagentTranscriptHydrationSucceeded = true
-      } else {
+      } else if (subagentTranscriptResult) {
         console.warn(
           "[ThreadContext] Failed to hydrate subagent transcripts:",
           subagentTranscriptResult.error
@@ -7131,36 +7243,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         subagentTranscriptHydrationSucceeded &&
         subagentTranscriptDirtyIdsRef.current[threadId]?.size
       ) {
-        scheduleSubagentTranscriptsPersist(threadId)
-      } else if (!subagentTranscriptHydrationSucceeded) {
+        scheduleSubagentTranscriptsPersist(threadId, canMutateHistory)
+      } else if (allowRuntimeRecovery && !subagentTranscriptHydrationSucceeded && canMutateHistory()) {
         scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration, foregroundToken)
       }
       if (!isCurrentLoad()) return
-      const pendingGoalSubturnMessages =
-        liveStreamAccumulatorsRef.current[threadId]?.pendingGoalSubturnMessages.splice(0) ?? []
-      for (const pending of pendingGoalSubturnMessages) {
-        flushGoalSubturnComplete(threadId, pending.messages, pending.nativeTranscriptCommitted)
-      }
-
-      const currentStreamData = streamDataRef.current[threadId]
-      if (
-        currentStreamData &&
-        (currentStreamData.isLoading || currentStreamData.messages.length > 0)
-      ) {
-        handleStreamUpdate(threadId, currentStreamData, {
-          ignoreHistoryLoading: true,
-          preserveExistingBaseline: true,
-          finalizeCachedSnapshot: !currentStreamData.isLoading
-        })
-      }
+      if (!canMutateHistory()) return
+      reconcileHydratedThreadStream(threadId)
     },
     [
-      flushGoalSubturnComplete,
+      applyHistoryCheckpointRuntime,
+      canRunHistoryRecovery,
       foregroundHydrationGeneration,
       getThreadActions,
-      handleStreamUpdate,
       messageWindowIntentCoordinator,
       mergeHydratedSubagentTranscripts,
+      reconcileHydratedThreadStream,
       rememberDurableMessageIds,
       requestCoordinatorWorkers,
       scheduleCoordinatorNotificationTurn,
@@ -7668,6 +7766,43 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     ]
   )
 
+  const hydrateWritableWorkflow = useCallback((threadId: string) => {
+    const epoch = threadListenerEpochRef.current[threadId]
+    if (!epoch) return
+    const thread = useAppStore.getState().threads.find((row) => row.thread_id === threadId)
+    if (!hasWorkflowPanelCapability(thread?.metadata)) return
+
+    const canRestore = (): boolean => {
+      if (threadListenerEpochRef.current[threadId] !== epoch ||
+          !initializedThreadsRef.current.has(threadId) || isThreadDeletionPending(threadId)) return false
+      if (!isReadOnlyProjectSearchThread(threadId)) return true
+      deferredWorkflowHydrationRef.current.add(threadId)
+      return false
+    }
+    if (!canRestore()) return
+    deferredWorkflowHydrationRef.current.delete(threadId)
+
+    void window.api.workflows.hydrate(threadId).then((raw) => {
+      if (!canRestore()) return
+      const hydrate = raw as {
+        latestRun?: PersistedWorkflowRunDTO | null
+        hasPendingNotification?: boolean
+      } | null
+      if (hydrate?.latestRun) {
+        const restored = workflowRunViewFromPersisted(hydrate.latestRun)
+        // Live events can already have supplied a newer run while the disk read was pending.
+        updateThreadState(threadId, (prev) =>
+          canRestore() && (!prev.workflowRun || prev.workflowRun.runId === restored.runId)
+            ? { workflowRun: reconcileHydratedWorkflowRun(prev.workflowRun, restored) }
+            : {}
+        )
+      }
+      if (hydrate?.hasPendingNotification) scheduleWorkflowNotificationTurn(threadId, canRestore)
+    }).catch((error) => {
+      if (canRestore()) console.warn("[ThreadContext] Workflow hydrate failed:", error)
+    })
+  }, [scheduleWorkflowNotificationTurn, updateThreadState])
+
   const initializeThread = useCallback(
     (threadId: string, options?: { requireQueuedMessages?: boolean }) => {
       const requireQueuedMessages = options?.requireQueuedMessages === true
@@ -7678,6 +7813,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const persistedQueue = requireQueuedMessages ? loadQueuedMessages(threadId, true) : undefined
       const existingState = threadStatesRef.current[threadId]
       const initialized = initializedThreadsRef.current.has(threadId)
+      const canPersistOnOpen = (): boolean => {
+        if (!isReadOnlyProjectSearchThread(threadId)) return true
+        deferredForegroundRecoveryRef.current.add(threadId)
+        return false
+      }
+      const writableOpen = canPersistOnOpen()
       // Background activity can create a partial state before queue restoration.
       // A warm in-memory queue remains authoritative if an earlier write failed.
       if (persistedQueue?.length && (initialized || existingState?.queuedMessages.length)) {
@@ -7717,13 +7858,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             ) &&
             !!subagentTranscriptDirtyIdsRef.current[threadId]?.size &&
             state?.subagentTranscriptBaselineReady === true
-          delete subagentTranscriptPersistRetryCountRef.current[threadId]
+          if (writableOpen) delete subagentTranscriptPersistRetryCountRef.current[threadId]
           if (
             shouldRestartSubagentPersist &&
             !subagentTranscriptPersistChainsRef.current[threadId] &&
             subagentTranscriptPersistRetryTimersRef.current[threadId] === undefined
           ) {
-            scheduleSubagentTranscriptsPersist(threadId)
+            scheduleSubagentTranscriptsPersist(threadId, canPersistOnOpen)
           }
         }
         const subagentTranscriptRetryExhausted = isSubagentTranscriptHydrationRetryExhausted(
@@ -7751,7 +7892,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // and must receive a fresh bounded retry budget.
         delete threadHistoryHydrationRetryCountsRef.current[threadId]
         delete subagentTranscriptHydrationRetryCountsRef.current[threadId]
-        delete subagentTranscriptPersistRetryCountRef.current[threadId]
+        if (writableOpen) delete subagentTranscriptPersistRetryCountRef.current[threadId]
       }
       initializedThreadsRef.current.add(threadId)
       const listenerEpoch = {}
@@ -7830,38 +7971,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // (The durable listener above is cheap to keep registered for all
       // threads, matching the coordinator-hook subscription pattern, so a
       // thread switched INTO workflow mode still receives live events.)
-      const hydrateThread = useAppStore
-        .getState()
-        .threads.find((thread) => thread.thread_id === threadId)
-      if (hasWorkflowPanelCapability(hydrateThread?.metadata)) {
-        void window.api.workflows
-          .hydrate(threadId)
-          .then((raw) => {
-            const hydrate = raw as {
-              latestRun?: PersistedWorkflowRunDTO | null
-              hasPendingNotification?: boolean
-            } | null
-            if (!isCurrentListenerEpoch()) return
-            if (hydrate?.latestRun) {
-              const restored = workflowRunViewFromPersisted(hydrate.latestRun)
-              updateThreadState(threadId, (prev) =>
-                // Live events may already have produced fresher state; only restore
-                // when the panel is empty or showing the same run. reconcile keeps
-                // fresh LIVE state but still adopts a TERMINAL hydrate over a stale
-                // local "running" (dropped terminal event → dead cancel button).
-                !prev.workflowRun || prev.workflowRun.runId === restored.runId
-                  ? { workflowRun: reconcileHydratedWorkflowRun(prev.workflowRun, restored) }
-                  : {}
-              )
-            }
-            if (hydrate?.hasPendingNotification) {
-              scheduleWorkflowNotificationTurn(threadId)
-            }
-          })
-          .catch((error) => {
-            console.warn("[ThreadContext] Workflow hydrate failed:", error)
-          })
-      }
+      hydrateWritableWorkflow(threadId)
 
       const cancelledApprovalRequestIds = new Set<string>()
 
@@ -8038,6 +8148,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       processSchedulerEvent,
       updateThreadState,
       handleCustomEvent,
+      hydrateWritableWorkflow,
       scheduleWorkflowNotificationTurn,
       getThreadActions,
       commitThreadStateChanges,
@@ -8101,8 +8212,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     foregroundHydrationGeneration.transition(currentThreadId)
+    const absentHistoryPanel = currentThreadId !== null &&
+      deferredForegroundRecoveryRef.current.has(currentThreadId) &&
+      projectSessionThreadId !== currentThreadId
+    const writableThreadId = foregroundHistoryReadOnly || absentHistoryPanel ? null : currentThreadId
     const previousThreadId = previousCurrentThreadIdRef.current
-    if (previousThreadId && previousThreadId !== currentThreadId) {
+    if (previousThreadId && previousThreadId !== writableThreadId) {
       void window.api.agent.unbindCoordinatorWorkers(previousThreadId).catch((error: unknown) => {
         console.warn(
           "[ThreadProvider] Failed to unbind inactive coordinator worker updates:",
@@ -8110,33 +8225,34 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         )
       })
     }
-    previousCurrentThreadIdRef.current = currentThreadId
+    previousCurrentThreadIdRef.current = writableThreadId
 
     // Tell the main process which thread is in the foreground so the workspace
     // watcher LRU never evicts it (and re-arm it if it was previously evicted).
     void window.api.workspace
-      .setActiveThread(currentThreadId)
+      .setActiveThread(writableThreadId)
       .then((watcherResult) => {
-        if (!currentThreadId || !watcherResult.success || !watcherResult.restarted) return
+        if (!writableThreadId || isReadOnlyProjectSearchThread(writableThreadId) ||
+            !watcherResult.success || !watcherResult.restarted) return
         const workspacePath =
-          watcherResult.workspacePath ?? threadStatesRef.current[currentThreadId]?.workspacePath
+          watcherResult.workspacePath ?? threadStatesRef.current[writableThreadId]?.workspacePath
         if (!workspacePath) return
 
         // The watcher was absent while this task was inactive, so its cached
         // tree may be stale. Invalidate it now, but defer the potentially huge
         // recursive scan and IPC payload until the user opens the Files panel.
         // A task switch must never deserialize tens of thousands of file rows.
-        markWorkspaceFilesStale(currentThreadId, workspacePath)
+        markWorkspaceFilesStale(writableThreadId, workspacePath)
       })
       .catch(() => {})
 
-    if (!currentThreadId) return
+    if (!writableThreadId) return
 
     let cancelled = false
-    void requestCoordinatorWorkers(currentThreadId, true)
+    void requestCoordinatorWorkers(writableThreadId, true)
       .then((workers) => {
-        if (cancelled) return
-        updateThreadState(currentThreadId, (prev) => {
+        if (cancelled || isReadOnlyProjectSearchThread(writableThreadId)) return
+        updateThreadState(writableThreadId, (prev) => {
           const merged = mergeCoordinatorWorkers(prev.coordinatorWorkers, workers, {
             authoritative: true
           })
@@ -8151,11 +8267,61 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true
     }
-  }, [currentThreadId, foregroundHydrationGeneration, requestCoordinatorWorkers, updateThreadState])
+  }, [
+    currentThreadId, foregroundHistoryReadOnly, foregroundHydrationGeneration,
+    projectSessionThreadId, requestCoordinatorWorkers, updateThreadState
+  ])
+
+  useEffect(() => {
+    const threadId = projectSessionThreadId
+    if (!threadId || threadId !== currentThreadId || foregroundHistoryReadOnly ||
+        isReadOnlyProjectSearchThread(threadId)) return
+
+    if (deferredWorkflowHydrationRef.current.has(threadId)) hydrateWritableWorkflow(threadId)
+    deferredCheckpointRecoveryRef.current.get(threadId)?.()
+    const historyAttempt = threadHistoryHydrationAttemptsRef.current[threadId]
+    if (historyAttempt && deferredSubagentHydrationRef.current.delete(threadId)) {
+      scheduleSubagentTranscriptHydrationRetry(
+        threadId, historyAttempt.loadGeneration, historyAttempt.foregroundToken, true
+      )
+    }
+    if (!deferredForegroundRecoveryRef.current.delete(threadId)) return
+    const epoch = threadListenerEpochRef.current[threadId]
+    if (!epoch) return
+    const canRecover = (): boolean => {
+      if (threadListenerEpochRef.current[threadId] !== epoch || isThreadDeletionPending(threadId))
+        return false
+      if (!isReadOnlyProjectSearchThread(threadId)) return true
+      deferredForegroundRecoveryRef.current.add(threadId)
+      return false
+    }
+    delete subagentTranscriptPersistRetryCountRef.current[threadId]
+    const state = threadStatesRef.current[threadId]
+    if (state?.subagentTranscriptBaselineReady &&
+        subagentTranscriptDirtyIdsRef.current[threadId]?.size) {
+      scheduleSubagentTranscriptsPersist(threadId, canRecover)
+    }
+    if (state && !state.historyLoading && !state.historyRestorationPending) {
+      reconcileHydratedThreadStream(threadId)
+    }
+    void window.api.agent.hasCoordinatorWorkerNotifications(threadId).then((hasPending) => {
+      if (hasPending && canRecover()) scheduleCoordinatorNotificationTurn(threadId)
+    }).catch((error) => {
+      if (canRecover()) console.warn("[ThreadContext] Failed to restore coordinator notifications:", error)
+    })
+  }, [
+    currentThreadId, foregroundHistoryReadOnly, hydrateWritableWorkflow, projectSessionThreadId,
+    reconcileHydratedThreadStream, scheduleCoordinatorNotificationTurn,
+    scheduleSubagentTranscriptHydrationRetry, scheduleSubagentTranscriptsPersist
+  ])
 
   const releaseThreadListeners = useCallback(
     (threadId: string): void => {
       delete threadListenerEpochRef.current[threadId]
+      deferredForegroundRecoveryRef.current.delete(threadId)
+      deferredWorkflowHydrationRef.current.delete(threadId)
+      deferredCheckpointRecoveryRef.current.delete(threadId)
+      deferredSubagentHydrationRef.current.delete(threadId)
       schedulerListenerCleanups.current[threadId]?.()
       delete schedulerListenerCleanups.current[threadId]
       heartbeatListenerCleanups.current[threadId]?.()
@@ -8324,7 +8490,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         (state.historyLoading ||
           state.historyRestorationPending ||
           state.historyPageLoading ||
-          (!state.subagentTranscriptBaselineReady && !subagentTranscriptRetryExhausted))
+          (!state.subagentTranscriptBaselineReady && !subagentTranscriptRetryExhausted &&
+            !deferredSubagentHydrationRef.current.has(threadId)))
       ) {
         return false
       }
