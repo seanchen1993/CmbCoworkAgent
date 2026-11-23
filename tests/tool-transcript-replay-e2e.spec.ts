@@ -117,6 +117,7 @@ async function seedHistory(): Promise<number> {
     ...nextAfterReplay.slice(0, 2),
     setOccurrence(first[2], 6),
     nextAfterReplay[2],
+    setOccurrence(first[2], 7),
     legacy
   ]
   await db.initializeDatabase()

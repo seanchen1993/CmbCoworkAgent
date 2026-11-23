@@ -335,7 +335,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     const key = resultReplayKey(row)
     if (!knownResults.has(key)) knownResults.set(key, row)
   }
-  const detachedByCall = new Map<string, T>()
+  const detachedExecutionIdsByCall = new Map<string, Set<string>>()
   for (const row of messages) {
     if (
       row.role === "tool" &&
@@ -343,7 +343,9 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       !owned.has(row) &&
       hasToolResultExecutionId(row)
     ) {
-      detachedByCall.set(row.tool_call_id, row)
+      const executions = detachedExecutionIdsByCall.get(row.tool_call_id) ?? new Set<string>()
+      executions.add(resultReplayKey(row))
+      detachedExecutionIdsByCall.set(row.tool_call_id, executions)
     }
   }
   const attachedDuplicates = new Map<string, string>()
@@ -355,8 +357,11 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       aliases.set(row.id, original.id)
       continue
     }
-    const potentialResult = row.tool_call_id && detachedByCall.get(row.tool_call_id)
-    if (potentialResult && resultReplayKey(potentialResult) !== resultReplayKey(row)) {
+    const potentialResults = row.tool_call_id && detachedExecutionIdsByCall.get(row.tool_call_id)
+    if (
+      potentialResults &&
+      potentialResults.size > Number(potentialResults.has(resultReplayKey(row)))
+    ) {
       attachedDuplicates.set(row.id, original.id)
     }
   }

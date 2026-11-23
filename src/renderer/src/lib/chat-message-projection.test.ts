@@ -204,7 +204,18 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     expect(findDisplayedReplayAliases(rows.slice(0, -1)).size).toBe(0)
     const aliases = findDisplayedReplayAliases(rows)
     expect(aliases).toEqual(new Map([[replay.id, oldResult.id]]))
-    const results = buildToolResultAssociations(rows.filter(({ id }) => !aliases.has(id)))
+    const trailing = { ...replay, id: `${resultId}::cmb-same-role-duplicate:tool:3` }
+    const withTrailing = [...rows, trailing]
+    const allAliases = findDisplayedReplayAliases(withTrailing)
+    expect(allAliases).toEqual(
+      new Map([
+        [replay.id, oldResult.id],
+        [trailing.id, oldResult.id]
+      ])
+    )
+    const results = buildToolResultAssociations(
+      withTrailing.filter(({ id }) => !allAliases.has(id))
+    )
     expect(results.get(getWorkerToolUiKey(oldCall.id, executeCall.id, 0))?.content).toBe(
       "Old output"
     )
