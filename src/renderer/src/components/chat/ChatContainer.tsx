@@ -262,7 +262,6 @@ import {
   formatGoalEventMessage,
   isVisibleCheckpointTranscriptMessage
 } from "@/lib/goal-transcript"
-import { hasToolReplayCandidates } from "../../../../shared/tool-transcript-replay"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
 import {
@@ -296,7 +295,6 @@ import {
 } from "@/lib/chat-search-matches"
 import {
   createChatMessageProjector,
-  findDisplayedReplayAliases,
   resolveChatReplayAliases
 } from "@/lib/chat-message-projection"
 import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
@@ -1199,7 +1197,6 @@ const threadDisplayBaselineCache = new WeakMap<
   readonly Message[],
   ThreadDisplayBaselineCacheEntry
 >()
-const noDisplayedReplayAliases: ReadonlyMap<string, string> = new Map()
 
 function getThreadDisplayBaseline(
   messages: readonly Message[],
@@ -3648,25 +3645,19 @@ export function ChatContainer({
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
   // Values hints can reorder results sharing one provider call ID. Prove the
   // pairs on the same order used by the tool cards before filtering any rows.
-  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
-    displayMessages,
-    displayMessageProjection.changedMessages,
-    displayMessagesStructureVersion
-  )
-  const hasReplayCandidates = useMemo(
-    () => hasToolReplayCandidates(displayMessages),
-    [displayMessages, displayMessagesStructureVersion]
-  )
-  const projectedReplayAliases = useMemo(() =>
-    hasReplayCandidates ? findDisplayedReplayAliases(displayMessages) : noDisplayedReplayAliases,
-    [hasReplayCandidates, displayMessages, displayMessagesStructureVersion, toolDerivationProjection.version]
-  )
   const replayAliases = resolveChatReplayAliases(
-    projectedReplayAliases,
+    threadProjectionRuntime.projectReplayAliases(displayMessageProjection),
     liveDisplayMessages,
     displayMessageProjection,
     liveDisplayProjection.messageIds
   )
+  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
+    displayMessages,
+    displayMessageProjection.changedMessages,
+    displayMessagesStructureVersion,
+    replayAliases.size ? replayAliases : undefined
+  )
+  const toolDerivationMessages = toolDerivationProjection.messages
   const resolveDisplayMessageId = useCallback(
     (messageId: string) => replayAliases.get(messageId) ?? messageId,
     [replayAliases]
@@ -3795,15 +3786,6 @@ export function ChatContainer({
         ? <></>
         : parentToolPresentation?.(tool, result, assistantMessageId, deliveryScope),
     [showExecutionDetails, searchExpandsExecutionDetails, inlineQuestionCallId, parentToolPresentation]
-  )
-  // Ordinary assistant tokens update only the changed display slot. Keep the
-  // tool projection stable and replace a slot only when that changed row is
-  // itself tool-relevant.
-  const toolDerivationMessages = useMemo(() =>
-    replayAliases.size
-      ? toolDerivationProjection.messages.filter((message) => !replayAliases.has(message.id))
-      : toolDerivationProjection.messages,
-    [replayAliases, toolDerivationProjection.messages, toolDerivationProjection.version]
   )
   const toolResults = threadProjectionRuntime.projectToolResults(
     toolDerivationMessages,

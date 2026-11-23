@@ -90,6 +90,19 @@ async function seedHistory(): Promise<number> {
     first.slice(1).map((row) => setOccurrence(row, occurrence))
   )
   const updatedResult = { ...nextAfterReplay[2], content: "Updated fourth result" }
+  const versionedCallId = "versioned-provider-tool-call"
+  const versionedAssistant: Message = {
+    ...nextAfterReplay[1],
+    id: "versioned-assistant",
+    content: "Checking versioned result",
+    tool_calls: nextAfterReplay[1].tool_calls!.map((call) => ({ ...call, id: versionedCallId }))
+  }
+  const versionedResult: Message = {
+    ...nextAfterReplay[2],
+    id: "1c711082-5111-4632-976d-7c05ee064c33",
+    content: "Earlier versioned result",
+    tool_call_id: versionedCallId
+  }
   const firstFinal: Message = {
     id: "first-final",
     role: "assistant",
@@ -122,7 +135,13 @@ async function seedHistory(): Promise<number> {
     setOccurrence(nextAfterReplay[2], 2),
     setOccurrence(updatedResult, 3),
     setOccurrence(updatedResult, 4),
-    legacy
+    legacy,
+    versionedAssistant,
+    versionedResult,
+    setOccurrence(versionedAssistant, 2),
+    setOccurrence({ ...versionedResult, content: "Final versioned result" }, 2),
+    setOccurrence(versionedAssistant, 3),
+    setOccurrence(versionedResult, 3)
   ]
   await db.initializeDatabase()
   try {
@@ -295,9 +314,12 @@ async function main(): Promise<void> {
             ["Fixture result 1", callId],
             ["Fixture result 2", callId],
             ["Fixture result 3", callId],
-            ["Updated fourth result", callId]
+            ["Updated fourth result", callId],
+            ["Earlier versioned result", "versioned-provider-tool-call"],
+            ["Final versioned result", "versioned-provider-tool-call"]
           ]
         )
+        assert.equal(rows.filter((row) => row.includes("Checking versioned result")).length, 2)
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)
         assert.equal(markdown.match(/Updated fourth result/g)?.length, 1)
         assert.match(markdown, /Readable legacy response/)

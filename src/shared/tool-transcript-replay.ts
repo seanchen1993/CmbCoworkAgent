@@ -33,6 +33,7 @@ interface ToolExchange<T> {
 const noAliases: ReadonlyMap<string, string> = new Map()
 const toolResultUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const generatedAssistantId = /^current-run-assistant:[0-9a-f-]{36}$/i
+const botFileDeliveryToolName = "bot_deliver_files"
 
 function readExchange<T extends TranscriptMessage>(
   assistant: T,
@@ -51,6 +52,9 @@ function readExchange<T extends TranscriptMessage>(
     const id = readToolOwnershipId(value)
     const call = value as { name?: unknown; args?: unknown }
     if (!id || typeof call.name !== "string" || !call.name || seenIds.has(id)) return
+    // File authorization addresses the exact persisted assistant batch by ID.
+    // A reconstructed transcript cannot establish that another batch is usable.
+    if (call.name === botFileDeliveryToolName) return
     const result = ownership.get(getWorkerToolUiKey(assistant.id, id, calls.length))
     if (result?.role !== "tool") return
     seenIds.add(id)
@@ -153,6 +157,23 @@ function hasExecutionIdentity(exchange: ToolExchange<TranscriptMessage>): boolea
 
 function resultReplayKey(result: TranscriptMessage): string {
   return JSON.stringify([getMessageProviderSourceId(result), result.tool_call_id])
+}
+
+function rememberVersion<T>(
+  index: Map<string, T[]>,
+  key: string,
+  value: T,
+  equals: (left: T, right: T) => boolean
+): T {
+  const versions = index.get(key)
+  if (!versions) {
+    index.set(key, [value])
+    return value
+  }
+  const previous = versions.find((version) => equals(version, value))
+  if (previous !== undefined) return previous
+  versions.push(value)
+  return value
 }
 
 /** Stable shape gate, independent of the order in which sources supplied the rows. */
@@ -292,7 +313,7 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
         originalOwner &&
         next &&
         previous &&
-        (call as { name?: unknown }).name !== "bot_deliver_files" &&
+        (call as { name?: unknown }).name !== botFileDeliveryToolName &&
         hasToolResultExecutionId(previous) &&
         hasToolResultExecutionId(next) &&
         !previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) &&
@@ -317,8 +338,20 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   if (!hasToolReplayCandidates(messages)) return noAliases
   const ownership = resolveToolResultOwnership(messages)
   const aliases = new Map<string, string>()
-  const sameTurn = new Map<string, ToolExchange<T>>()
-  const physical = new Map<string, ToolExchange<T>>()
+  // Intern scalar payloads instead of serializing potentially large outputs
+  // into every key. Structured blocks still require exact comparison.
+  const payloadIds = new Map<unknown, number>()
+  const payloadId = (value: unknown): number => {
+    if (value !== null && typeof value === "object") return 0
+    const existing = payloadIds.get(value)
+    if (existing !== undefined) return existing
+    const id = payloadIds.size + 1
+    payloadIds.set(value, id)
+    return id
+  }
+  const resultVersionKey = (result: T) => [resultReplayKey(result), payloadId(result.content)]
+  const sameTurn = new Map<string, ToolExchange<T>[]>()
+  const physical = new Map<string, ToolExchange<T>[]>()
   for (const message of messages) {
     if (message.role === "user" || message.role === "system") sameTurn.clear()
     const exchange = readExchange(message, ownership)
@@ -327,17 +360,20 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     // Transport replay can append records after the next visible user turn.
     // Only separately generated result UUIDs support matching across that boundary.
     const index = exchange.results.every(hasToolResultExecutionId) ? physical : sameTurn
-    const key = JSON.stringify([exchangeKey(exchange), exchange.results.map(resultReplayKey)])
-    const previous = index.get(key)
-    if (!previous || !isSameExchange(previous, exchange)) {
-      index.set(key, exchange)
-      continue
-    }
-    if (
-      previous.assistant.id === exchange.assistant.id ||
-      (previous.assistant.reasoning || "") !== (exchange.assistant.reasoning || "")
+    const key = JSON.stringify([
+      exchangeKey(exchange),
+      payloadId(exchange.assistant.content),
+      exchange.results.map(resultVersionKey)
+    ])
+    const previous = rememberVersion(
+      index,
+      key,
+      exchange,
+      (left, right) =>
+        (left.assistant.reasoning || "") === (right.assistant.reasoning || "") &&
+        isSameExchange(left, right)
     )
-      continue
+    if (previous.assistant.id === exchange.assistant.id) continue
     aliases.set(exchange.assistant.id, previous.assistant.id)
     for (const [index, result] of exchange.results.entries()) {
       const canonical = previous.results[index]
@@ -349,21 +385,16 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   // occupied a newer call that happened to reuse the original ID.
   const owned = new Set(ownership.values())
   const ownedExecutionIds = new Set<string>()
-  const knownResults = new Map<string, Map<unknown, T[]>>()
-  const structuredContent = Symbol()
-  const resultsWithContent = (row: T) => {
-    const key = resultReplayKey(row)
-    const content = row.content
-    const contentKey = content !== null && typeof content === "object" ? structuredContent : content
-    const byContent = knownResults.get(key) ?? new Map<unknown, T[]>()
-    const versions = byContent.get(contentKey) ?? []
-    byContent.set(contentKey, versions)
-    knownResults.set(key, byContent)
-    return versions
-  }
+  const knownResults = new Map<string, T[]>()
+  const duplicateResults = new Map<T, T>()
   const rememberResult = (row: T) => {
-    const versions = resultsWithContent(row)
-    if (!versions.some((result) => sameRow(result, row))) versions.push(row)
+    const previous = rememberVersion(
+      knownResults,
+      JSON.stringify(resultVersionKey(row)),
+      row,
+      sameRow
+    )
+    if (previous.id !== row.id) duplicateResults.set(row, previous)
   }
   for (const row of owned) {
     if (!hasToolResultExecutionId(row)) continue
@@ -391,8 +422,8 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     if (row.tool_call_id && !ownedExecutionIds.has(getMessageProviderSourceId(row))) {
       callsWithUnownedResults.add(row.tool_call_id)
     }
-    const original = resultsWithContent(row).find((result) => sameRow(result, row))
-    if (!original || original.id === row.id) continue
+    const original = duplicateResults.get(row)
+    if (!original) continue
     if (!owned.has(row)) {
       aliases.set(row.id, original.id)
       continue

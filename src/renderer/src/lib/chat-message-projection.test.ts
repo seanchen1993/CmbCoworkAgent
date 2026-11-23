@@ -7,8 +7,10 @@ import {
 } from "../../../shared/tool-transcript-replay"
 import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 import { createLiveDisplayMessageProjector } from "./live-display-message-projection"
+import { createIncrementalToolDerivationProjector } from "./message-render-stability"
 import {
   createChatMessageProjector,
+  createChatReplayAliasProjector,
   findDisplayedReplayAliases,
   preserveReplayToolBindings,
   resolveChatReplayAliases,
@@ -43,6 +45,67 @@ function liveProjection(
 }
 
 describe("createChatMessageProjector tool-call reconciliation", () => {
+  it("keeps proven history off unrelated tool-bearing token frames and rechecks changed evidence", () => {
+    const original = assistant({ id: "settled", tool_calls: [executeCall] })
+    const tool = assistant({
+      id: "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465",
+      role: "tool",
+      content: "Settled output",
+      tool_call_id: executeCall.id
+    })
+    const copy = { ...original, id: `${original.id}::cmb-same-role-duplicate:assistant:2` }
+    const toolCopy = { ...tool, id: `${tool.id}::cmb-same-role-duplicate:tool:2` }
+    const tail = assistant({
+      id: "unrelated-tail",
+      tool_calls: [{ ...executeCall, id: "unrelated-call" }]
+    })
+    const history = [
+      original,
+      tool,
+      copy,
+      toolCopy,
+      ...Array.from({ length: 10000 }, (_, index) => assistant({ id: `unrelated-${index}` })),
+      tail
+    ]
+    let forbidHistoryReads = false
+    const rows = new Proxy(history, {
+      get(target, property, receiver) {
+        if (forbidHistoryReads) throw new Error("the display traversed unchanged history")
+        return Reflect.get(target, property, receiver)
+      }
+    })
+    const project = createChatReplayAliasProjector()
+    const deriveTools = createIncrementalToolDerivationProjector()
+    const indexById = new Map(history.map((message, index) => [message.id, index]))
+    const display = { messages: rows, indexById, structureVersion: 1 }
+    const aliases = project({ ...display, contentVersion: 1, changedMessages: rows })
+    expect(aliases.get(copy.id)).toBe(original.id)
+    expect(aliases.get(toolCopy.id)).toBe(tool.id)
+    deriveTools(rows, rows, 1, aliases)
+    forbidHistoryReads = true
+    for (let frame = 0; frame < 300; frame++) {
+      const next = { ...tail, content: `Streaming ${frame}` }
+      history[history.length - 1] = next
+      expect(project({ ...display, contentVersion: frame + 2, changedMessages: [next] })).toBe(
+        aliases
+      )
+      const toolRows = deriveTools(rows, [next], 1, aliases).messages
+      expect(toolRows.map(({ id }) => id)).toEqual([original.id, tool.id, tail.id])
+    }
+    forbidHistoryReads = false
+    const distinct = { ...copy, reasoning: "Keep this distinct reasoning" }
+    history[2] = distinct
+    const nextAliases = project({ ...display, contentVersion: 302, changedMessages: [distinct] })
+    expect(nextAliases.size).toBe(0)
+    expect(deriveTools(rows, [distinct], 1, nextAliases).messages.map(({ id }) => id)).toEqual([
+      original.id,
+      tool.id,
+      copy.id,
+      toolCopy.id,
+      tail.id
+    ])
+  })
+
   it("folds the calls and results proved by the projected order, not stale durable order", () => {
     const resultId = "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465"
     const user = assistant({ id: "user", role: "user", content: "Run both checks" })

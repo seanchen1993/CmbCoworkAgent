@@ -242,6 +242,22 @@ describe("tool transcript replay", () => {
       newResult
     ]
     expect(findReplayedToolExchangeAliases(rows).size).toBe(0)
+    const [copyAssistant] = exchange(2)
+    const exactBatchCopy = { ...copyAssistant, tool_calls: calls }
+    const earlierBatch = { ...assistant, tool_calls: calls }
+    const intervening = { ...assistant, id: "interim", tool_calls: undefined }
+    expect(
+      findReplayedToolExchangeAliases([
+        user,
+        earlierBatch,
+        intervening,
+        oldResult,
+        exactBatchCopy,
+        replay
+      ]).size
+    ).toBe(0)
+    const checkpoint = [user, exactBatchCopy, replay]
+    expect(alignReplayedToolExchanges([user, earlierBatch, oldResult], checkpoint)).toBe(checkpoint)
   })
 
   it("repairs a replay even when another proposal temporarily displaces its canonical result", () => {
@@ -394,6 +410,22 @@ describe("tool transcript replay", () => {
       new Map([
         [replay[0].id, final[0].id],
         [replay[1].id, final[1].id]
+      ])
+    )
+  })
+
+  it("folds a replay of an older complete exchange after a newer version", () => {
+    const earlier = exchange(1, { path: "fixture" }, "Earlier output")
+    const updated = exchange(2)
+    const earlierReplay = exchange(3, { path: "fixture" }, "Earlier output")
+    const updatedReplay = exchange(4)
+    const rows = [user, ...earlier, ...updated, ...earlierReplay, ...updatedReplay]
+    expect(findReplayedToolExchangeAliases(rows)).toEqual(
+      new Map([
+        [earlierReplay[0].id, earlier[0].id],
+        [earlierReplay[1].id, earlier[1].id],
+        [updatedReplay[0].id, updated[0].id],
+        [updatedReplay[1].id, updated[1].id]
       ])
     )
   })

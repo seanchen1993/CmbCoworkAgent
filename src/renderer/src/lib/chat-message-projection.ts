@@ -1,4 +1,10 @@
 import type { Message } from "../types"
+import {
+  getMessageProviderOccurrence,
+  getMessageProviderSourceId
+} from "../../../shared/message-role-collision"
+import { readToolOwnershipId } from "../../../shared/tool-result-ownership"
+import { findReplayedToolExchangeAliases } from "../../../shared/tool-transcript-replay"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
 
 export {
@@ -26,6 +32,77 @@ export interface ChatLiveMessageProjectionMetadata {
 }
 
 const noReplayAliases: ReadonlyMap<string, string> = new Map()
+
+function replaySourceKey(message: Message): string | undefined {
+  if (message.role === "assistant" || message.role === "tool") {
+    return `${message.role}:${getMessageProviderSourceId(message)}`
+  }
+}
+
+function sameToolSlots(before: Message["tool_calls"], after: Message["tool_calls"]): boolean {
+  if (before === after) return true
+  const previous = Array.isArray(before) ? before : []
+  const next = Array.isArray(after) ? after : []
+  return previous.length === next.length && previous.every((call, index) =>
+    readToolOwnershipId(call) === readToolOwnershipId(next[index]) &&
+    call?.name === next[index]?.name
+  )
+}
+
+/** Recheck replay proof on order, ownership or evidence changes, including live reasoning. */
+export function createChatReplayAliasProjector(): (
+  display: ChatMessageProjection
+) => ReadonlyMap<string, string> {
+  let previousMessages: readonly Message[] | undefined
+  let previousStructureVersion = -1
+  let previousById = new Map<string, Message>()
+  let repeatedSources = new Set<string>()
+  let aliases = noReplayAliases
+
+  return ({ messages, changedMessages, structureVersion }) => {
+    let rebuildSources = messages !== previousMessages || structureVersion !== previousStructureVersion
+    let evidenceChanged = false
+    if (!rebuildSources) {
+      for (const message of changedMessages) {
+        const previous = previousById.get(message.id)
+        if (message === previous) continue
+        const source = replaySourceKey(message)
+        if (source !== (previous && replaySourceKey(previous))) {
+          rebuildSources = true
+          break
+        }
+        if (!source || !previous) continue
+        previousById.set(message.id, message)
+        evidenceChanged ||= repeatedSources.has(source) ||
+          previous.tool_call_id !== message.tool_call_id ||
+          getMessageProviderOccurrence(previous) !== getMessageProviderOccurrence(message) ||
+          !sameToolSlots(previous.tool_calls, message.tool_calls)
+      }
+    }
+    if (rebuildSources) {
+      previousMessages = messages
+      previousStructureVersion = structureVersion
+      previousById = new Map()
+      repeatedSources = new Set()
+      const sources = new Set<string>()
+      for (const message of messages) {
+        const source = replaySourceKey(message)
+        if (!source) continue
+        previousById.set(message.id, message)
+        if (sources.has(source)) repeatedSources.add(source)
+        sources.add(source)
+      }
+    }
+    if (rebuildSources || evidenceChanged) {
+      const nextAliases = findReplayedToolExchangeAliases(messages)
+      if (nextAliases.size !== aliases.size ||
+          [...nextAliases].some(([id, target]) => aliases.get(id) !== target)) {
+        aliases = nextAliases
+      }
+    }
+    return aliases
+  }
+}
 
 /** A live row may have the only surviving copy of renderer-only reasoning. */
 export function resolveChatReplayAliases(
