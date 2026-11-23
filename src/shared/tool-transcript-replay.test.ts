@@ -1374,6 +1374,64 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true]
+  ])(
+    "keeps the earliest complete tool batch (single %s, late shorter text %s)",
+    (single, lateShorter) => {
+      const [first, read] = exchange()
+      const [second, readCopy] = exchange(2)
+      const extended = "Checking the fixture and reporting status"
+      const calls = [...first.tool_calls!]
+      const extra = {
+        id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+        role: "tool",
+        name: "ls",
+        tool_call_id: "ls-call",
+        content: "Directory output"
+      }
+      if (!single) calls.push({ id: extra.tool_call_id, name: extra.name, args: {} })
+      const original = {
+        ...first,
+        content: lateShorter ? extended : first.content,
+        tool_calls: calls
+      }
+      const replica = {
+        ...second,
+        content: lateShorter ? first.content : extended,
+        tool_calls: calls
+      }
+      const unrelated = {
+        id: "unrelated-assistant",
+        role: "assistant",
+        content: "Independent reply"
+      }
+      const rows = [
+        user,
+        original,
+        read,
+        ...(single ? [] : [extra]),
+        unrelated,
+        replica,
+        readCopy,
+        ...(single ? [] : [{ ...extra, id: `${extra.id}::cmb-same-role-duplicate:tool:2` }])
+      ]
+      const aliases = findReplayedToolExchangeAliases(rows)
+      expect(rows.filter(({ id }) => !aliases.has(id)).map(({ id }) => id)).toEqual([
+        user.id,
+        original.id,
+        read.id,
+        ...(single ? [] : [extra.id]),
+        unrelated.id
+      ])
+      const content = getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))
+      expect(content.get(original.id) ?? original.content).toBe(extended)
+    }
+  )
+
   it.each([false, true])(
     "keeps divergent presentations and folds copies within each (more results %s)",
     (moreResults) => {

@@ -518,6 +518,22 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (row.role === "user" || row.role === "system") turn++
     if (row.role === "assistant") rawTurnByAssistant.set(row.id, turn)
   }
+  const assistantTextKey = (row: T) =>
+    `${rawTurnByAssistant.get(row.id)}\u0000${getMessageProviderSourceId(row)}`
+  const firstText = new Map<string, string>()
+  const hasDifferentText = new Set<string>()
+  for (const assistant of messages) {
+    if (
+      assistant.role !== "assistant" ||
+      typeof assistant.content !== "string" ||
+      !assistant.tool_calls?.length
+    )
+      continue
+    const key = assistantTextKey(assistant)
+    const existing = firstText.get(key)
+    if (existing === undefined) firstText.set(key, assistant.content)
+    else if (existing !== assistant.content) hasDifferentText.add(key)
+  }
 
   const payloadId = createPayloadIds()
   type SlotVersion = { batch: PartialToolExchange<T>; keys: string[]; complete: boolean }
@@ -527,7 +543,9 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     string,
     Array<{ batch: PartialToolExchange<T>; text: string }>
   >()
+  const completeOrder = new Map<PartialToolExchange<T>, number>()
   const exactCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+  const exactSingleToolCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const extendedText = (candidate: T, original: T) =>
     typeof candidate.content === "string" &&
     typeof original.content === "string" &&
@@ -547,7 +565,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
         Boolean(peer && sameRow(row, peer) && (row.reasoning || "") === (peer.reasoning || ""))
       )
     })
-  for (const assistant of messages) {
+  for (const [position, assistant] of messages.entries()) {
     const scope = rawTurnByAssistant.get(assistant.id)
     if (scope === undefined) continue
     const batch = readToolExchangeSlots(assistant, ownership)
@@ -565,7 +583,9 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
         : []
     )
     const full = keys.length === batch.calls.length
-    if (full && batch.calls.length === 1 && !Array.isArray(batch.results[0]?.content)) continue
+    const plainSingleTool =
+      full && batch.calls.length === 1 && !Array.isArray(batch.results[0]?.content)
+    if (plainSingleTool && !hasDifferentText.has(assistantTextKey(assistant))) continue
     toolReplayAssistantIds?.add(assistant.id)
     const version = { batch, keys, complete: full }
     const original = rememberVersion(
@@ -575,10 +595,11 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       (left, right) => exactSlots(left.batch, right.batch, true)
     )
     if (original !== version) {
-      exactCopies.set(batch, original.batch)
+      ;(plainSingleTool ? exactSingleToolCopies : exactCopies).set(batch, original.batch)
       continue
     }
     if (full && typeof assistant.content === "string") {
+      completeOrder.set(batch, position)
       const outcome = JSON.stringify(keys)
       const complete = completeTextVersions.get(outcome) ?? []
       complete.push({ batch, text: assistant.content })
@@ -682,10 +703,31 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       containing.delete(copy)
     }
   }
+  // Prefixes establish which presentations agree. The first complete row
+  // keeps its chronology and bindings even if a shorter copy arrived later.
+  const firstCompleteByGroup = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+  for (const [copy, original] of containing) {
+    const position = completeOrder.get(copy)
+    if (position === undefined) continue
+    const first = firstCompleteByGroup.get(original) ?? original
+    if (position < (completeOrder.get(first) ?? Infinity)) firstCompleteByGroup.set(original, copy)
+  }
+  for (const [copy, original] of containing) {
+    const first = firstCompleteByGroup.get(original)
+    if (!first) continue
+    if (first === copy) containing.delete(copy)
+    else containing.set(copy, first)
+  }
+  for (const [original, first] of firstCompleteByGroup) containing.set(original, first)
+
   // Rejected cross-presentation transitions leave the proved continuity
   // inside each unchanged presentation intact.
   for (const [copy, original] of samePresentation) {
     containing.set(copy, containing.get(original) ?? original)
+  }
+  const withVerifiedText = new Set([...containing].flat())
+  for (const [copy, original] of exactSingleToolCopies) {
+    if (withVerifiedText.has(original)) exactCopies.set(copy, original)
   }
 
   const proposed = new Map<string, string>()
