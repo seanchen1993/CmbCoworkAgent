@@ -21,6 +21,7 @@ import type {
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "./order-sql"
+import { readPriorToolReplayIds } from "./tool-replay-evidence"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
@@ -1016,6 +1017,19 @@ export function readThreadMessagesPage(
     const hasNewerMessages = head && Boolean(database.prepare(`SELECT 1 FROM thread_messages
       WHERE thread_id = ? AND (ordinal, message_id) > (?, ?) LIMIT 1`)
       .get(request.threadId, head.ordinal, head.message_id))
+    if (!request.options.recoveryCheckpointId) {
+      const priorResults = readPriorToolReplayIds(request.threadId, orderedMessages,
+        (sql, threadId, ids, oldest) => database.prepare(sql).all(threadId, ids, oldest)
+          .map(({ message_id, earlier_id }) => [message_id, earlier_id]))
+      for (const message of orderedMessages) {
+        const earlier = priorResults.get(message.id)
+        if (!earlier || message.content_preview_notice) continue
+        const extraBytes = jsonBytes({ historical_tool_replay_id: earlier })
+        if (responseBytes + extraBytes > byteBudget) continue
+        responseBytes += extraBytes
+        message.historical_tool_replay_id = earlier
+      }
+    }
     throwIfCancelled(cancellation)
     database.exec("COMMIT")
     const oldest = returnedCandidates.at(-1)

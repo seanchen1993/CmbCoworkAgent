@@ -10,6 +10,7 @@ import {
   markMemorySessionOptInMigrated
 } from "../storage"
 import { type NativeSqliteAdapter, type NativeSqliteExecResult, type NativeSqliteValue, openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { readPriorToolReplayIds } from "../thread-message-hydration/tool-replay-evidence"
 import { ensureLegacyTranscriptSlots, ensureThreadGraphTranscriptBoundaries } from "./legacy-transcript-slots"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import { ensureLegacyMessageTimeArchive } from "../checkpointer/legacy-message-times"
@@ -2290,6 +2291,12 @@ function readThreadMessagesPage(database: ReturnType<typeof getDb>, threadId: st
     threadId,
     hasAnchorMessageId ? pageRows : pageRows.reverse()
   )
+  const priorResults = readPriorToolReplayIds(threadId, messages,
+    (sql, currentThreadId, ids, oldest) => database.exec(sql, [currentThreadId, ids, oldest])[0]?.values ?? [])
+  for (const message of messages) {
+    const earlier = priorResults.get(message.id)
+    if (earlier && !message.content_preview_notice) message.historical_tool_replay_id = earlier
+  }
 
   return {
     messages,

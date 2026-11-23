@@ -285,6 +285,8 @@ export interface Message {
   botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
+  /** An exact physical tool result verified by a durable page read. */
+  historical_tool_replay_id?: string
   /** A rendered Goal event occupies the position immediately before its durable anchor. */
   transcript_anchor_message_id?: string
   provider_source_id?: string

@@ -90,6 +90,7 @@ export interface FilteredThreadValuesInput {
 
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
+  historical_tool_replay_id?: string
   provider_source_id?: string
   provider_occurrence?: number
   role?: string
@@ -246,7 +247,7 @@ export function mergeCheckpointAuthorityTranscriptMessage<
 
   const checkpointClearsToolCallContent = isCheckpointEmptyAssistantToolCallMessage(base)
   const reasoning = base.reasoning || incoming.reasoning
-  return {
+  const merged = {
     ...base,
     ...(reasoning ? { reasoning } : {}),
     content: checkpointClearsToolCallContent
@@ -267,6 +268,14 @@ export function mergeCheckpointAuthorityTranscriptMessage<
     start_at: incoming.start_at ?? base.start_at,
     end_at: incoming.end_at ?? base.end_at
   } as T
+  if (merged.role === "tool") {
+    merged.historical_tool_replay_id = [base, incoming].find((row) =>
+      row.historical_tool_replay_id && row.content === merged.content && row.tool_call_id === merged.tool_call_id &&
+      row.name === merged.name && row.status === merged.status && row.is_error === merged.is_error &&
+      row.reasoning === merged.reasoning && row.goal_id === merged.goal_id && row.active_window_id === merged.active_window_id
+    )?.historical_tool_replay_id
+  }
+  return merged
 }
 
 function preserveMessageIdCollision<T extends CheckpointAuthorityTranscriptMessage>(

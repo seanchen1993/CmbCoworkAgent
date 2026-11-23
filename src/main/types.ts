@@ -228,6 +228,8 @@ export interface Message {
   botHistoryDeliveryScope?: import("../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
+  /** An exact physical tool result persisted before this read window. */
+  historical_tool_replay_id?: string
   provider_source_id?: string
   provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"

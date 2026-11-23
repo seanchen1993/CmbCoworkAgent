@@ -78,6 +78,7 @@ export function createChatReplayAliasProjector(): (
         evidenceChanged ||= (repeatedSources.has(source) &&
           (message.role === "tool" || completedAssistantIds.has(message.id))) ||
           previous.tool_call_id !== message.tool_call_id ||
+          previous.historical_tool_replay_id !== message.historical_tool_replay_id ||
           (message.role === "tool" && previous.name !== message.name) ||
           getMessageProviderOccurrence(previous) !== getMessageProviderOccurrence(message) ||
           !sameToolSlots(previous.tool_calls, message.tool_calls)

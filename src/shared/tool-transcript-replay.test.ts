@@ -1008,6 +1008,120 @@ describe("tool transcript replay", () => {
     expect(merged.find(({ id }) => id === current.id)?.content).toBe("")
   })
 
+  it.each([false, true])(
+    "omits a proved older whole exchange from a current checkpoint (current first %s)",
+    (currentFirst) => {
+      const [earlier, originalResult] = exchange()
+      const [current] = exchange(2)
+      const fresh = { ...current, content: "Updated current reply" }
+      const currentResult = {
+        ...originalResult,
+        id: "1c711082-5111-4632-976d-7c05ee064c33",
+        provider_source_id: undefined,
+        content: "Current result"
+      }
+      const newUser = { ...user, id: "current-user" }
+      const durable = [user, earlier, originalResult, newUser, current, currentResult]
+      const currentRows = [fresh, currentResult]
+      const earlierReplay = [earlier, originalResult]
+      const checkpoint = [
+        newUser,
+        ...(currentFirst ? [...currentRows, ...earlierReplay] : [...earlierReplay, ...currentRows])
+      ]
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(
+        prepared.checkpoint,
+        prepared.durable,
+        { useStableProviderOccurrences: true }
+      )
+      expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
+      expect(merged[4].content).toBe(fresh.content)
+    }
+  )
+
+  it.each(["only-read", "stale-before-read", "only-ls-after-stale", "hidden-partial"])(
+    "reconciles a partial parallel batch using a witnessed durable result (%s)",
+    (variant) => {
+      const [earlier, oldResult] = exchange()
+      const currentUser = { ...user, id: "current-user" }
+      const [current, replay] = exchange(2)
+      const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+      const realRead = {
+        ...oldResult,
+        id: "1c711082-5111-4632-976d-7c05ee064c33",
+        provider_source_id: undefined,
+        content: "Current read output"
+      }
+      const realLs = {
+        ...oldResult,
+        id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+        provider_source_id: undefined,
+        tool_call_id: "ls-call",
+        name: "ls",
+        content: "Current ls output"
+      }
+      const durable = [
+        user,
+        earlier,
+        oldResult,
+        currentUser,
+        { ...current, tool_calls: calls },
+        realRead,
+        realLs
+      ]
+      const newAssistant = { ...earlier, tool_calls: calls, content: "Authoritative current batch" }
+      const observed =
+        variant === "only-read"
+          ? [realRead]
+          : variant === "only-ls-after-stale"
+            ? [replay, realLs]
+            : [replay, realRead]
+      const checkpoint =
+        variant === "hidden-partial"
+          ? [newAssistant, ...observed]
+          : [currentUser, newAssistant, ...observed]
+      const turns =
+        variant === "hidden-partial"
+          ? readCheckpointReplayTurns({
+              channel_values: {
+                messages: [hiddenTeam, ...checkpointRows(checkpoint)]
+              }
+            })
+          : undefined
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(
+        prepared.checkpoint,
+        prepared.durable,
+        { useStableProviderOccurrences: true }
+      )
+      expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
+      expect(merged[4].content).toBe(newAssistant.content)
+      const bindings = resolveToolResultOwnership(merged)
+      expect(bindings.get(getWorkerToolUiKey(current.id, "shared-call", 0))?.id).toBe(realRead.id)
+      expect(bindings.get(getWorkerToolUiKey(current.id, "ls-call", 1))?.id).toBe(realLs.id)
+    }
+  )
+
+  it("uses durable page evidence when both the earlier tool and its assistant are outside the window", () => {
+    const [, original] = exchange()
+    const [current, stale] = exchange(2)
+    const latest = {
+      ...original,
+      id: "1c711082-5111-4632-976d-7c05ee064c33",
+      provider_source_id: undefined,
+      content: "New result"
+    }
+    const proven = { ...stale, historical_tool_replay_id: original.id }
+    const loaded = [user, current, proven, latest]
+    expect(findReplayedToolExchangeAliases(loaded)).toEqual(new Map([[stale.id, original.id]]))
+    expect(findReplayedToolExchangeAliases([user, current, stale, latest]).size).toBe(0)
+    const changed = mergeCheckpointAuthorityTranscriptMessages(
+      [{ ...proven, content: "" }],
+      [{ ...stale, content: "Longer and different payload" }]
+    )
+    expect(changed[0].historical_tool_replay_id).toBeUndefined()
+  })
+
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")
     const final = exchange(2)
