@@ -223,6 +223,18 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       "Current output"
     )
 
+    const currentReplay = {
+      ...currentResult,
+      id: `${currentResult.id}::cmb-same-role-duplicate:tool:2`
+    }
+    expect(findDisplayedReplayAliases([...withTrailing, currentReplay])).toEqual(
+      new Map([
+        [replay.id, oldResult.id],
+        [trailing.id, oldResult.id],
+        [currentReplay.id, currentResult.id]
+      ])
+    )
+
     const priorPreview = { ...currentResult, content: "Earlier result preview" }
     const priorFull = {
       ...currentResult,
@@ -244,6 +256,33 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     const waitingReplay = { ...replay, id: `${resultId}::cmb-same-role-duplicate:tool:4` }
     const withWaiting = [...rows, assistant({ id: "u3", role: "user" }), waiting, waitingReplay]
     expect(findDisplayedReplayAliases(withWaiting)).toEqual(aliases)
+
+    const independentCall = { ...executeCall, id: "different-raw-id" }
+    const independentAssistant = (id: string) =>
+      assistant({ id, tool_calls: [{ ...independentCall, args: { command: id } }] })
+    const independentResult = (id: string, content: string) => ({
+      ...oldResult,
+      id,
+      tool_call_id: independentCall.id,
+      content
+    })
+    const otherOld = independentResult(
+      "2a336f5a-c3d6-406d-bcf8-5fda5e53c111",
+      "Other previous output"
+    )
+    const otherReplay = { ...otherOld, id: `${otherOld.id}::cmb-same-role-duplicate:tool:2` }
+    const ambiguousBucket = [
+      assistant({ id: "u-d1", role: "user" }),
+      independentAssistant("d1"),
+      otherOld,
+      assistant({ id: "u-d2", role: "user" }),
+      independentAssistant("d2"),
+      otherReplay,
+      independentAssistant("d3"),
+      independentResult("89668b32-971a-43fa-81aa-ce014c243774", "D2 or D3"),
+      independentResult("0e02e6a6-9b77-44cc-9bc1-04f4303e6d0e", "Unclear owner")
+    ]
+    expect(findDisplayedReplayAliases([...rows, ...ambiguousBucket])).toEqual(aliases)
   })
   it("keeps a replay row visible when only it has the live reasoning", () => {
     const original = assistant()

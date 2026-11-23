@@ -109,7 +109,7 @@ function getWorkerTurnScope(messageId: string): { prefix: string; turn: number }
   return { prefix, turn: Number(turnMatch[1]) }
 }
 
-function getRawWorkerToolCallId(toolCallId: string): string {
+export function getRawWorkerToolCallId(toolCallId: string): string {
   if (!toolCallId.startsWith("worker-turn-")) return toolCallId
   const separatorIndex = toolCallId.indexOf("::")
   return separatorIndex >= 0 ? toolCallId.slice(separatorIndex + 2) : toolCallId

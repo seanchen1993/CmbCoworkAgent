@@ -6,6 +6,7 @@ import {
   MESSAGE_SAME_ROLE_DUPLICATE_MARKER
 } from "./message-role-collision"
 import {
+  getRawWorkerToolCallId,
   getWorkerToolUiKey,
   readToolOwnershipId,
   resolveToolResultOwnership
@@ -250,7 +251,8 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
 export function preserveReplayToolBindings<T extends TranscriptMessage>(
   messages: readonly T[],
   aliases: ReadonlyMap<string, string>,
-  original = resolveToolResultOwnership(messages)
+  original = resolveToolResultOwnership(messages),
+  unsafeCalls?: Set<string>
 ): ReadonlyMap<string, string> {
   if (aliases.size === 0) return aliases
   const occurrences = new Set<string>()
@@ -265,32 +267,37 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
     [...original.values()].filter(hasToolResultExecutionId).map(getMessageProviderSourceId)
   )
   const ownerByResultId = new Map([...original].map(([owner, result]) => [result.id, owner]))
+  const keptBinding = (previous: T | undefined, next: T | undefined): boolean => {
+    if (previous === next) return true
+    if (!previous || !next || !hasToolResultExecutionId(previous)) return false
+    if (sameRow(previous, next)) return true
+    // A delayed result copy can occupy a new same-ID call before that call's
+    // own result arrives. Replace it only with a distinct, otherwise unowned
+    // result while the original physical result stays bound to its owner.
+    const duplicateOf = aliases.get(previous.id)
+    const originalOwner = duplicateOf && ownerByResultId.get(duplicateOf)
+    return Boolean(
+      originalOwner &&
+      after.get(originalOwner)?.id === duplicateOf &&
+      !previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) &&
+      hasToolResultExecutionId(next) &&
+      resultReplayKey(previous) !== resultReplayKey(next)
+    )
+  }
+  let bindingsPreserved = true
   for (const message of retained) {
     if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue
     for (const [index, call] of message.tool_calls.entries()) {
-      const key = getWorkerToolUiKey(message.id, readToolOwnershipId(call), index)
-      const previous = original.get(key)
-      const next = after.get(key)
-      if (previous === next) continue
-      if (!previous || !next || !hasToolResultExecutionId(previous)) return noAliases
-      if (sameRow(previous, next)) continue
-      // A delayed result copy can occupy a new same-ID call before that call's
-      // own result arrives. Replace it only with a distinct, otherwise unowned
-      // result while the original physical result stays bound to its owner.
-      const duplicateOf = aliases.get(previous.id)
-      const originalOwner = duplicateOf && ownerByResultId.get(duplicateOf)
-      if (
-        !originalOwner ||
-        after.get(originalOwner)?.id !== duplicateOf ||
-        previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) ||
-        !hasToolResultExecutionId(next) ||
-        resultReplayKey(previous) === resultReplayKey(next)
-      ) {
-        return noAliases
-      }
+      const id = readToolOwnershipId(call)
+      if (!id) continue
+      const key = getWorkerToolUiKey(message.id, id, index)
+      if (keptBinding(original.get(key), after.get(key))) continue
+      if (!unsafeCalls) return noAliases
+      bindingsPreserved = false
+      unsafeCalls.add(getRawWorkerToolCallId(id))
     }
   }
-  return aliases
+  return bindingsPreserved ? aliases : noAliases
 }
 
 /** Identify copies using the same result bindings that are used in chat. */
@@ -340,8 +347,15 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     const key = resultReplayKey(row)
     if (!knownResults.has(key)) knownResults.set(key, row)
   }
+  // Prefer a bound result as the canonical row. A delayed genuine result may
+  // still be unbound while a replay occupies its receiving call.
+  for (const row of messages) {
+    if (row.role !== "tool" || aliases.has(row.id) || !hasToolResultExecutionId(row)) continue
+    const key = resultReplayKey(row)
+    if (!knownResults.has(key)) knownResults.set(key, row)
+  }
   const callsWithUnownedResults = new Set<string>()
-  const attachedDuplicates = new Map<string, string>()
+  const attachedDuplicates: Array<{ alias: string; canonical: string; call: string }> = []
   // A replacement must arrive after the replay that occupied its call's slot.
   for (let index = messages.length - 1; index >= 0; index--) {
     const row = messages[index]
@@ -356,17 +370,38 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       continue
     }
     if (row.tool_call_id && callsWithUnownedResults.has(row.tool_call_id)) {
-      attachedDuplicates.set(row.id, original.id)
+      attachedDuplicates.push({
+        alias: row.id,
+        canonical: original.id,
+        call: getRawWorkerToolCallId(row.tool_call_id)
+      })
     }
   }
   const verified = preserveReplayToolBindings(messages, aliases, ownership)
-  if (attachedDuplicates.size) {
+  if (attachedDuplicates.length) {
+    const unsafeCalls = new Set<string>()
     const repaired = preserveReplayToolBindings(
       messages,
-      new Map([...verified, ...attachedDuplicates]),
-      ownership
+      new Map([
+        ...verified,
+        ...attachedDuplicates.map(({ alias, canonical }) => [alias, canonical] as const)
+      ]),
+      ownership,
+      unsafeCalls
     )
     if (repaired.size) return repaired
+    const independent = attachedDuplicates.filter(({ call }) => !unsafeCalls.has(call))
+    if (independent.length > 0 && independent.length < attachedDuplicates.length) {
+      const retainedRepairs = preserveReplayToolBindings(
+        messages,
+        new Map([
+          ...verified,
+          ...independent.map(({ alias, canonical }) => [alias, canonical] as const)
+        ]),
+        ownership
+      )
+      if (retainedRepairs.size) return retainedRepairs
+    }
   }
   return verified
 }
