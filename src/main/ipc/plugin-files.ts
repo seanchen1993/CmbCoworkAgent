@@ -1,3 +1,4 @@
+import { assertOriginalContent, MARKET_CONTENT_DENIED } from "../services/market-content"
 import { IpcMain, BrowserWindow } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
@@ -16,11 +17,11 @@ import { bumpHookCatalogGlobalRevision } from "../hook-catalog/revision"
  * Plugin file-editing IPC.
  *
  * Surface area is intentionally minimal and read-mostly: users can list and
- * view every file inside their own plugins, but write is gated by three
+ * view and edit files only inside their original uploaded plugins, gated by three
  * orthogonal checks:
  *
  *   1. Plugin origin must be "local" (user-uploaded). Market downloads are
- *      read-only — we never diverge silently from an upstream.
+ *      protected and cannot be listed, read, written, or exported.
  *   2. Resolved (realpath) target must stay inside the plugin root. Defends
  *      against symlink escapes and "../" traversal in the requested path.
  *   3. File extension must be in the editable allowlist — broad text policy
@@ -72,7 +73,12 @@ interface ResolvedPlugin {
 async function resolvePluginRoot(pluginId: string): Promise<ResolvedPlugin | null> {
   if (!pluginId || typeof pluginId !== "string") return null
   const plugin = getPlugins().find((p) => p.id === pluginId)
-  if (!plugin) return null
+  if (!plugin || !isPluginEditable(plugin)) return null
+  try {
+    assertOriginalContent(plugin.path)
+  } catch {
+    return null
+  }
   if (!plugin.path || !existsSync(plugin.path)) return null
   try {
     const root = await fs.realpath(plugin.path)
@@ -96,6 +102,11 @@ async function resolveInsidePlugin(root: string, requested: string): Promise<str
     return null
   }
   if (!isPathInsideDir(resolved, root)) return null
+  try {
+    assertOriginalContent(resolved)
+  } catch {
+    return null
+  }
   return resolved
 }
 
@@ -189,7 +200,7 @@ export function registerPluginFileHandlers(ipcMain: IpcMain): void {
       error?: string
     }> => {
       const resolved = await resolvePluginRoot(pluginId)
-      if (!resolved) return { success: false, error: "插件不存在" }
+      if (!resolved) return { success: false, error: MARKET_CONTENT_DENIED }
 
       const all = await walkPluginFiles(resolved.root)
       const entries: FileEntry[] = all.map((abs) => ({
@@ -216,7 +227,7 @@ export function registerPluginFileHandlers(ipcMain: IpcMain): void {
     ): Promise<{ success: boolean; content?: string; editable?: boolean; error?: string }> => {
       const { pluginId, filePath } = payload || {}
       const resolved = await resolvePluginRoot(pluginId)
-      if (!resolved) return { success: false, error: "插件不存在" }
+      if (!resolved) return { success: false, error: MARKET_CONTENT_DENIED }
 
       const realFile = await resolveInsidePlugin(resolved.root, filePath)
       if (!realFile) return { success: false, error: "文件路径越界" }
@@ -257,7 +268,7 @@ export function registerPluginFileHandlers(ipcMain: IpcMain): void {
       }
 
       const resolved = await resolvePluginRoot(pluginId)
-      if (!resolved) return { success: false, error: "插件不存在" }
+      if (!resolved) return { success: false, error: MARKET_CONTENT_DENIED }
 
       // Gate 1 — origin
       if (!isPluginEditable(resolved.plugin)) {

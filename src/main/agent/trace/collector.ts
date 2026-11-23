@@ -58,6 +58,10 @@ import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { getHarnessProjectAdapterSnapshot } from "../../harness-board/service"
+import {
+  loadHarnessDeployUnitSnapshot,
+  harnessDeployUnitTelemetry
+} from "../../services/harness-deploy-unit-attribution"
 import { nowIsoLocal } from "../../util/local-time"
 import { deriveUpperOrgLevelsFromPath } from "../../org-levels"
 import {
@@ -689,14 +693,15 @@ export class TraceCollector {
   private readonly traceId: string
   private readonly threadId: string
   private readonly startedAt: string
-  private readonly userMessage: string
-  private readonly suspectedTechnicalDetailSupplement: boolean
+  private userMessage: string
+  private suspectedTechnicalDetailSupplement: boolean
   private modelId: string
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
   private readonly harnessFeature: TraceHarnessFeatureContext | undefined
   private readonly harnessAdapterPromise: ReturnType<typeof getHarnessProjectAdapterSnapshot>
+  private readonly harnessDeployUnitPromise: ReturnType<typeof loadHarnessDeployUnitSnapshot>
   private observability: TraceObservabilityContext
   private readonly includeSkillEval: boolean
 
@@ -794,6 +799,9 @@ export class TraceCollector {
     this.harnessAdapterPromise = this.harnessFeature
       ? getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId).catch(() => null)
       : Promise.resolve(null)
+    this.harnessDeployUnitPromise = this.harnessFeature
+      ? loadHarnessDeployUnitSnapshot(this.harnessFeature.projectId, this.harnessFeature.slug)
+      : Promise.resolve(null)
     if (this.harnessFeature) registerTraceStageUsage(this.traceId, this.stageUsageCounter)
     this.observability = buildObservabilityContext(this.traceId, this.threadId, options)
     this.includeSkillEval = options.includeSkillEval ?? this.observability.traceKind === "root"
@@ -853,6 +861,7 @@ export class TraceCollector {
               harnessFeatureSlug: this.harnessFeature.slug,
               harnessNodeName: this.harnessFeature.nodeName,
               harnessNodeStatus: this.harnessFeature.nodeStatus,
+              harnessDeployUnitSnapshot: this.harnessDeployUnitPromise,
               harnessAdapterName: undefined,
               harnessAdapterVersion: undefined
             }
@@ -909,6 +918,18 @@ export class TraceCollector {
 
   setExecutionMode(mode: TraceExecutionMode): void {
     this.setObservabilityContext({ executionMode: mode })
+  }
+
+  /** Fill the request after a caller's submit checks have accepted it. */
+  setPreparedUserMessage(message: string): void {
+    this.userMessage = clampText(message, 64 * 1024)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(message)
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      const input = this.collectionBudget.takeValue({ userMessage: this.userMessage }, 32 * 1024)
+      root.inputRef = this.internNodeValue(input)
+      root.input = root.inputRef ? undefined : input
+    }
   }
 
   /** Update the modelId (can be resolved after construction). */
@@ -1580,11 +1601,26 @@ export class TraceCollector {
     // Finishing touches several non-idempotent side channels (skill-eval
     // windows, local persistence, cloud reporting, and adoption cleanup). Keep
     // the documented first-call-wins contract even when two teardown paths race.
-    this.finishPromise ??= this.finishOnce(outcome, errorMessage)
+    if (!this.finishPromise) {
+      // Tool writes already capture attribution synchronously in recordGen.
+      // Release execution state now, before potentially slow/hung metadata
+      // enrichment in finishOnce. A late finish cannot clear a newer turn.
+      let hasCodeAttributedSkill: boolean | undefined
+      try {
+        hasCodeAttributedSkill = clearAdoptionContext(this.threadId, this.traceId)
+      } catch {
+        // Attribution cleanup must not mask the original finish result.
+      }
+      this.finishPromise = this.finishOnce(outcome, errorMessage, hasCodeAttributedSkill)
+    }
     return this.finishPromise
   }
 
-  private async finishOnce(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+  private async finishOnce(
+    outcome: TraceOutcome,
+    errorMessage?: string,
+    hasCodeAttributedSkill?: boolean
+  ): Promise<AgentTrace> {
     unregisterTraceStageUsage(this.traceId)
     const endedAt = nowIsoLocal()
     this.stageDurationEndedAt = new Date(endedAt).getTime()
@@ -1767,6 +1803,7 @@ export class TraceCollector {
       outcome,
       ...(boundedErrorMessage ? { errorMessage: boundedErrorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
+      ...(hasCodeAttributedSkill !== undefined ? { hasCodeAttributedSkill } : {}),
       ...(skillSource.length > 0 ? { skillSource } : {}),
       evolvedSkills: evolvedSkillsWithVersions,
       triggerSource: this.triggerSource,
@@ -1780,7 +1817,8 @@ export class TraceCollector {
             ...(this.harnessFeature.nodeStatus
               ? { harnessNodeStatus: this.harnessFeature.nodeStatus }
               : {}),
-            ...harnessAdapterFields
+            ...harnessAdapterFields,
+            ...harnessDeployUnitTelemetry(await this.harnessDeployUnitPromise)
           }
         : {}),
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
@@ -1818,26 +1856,15 @@ export class TraceCollector {
       : trace
 
     try {
-      try {
-        flushSystemConstraintReadSummaries(this.traceId, outcome)
-      } catch (error) {
-        console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
-      }
-      writeTraceFile(traceWithEval)
-
-      // Keep reporting off the main run path, but track it so graceful app
-      // shutdown can wait for already-scheduled uploads within a hard bound.
-      reportTraceInBackground(traceWithEval)
-    } finally {
-      // A child trace may finish in the background after a continuation has
-      // installed a newer context on the same worker thread. Only clear the
-      // context still owned by this trace, even when persistence fails.
-      try {
-        clearAdoptionContext(this.threadId, this.traceId)
-      } catch {
-        // ignore
-      }
+      flushSystemConstraintReadSummaries(this.traceId, outcome)
+    } catch (error) {
+      console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
     }
+    writeTraceFile(traceWithEval)
+
+    // Keep reporting off the main run path, but track it so graceful app
+    // shutdown can wait for already-scheduled uploads within a hard bound.
+    reportTraceInBackground(traceWithEval)
 
     return traceWithEval
   }

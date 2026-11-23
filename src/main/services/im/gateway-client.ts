@@ -1,3 +1,4 @@
+import type { ImDeliveryOrder } from "./delivery-order"
 import type {
   GatewayReasonCodeV1,
   RemoteImAckV1,
@@ -25,6 +26,8 @@ export interface ImReplySubmissionResult {
  * using the short code that was published alongside it.
  */
 export interface ImCardSubmissionResult {
+  /** Optional durable platform delivery state, returned by gateways with Bot cards. */
+  deliveryState?: "pending" | "sent" | "unknown"
   state: "accepted" | "rejected"
   reasonCode?: GatewayReasonCodeV1 | string
   /**
@@ -43,12 +46,13 @@ export interface ImCardSubmissionResult {
  * platform credentials or choose a route themselves.
  */
 export interface ImGatewayClientPort {
+  readonly deliveryOrder?: ImDeliveryOrder
   isAuthenticated(): boolean
   sendAcknowledgement(ack: RemoteImAckV1): Promise<void>
   acquireExecutionPermit(event: ImEventRecord): Promise<ImExecutionPermitResult>
   renewExecutionPermit(event: ImEventRecord): Promise<ImExecutionPermitResult>
   submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult>
-  sendCard(card: RemoteImCardSendV1): Promise<ImCardSubmissionResult>
+  sendCard(card: RemoteImCardSendV1, switchCardOrder?: number): Promise<ImCardSubmissionResult>
   updateCard(update: RemoteImCardUpdateV1): Promise<ImCardSubmissionResult>
   acknowledgeCardReceipt(receiptId: string): Promise<void>
   /**

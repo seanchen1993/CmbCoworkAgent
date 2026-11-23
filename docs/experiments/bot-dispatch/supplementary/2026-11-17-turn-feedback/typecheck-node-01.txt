@@ -1,0 +1,7 @@
+
+> cmbdevclaw@1.5.6 typecheck:node
+> tsc --noEmit -p tsconfig.node.json --composite false
+
+src/main/agent/bot-dispatch-feedback.test.ts(8,50): error TS2724: '"./current-run-message-queue"' has no exported member named 'registerCurrentRunMessageQueueOwner'. Did you mean 'isCurrentRunMessageQueueOwner'?
+src/main/agent/bot-dispatch-feedback.test.ts(8,87): error TS2724: '"./current-run-message-queue"' has no exported member named 'enqueueCurrentRunMessage'. Did you mean 'queueCurrentRunMessage'?
+src/main/agent/bot-dispatch-feedback.ts(38,72): error TS7030: Not all code paths return a value.

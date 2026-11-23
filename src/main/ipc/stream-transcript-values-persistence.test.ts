@@ -1,7 +1,13 @@
 import { mkdtempSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import {
+  AIMessage,
+  AIMessageChunk,
+  HumanMessage,
+  ToolMessage,
+  type BaseMessage
+} from "@langchain/core/messages"
 import { afterAll, beforeAll, expect, it, vi } from "vitest"
 import {
   createStreamDataSerializer,
@@ -13,7 +19,15 @@ import {
   getStreamTranscriptValueLocalOccurrence
 } from "./stream-transcript-values"
 import { resolveStreamTranscriptFlush } from "./stream-transcript-flush"
+import { deriveCheckpointTranscriptIndex } from "../../shared/checkpoint-transcript"
 import * as db from "../db"
+import { SqlJsSaver } from "../checkpointer/sqljs-saver"
+import { buildGoalContinuationPrompt } from "../agent/goals/goal-manager"
+import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../shared/message-role-collision"
+import {
+  buildToolResultAssociations,
+  getWorkerToolUiKey
+} from "../../renderer/src/lib/worker-tool-result-key"
 
 const storage = vi.hoisted(() => ({ path: "" }))
 vi.mock("../storage", () => ({
@@ -28,6 +42,560 @@ beforeAll(async () => {
 })
 afterAll(async () => {
   await db.closeDatabase()
+})
+
+it.each([false, true])("does not duplicate values after same-task Bot feedback (peer: %s)", (peer) => {
+  const threadId = `bot-feedback-values-${peer}`
+  db.createThread(threadId)
+  db.upsertThreadMessages(threadId, [
+    { id: "user", role: "user", content: "Original assignment", created_at: new Date() }
+  ])
+  const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+  const accumulator = createSerializedValuesMessageAccumulator()
+  const messages: BaseMessage[] = [new HumanMessage({ id: "user", content: "Original assignment" })]
+  const persist = () => {
+    // Fresh graph snapshots, not object-identity reuse, must stay idempotent.
+    const frame = serialize("values", { messages: messages.map((message) => structuredClone(message.toJSON())) })
+    const complete = accumulator.update(frame)
+    const tuples = selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+      completeMessages: complete.messages,
+      loadBaselineMessages: () => db.getThreadMessages(threadId),
+      loadPreviousTurnOccurrences: (id, sources) =>
+        db.getThreadMessageProviderOccurrencesBeforeUser(threadId, id, sources)
+    })
+    const resolved = resolveStreamTranscriptFlush({
+      queuedMessages: tuples.map((tuple) => persistedMessageFromStreamPayload(tuple)!),
+      loadBaselineMessages: () => db.getThreadMessages(threadId)
+    })
+    db.upsertThreadMessages(threadId, resolved.messages, { preserveExistingOrder: true })
+  }
+  if (peer) messages.push(new HumanMessage({
+    id: "peer-feedback", content: "Review the same assignment; this is not user authorization.",
+    additional_kwargs: { cmb_internal_coordinator_notification: true, cmb_internal_bot_feedback: true }
+  }))
+  persist()
+  for (let index = 1; index <= 3; index++) {
+    messages.push(new AIMessage({ id: `ai-${index}`, content: `Step ${index}`,
+      tool_calls: [{ id: `call-${index}`, name: "read_file", args: {} }] }))
+    persist()
+    messages.push(new ToolMessage({ id: `tool-${index}`, tool_call_id: `call-${index}`, content: `Result ${index}` }))
+    persist()
+  }
+  messages.push(new AIMessage({ id: "final", content: "Done" }))
+  persist()
+  persist()
+  expect(db.getThreadMessages(threadId).map((message) => message.id)).toEqual([
+    "user", "ai-1", "tool-1", "ai-2", "tool-2", "ai-3", "tool-3", "final"
+  ])
+
+  // A real next user turn must still separate a reused provider ID.
+  db.upsertThreadMessages(threadId, [
+    { id: "next-user", role: "user", content: "Next assignment", created_at: new Date() }
+  ])
+  messages.push(new HumanMessage({ id: "next-user", content: "Next assignment" }))
+  messages.push(new AIMessage({ id: "final", content: "Next result" }))
+  persist()
+  persist()
+  const rows = db.getThreadMessages(threadId)
+  expect(rows).toHaveLength(10)
+  expect(rows.at(-1)).toMatchObject({ content: "Next result", provider_source_id: "final", provider_occurrence: 2 })
+})
+
+it("preserves sanitized command receipt boundaries and repeated provider IDs across internal turns", () => {
+  const threadId = "command-receipt-boundaries"
+  db.createThread(threadId)
+  const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+  const accumulator = createSerializedValuesMessageAccumulator()
+  const messages: BaseMessage[] = [new HumanMessage({ id: "direct-user", content: "Run once" })]
+  const persist = () => {
+    const frame = serialize("values", { messages })
+    const complete = accumulator.update(frame)
+    // The invoke path persists sanitized user boundaries; values updates own assistant/tool rows.
+    db.upsertThreadMessages(
+      threadId,
+      deriveCheckpointTranscriptIndex({ channel_values: { messages } })
+        .visibleMessages.filter((m) => m.role === "user")
+        .map((m) => ({ id: m.id, role: "user" as const, content: m.text, created_at: new Date() })),
+      { preserveExistingOrder: true }
+    )
+    const tuples = selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+      completeMessages: complete.messages,
+      loadBaselineMessages: () => db.getThreadMessages(threadId),
+      loadPreviousTurnOccurrences: (id, sources) =>
+        db.getThreadMessageProviderOccurrencesBeforeUser(threadId, id, sources)
+    })
+    const resolved = resolveStreamTranscriptFlush({
+      queuedMessages: tuples.map((tuple) => persistedMessageFromStreamPayload(tuple)!),
+      loadBaselineMessages: () => db.getThreadMessages(threadId)
+    })
+    db.upsertThreadMessages(threadId, resolved.messages, { preserveExistingOrder: true })
+  }
+  persist()
+  for (const key of ["cleanup", "new-file"]) {
+    messages.push(
+      new HumanMessage({
+        id: `notification:${threadId}:command:${key}`,
+        content: `PRIVATE RAW RECEIPT ${key}`,
+        additional_kwargs: {
+          cmb_coordinator_augmented_user_message: true,
+          cmb_visible_user_message: "后台命令结果"
+        }
+      })
+    )
+    persist()
+    messages.push(new AIMessage({ id: "reused-provider-id", content: key }))
+    for (let chunk = 0; chunk < 5; chunk++) persist()
+  }
+  const saved = db.getThreadMessages(threadId)
+  expect(saved.map((m) => [m.role, m.content])).toEqual([
+    ["user", "Run once"],
+    ["user", "后台命令结果"],
+    ["assistant", "cleanup"],
+    ["user", "后台命令结果"],
+    ["assistant", "new-file"]
+  ])
+  expect(new Set(saved.map((m) => m.id)).size).toBe(5)
+})
+
+it.each(["length_truncated", "todo"])(
+  "keeps runtime %s recovery in the same durable user turn",
+  (defect) => {
+    const threadId = `values-recovery-boundary-${defect}`
+    db.createThread(threadId)
+    const user = new HumanMessage({ id: "user", content: "complete the task" })
+    db.upsertThreadMessages(threadId, [
+      { id: "user", role: "user", content: "complete the task", created_at: new Date() }
+    ])
+    const call = new AIMessage({
+      id: "checking",
+      content: "checking",
+      tool_calls: [{ id: "read", name: "read_file", args: { file_path: "fixture.txt" } }]
+    })
+    const tool = new ToolMessage({ id: "result", tool_call_id: "read", content: "verified" })
+    const recovery = new HumanMessage({
+      id: "internal-recovery",
+      content: `[[CMB_TURN_COMPLETION_GATE_V1:${defect}]]\nContinue the current task.`
+    })
+    const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+    const accumulator = createSerializedValuesMessageAccumulator()
+    const values = (messages: unknown[]) => {
+      const frame = serialize("values", { messages })
+      const complete = accumulator.update(frame)
+      const tuples = selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+        completeMessages: complete.messages,
+        loadBaselineMessages: () => db.getThreadMessages(threadId),
+        loadPreviousTurnOccurrences: (id, sources) =>
+          db.getThreadMessageProviderOccurrencesBeforeUser(threadId, id, sources)
+      })
+      const resolved = resolveStreamTranscriptFlush({
+        queuedMessages: tuples.map((tuple) => persistedMessageFromStreamPayload(tuple)!),
+        loadBaselineMessages: () => db.getThreadMessages(threadId)
+      })
+      db.upsertThreadMessages(threadId, resolved.messages, { preserveExistingOrder: true })
+    }
+    values([user, call, tool])
+    values([user, call, tool, recovery])
+    for (let update = 0; update < 20; update += 1) {
+      values([
+        user,
+        call,
+        tool,
+        recovery,
+        new AIMessage({ id: "answer", content: `continued result ${update}` })
+      ])
+    }
+    expect(db.getThreadMessages(threadId).map((message) => message.id)).toEqual([
+      "user",
+      "checking",
+      "result",
+      "answer"
+    ])
+    expect(db.getThreadMessages(threadId).at(-1)?.content).toBe("continued result 19")
+
+    // A real later user still starts a new turn, even with a reused provider ID.
+    const nextUser = new HumanMessage({ id: "next-user", content: "another request" })
+    db.upsertThreadMessages(threadId, [
+      { id: "next-user", role: "user", content: "another request", created_at: new Date() }
+    ])
+    values([
+      user,
+      call,
+      tool,
+      recovery,
+      nextUser,
+      new AIMessage({ id: "answer", content: "new answer" })
+    ])
+    const stored = db.getThreadMessages(threadId)
+    expect(stored).toHaveLength(6)
+    expect(stored.at(-1)).toMatchObject({
+      content: "new answer",
+      provider_source_id: "answer",
+      provider_occurrence: 2
+    })
+  }
+)
+
+it.each([false, true])(
+  "keeps hidden notification snapshots on one streamed row (reused provider: %s)",
+  (reused) => {
+    const threadId = `hidden-notification-${reused}`
+    db.createThread(threadId)
+    db.upsertThreadMessages(threadId, [
+      { id: "u", role: "user", content: "delegate work", created_at: new Date(1) },
+      {
+        id: reused ? "response" : "earlier",
+        role: "assistant",
+        content: "started",
+        created_at: new Date(2)
+      }
+    ])
+    const boundary = db.captureThreadMessageProviderOccurrenceBoundary(threadId)
+    const serialize = createStreamDataSerializer()
+    const persist = (tuples: unknown[]) => {
+      const queued = tuples.map(persistedMessageFromStreamPayload).filter((value) => value !== null)
+      const result = resolveStreamTranscriptFlush({
+        queuedMessages: queued,
+        loadBaselineMessages: () => db.getThreadMessages(threadId)
+      })
+      db.upsertThreadMessages(threadId, result.messages, { preserveExistingOrder: true })
+    }
+    persist([
+      serialize("messages", [
+        new AIMessageChunk({
+          id: "response",
+          content: "result",
+          additional_kwargs: {
+            cmb_internal_provider_source_id: "response",
+            cmb_internal_provider_occurrence: reused ? 2 : 1
+          }
+        }),
+        {}
+      ]).data
+    ])
+    for (const content of ["result complete", "result complete", "result corrected"]) {
+      const frame = serialize("values", {
+        messages: [
+          new HumanMessage({ id: "hidden-notice", content: "internal result" }),
+          new AIMessage({ id: "response", content, tool_calls: [] })
+        ]
+      })
+      persist(
+        selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+          loadBaselineMessages: () => db.getThreadMessages(threadId),
+          loadPreviousTurnOccurrences: (_userId, sources) => boundary(sources)
+        })
+      )
+    }
+    const rows = db.getThreadMessages(threadId)
+    expect(rows).toHaveLength(3)
+    expect(rows[1].content).toBe("started")
+    expect(rows[2]).toMatchObject({
+      content: "result corrected",
+      provider_source_id: "response",
+      provider_occurrence: reused ? 2 : 1
+    })
+    expect(boundary(["response"])).toEqual(
+      reused ? [{ provider_source_id: "response", role: "assistant", provider_occurrence: 1 }] : []
+    )
+  }
+)
+it.each([true, false])(
+  "reopens Goal continuations with each assistant, tool result and response in order (streamed tool: %s)",
+  async (streamedTool) => {
+    const threadId = `goal-continuation-${streamedTool}`
+    db.createThread(threadId)
+    const userContent = "/goal read the fixture"
+    const user = new HumanMessage({ id: "goal-user", content: userContent })
+    db.upsertThreadMessages(
+      threadId,
+      [
+        {
+          id: "historical-assistant-alias",
+          role: "assistant",
+          provider_source_id: "provider-ai",
+          provider_occurrence: 8,
+          content: "Earlier work",
+          created_at: new Date()
+        },
+        ...Array.from({ length: 40 }, (_, index) => ({
+          id: `history-${index}`,
+          role: "assistant" as const,
+          content: `Archived reply ${index}`,
+          created_at: new Date()
+        })),
+        { id: user.id!, role: "user", content: userContent, created_at: new Date() }
+      ],
+      { preserveExistingOrder: true }
+    )
+
+    const transcript: unknown[] = [user]
+    const boundaryIds: string[] = []
+    for (const turn of [1, 2]) {
+      const boundaryId = `continuation-${turn}`
+      boundaryIds.push(boundaryId)
+      const boundary = new HumanMessage({
+        id: boundaryId,
+        content: buildGoalContinuationPrompt({
+          goalId: "goal",
+          activeWindowId: "goal-window",
+          threadId,
+          objective: "Read the fixture",
+          completionCondition: "Report the result",
+          context: {},
+          ledger: { progress: [], evidence: [], blockers: [] },
+          turnsUsed: turn,
+          maxTurns: 3,
+          status: "active",
+          lastVerdict: null,
+          lastReason: null,
+          pausedReason: null,
+          consecutiveParseFailures: 0,
+          createdAt: 1,
+          updatedAt: 1
+        })
+      })
+      const ordinal = db.reserveThreadGraphTranscriptBoundary(threadId, boundaryId)
+      expect(db.reserveThreadGraphTranscriptBoundary(threadId, boundaryId)).toBe(ordinal)
+      expect(db.getThreadMessagesByIds(threadId, [boundaryId])).toEqual([])
+      const previousOccurrences = (sources: readonly string[]) =>
+        db.getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sources)
+      const readBaseline = (selectors: Parameters<typeof db.getThreadMessageIdentityContext>[1]) =>
+        db.getThreadMessageIdentityContext(threadId, selectors, 4)
+      let serialize = createStreamDataSerializer({ projectMessageChunks: true })
+      let accumulator = createSerializedValuesMessageAccumulator()
+      const flush = (tuples: unknown[]) => {
+        const queuedMessages = tuples.map(persistedMessageFromStreamPayload).filter(Boolean)
+        const result = resolveStreamTranscriptFlush({
+          queuedMessages: queuedMessages.filter((message) => message !== null),
+          boundaryOrdinal: ordinal,
+          loadPreviousOccurrences: previousOccurrences,
+          loadBaselineMessages: () =>
+            readBaseline(
+              queuedMessages.flatMap((message) =>
+                message
+                  ? [
+                      {
+                        messageId: message.id,
+                        providerSourceId: message.provider_source_id ?? message.id,
+                        providerOccurrence: message.provider_occurrence,
+                        role: message.role
+                      }
+                    ]
+                  : []
+              )
+            )
+        })
+        db.upsertThreadMessages(threadId, result.messages, {
+          preserveExistingOrder: result.preserveExistingOrder
+        })
+      }
+      const values = (messages: unknown[]) => {
+        const frame = serialize("values", { messages })
+        const completeMessages = accumulator.update(frame).messages
+        flush(
+          selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+            completeMessages,
+            resolveBoundaryOrdinal: (id) => db.getThreadTranscriptBoundaryOrdinal(threadId, id),
+            loadPreviousTurnOccurrences: (id, sources) =>
+              db.getThreadMessageProviderOccurrencesBeforeUser(threadId, id, sources),
+            loadBaselineMessages: (selectors) =>
+              readBaseline(
+                selectors.map((message) => ({
+                  messageId: message.id,
+                  providerSourceId: message.provider_source_id ?? message.id,
+                  providerOccurrence: message.provider_occurrence,
+                  role: message.role as "assistant" | "tool"
+                }))
+              )
+          })
+        )
+      }
+      const toolCall = { id: "same-call", name: "read_file", args: { file_path: "fixture.txt" } }
+      const assistant = new AIMessage({
+        id: `graph-reply-${turn}`,
+        additional_kwargs: { [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: "provider-ai" },
+        content: "Reading the fixture",
+        tool_calls: [toolCall]
+      })
+      const tool = new ToolMessage({
+        id: `result-${turn}`,
+        name: "read_file",
+        content: `Result ${turn}`,
+        tool_call_id: toolCall.id,
+        status: "success"
+      })
+      const final = new AIMessage({
+        id: `graph-final-${turn}`,
+        additional_kwargs: { [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: "final-provider-ai" },
+        content: "Fixture read"
+      })
+      transcript.push(boundary)
+      values(transcript)
+      flush([
+        serialize("messages", [
+          new AIMessage({
+            id: "provider-ai",
+            content: assistant.content,
+            tool_calls: [toolCall]
+          }),
+          { checkpoint_ns: `model:${turn}` }
+        ]).data
+      ])
+      transcript.push(assistant)
+      values(transcript)
+      if (streamedTool) flush([serialize("messages", [tool, {}]).data])
+      transcript.push(tool)
+      values(transcript)
+      // Retry opens a fresh serialization stream and replays graph history.
+      serialize = createStreamDataSerializer({ projectMessageChunks: true })
+      accumulator = createSerializedValuesMessageAccumulator()
+      values(transcript)
+      flush([
+        serialize("messages", [
+          new AIMessageChunk({
+            id: "final-provider-ai",
+            content: final.content
+          }),
+          { checkpoint_ns: `model:final-${turn}` }
+        ]).data
+      ])
+      transcript.push(final)
+      values(transcript)
+    }
+
+    const path = join(mkdtempSync(join(tmpdir(), "cmb-goal-checkpoint-")), "checkpoints.sqlite")
+    const saver = new SqlJsSaver(path)
+    const config = { configurable: { thread_id: threadId, checkpoint_ns: "" } }
+    await saver.put(
+      config,
+      {
+        v: 1,
+        id: "goal-checkpoint",
+        ts: new Date().toISOString(),
+        channel_values: { messages: transcript },
+        channel_versions: { messages: 1 },
+        versions_seen: {}
+      },
+      { source: "loop", step: 1, parents: {} }
+    )
+    await saver.close()
+    await db.closeDatabase()
+    await db.initializeDatabase()
+
+    const reopenedCheckpoint = new SqlJsSaver(path)
+    expect(
+      (await reopenedCheckpoint.getTuple(config))?.checkpoint.channel_values.messages
+    ).toHaveLength(9)
+    await reopenedCheckpoint.close()
+    const persisted = db.getThreadMessagesPage(threadId, { limit: 10 }).messages.slice(-6)
+    expect(persisted.map((message) => [message.role, message.content])).toEqual([
+      ["assistant", "Reading the fixture"],
+      ["tool", "Result 1"],
+      ["assistant", "Fixture read"],
+      ["assistant", "Reading the fixture"],
+      ["tool", "Result 2"],
+      ["assistant", "Fixture read"]
+    ])
+    expect(persisted.map((message) => message.ordinal)).toEqual([43, 44, 45, 47, 48, 49])
+    expect(db.getThreadMessageCount(threadId)).toBe(48)
+    expect(db.getThreadMessagesByIds(threadId, boundaryIds)).toEqual([])
+    expect(db.getThreadTranscriptBoundaryOrdinal(threadId, boundaryIds[1])).toBe(46)
+    expect(
+      persisted
+        .filter((message) => message.provider_source_id === "provider-ai")
+        .map((message) => message.provider_occurrence)
+    ).toEqual([9, 10])
+    const associations = buildToolResultAssociations(persisted)
+    for (const [offset, turn] of [
+      [0, 1],
+      [3, 2]
+    ]) {
+      const { id, tool_calls } = persisted[offset]
+      expect(associations.get(getWorkerToolUiKey(id, tool_calls?.[0].id, 0))).toEqual({
+        content: `Result ${turn}`,
+        is_error: false
+      })
+      expect(persisted[offset + 1]).toMatchObject({ tool_call_id: "same-call", status: "success" })
+    }
+  }
+)
+
+it("keeps reserved Goal positions through a steering splice and removes them on deletion", () => {
+  const threadId = "goal-boundary-order"
+  db.createThread(threadId)
+  const write = (id: string, role: "user" | "assistant") => ({
+    id,
+    role,
+    content: id,
+    created_at: new Date()
+  })
+  db.upsertThreadMessages(threadId, [write("user", "user"), write("prior-reply", "assistant")])
+  expect(db.reserveThreadGraphTranscriptBoundary(threadId, "continuation")).toBe(2)
+  db.upsertThreadMessages(threadId, [write("continuation-reply", "assistant")])
+  db.upsertThreadMessages(threadId, [write("injected", "user")])
+  expect(db.moveThreadMessagesAfterAnchor(threadId, "user", ["injected"])).toBe(true)
+  expect(db.getThreadTranscriptBoundaryOrdinal(threadId, "continuation")).toBe(3)
+  expect(db.getThreadMessages(threadId).map(({ id, ordinal }) => [id, ordinal])).toEqual([
+    ["user", 0],
+    ["injected", 1],
+    ["prior-reply", 2],
+    ["continuation-reply", 4]
+  ])
+  db.upsertThreadMessages(threadId, [write("follow-up", "user")])
+  expect(db.moveThreadMessagesAfterAnchor(threadId, "continuation", ["follow-up"])).toBe(true)
+  expect(db.getThreadMessages(threadId).map(({ id, ordinal }) => [id, ordinal])).toEqual([
+    ["user", 0],
+    ["injected", 1],
+    ["prior-reply", 2],
+    ["follow-up", 4],
+    ["continuation-reply", 5]
+  ])
+  db.deleteThread(threadId)
+  expect(db.getThreadTranscriptBoundaryOrdinal(threadId, "continuation")).toBeUndefined()
+})
+
+it("preserves the previous result when another Goal boundary reuses raw tool IDs", () => {
+  const threadId = "goal-reused-tool-result-id"
+  db.createThread(threadId)
+  for (const turn of [1, 2]) {
+    const boundaryId = `turn-${turn}`
+    const boundaryOrdinal = db.reserveThreadGraphTranscriptBoundary(threadId, boundaryId)
+    const serialize = createStreamDataSerializer()
+    const frame = serialize("messages", [
+      new ToolMessage({
+        id: "reused-result",
+        tool_call_id: "reused-call",
+        content: `Result in turn ${turn}`,
+        status: "success"
+      }),
+      {}
+    ])
+    const queued = persistedMessageFromStreamPayload(frame.data)!
+    const result = resolveStreamTranscriptFlush({
+      queuedMessages: [queued],
+      boundaryOrdinal,
+      loadPreviousOccurrences: (sources) =>
+        db.getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sources),
+      loadBaselineMessages: () =>
+        db.getThreadMessageIdentityContext(threadId, [
+          { messageId: queued.id, providerSourceId: queued.id, role: "tool" }
+        ])
+    })
+    db.upsertThreadMessages(threadId, result.messages, {
+      preserveExistingOrder: result.preserveExistingOrder
+    })
+  }
+
+  expect(db.getThreadMessages(threadId)).toMatchObject([
+    { ordinal: 1, content: "Result in turn 1", tool_call_id: "reused-call", status: "success" },
+    {
+      ordinal: 3,
+      content: "Result in turn 2",
+      provider_occurrence: 2,
+      tool_call_id: "reused-call",
+      status: "success"
+    }
+  ])
 })
 
 it("accepts new native values after clear without letting delayed renderer echoes restore drafts", () => {

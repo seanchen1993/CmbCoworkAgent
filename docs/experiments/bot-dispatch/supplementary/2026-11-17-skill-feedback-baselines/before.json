@@ -1,0 +1,51 @@
+{
+  "head": "0f13fc512b6bfe4a7a37399882c8e2704c473d8d",
+  "node": "v22.23.5",
+  "results": [
+    {
+      "name": "projection",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/main/bots/work-projection.test.ts",
+        "--maxWorkers=1"
+      ],
+      "exitCode": 1,
+      "seconds": 3.71,
+      "log": "before-projection.log.txt"
+    },
+    {
+      "name": "desktop",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/desktop-agent-invoke-characterization.spec.ts"
+      ],
+      "exitCode": 1,
+      "seconds": 0.2,
+      "log": "before-desktop.log.txt"
+    },
+    {
+      "name": "architecture",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/standard-thread-turn-architecture.spec.ts"
+      ],
+      "exitCode": 1,
+      "seconds": 0.13,
+      "log": "before-architecture.log.txt"
+    },
+    {
+      "name": "stream",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/stream-message-ids.spec.ts"
+      ],
+      "exitCode": 1,
+      "seconds": 0.61,
+      "log": "before-stream.log.txt"
+    }
+  ]
+}

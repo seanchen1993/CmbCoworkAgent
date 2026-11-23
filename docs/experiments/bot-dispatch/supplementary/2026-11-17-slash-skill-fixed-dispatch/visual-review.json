@@ -1,0 +1,30 @@
+[
+  {
+    "run": "20261117T113159Z-074498fe",
+    "file": "slash-skill-main-return.png",
+    "sha256": "7bd74541aa3227c69271ff6f3657bb4388b37fc0a94671bd3af1c11807fe1b5b",
+    "retention": "local only; screenshots may contain the local temporary directory",
+    "review": "Captured before transcript hydration; not UI acceptance evidence."
+  },
+  {
+    "run": "20261117T113159Z-074498fe",
+    "file": "slash-skill-task.png",
+    "sha256": "e059f6780c8410d2745227d684a04530630d8d9ca161125337578f5a09477590",
+    "retention": "local only; screenshots may contain the local temporary directory",
+    "review": "Captured before transcript hydration; not UI acceptance evidence."
+  },
+  {
+    "run": "20261117T113345Z-b8d3b9f8",
+    "file": "slash-skill-main-return.png",
+    "sha256": "fc8a52f89d87600ba0f96e30d4b7c8132277becc9a26fbb3505ad2a162797b82",
+    "retention": "local only; screenshots may contain the local temporary directory",
+    "review": "Hydrated conversation inspected: one acceptance reply, task navigation, concurrent answer, returned result and worker attachment card."
+  },
+  {
+    "run": "20261117T113345Z-b8d3b9f8",
+    "file": "slash-skill-task.png",
+    "sha256": "0f0aa522fab3ed6e733088ece03a3a56405c3e21343f763be628eaf8840fea9a",
+    "retention": "local only; screenshots may contain the local temporary directory",
+    "review": "Hydrated conversation inspected: one acceptance reply, task navigation, concurrent answer, returned result and worker attachment card."
+  }
+]

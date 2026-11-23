@@ -100,7 +100,9 @@ describe("stream transcript flush identity cache", () => {
     const start = source.indexOf("if (resolved.appendTextDelta")
     const end = source.indexOf("if (persistedCount !== messages.length)", start)
     const appendBranch = source.slice(start, end)
-    expect(appendBranch).toMatch(/if \(!appendThreadMessageTextDelta[\s\S]*throw new Error/)
+    expect(appendBranch).toMatch(
+      /if \(!appendThreadMessageTextDelta[\s\S]*throw new StreamTranscriptSnapshotRequiredError/
+    )
     expect(appendBranch).toMatch(/else \{[\s\S]*upsertThreadMessages/)
     expect(appendBranch).not.toMatch(/appendThreadMessageTextDelta[\s\S]*\?\s*1\s*:\s*upsert/)
     expect(source).toMatch(

@@ -1,0 +1,4 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T083617Z-a944a874/record.json
+{"case":"slash-skill-natural","actual":"independent","preferred":"independent","seconds":27.6,"mainSeconds":11.1,"dispatchSeconds":11,"mainModelRequests":2,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["read_file","bot_work_create"]}
+Routing evaluation report: <temp>/bot-integration-build-NSdWZU/artifacts/routing-1794904577302.json
+Real-model case did not settle within six minutes

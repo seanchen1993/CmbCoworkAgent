@@ -5,6 +5,7 @@ interface ThreadDeletionRuntime {
   hasExternalRun: (threadId: string) => boolean
   hasWorkflowRun: (threadId: string) => boolean
   hasWorkerRun: (threadId: string) => boolean
+  hasBackgroundShell: (threadId: string) => boolean
 }
 
 /** A missing workspace is not a running task, but prevents verification of retained worktrees. */
@@ -31,6 +32,7 @@ export async function isThreadDeletionBusy(
     runtime.hasActiveRun(threadId) ||
     runtime.hasExternalRun(threadId) ||
     runtime.hasWorkflowRun(threadId) ||
-    runtime.hasWorkerRun(threadId)
+    runtime.hasWorkerRun(threadId) ||
+    runtime.hasBackgroundShell(threadId)
   )
 }

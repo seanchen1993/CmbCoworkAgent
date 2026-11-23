@@ -18,6 +18,7 @@ import {
 } from "../src/renderer/src/features/slash-commands/useSlashCommands.ts"
 import {
   BUILTIN_BROWSER_COMMAND_ID,
+  BUILTIN_BROWSER_COMMAND,
   formatBuiltinBrowserPrompt,
   getBuiltinBrowserPromptPrefix,
   parseBuiltinBrowserPrompt,
@@ -70,6 +71,23 @@ function testRootSlashShowsGoalAboveSkills(): void {
 function testPlainTextKeepsPopoverClosed(): void {
   const mode = buildSlashPopoverMode({ input: "hello /", skills, skillSelected: false })
   assertEqual(mode.kind, "closed", "plain text should not open slash popover")
+}
+
+function testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands(): void {
+  const mode = buildSlashPopoverMode({
+    input: "/",
+    skills,
+    skillSelected: false,
+    generalCommands: [BUILTIN_BROWSER_COMMAND]
+  })
+  assertEqual(mode.kind, "slash", "managed composer still supports slash selection")
+  if (mode.kind !== "slash") return
+  assertArrayEqual(
+    mode.commands.map((item) => item.id),
+    [BUILTIN_BROWSER_COMMAND_ID],
+    "managed commands must not expose the desktop Goal control plane"
+  )
+  assertEqual(mode.skills.length, 2, "managed composer retains available skills")
 }
 
 function testGoalFilterShowsGoalCommand(): void {
@@ -161,12 +179,12 @@ function testSelectedBrowserKeepsPopoverClosed(): void {
 }
 
 function testBuiltinBrowserPromptFormatting(): void {
-  setBuiltinBrowserScreenshotEnabled(true)
+  setBuiltinBrowserScreenshotEnabled(false)
   const formatted = formatBuiltinBrowserPrompt("打开百度并搜索 CMB")
   assertEqual(
     formatted,
-    `${BUILTIN_BROWSER_PROMPT_PREFIX}打开百度并搜索 CMB`,
-    "built-in browser prompt should expose screenshots by default and defer eligibility to the skill"
+    `${BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX}打开百度并搜索 CMB`,
+    "built-in browser prompt should block screenshots by default"
   )
   assertEqual(
     parseBuiltinBrowserPrompt(formatted).visibleText,
@@ -179,18 +197,18 @@ function testBuiltinBrowserPromptFormatting(): void {
     "built-in browser prompt should expose the browser tag state"
   )
 
-  setBuiltinBrowserScreenshotEnabled(false)
+  setBuiltinBrowserScreenshotEnabled(true)
   assertEqual(
     getBuiltinBrowserPromptPrefix(),
-    BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
-    "explicit screenshot disablement should keep the screenshot restriction"
+    BUILTIN_BROWSER_PROMPT_PREFIX,
+    "enabled screenshot prompt should omit the screenshot restriction"
   )
   assertEqual(
     formatBuiltinBrowserPrompt("打开百度并搜索 CMB"),
-    `${BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX}打开百度并搜索 CMB`,
-    "explicit screenshot disablement should use the restricted browser prefix"
+    `${BUILTIN_BROWSER_PROMPT_PREFIX}打开百度并搜索 CMB`,
+    "enabled screenshot prompt should keep the original browser prefix"
   )
-  setBuiltinBrowserScreenshotEnabled(true)
+  setBuiltinBrowserScreenshotEnabled(false)
 }
 
 function testGoalSlashInputDetectionForRuntimeControls(): void {
@@ -551,6 +569,7 @@ function testRuntimeComposerStateKeepsHistoryLoadingLocked(): void {
 function main(): void {
   const tests = [
     testRootSlashShowsGoalAboveSkills,
+    testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands,
     testPlainTextKeepsPopoverClosed,
     testGoalFilterShowsGoalCommand,
     testSkillNameFilteringStillWorks,

@@ -23,23 +23,61 @@
 // renderer notification (which uses BrowserWindow) is injected by runtime.ts via
 // `setCurrentRunInjectionNotifier`.
 
-import { AIMessage, HumanMessage } from "@langchain/core/messages"
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+  type BaseMessage
+} from "@langchain/core/messages"
+import { getConfig } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
+import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { Message } from "../types"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "./agent-run-service"
+import {
+  getCheckpointTranscriptMessageIdentity,
+  isInternalNotificationMessage,
+  isWorkflowPlumbingTranscriptContent
+} from "../../shared/checkpoint-transcript"
+import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
+import {
+  hasScopedGraphTranscriptBoundary,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
+import { GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY } from "./goals/internal-prompt"
 import {
   advanceCompletedMessageContentRoute,
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
+  getMessageProviderTupleFromMetadata,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY,
-  normalizeAppendedMessageIds
+  normalizeAppendedMessageIds,
+  normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
 
 export interface CurrentRunQueuedMessage {
   id: string
   content: string
   displayContent?: string
+  /** Host-resolved composer selection; never inferred from a Bot's routing text. */
+  trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Only a local user composer may select via a raw trailing marker. */
+  allowTrustedTransportSkillMarker?: boolean
+  /** Set only after the Bot's trusted submit preparation. Empty means omit the request anchor. */
+  botPreparedUserRequest?: string
+  /** Trusted Bot-only data, never a user instruction or permission grant. */
+  peerFeedback?: { senderBotId: string; sourceTaskId: string; targetTaskId: string }
+  /** Optional Bot work authority for admission and foreground command handoff. */
+  botCanDispatch?: () => boolean
+  /** Trusted host receipt, called synchronously before durable transcript/model injection.
+   * False withdraws a cancelled inbox message. Throws fail the turn before model side effects. */
+  beforeInject?: () => boolean
+  /** Trusted host callbacks; never accepted from renderer input. */
+  onInjected?: () => void
+  onDiscarded?: () => void
 }
 
 /** Final assistant reply immediately preceding an afterModel steer. The outer
@@ -274,9 +312,29 @@ function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectio
   }
 }
 
+function currentRunInjectionAnchorForTail(
+  messages: readonly unknown[],
+  index: number
+): CurrentRunInjectionAnchor | undefined {
+  // Internal cues exist in graph state but are deliberately absent from the visible
+  // durable transcript. Anchor to the preceding real message, or the empty history.
+  while (index >= 0 && isInternalNotificationMessage(messages[index])) index--
+  return index >= 0 ? currentRunInjectionAnchorForMessage(messages[index]) : undefined
+}
+
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
 const currentRunMessageQueueOwners = new Map<string, string>()
 const completedAssistantMessagesByRun = new Map<string, CurrentRunCompletedAssistantMessage>()
+type ScopedGraphProviderRole = "assistant" | "tool"
+type ScopedGraphProviderOccurrences = Map<string, Partial<Record<ScopedGraphProviderRole, number>>>
+const scopedGraphOccurrencesByThread = new Map<
+  string,
+  {
+    runToken: string
+    boundaries: Map<string, ScopedGraphProviderOccurrences>
+    notificationExecutions: Set<string>
+  }
+>()
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 // A renderer can withdraw a handoff while its async UserPromptSubmit/skill hooks
 // are still running, before queueCurrentRunMessage has inserted anything. Keep a
@@ -356,6 +414,9 @@ export function setCurrentRunMessageQueueOwner(threadId: string, runToken: strin
   if (pendingRoute && pendingRoute.runToken !== runToken) {
     completedAssistantRoutes.delete(threadId)
   }
+  if (currentRunMessageQueueOwners.get(threadId) !== runToken) {
+    scopedGraphOccurrencesByThread.delete(threadId)
+  }
   currentRunMessageQueueOwners.set(threadId, runToken)
 }
 
@@ -388,6 +449,12 @@ export function queueCurrentRunMessage(
   return true
 }
 
+function notifyQueueSettlement(notify: (() => void) | undefined): void {
+  try { notify?.() } catch (error) {
+    console.warn("[Runtime] Current-run receipt settlement failed", error)
+  }
+}
+
 /** Remove a steered message before it is injected (user deleted/un-steered it). */
 export function deleteCurrentRunQueuedMessage(threadId: string, messageId: string): void {
   const withdrawn = withdrawnMessageIds.get(threadId) ?? new Set<string>()
@@ -395,6 +462,9 @@ export function deleteCurrentRunQueuedMessage(threadId: string, messageId: strin
   withdrawnMessageIds.set(threadId, withdrawn)
   const existing = currentRunMessageQueues.get(threadId)
   if (!existing) return
+  for (const message of existing) {
+    if (message.id === messageId) notifyQueueSettlement(message.onDiscarded)
+  }
   const next = existing.filter((message) => message.id !== messageId)
   if (next.length > 0) currentRunMessageQueues.set(threadId, next)
   else currentRunMessageQueues.delete(threadId)
@@ -409,8 +479,11 @@ export function clearCurrentRunMessageQueue(threadId: string, runToken?: string)
     }
     return
   }
+  const pending = currentRunMessageQueues.get(threadId) ?? []
   currentRunMessageQueues.delete(threadId)
+  for (const message of pending) notifyQueueSettlement(message.onDiscarded)
   currentRunMessageQueueOwners.delete(threadId)
+  scopedGraphOccurrencesByThread.delete(threadId)
   injectedMessageIds.delete(threadId)
   withdrawnMessageIds.delete(threadId)
   completedAssistantRoutes.delete(threadId)
@@ -454,9 +527,27 @@ async function drainCurrentRunMessagesForInjection(
     }
   | undefined
 > {
-  const queued = drainCurrentRunMessageQueue(threadId, runToken).filter((message) =>
-    message.content.trim()
-  )
+  const restoreOrDiscard = (messages: CurrentRunQueuedMessage[]) => {
+    if (isCurrentRunMessageQueueOwner(threadId, runToken)) {
+      const arrivals = currentRunMessageQueues.get(threadId) ?? []
+      currentRunMessageQueues.set(threadId, [...messages, ...arrivals])
+    } else {
+      for (const message of messages) notifyQueueSettlement(message.onDiscarded)
+    }
+  }
+  const pending = drainCurrentRunMessageQueue(threadId, runToken)
+  const queued: CurrentRunQueuedMessage[] = []
+  for (let index = 0; index < pending.length; index++) {
+    const message = pending[index]
+    try {
+      const accepted = Boolean(message.content.trim()) && (message.beforeInject?.() ?? true)
+      if (accepted) queued.push(message)
+      else notifyQueueSettlement(message.onDiscarded)
+    } catch (error) {
+      restoreOrDiscard([...queued, ...pending.slice(index)])
+      throw error
+    }
+  }
   if (queued.length === 0) return undefined
 
   // The notifier durably persists these user turns before acknowledging them to
@@ -470,15 +561,15 @@ async function drainCurrentRunMessagesForInjection(
   } catch (error) {
     // The run can be replaced while durable persistence is in flight. Never
     // restore an old owner's messages into the replacement run's shared queue.
-    if (isCurrentRunMessageQueueOwner(threadId, runToken)) {
-      const arrivalsDuringNotification = currentRunMessageQueues.get(threadId) ?? []
-      currentRunMessageQueues.set(threadId, [...queued, ...arrivalsDuringNotification])
-    }
+    restoreOrDiscard(queued)
     throw error
   }
 
   const injected = injectedMessageIds.get(threadId) ?? new Set<string>()
-  for (const message of queued) injected.add(message.id)
+  for (const message of queued) {
+    injected.add(message.id)
+    notifyQueueSettlement(message.onInjected)
+  }
   injectedMessageIds.set(threadId, injected)
   console.log(
     `[Runtime] Injected ${queued.length} queued current-run message(s) in ${phase} for thread ${threadId}`
@@ -491,13 +582,25 @@ async function drainCurrentRunMessagesForInjection(
         return new HumanMessage({
           id: message.id,
           content: message.content,
-          ...(visibleContent !== message.content
+          ...(message.peerFeedback
             ? {
                 additional_kwargs: {
-                  [VISIBLE_USER_MESSAGE_KEY]: visibleContent
+                  // The historical marker is shared by workflow/internal Human inputs.
+                  // Reuse its history, StopHook and compaction authority protections.
+                  cmb_internal_coordinator_notification: true,
+                  cmb_internal_bot_feedback: true,
+                  cmb_peer_feedback_source: message.peerFeedback
                 }
               }
-            : {})
+            : visibleContent !== message.content || message.botPreparedUserRequest !== undefined
+              ? {
+                additional_kwargs: {
+                  ...(visibleContent !== message.content ? { [VISIBLE_USER_MESSAGE_KEY]: visibleContent } : {}),
+                  ...(message.botPreparedUserRequest !== undefined
+                    ? { [BOT_PREPARED_USER_REQUEST_KEY]: message.botPreparedUserRequest } : {})
+                }
+              }
+              : {})
         })
       }
     ),
@@ -507,10 +610,19 @@ async function drainCurrentRunMessagesForInjection(
   }
 }
 
+function graphAssistantProviderSourceId(message: AIMessage): string | undefined {
+  const providerSourceId = message.additional_kwargs[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
+  if (typeof providerSourceId === "string" && providerSourceId.trim()) {
+    return providerSourceId.trim()
+  }
+  const id = message.id?.trim()
+  return id ? getMessageProviderSourceId({ id, role: "assistant" }) : undefined
+}
+
 function completedAssistantMessageForTranscript(
   message: AIMessage
 ): CurrentRunCompletedAssistantMessage | undefined {
-  const sourceId = typeof message.id === "string" && message.id.trim() ? message.id.trim() : undefined
+  const sourceId = graphAssistantProviderSourceId(message)
   if (typeof message.content === "string") {
     return message.content.length > 0
       ? {
@@ -533,6 +645,254 @@ function completedAssistantMessageForTranscript(
     : undefined
 }
 
+type GraphProviderOccurrenceLoader = (
+  threadId: string,
+  boundaryId: string,
+  providerSourceId: string
+) => number | undefined
+
+function collectPreviousScopedGraphProviderOccurrences(
+  messages: readonly BaseMessage[],
+  end: number
+): ScopedGraphProviderOccurrences {
+  const candidates: Array<ReturnType<typeof getCheckpointTranscriptMessageIdentity>> = []
+  for (let index = 0; index < end; index += 1) {
+    const message = messages[index]
+    if (isSerializedSummarizationMessage(message) || isInternalNotificationMessage(message)) {
+      continue
+    }
+    const role = AIMessage.isInstance(message)
+      ? "assistant"
+      : ToolMessage.isInstance(message)
+        ? "tool"
+        : HumanMessage.isInstance(message)
+          ? "user"
+          : SystemMessage.isInstance(message)
+            ? "system"
+            : undefined
+    if (!role) continue
+    const metadata = message.additional_kwargs
+    const visibleUserMessage = metadata[VISIBLE_USER_MESSAGE_KEY]
+    if (
+      role === "user" &&
+      hasScopedGraphTranscriptBoundary(metadata) &&
+      !(typeof visibleUserMessage === "string" && visibleUserMessage.trim())
+    ) {
+      continue
+    }
+    const content =
+      role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
+        ? visibleUserMessage
+        : message.content
+    if (isWorkflowPlumbingTranscriptContent(content)) continue
+    candidates.push(
+      getCheckpointTranscriptMessageIdentity(
+        message.id?.trim() || `checkpoint-${index}`,
+        role,
+        metadata,
+        ToolMessage.isInstance(message) ? message.tool_call_id : undefined
+      )
+    )
+  }
+
+  const occurrences: ScopedGraphProviderOccurrences = new Map()
+  for (const message of normalizeCompleteSnapshotMessageIds([], candidates)) {
+    const { role } = message
+    if (role !== "assistant" && role !== "tool") continue
+    const sourceId = getMessageProviderSourceId(message)
+    const occurrence = getMessageProviderOccurrence(message) ?? 1
+    const source = occurrences.get(sourceId) ?? {}
+    source[role] = Math.max(source[role] ?? 0, occurrence)
+    occurrences.set(sourceId, source)
+  }
+  return occurrences
+}
+
+function rememberScopedGraphProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  messages: readonly BaseMessage[]
+): boolean {
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return false
+  const boundaryIndex = messages.findLastIndex(HumanMessage.isInstance)
+  const boundary = messages[boundaryIndex]
+  if (
+    !boundary?.id ||
+    !hasScopedGraphTranscriptBoundary(boundary.additional_kwargs)
+  ) {
+    return false
+  }
+
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return false
+  let scope = scopedGraphOccurrencesByThread.get(threadId)
+  if (!scope) {
+    scope = { runToken, boundaries: new Map(), notificationExecutions: new Set() }
+    scopedGraphOccurrencesByThread.set(threadId, scope)
+  }
+  const parentId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  const remember = (id: string, end: number): void => {
+    if (scope.boundaries.has(id)) return
+    scope.boundaries.set(id, collectPreviousScopedGraphProviderOccurrences(messages, end))
+  }
+  if (typeof parentId === "string" && !scope.boundaries.has(parentId)) {
+    const parentIndex = messages.findIndex(
+      (message, index) =>
+        index < boundaryIndex &&
+        message.id === parentId &&
+        HumanMessage.isInstance(message) &&
+        hasScopedGraphTranscriptBoundary(message.additional_kwargs)
+    )
+    if (parentIndex >= 0) remember(parentId, parentIndex)
+  }
+  remember(boundary.id, boundaryIndex)
+  return true
+}
+
+function getScopedGraphProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  boundaryId: string
+): ScopedGraphProviderOccurrences | undefined {
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
+  return scope?.runToken === runToken ? scope.boundaries.get(boundaryId) : undefined
+}
+
+interface PreviousGraphProviderOccurrence {
+  provider_source_id: string
+  role: Message["role"]
+  provider_occurrence: number
+}
+
+/** The checkpoint can know an older provider identity before SQLite's legacy worker imports it. */
+export function mergeCurrentRunGraphProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  boundaryId: string,
+  sourceIds: readonly string[],
+  durable: readonly PreviousGraphProviderOccurrence[] | undefined
+): readonly PreviousGraphProviderOccurrence[] | undefined {
+  if (durable === undefined) return undefined
+  const graph = getScopedGraphProviderOccurrences(threadId, runToken, boundaryId)
+  if (!graph?.size) return durable
+
+  const keyFor = (sourceId: string, role: Message["role"]): string =>
+    JSON.stringify([sourceId, role])
+  const occurrences = new Map(
+    durable.map((entry) => [keyFor(entry.provider_source_id, entry.role), entry])
+  )
+  for (const sourceId of sourceIds) {
+    const previous = graph.get(sourceId)
+    if (!previous) continue
+    for (const role of ["assistant", "tool"] as const) {
+      const occurrence = previous[role]
+      if (occurrence === undefined) continue
+      const key = keyFor(sourceId, role)
+      if ((occurrences.get(key)?.provider_occurrence ?? 0) < occurrence) {
+        occurrences.set(key, { provider_source_id: sourceId, role, provider_occurrence: occurrence })
+      }
+    }
+  }
+  return [...occurrences.values()]
+}
+
+interface NotificationAssistantIdentity {
+  stableId: string
+  providerSourceId: string
+  providerOccurrence: number
+}
+
+/** The graph model node and its token callbacks share the same execution namespace. */
+export function getCurrentRunNotificationAssistantIdentity(
+  threadId: string,
+  runToken: string,
+  namespace: unknown
+): NotificationAssistantIdentity | undefined {
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
+  if (
+    typeof namespace !== "string" ||
+    scope?.runToken !== runToken ||
+    !scope.notificationExecutions.has(namespace)
+  ) {
+    return undefined
+  }
+  const stableId = "cmb-notification-assistant:" + namespace
+  return { stableId, providerSourceId: stableId, providerOccurrence: 1 }
+}
+
+function registerNotificationModelExecution(
+  threadId: string,
+  runToken: string,
+  messages: readonly BaseMessage[]
+): NotificationAssistantIdentity | undefined {
+  const latestUser = messages.findLast(HumanMessage.isInstance)
+  if (latestUser?.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] !== true) {
+    return undefined
+  }
+  const namespace = getConfig()?.metadata?.langgraph_checkpoint_ns
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
+  if (typeof namespace !== "string" || !namespace || scope?.runToken !== runToken) {
+    return undefined
+  }
+  scope.notificationExecutions.add(namespace)
+  return getCurrentRunNotificationAssistantIdentity(threadId, runToken, namespace)
+}
+
+function assignScopedGraphAssistantIdentity(
+  threadId: string,
+  runToken: string,
+  messages: readonly BaseMessage[],
+  response: AIMessage,
+  loadPreviousOccurrence?: GraphProviderOccurrenceLoader
+): void {
+  const boundaryIndex = messages.findLastIndex(HumanMessage.isInstance)
+  const boundary = messages[boundaryIndex]
+  if (!boundary?.id || !hasScopedGraphTranscriptBoundary(boundary.additional_kwargs)) return
+  const sourceId = graphAssistantProviderSourceId(response)
+  if (!sourceId) return
+
+  let occurrence = loadPreviousOccurrence?.(threadId, boundary.id, sourceId)
+  let scopeIndex = boundaryIndex
+  let scopeId = boundary.id
+  const parentBoundaryId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  if (occurrence === undefined && typeof parentBoundaryId === "string") {
+    // The graph may start the repair model before the IPC values consumer
+    // records the new boundary. Its trusted parent already has durable order.
+    const parentIndex = messages.findIndex(
+      (message, index) =>
+        index < boundaryIndex &&
+        message.id === parentBoundaryId &&
+        HumanMessage.isInstance(message) &&
+        hasScopedGraphTranscriptBoundary(message.additional_kwargs)
+    )
+    if (parentIndex >= 0) {
+      occurrence = loadPreviousOccurrence?.(threadId, parentBoundaryId, sourceId)
+      scopeIndex = parentIndex
+      scopeId = parentBoundaryId
+    }
+  }
+  if (occurrence !== undefined) {
+    const graph = getScopedGraphProviderOccurrences(threadId, runToken, scopeId)
+    occurrence = Math.max(occurrence, graph?.get(sourceId)?.assistant ?? 0)
+    for (const message of messages.slice(scopeIndex + 1)) {
+      if (!AIMessage.isInstance(message) || graphAssistantProviderSourceId(message) !== sourceId)
+        continue
+      const declared = getMessageProviderTupleFromMetadata(message.additional_kwargs)
+      occurrence = Math.max(occurrence + 1, declared?.provider_occurrence ?? 0)
+    }
+  }
+
+  response.additional_kwargs = {
+    ...response.additional_kwargs,
+    [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: sourceId,
+    ...(occurrence !== undefined && {
+      [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: occurrence + 1
+    })
+  }
+  // The graph reducer would otherwise replace an earlier assistant when the
+  // provider reuses its ID. The tuple keeps this graph slot tied to its SQLite row.
+  if (messages.some((message) => message.id === response.id)) response.id = randomUUID()
+}
+
 /** Middleware that injects steered messages into the running model loop. Wired
  * into runtime.ts's single `createDeepAgent` middleware array (before
  * summarization, so injected turns are seen by context management, and before
@@ -548,23 +908,64 @@ function completedAssistantMessageForTranscript(
  * into a foreground run can never be drained by a differently-keyed background
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
-  ownerRunToken?: string
+  ownerRunToken?: string,
+  onModelRequestState?: (active: boolean) => void,
+  loadGraphProviderOccurrence?: GraphProviderOccurrenceLoader,
+  prepareScopedProviderHistory?: (threadId: string, scopedTurn: boolean) => Promise<void> | undefined
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
     wrapModelCall: async (request, handler) => {
-      const response = await handler(request)
       const threadId =
         typeof request.runtime?.configurable?.thread_id === "string"
           ? request.runtime.configurable.thread_id
           : undefined
-      if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
-        const completed = completedAssistantMessageForTranscript(response)
-        if (completed) {
-          completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
+      const messages = request.state?.messages ?? request.messages ?? []
+      // Record before the handler can emit the first raw delta.
+      if (threadId && ownerRunToken && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
+        const scopedTurn = rememberScopedGraphProviderOccurrences(threadId, ownerRunToken, messages)
+        const preparation = prepareScopedProviderHistory?.(threadId, scopedTurn)
+        if (preparation) {
+          await preparation
+          request.runtime?.signal?.throwIfAborted()
+          if (!isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
+            throw new DOMException("Superseded turn", "AbortError")
+          }
         }
       }
-      return response
+      onModelRequestState?.(true)
+      try {
+        const notificationIdentity =
+          threadId && ownerRunToken
+            ? registerNotificationModelExecution(threadId, ownerRunToken, messages)
+            : undefined
+        const response = await handler(request)
+        if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
+          if (notificationIdentity) {
+            response.id = notificationIdentity.stableId
+            response.additional_kwargs = {
+              ...response.additional_kwargs,
+              [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: notificationIdentity.providerSourceId,
+              [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: notificationIdentity.providerOccurrence
+            }
+          } else {
+            assignScopedGraphAssistantIdentity(
+              threadId,
+              ownerRunToken,
+              messages,
+              response,
+              loadGraphProviderOccurrence
+            )
+          }
+          const completed = completedAssistantMessageForTranscript(response)
+          if (completed) {
+            completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
+          }
+        }
+        return response
+      } finally {
+        onModelRequestState?.(false)
+      }
     },
     beforeModel: async (state, runtime) => {
       const threadId =
@@ -574,7 +975,7 @@ export function createCurrentRunMessageQueueMiddleware(
       if (!threadId || !ownerRunToken) return undefined
 
       const messages = Array.isArray(state.messages) ? state.messages : []
-      const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-1))
+      const anchorMessage = currentRunInjectionAnchorForTail(messages, messages.length - 1)
       const injection = await drainCurrentRunMessagesForInjection(
         threadId,
         ownerRunToken,
@@ -609,7 +1010,7 @@ export function createCurrentRunMessageQueueMiddleware(
           completedAssistantMessagesByRun.get(completedKey) ??
           completedAssistantMessageForTranscript(lastMessage)
         completedAssistantMessagesByRun.delete(completedKey)
-        const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-2))
+        const anchorMessage = currentRunInjectionAnchorForTail(messages, messages.length - 2)
 
         const injection = await drainCurrentRunMessagesForInjection(
           threadId,
@@ -635,7 +1036,17 @@ export function createCurrentRunMessageQueueMiddleware(
             }
           }
         }
-        return injection ? { messages: injection.messages, jumpTo: "model" as const } : undefined
+        if (!injection) return undefined
+        // Persist a new object for the renamed reply. The checkpoint saver uses
+        // immutable message-prefix reuse; mutating its previous object alone
+        // keeps the old provider ID on disk and duplicates the reply on reload.
+        const completedSnapshot = completedAssistantMessage
+          ? new AIMessage({ ...lastMessage, content: lastMessage.content, id: lastMessage.id })
+          : undefined
+        return {
+          messages: completedSnapshot ? [completedSnapshot, ...injection.messages] : injection.messages,
+          jumpTo: "model" as const
+        }
       }
     }
   })

@@ -48,6 +48,7 @@ const EMPTY_SCRIPT_RECORDING: BrowserRecordingSession = {
   script: ""
 }
 const DEFAULT_PLAYBACK_LABEL = "当前操作"
+const RECORDING_POLL_MS = 800
 
 interface PendingScriptExecution {
   script: string
@@ -264,6 +265,16 @@ export function BrowserScriptRecordingControls({
   useEffect(() => {
     return window.api.browser.onScriptRecordingState(setScriptRecording)
   }, [])
+
+  useEffect(() => {
+    if (scriptRecording.status !== "recording" || !recordingDialogOpen) return
+    const interval = window.setInterval(() => {
+      void refreshScriptRecording()
+    }, RECORDING_POLL_MS)
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [recordingDialogOpen, scriptRecording.status, refreshScriptRecording])
 
   useEffect(() => {
     const nextSelectionSyncKey = [

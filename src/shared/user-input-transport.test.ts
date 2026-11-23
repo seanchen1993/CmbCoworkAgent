@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { formatSkillUseBlock } from "./skill-use-block"
 import {
+  BOT_BROWSER_PROMPT_PREFIX,
   BUILTIN_BROWSER_INSTRUCTIONS_CLOSE,
   BUILTIN_BROWSER_INSTRUCTIONS_OPEN,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
@@ -43,6 +44,9 @@ describe("stripUserInputTransportDecorations", () => {
   })
 
   it("peels the browser prefix, then a coordinator token inside it", () => {
+    expect(stripUserInputTransportDecorations(`${BOT_BROWSER_PROMPT_PREFIX}打开首页`)).toBe(
+      "打开首页"
+    )
     expect(
       stripUserInputTransportDecorations(`${BUILTIN_BROWSER_PROMPT_PREFIX}[coordinator] 打开首页`)
     ).toBe("打开首页")
@@ -66,10 +70,16 @@ describe("stripUserInputTransportDecorations", () => {
 })
 
 describe("built-in browser prefixes", () => {
-  it("routes browser operations through the local skill", () => {
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("devclaw-in-app-browser 技能")
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("inAppBrowser_extract_iframes")
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("WPS 在线文档")
+  it("uses reusable-operation wording", () => {
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("匹配的可复用操作")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("匹配的录制脚本")
+  })
+
+  it("uses the iframe extractor when iframe content cannot be read", () => {
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("页面读取先用 browser_snapshot")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("iframe 内容无法读取时")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("inAppBrowser_extract_iframes")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("支持跨域")
   })
 
   it("stay the pair the composer actually prepends", () => {

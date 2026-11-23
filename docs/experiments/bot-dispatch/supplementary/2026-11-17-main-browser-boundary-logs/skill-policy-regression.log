@@ -1,0 +1,46 @@
+
+ RUN  v3.2.4 <repository>
+
+ ✓ src/main/bots/skill-policy.test.ts (5 tests) 2ms
+stderr | src/main/agent/bot-skill-selection.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+(node:30907) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+stdout | src/main/agent/bot-skill-selection.test.ts > task subagents with their own skill sources receive the selected catalog and file loader
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+ ✓ src/main/agent/bot-skill-selection.test.ts (9 tests) 224ms
+
+ Test Files  2 passed (2)
+      Tests  14 passed (14)
+   Start at  15:39:11
+   Duration  3.59s (transform 1.73s, setup 0ms, collect 3.23s, tests 226ms, environment 0ms, prepare 89ms)
+

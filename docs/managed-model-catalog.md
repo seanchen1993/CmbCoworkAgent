@@ -43,4 +43,41 @@ CMB_BUILTIN_MODEL_API_KEY=<由凭据管理系统注入，不要提交到 Git>
 
 清单没有 `modelCatalog`、目录为空或首次拉取失败时，客户端只使用内置的 MiniMax 作为本地兜底模型，不会额外注入 DeepSeek。成功加载过后台目录后，后续刷新失败会继续保留上一次内存中的有效目录。客户端启动时拉取一次，并等待首次请求完成后才启动调度器、心跳和 ChatX，之后每 30 分钟刷新。
 
-模型列表将用户保存的默认模型放在首位；固定模型被后台撤下或失去密钥时，ChatX 会回退到保存的默认可用模型。
+模型列表将用户保存的默认模型放在首位。未设置默认模型时，优先使用可用的码豆模型PRO。固定路由收到明确的模型引用后，模型缺失或缺少密钥时会提示模型不可用。
+
+## 码豆模型PRO（生产 / UAT）
+
+在仓库 `.env` 中配置以下变量，沿用 `envcrypt` Git 过滤器加密保存的流程（见 [环境变量加密说明](env-encryption-guide.md)）：
+
+```dotenv
+MAIN_VITE_IDLE_MODEL_PROD_BASE_URL=<生产转发网关的完整 Base URL，不含 /chat/completions>
+MAIN_VITE_IDLE_MODEL_PROD_API_KEY=<独立团队提供的生产网关凭据>
+MAIN_VITE_IDLE_MODEL_UAT_BASE_URL=<UAT 网关地址，路径截至 /pattern/llm/v1>
+MAIN_VITE_IDLE_MODEL_UAT_API_KEY=<独立团队提供的 UAT 网关凭据>
+```
+
+这四个变量只注入主进程，不下发到渲染进程。原有 `MAIN_VITE_IDLE_MODEL_BASE_URL` / `MAIN_VITE_IDLE_MODEL_API_KEY` 已迁移至对应的 UAT 变量。配置所选环境的地址后，客户端会独立加入 `builtin:idle-ultra`，不受远端目录替换影响，也不复用其他内置模型的密钥。
+
+生产环境经网关转发时，Base URL 需包含网关要求的完整路由前缀；客户端在其后追加 `/chat/completions`。修改仓库 `.env` 后需重新构建应用。
+
+码豆模型PRO 的生产 Base URL 为 `http://pmsgateway.paasoa.cmbchina.cn/devagent/pattern/llm/v1`，最终请求路径为 `/devagent/pattern/llm/v1/chat/completions`。
+
+默认使用生产环境。在应用数据目录的 `settings.json`（默认 `~/.cmbcoworkagent/settings.json`；使用 `CMB_COWORK_AGENT_HOME` 时位于该目录）中合并以下配置，可切换到 UAT：
+
+```json
+{
+  "idleModelUseUat": true
+}
+```
+
+修改后重启应用生效。布尔值 `true` 为码豆模型PRO 启用 UAT，设为 `false` 或删除该字段即使用生产环境。各环境使用各自的地址和密钥，切换环境时沿用模型引用、用户参数和历史会话。
+
+- 默认显示为“码豆模型PRO”，连接信息和请求模式 `pro` 由内置配置管理。生产环境的上下文窗口固定为 128,000 Tokens。UAT 默认使用 200,000 Tokens，可在模型配置中调整并保存。切回生产后会保留 UAT 保存的窗口大小。
+- 配置密钥和八位 SAP 工号后，生产和 UAT 环境均可随时调用。未设置默认模型时，码豆模型PRO 在可用内置模型中优先，默认路由档位为强力。
+- 已保存的默认模型、会话和托管预约沿用原有标识，执行时使用 Pro。界面在 UAT 环境下仍会显示测试环境提示。
+- 每次请求从当前登录用户信息读取八位 `sapId`，作为 `x-spaid`；缺少或格式不正确时禁止调用，并提示完善用户信息。
+- 网关凭据使用 `x-gateway-key`，会话使用 `x-session-id`，每次调用携带 `x-request-id`。客户端将 `x-session-id` 控制在 36 位以内，为网关的 40 位上限预留余量。不超过 36 位的 Thread ID 保持原值，超长 ID 对完整内容计算 SHA-256 并取前 36 位十六进制摘要。主对话与上下文压缩使用相同的会话标识。独立子会话使用自身 Thread ID 映射，无 Thread 的辅助调用使用模型实例生命周期内稳定的独立 UUID。映射仅用于码豆模型PRO 请求头，内部 Thread ID 保持原值。
+- 复用 OpenAI 聊天、SSE 与工具调用协议。界面始终显示配置名称，响应中的实际模型名仅用于诊断。
+- 沿用现有重试等待策略，不读取 `retry_after_ms` 或 `Retry-After`；`434` 显示“码豆余额不足”，不进行自动重试或模型故障切换。保留其他网关错误的 `errorMsg` 和请求追踪 ID。
+- `485/580` 的错误文案包含“任务上下文超过最大限度”时，优先进入现有上下文压缩恢复；`580` 不再先原样重复请求。恢复复用摘要生成、完整轮次裁剪及最近消息保留逻辑，摘要模型调用共享最多 4 次的预算，仍无法恢复时返回错误。不包含该文案的内部异常继续沿用原有错误处理。
+- 此网关提供 OpenAI 接口，暂不用于要求 Anthropic 接口的 Claude Code 终端。

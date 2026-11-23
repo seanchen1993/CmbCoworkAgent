@@ -1,3 +1,4 @@
+import { nextImDeliveryOrder } from "./delivery-order"
 import {
   assertRemoteImEventV1,
   assertRemoteImReplyV1,
@@ -10,6 +11,7 @@ import type { ImTargetSnapshot } from "./conversation-state"
 import { ImConversationStateError } from "./conversation-state"
 import type { ImPersistenceDependencies } from "./persistence"
 import { readAll, readOne, withImTransaction } from "./persistence"
+import { ImSessionLinkStore } from "./session-link-store"
 
 export type ImEventState =
   | "received"
@@ -52,6 +54,7 @@ export interface ImEventRecord {
 }
 
 export interface ImReplyOutboxRecord {
+  deliveryOrder?: number
   outboxId: string
   deliveryId: string
   eventId: string | null
@@ -98,6 +101,7 @@ interface ImEventRow {
 }
 
 interface ImReplyOutboxRow {
+  delivery_order: number | null
   outbox_id: string
   delivery_id: string
   event_id: string | null
@@ -202,6 +206,7 @@ function hydrateEvent(row: ImEventRow): ImEventRecord {
 
 function hydrateOutbox(row: ImReplyOutboxRow): ImReplyOutboxRecord {
   return {
+    deliveryOrder: row.delivery_order ?? Number(row.created_at) * 1024,
     outboxId: row.outbox_id,
     deliveryId: row.delivery_id,
     eventId: row.event_id ?? null,
@@ -322,7 +327,10 @@ function normalizeProactiveReplies(replies: readonly RemoteImReplyV1[]): RemoteI
 }
 
 export class ImEventStore {
-  constructor(private readonly dependencies: ImPersistenceDependencies) {}
+  readonly sessionLinks: ImSessionLinkStore
+  constructor(private readonly dependencies: ImPersistenceDependencies) {
+    this.sessionLinks = new ImSessionLinkStore(dependencies)
+  }
 
   getEvent(eventId: string): ImEventRecord | null {
     const row = readOne<ImEventRow>(
@@ -339,6 +347,26 @@ export class ImEventStore {
       "SELECT * FROM im_events WHERE conversation_key = ? ORDER BY conversation_seq ASC",
       [conversationKey]
     ).map(hydrateEvent)
+  }
+
+  countQueuedConversationEvents(conversationKey: string): number {
+    return Number(
+      readOne<{ count: number }>(
+        this.dependencies.getDatabase(),
+        "SELECT COUNT(*) AS count FROM im_events WHERE conversation_key = ? AND state = 'queued'",
+        [conversationKey]
+      )?.count ?? 0
+    )
+  }
+
+  hasReplyDelivery(deliveryId: string): boolean {
+    return Boolean(
+      readOne<{ found: number }>(
+        this.dependencies.getDatabase(),
+        "SELECT 1 AS found FROM im_reply_outbox WHERE delivery_id = ? LIMIT 1",
+        [deliveryId]
+      )
+    )
   }
 
   getNextQueuedEvent(conversationKey: string): ImEventRecord | null {
@@ -707,11 +735,12 @@ export class ImEventStore {
       for (const reply of normalizedReplies) {
         database.run(
           `INSERT INTO im_reply_outbox (
-             outbox_id, delivery_id, event_id, conversation_key,
+             delivery_order, outbox_id, delivery_id, event_id, conversation_key,
              idempotency_key, segment_index, segment_count, content, content_format, state,
              platform_reply_id, attempt_count, next_attempt_at, reason_code, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
           [
+            nextImDeliveryOrder(),
             `${reply.deliveryId}:${reply.segment.index}`,
             reply.deliveryId,
             eventId,
@@ -785,11 +814,12 @@ export class ImEventStore {
       for (const reply of normalized) {
         database.run(
           `INSERT INTO im_reply_outbox (
-             outbox_id, delivery_id, event_id, conversation_key,
+             delivery_order, outbox_id, delivery_id, event_id, conversation_key,
              idempotency_key, segment_index, segment_count, content, content_format, state,
              platform_reply_id, attempt_count, next_attempt_at, reason_code, created_at, updated_at
-           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
+           ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
           [
+            nextImDeliveryOrder(),
             `${reply.deliveryId}:${reply.segment.index}`,
             reply.deliveryId,
             reply.conversationKey,
@@ -962,6 +992,35 @@ export class ImEventStore {
           "SELECT * FROM im_reply_outbox ORDER BY created_at ASC, segment_index ASC"
         )
     return rows.map(hydrateOutbox)
+  }
+
+  isOutboxPending(id: string): boolean {
+    return Boolean(readOne(this.dependencies.getDatabase(),
+      "SELECT 1 FROM im_reply_outbox WHERE outbox_id=? AND state='pending'", [id]))
+  }
+
+  headDeliveryOrder(conversationKey: string): number | null {
+    return readOne<{ position: number }>(this.dependencies.getDatabase(),
+      `SELECT COALESCE(o.delivery_order,o.created_at*1024) AS position FROM im_reply_outbox o
+       WHERE o.conversation_key=? AND o.state IN ('pending','sending') AND NOT EXISTS (
+         SELECT 1 FROM im_reply_outbox prev WHERE prev.delivery_id=o.delivery_id
+         AND prev.segment_index<o.segment_index AND prev.state IN ('unknown','failed')
+       ) ORDER BY o.rowid LIMIT 1`, [conversationKey])?.position ?? null
+  }
+
+  pendingReplyConversations(): string[] {
+    return readAll<{ conversation_key: string }>(this.dependencies.getDatabase(),
+      "SELECT DISTINCT conversation_key FROM im_reply_outbox WHERE state='pending'")
+      .map(row => row.conversation_key)
+  }
+
+  // Include settled siblings of unfinished deliveries so a failed segment cannot
+  // accidentally release the rest of its own multipart reply.
+  conversationOutbox(conversationKey: string): ImReplyOutboxRecord[] {
+    return readAll<ImReplyOutboxRow>(this.dependencies.getDatabase(),
+      `SELECT * FROM im_reply_outbox WHERE conversation_key=? AND delivery_id IN (
+         SELECT delivery_id FROM im_reply_outbox WHERE conversation_key=? AND state IN ('pending','sending')
+       ) ORDER BY rowid`, [conversationKey, conversationKey]).map(hydrateOutbox)
   }
 
   async markOutboxSending(outboxId: string): Promise<ImReplyOutboxRecord> {

@@ -1,0 +1,17 @@
+stage: launching isolated App <temp>/m05-local-work-app-3SKTaO
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+stage: real-work-runtime-file-delivery
+artifact-directory <temp>/m05-local-work-app-3SKTaO last model phases [[],[],[],[],[],["bot_work_read"],["write_file"],["write_file","bot_deliver_files"],[],[],[],["edit_file"],["edit_file","bot_deliver_files"],[]]
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-3SKTaO
+locator.waitFor: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('[data-chat-thread-id="16542612-3922-4323-8063-d25a4e9c7616"]') to be visible
+
+    at checkReturned (<repo>/tests/bots-local-work-app.spec.ts:544:71)
+    at async main (<repo>/tests/bots-local-work-app.spec.ts:606:5) {
+  log: [
+    `  - waiting for locator('[data-chat-thread-id="16542612-3922-4323-8063-d25a4e9c7616"]') to be visible`
+  ],
+  name: 'TimeoutError'
+}

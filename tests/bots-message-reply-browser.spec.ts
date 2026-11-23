@@ -1,0 +1,495 @@
+/** Real message rows/actions; transport and optional tool/dialog dependencies are isolated. */
+import assert from "node:assert/strict"
+import { existsSync } from "node:fs"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
+import { build } from "esbuild"
+import { chromium } from "playwright"
+import { compile } from "@tailwindcss/node"
+import { Scanner } from "@tailwindcss/oxide"
+
+declare global {
+  interface Window {
+    replyFixture: {
+      ids: string[]
+      calls: string[]
+      loading: boolean
+      runningTool: boolean
+      renderMembers(width: number): void
+      renderQuote(imported: boolean, editReady?: boolean, mode?: "bot" | "default"): void
+      renderHistoricalSkill(text: string, trusted: boolean): void
+      edits: { content: string }[]
+      draftReplies: ({ id: string } | null)[]
+      jumps: string[]
+      render(
+        mode: "bot" | "default",
+        loading?: boolean,
+        layout?: "short" | "long" | "table" | "file" | "failed-file",
+        userReaction?: boolean,
+        canReply?: boolean
+      ): void
+    }
+  }
+}
+
+async function main() {
+  const dir = await mkdtemp(join(tmpdir(), "bot-message-reply-"))
+  const browser = await chromium.launch({
+    ...(existsSync(chromium.executablePath())
+      ? {}
+      : { channel: process.platform === "win32" ? "msedge" : "chrome" }),
+    headless: true
+  })
+  try {
+    const bundle = await build({
+      stdin: {
+        resolveDir: resolve("."),
+        loader: "tsx",
+        contents: `
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {ChatMessageVirtualList} from './src/renderer/src/components/chat/ChatMessageVirtualList';
+import {ChatPresentationContext,ChatReplyActionsContext} from './src/renderer/src/components/chat/chat-presentation-context';
+import {BotMessageReactionsContext} from './src/renderer/src/components/bots/bot-message-reactions-context';
+import {BotGroupMembers} from './src/renderer/src/components/bots/BotGroupMembers';
+import {formatBotMessageReply} from './src/shared/bots/message-reply';
+import {getWorkerToolUiKey} from './src/renderer/src/lib/worker-tool-result-key';
+const root=createRoot(document.getElementById('root'));
+const noop=()=>{};
+const ids=['first','provider:response/model::cmb-same-role-duplicate:assistant:2','provider:response/model::cmb-same-role-duplicate:assistant:3'];
+const messages=[{id:'user',role:'user',content:'请分段报告',created_at:new Date(1)},...ids.map((id,i)=>({id,ordinal:2+i*2,role:'assistant',content:['第一条已完成','中间这条独立结果','最后一条结果'][i],created_at:new Date(2+i)}))];
+const props={lastUserMessageIndex:0,contentVersion:0,historyHasMore:false,historyPageLoading:false,historyRemainingCount:0,onLoadEarlierHistoryPage:noop,historyGapBeforeMessageId:null,canLoadReleasedHistory:false,onLoadReleasedHistoryWindow:noop,onRestoreLatestHistoryWindow:noop,hookLoggingEnabled:false,hookLogBucketByTurnId:new Map(),detachedHookLogBuckets:[],contentMessageRefs:{current:new Map()},setMessageRef:()=>noop,toolResults:new Map(),toolCallStates:new Map(),pendingApprovalToolCallKeys:new Set(),pendingApproval:null,autoApproveGitPush:false,onApprovalDecision:noop,onEditUserMessage:noop,onSetGoalFromMessage:noop,onForkFromMessage:null,forkingMessageId:null,onOpenHookLogBucket:noop,threadId:'reply-fixture',customScrollParent:document.getElementById('viewport'),virtuosoRef:{current:null},navigatorVirtualRangeRef:{current:null},initialTopMostItemIndex:{index:'LAST',align:'end',behavior:'auto'},onInitialVirtualItemsRendered:noop,onContentHeightChanged:noop,onAtBottomStateChange:noop,footer:null,assistantDurationMsById:new Map(),userSendTimeLabelById:new Map([["user","08:00"]])};
+const state=window.replyFixture={ids,calls:[],mode:'bot',loading:false,runningTool:false,render(mode='bot',loading=false,layout='short',userReaction=true,canReply=true){state.mode=mode;state.loading=loading;state.runningTool=loading;document.getElementById('root').dataset.chatSurface=mode;const shown=messages.map(m=>m.role!=='assistant'||layout==='short'?m:{...m,content:layout==='long'?'长消息正文和不能断开的链接 https://example.com/'+ 'a'.repeat(120)+' 结束。'.repeat(24):'| 项目 | 内容 | 补充 |\\n| --- | --- | --- |\\n| 已完成 | https://example.com/'+ 'a'.repeat(160)+' | 表格内容 |'});const fileLayout=layout==='file'||layout==='failed-file';if(fileLayout){shown.splice(0,shown.length,...messages);shown[1]={...messages[1],content:'',tool_calls:[{id:'file-call',name:'bot_deliver_files',args:{}}]}}const fileResults=fileLayout?new Map([[getWorkerToolUiKey(ids[0],'file-call',0),{content:JSON.stringify({kind:'bot-file-delivery',files:[{name:'report.json',filePath:'/workspace/report.json',size:44}]}),is_error:layout==='failed-file'}]]):props.toolResults;if(loading)shown[shown.length-1]={...shown.at(-1),tool_calls:[{id:'held-execute',name:'execute',args:{command:'held'}}]};const tools=loading?new Map([['held-execute',{status:'running',name:'execute'}]]):props.toolCallStates;root.render(<ChatPresentationContext.Provider value={mode}><ChatReplyActionsContext.Provider value={{canReply,reply:id=>state.calls.push(id),setDraftReply:noop,quoteFor:()=>undefined,jump:noop}}><BotMessageReactionsContext.Provider value={{stateFor:id=>({messageId:id,canReact:true,reactions:id==='user'?(userReaction?[{emoji:"👍",count:1,mine:false,actors:[{botId:"actor-bot",name:"验收 Bot"}]}]:[]):[{emoji:"👍",count:1,mine:true}]}),pending:()=>false,errorFor:()=>undefined,readOnly:false,set:async()=>{},retry:noop}}><ChatMessageVirtualList {...props} isLoading={loading} toolResults={fileResults} toolCallStates={tools} messages={shown} visibleMessageIndexes={shown.map((_,i)=>i)}/></BotMessageReactionsContext.Provider></ChatReplyActionsContext.Provider></ChatPresentationContext.Provider>)} };
+state.renderMembers=(width)=>{const m={id:'m',name:'Existing',color:'#999',shape:'circle'},a={...m,id:'a',name:'Available'};root.render(<div style={{width}}><BotGroupMembers group={{id:'g',name:'G',version:1,memberIds:['m']}} bots={[m,a]} client={{saveGroup:async()=>{}}} onOpen={noop}/></div>)};
+state.edits=[];state.draftReplies=[];state.jumps=[];
+state.renderQuote=(imported,editReady=true,mode="bot")=>{
+  state.edits=[];state.draftReplies=[];state.jumps=[];
+  const quote={id:'prior',ordinal:1,role:'assistant',text:'Earlier reference @notes.md',...(imported?{sourceThreadId:'source-main'}:{})};
+  const shown=[{...messages[0],...(mode==='default'?{botHistoryInputOrigin:{replyTo:quote}}:{}),content:formatBotMessageReply('📎 old.csv\\n\\nSelected instruction',quote)}];
+  root.render(<ChatPresentationContext.Provider value={mode}><ChatReplyActionsContext.Provider value={mode==='bot'?{canReply:true,editReady,reply:noop,setDraftReply:q=>state.draftReplies.push(q),quoteFor:()=>quote,jump:q=>state.jumps.push(q.id)}:null}><ChatMessageVirtualList {...props} onEditUserMessage={m=>state.edits.push(m)} messages={shown} visibleMessageIndexes={[0]}/></ChatReplyActionsContext.Provider></ChatPresentationContext.Provider>);
+};
+state.renderHistoricalSkill=(text,trusted)=>{
+  const shown=[{...messages[0],content:text,...(trusted?{botHistoryInputOrigin:{explicitSkill:{name:'Verified review',path:'/skills/review/SKILL.md'}}}:{})}];
+  root.render(<ChatPresentationContext.Provider value="default"><ChatMessageVirtualList {...props} messages={shown} visibleMessageIndexes={[0]}/></ChatPresentationContext.Provider>);
+};
+state.render();`
+      },
+      bundle: true,
+      write: false,
+      format: "iife",
+      platform: "browser",
+      jsx: "automatic",
+      loader: { ".png": "dataurl" },
+      alias: { "@": resolve("src/renderer/src") },
+      define: { "process.env.NODE_ENV": '"production"', "import.meta.env.DEV": "false" },
+      plugins: [
+        {
+          name: "reply-fixture-isolation",
+          setup(builder) {
+            builder.onResolve({ filter: /^@\/lib\/thread-context$/ }, () => ({
+              path: "thread-state",
+              namespace: "reply-thread-fixture"
+            }))
+            builder.onLoad({ filter: /.*/, namespace: "reply-thread-fixture" }, () => ({
+              contents:
+                "const state={workspacePath:null,workspaceFiles:[]};export const useThreadStateSelector=(_id,select)=>select(state);",
+              loader: "js"
+            }))
+            builder.onResolve(
+              {
+                filter: /^\.\/(ToolCallRenderer|MessageFeedbackDialog|HookLogViews|ModCards)$/
+              },
+              (args) => ({ path: args.path, namespace: "reply-fixture" })
+            )
+            builder.onLoad({ filter: /.*/, namespace: "reply-fixture" }, (args) => ({
+              contents: args.path.includes("HookLog")
+                ? "export const HookLogChip=()=>null"
+                : args.path.includes("Feedback")
+                  ? "export const MessageFeedbackDialog=()=>null"
+                  : args.path.includes("ModCards")
+                    ? "export const ModCards=()=>null"
+                    : "export const ToolCallRenderer=()=>null",
+              loader: "tsx"
+            }))
+          }
+        }
+      ]
+    })
+    const styleSources = [
+      "src/renderer/src/components/chat/MessageBubble.tsx",
+      "src/renderer/src/components/chat/ChatMessageVirtualList.tsx",
+      "src/renderer/src/components/chat/StreamingMarkdown.tsx",
+      "src/renderer/src/components/bots/BotMessageActions.tsx",
+      "src/renderer/src/components/bots/BotGroupMembers.tsx",
+      "src/renderer/src/components/ui/select.tsx"
+    ]
+    const stylesheet = await compile(await readFile("src/renderer/src/index.css", "utf8"), {
+      base: resolve("src/renderer/src"),
+      onDependency: () => {}
+    })
+    const productionStyles =
+      stylesheet.build(
+        new Scanner({}).scanFiles(
+          await Promise.all(
+            styleSources.map(async (file) => ({
+              content: await readFile(file, "utf8"),
+              extension: "tsx"
+            }))
+          )
+        )
+      ) + (await readFile("src/renderer/src/components/bots/bots.css", "utf8"))
+    await writeFile(
+      join(dir, "index.html"),
+      '<meta charset="utf-8"><style>' +
+        productionStyles +
+        '</style><style>body{margin:0}#viewport{height:100vh;overflow:auto}#root{display:block;max-width:760px;margin:auto;padding:24px}</style><div id="viewport"><div id="root" class="bots-workspace"></div></div><script>' +
+        bundle.outputFiles[0].text +
+        "</script>"
+    )
+    const page = await browser.newPage({ viewport: { width: 960, height: 800 } })
+    const errors: string[] = []
+    page.on("pageerror", (error) => errors.push(error.message))
+    await page.route("**/*", (route) =>
+      route.request().url().startsWith("file:") || route.request().url().startsWith("data:")
+        ? route.continue()
+        : route.abort()
+    )
+    await page.goto("file://" + join(dir, "index.html"))
+    const rows = page.locator('[data-chat-message-row][data-message-role="assistant"]')
+    await rows
+      .last()
+      .waitFor({ timeout: 15_000 })
+      .catch((error) => {
+        throw new Error(`${error.message}\nRenderer errors: ${errors.join("\n")}`)
+      })
+    assert.equal(await rows.count(), 3)
+    const userRow = page.locator('[data-chat-message-row][data-message-role="user"]')
+    const userChip = userRow.locator("[data-message-reactions] button")
+    await userChip.waitFor()
+    assert.equal(await userRow.getByRole("button", {name:"添加表情回应",exact:true}).count(), 0, "user messages do not offer self-reactions")
+    await page.mouse.move(0, 0)
+    const userVisibility = () =>
+      userChip.evaluate((chip) => {
+        const chain = []
+        let opacity = 1
+        for (let node: HTMLElement | null = chip; node; node = node.parentElement) {
+          const style = getComputedStyle(node)
+          opacity *= Number(style.opacity)
+          chain.push({
+            tag: node.tagName,
+            actions: node.hasAttribute("data-message-actions"),
+            opacity: style.opacity,
+            position: style.position,
+            overflow: style.overflow
+          })
+        }
+        const bubble = chip.closest('[data-message-bubble="user"]')!
+        const outer = bubble.querySelector(":scope > div > [data-message-actions]")!
+        const toolbar = outer.querySelector("[data-message-actions]")!
+        const time = outer.querySelector("time")!
+        const rect = chip.getBoundingClientRect(),
+          body = bubble.querySelector("[data-message-body]")!.getBoundingClientRect()
+        return {
+          opacity,
+          chain,
+          outerPosition: getComputedStyle(outer).position,
+          toolbarOpacity: getComputedStyle(toolbar).opacity,
+          timeOpacity: getComputedStyle(time).opacity,
+          chip: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+          bodyBottom: body.bottom,
+          viewportWidth: innerWidth
+        }
+      })
+    const offHover = await userVisibility()
+    console.log("USER_REACTION_OFF_HOVER", JSON.stringify(offHover))
+    assert.equal(
+      offHover.opacity,
+      1,
+      "a persistent user-message reaction must have no transparent ancestor"
+    )
+    assert.equal(
+      offHover.outerPosition,
+      "static",
+      "persistent reactions participate in user-row layout"
+    )
+    assert(
+      offHover.chip.top >= offHover.bodyBottom && offHover.chip.right <= offHover.viewportWidth
+    )
+    assert.equal(offHover.toolbarOpacity, "0", "the action toolbar still waits for hover")
+    assert.equal(offHover.timeOpacity, "0", "the timestamp still waits for hover")
+    await userRow.hover()
+    await page.waitForFunction(() => {
+      const row = document.querySelector('[data-message-bubble="user"]')!
+      const outer = row.querySelector(":scope > div > [data-message-actions]")!
+      return (
+        getComputedStyle(outer.querySelector("[data-message-actions]")!).opacity === "1" &&
+        getComputedStyle(outer.querySelector("time")!).opacity === "1"
+      )
+    })
+    await page.evaluate(() => window.replyFixture.render("bot", false, "short", false))
+    await userRow.locator("[data-message-reactions]").waitFor({ state: "detached" })
+    await page.mouse.move(0, 0)
+    await page.waitForFunction(
+      () =>
+        getComputedStyle(
+          document.querySelector('[data-message-bubble="user"] > div > [data-message-actions]')!
+        ).opacity === "0"
+    )
+    assert.equal(
+      await userRow
+        .locator("[data-message-actions]")
+        .first()
+        .evaluate((node) => getComputedStyle(node).position),
+      "absolute",
+      "rows without reactions keep their original action layout"
+    )
+    await page.evaluate(() => window.replyFixture.render("bot"))
+    await userChip.waitFor()
+    console.log(
+      "PASS user reaction visibility: actual MessageBubble ancestors and production CSS; persistent chip visible without hover, toolbar/time hover only, no-chip layout unchanged"
+    )
+
+    for (let index = 0; index < 3; index++) {
+      assert.equal(
+        await rows.nth(index).getByRole("button", { name: "回复消息", exact: true }).count(),
+        1,
+        "each actual assistant bubble needs its own explicit reply action"
+      )
+    }
+    await rows.nth(0).hover()
+    await rows.nth(0).getByRole("button", { name: "回复消息", exact: true }).click()
+    const middle = rows.nth(1).getByRole("button", { name: "回复消息", exact: true })
+    await middle.focus()
+    await page.keyboard.press("Enter")
+    assert.equal(
+      (await middle.locator("svg").boundingBox())?.width,
+      16,
+      "Bot reply icon matches Smile and More"
+    )
+    const ids = await page.evaluate(() => window.replyFixture.ids)
+    assert.deepEqual(
+      await page.evaluate(() => window.replyFixture.calls),
+      ids.slice(0, 2),
+      "click and keyboard reply must retain each selected durable identity"
+    )
+    assert.equal(
+      await rows.nth(1).getByRole("button", { name: "复制消息", exact: true }).count(),
+      0,
+      "the existing terminal-only feedback/copy toolbar must not spread to intermediate messages"
+    )
+    for (const width of [960, 360]) {
+      await page.setViewportSize({ width, height: 900 })
+      for (const layout of ["short", "long", "table"] as const) {
+        await page.evaluate((layout) => window.replyFixture.render("bot", false, layout), layout)
+        const row = rows.last()
+        await row.locator(".bot-assistant-content-row").waitFor()
+        if (layout === "table") await row.locator("table").waitFor()
+        await row.hover()
+        const geometry = await row.evaluate((node) => {
+          const body = node.querySelector("[data-message-body]")!.getBoundingClientRect()
+          const actions = node
+            .querySelector(".bot-message-bubble-wrap > [data-message-actions]")!
+            .getBoundingClientRect()
+          const reactions = node.querySelector("[data-message-reactions]")!.getBoundingClientRect()
+          const content = node.querySelector(".bot-assistant-content-row")!
+          let clipped = false
+          for (let ancestor = content.parentElement; ancestor && ancestor !== node.parentElement; ancestor = ancestor.parentElement) {
+            const style = getComputedStyle(ancestor)
+            const bounds = ancestor.getBoundingClientRect()
+            if (["hidden", "clip"].includes(style.overflowY) && reactions.top < bounds.top) clipped = true
+          }
+          return {
+            clipped,
+            body: { right: body.right, top: body.top, bottom: body.bottom },
+            actions: {
+              left: actions.left,
+              top: actions.top,
+              bottom: actions.bottom,
+              right: actions.right
+            },
+            reactions: { top: reactions.top, left: reactions.left, right: reactions.right, width: reactions.width },
+            row: content.getBoundingClientRect().toJSON(),
+            overflow: content.scrollWidth > content.clientWidth + 1,
+            order: [...content.querySelectorAll(".bot-message-bubble-wrap > [data-message-actions] > button")].map(
+              (button) => button.getAttribute("aria-label")
+            )
+          }
+        })
+        assert(
+          geometry.actions.left >= geometry.body.right + 4,
+          `${layout}/${width}: actions follow the bubble without overlap`
+        )
+        assert(
+          geometry.actions.top < geometry.body.bottom &&
+            geometry.actions.bottom > geometry.body.top,
+          `${layout}/${width}: actions stay beside the bubble`
+        )
+        assert(
+          geometry.actions.right <= geometry.row.right + 1 && !geometry.overflow,
+          `${layout}/${width}: no horizontal overflow`
+        )
+        assert(
+          geometry.reactions.top < geometry.body.top && geometry.reactions.top >= geometry.body.top - 14,
+          `${layout}/${width}: the reaction sits on the bubble's upper edge`
+        )
+        assert.equal(geometry.clipped, false, "the complete upper-right badge is not clipped by message ancestors")
+        assert(
+          Math.abs(geometry.reactions.width - 28) <= 1 && Math.abs(geometry.reactions.right - geometry.body.right - 8) <= 1,
+          `${layout}/${width}: one compact badge sits at the bubble's right corner ${JSON.stringify(geometry)}`
+        )
+        assert.deepEqual(geometry.order, ["添加表情回应", "回复消息", "更多消息操作"])
+      }
+    }
+    await page.setViewportSize({ width: 960, height: 800 })
+    await page.evaluate(() => window.replyFixture.render("bot", true))
+    await rows.last().getByRole("button", { name: "回复消息", exact: true }).waitFor()
+    const streamingBody = await rows.last().locator("[data-message-body]").elementHandle()
+    assert.equal(
+      await rows.nth(0).getByRole("button", { name: "回复消息", exact: true }).count(),
+      1
+    )
+    assert.equal(
+      await rows.nth(1).getByRole("button", { name: "回复消息", exact: true }).count(),
+      1,
+      "a later streaming message must not block replies to completed intermediate messages"
+    )
+    assert.equal(await page.evaluate(() => window.replyFixture.loading), true)
+    assert.equal(await page.evaluate(() => window.replyFixture.runningTool), true)
+    assert.equal(
+      await rows.last().getByRole("button", { name: "添加表情回应", exact: true }).isEnabled(),
+      true,
+      "Host-confirmed reactable Bot messages keep their actions while a hidden tool runs"
+    )
+    assert.equal(
+      await rows.last().getByRole("button", { name: "更多消息操作", exact: true }).count(),
+      1
+    )
+    await rows.last().getByRole("button", { name: "回复消息", exact: true }).click()
+    assert.equal(
+      await page.evaluate(() => window.replyFixture.calls.at(-1)),
+      ids.at(-1),
+      "reply forwards the exact selected message ID while the task remains loading, without finish metadata"
+    )
+    await page.evaluate(() => window.replyFixture.render("bot", false))
+    await rows.last().getByRole("button", { name: "回复消息", exact: true }).waitFor()
+    assert.equal(
+      await streamingBody!.evaluate(
+        (body) =>
+          body.isConnected && body.parentElement?.classList.contains("bot-message-bubble-wrap")
+      ),
+      true,
+      "completion retains the original Bot body and parent"
+    )
+    await page.evaluate(() => window.replyFixture.render("bot", false, "short", true, false))
+    await rows.last().getByRole("button", { name: "回复消息", exact: true }).waitFor({ state: "detached" })
+    assert.equal(
+      await page.getByRole("button", { name: "回复消息", exact: true }).count(),
+      0,
+      "read-only Bot history must not offer a reply action that cannot create a draft"
+    )
+    assert.equal(await rows.count(), 3, "read-only keeps the original message history mounted")
+    await page.evaluate(() => window.replyFixture.render("default", true))
+    await rows.last().locator("[data-message-actions]").waitFor({ state: "detached" })
+    assert.equal(
+      await rows.last().getByRole("button", { name: "回复消息", exact: true }).count(),
+      0,
+      "ordinary workbench streaming keeps its existing reply/action gate"
+    )
+    await page.evaluate(() => window.replyFixture.render("default", false))
+    await rows.nth(1).locator("[data-message-actions]").waitFor({ state: "detached" })
+    assert.equal(await rows.nth(0).locator("[data-message-actions]").count(), 0)
+    assert.equal(
+      await rows.last().getByRole("button", { name: "复制消息", exact: true }).count(),
+      1,
+      "the ordinary workbench must retain its original terminal message actions"
+    )
+    assert.equal(
+      (
+        await rows
+          .last()
+          .getByRole("button", { name: "回复消息", exact: true })
+          .locator("svg")
+          .boundingBox()
+      )?.width,
+      12,
+      "workbench reply icon keeps its original size"
+    )
+    await page.evaluate(() => window.replyFixture.render("bot", false, "file"))
+    await rows.first().getByRole("button", { name: "回复消息", exact: true }).waitFor()
+    await rows.first().getByRole("button", { name: "回复消息", exact: true }).click({ force: true })
+    assert.equal(await page.evaluate(() => window.replyFixture.calls.at(-1)), "first", "file-only reply keeps the original assistant identity")
+    await page.evaluate(() => window.replyFixture.render("bot", false, "failed-file"))
+    await rows.first().getByRole("button", { name: "回复消息", exact: true }).waitFor({ state: "detached" })
+    await page.evaluate(() => window.replyFixture.render("default", false, "file"))
+    assert.equal(await rows.first().getByRole("button", { name: "回复消息", exact: true }).count(), 0, "native workbench file actions unchanged")
+    await page.evaluate(() => window.replyFixture.renderQuote(true, false))
+    await userRow.getByRole('button', {name:'更多消息操作',exact:true}).click()
+    assert(await page.getByRole('button', {name:'编辑后重新发送',exact:true}).isDisabled(), 'cold Bot history cannot edit before verified origins arrive')
+    assert.deepEqual(await page.evaluate(() => window.replyFixture.edits), [])
+    await page.keyboard.press('Escape')
+    for (const [imported, mode] of [[false, "bot"], [true, "bot"], [true, "default"]] as const) {
+      await page.evaluate(([imported, mode]) => window.replyFixture.renderQuote(imported, true, mode), [imported, mode] as const)
+      const quote = mode === 'default' ? userRow.getByLabel('原消息引用', {exact:true}) : userRow.getByRole('button', {name: imported ? '来自主对话的引用' : '跳转到被回复的消息', exact:true})
+      await quote.waitFor()
+      if (mode === 'bot') assert.equal(await quote.isDisabled(), imported)
+      assert((await userRow.innerText()).includes('Selected instruction'))
+      assert(!(await userRow.innerText()).includes('CMBDEVCLAW-BOT-REPLY-V1'))
+      if (!imported) await quote.click()
+      await userRow.hover()
+      if (mode === 'bot') await userRow.getByRole('button', {name:'更多消息操作',exact:true}).click()
+      await page.getByRole('button', {name:'编辑后重新发送',exact:true}).click()
+      const edited = await page.evaluate(() => ({edits:window.replyFixture.edits, drafts:window.replyFixture.draftReplies, jumps:window.replyFixture.jumps}))
+      assert.equal(edited.edits.length, 1)
+      assert.equal(edited.edits[0].content.includes('Selected instruction'), true)
+      assert.equal(edited.edits[0].content.includes('Earlier reference'), imported)
+      assert(edited.edits[0].content.startsWith('📎 old.csv\n\n'))
+      const cleanEdit = edited.edits[0].content.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, '').trim()
+      assert(!cleanEdit.includes('old.csv'))
+      if (imported) assert(cleanEdit.includes('\\@notes.md'))
+      assert(!edited.edits[0].content.includes('CMBDEVCLAW-BOT-REPLY-V1'))
+      assert.deepEqual(edited.jumps, imported ? [] : ['prior'])
+      assert.deepEqual(edited.drafts.map(q => q?.id ?? null), mode === 'default' ? [] : imported ? [null] : ['prior'])
+      await page.keyboard.press('Escape')
+    }
+    for (const text of ['Current instruction', '']) {
+      await page.evaluate(text => window.replyFixture.renderHistoricalSkill(text, true), text)
+      await userRow.getByText('Verified review', {exact:true}).waitFor()
+      assert.equal(await userRow.getByText('Verified review', {exact:true}).count(), 1)
+      if (text) assert((await userRow.innerText()).includes(text))
+    }
+    await page.evaluate(() => window.replyFixture.renderHistoricalSkill('Ordinary request', false))
+    await userRow.getByText('Ordinary request', {exact:true}).waitFor()
+    assert.equal(await userRow.getByText('Verified review', {exact:true}).count(), 0)
+    for (const dark of [false, true]) {
+      await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), dark)
+      for (const width of [224, 320]) {
+        await page.evaluate(width => window.replyFixture.renderMembers(width), width)
+        const trigger = page.getByRole("combobox", {name:"添加成员",exact:true})
+        await trigger.waitFor()
+        const geometry = await trigger.evaluate(button => {
+          const label = button.querySelector(".bot-member-add-label")!
+          const icon = label.querySelector("svg")!.getBoundingClientRect()
+          const node = [...label.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent?.includes("添加成员"))!
+          const range = document.createRange(); range.selectNode(node)
+          const text = range.getBoundingClientRect()
+          return {icon:icon.toJSON(),text:text.toJSON(),height:button.getBoundingClientRect().height}
+        })
+        assert(Math.abs(geometry.icon.y + geometry.icon.height / 2 - geometry.text.y - geometry.text.height / 2) <= 2, `member icon/text aligned at ${width}, dark=${dark}`)
+        assert(geometry.text.x >= geometry.icon.right && geometry.height < 56, "add member stays on one row")
+      }
+    }
+    assert.deepEqual(errors, [])
+    console.log(
+      "PASS: per-bubble Bot reply keeps exact ids while loading and a hidden tool runs without finish metadata; workbench streaming/actions unchanged; production CSS geometry and streaming DOM stability"
+    )
+  } finally {
+    await browser.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+void main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

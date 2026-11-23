@@ -8,6 +8,7 @@ import {
   type StableFileHandle
 } from "../../services/stable-file-handle"
 import { runWorkflowScriptInSandbox } from "./sandbox"
+import { withFileOperation } from "../file-operation-lock"
 import { validateWorkflowScript, MAX_WORKFLOW_SCRIPT_BYTES } from "./script"
 import { sha256Hex, type WorkflowRunStore } from "./run-store"
 import { resolveExistingWorkspacePath, resolveWorkspaceWritePath } from "./paths"
@@ -89,12 +90,10 @@ export interface WorkflowEngineOptions {
    * the user switched the thread's model would otherwise replay the OLD default
    * model's cached result instead of re-running on the new one. (#1) */
   defaultModelId?: string
-  /** Run-level exclusive file-write lock, shared with this run's subagent tool
-   * writes (both keyed on the parent threadId). Injected so a script writeFile() and
-   * a concurrent agent()'s tool write serialize TOGETHER instead of each in its own
-   * silo (fileWriteChain vs the tool-concurrency lock). Falls back to the local chain
-   * when absent (unit harness / embedded caller). (#2) */
-  runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
+  /** Admission shared with agent file tools, excluding unknown tool mutations.
+   * The legacy name is retained for embedded callers; per-file exclusivity is
+   * enforced below regardless of whether this admission callback is supplied. */
+  runExclusiveFileWrite?: <T>(fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>
 }
 
 export interface WorkflowEngineResult {
@@ -1087,14 +1086,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
   // enumerate work units (glob) and read/write files directly instead of burning a
   // subagent on it. Paths are confined to the workspace (realpath containment, plus
   // a symlink-parent defense on write); reads/writes are size-capped; writes are
-  // serialized so concurrent writeFile() calls can't interleave or race a mkdir.
+  // serialized per file across scripts and sandbox instances.
   const FILE_READ_MAX_BYTES = 1_048_576
   const FILE_WRITE_MAX_BYTES = 1_048_576
   // Default 10k; overridable SMALLER via CMB_WORKFLOW_GLOB_MAX for tests only.
   // Parsed/guarded in types so a bad value (negative / Infinity / non-numeric)
   // can neither disable nor raise the cap.
   const MAX_GLOB_RESULTS = getWorkflowGlobMax()
-  let fileWriteChain: Promise<void> = Promise.resolve()
   const readFile = async (filePath: unknown): Promise<string> => {
     throwIfAborted()
     if (typeof filePath !== "string") throw new TypeError("readFile(path) expects a string path")
@@ -1103,19 +1101,27 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       filePath,
       `readFile "${filePath}"`
     )
-    const stat = await fsp.stat(resolved)
-    // Must be a REGULAR file: reading a FIFO/socket/device parks until a writer
-    // appears, tying up a libuv thread-pool slot indefinitely (and a sync read of
-    // one would freeze the main process). Reject anything non-regular up front.
-    if (!stat.isFile()) {
-      throw new WorkflowFatalError(`readFile "${filePath}" is not a regular file`)
-    }
-    if (stat.size > FILE_READ_MAX_BYTES) {
-      throw new WorkflowFatalError(
-        `readFile "${filePath}" is too large (${stat.size} bytes > ${FILE_READ_MAX_BYTES} limit)`
-      )
-    }
-    return await fsp.readFile(resolved, "utf-8")
+    return withFileOperation(
+      context.workspacePath,
+      resolved,
+      "read",
+      async () => {
+        const stat = await fsp.stat(resolved)
+        // Must be a REGULAR file: reading a FIFO/socket/device parks until a writer
+        // appears, tying up a libuv thread-pool slot indefinitely (and a sync read of
+        // one would freeze the main process). Reject anything non-regular up front.
+        if (!stat.isFile()) {
+          throw new WorkflowFatalError(`readFile "${filePath}" is not a regular file`)
+        }
+        if (stat.size > FILE_READ_MAX_BYTES) {
+          throw new WorkflowFatalError(
+            `readFile "${filePath}" is too large (${stat.size} bytes > ${FILE_READ_MAX_BYTES} limit)`
+          )
+        }
+        return await fsp.readFile(resolved, "utf-8")
+      },
+      signal
+    )
   }
   const exists = async (filePath: unknown): Promise<boolean> => {
     if (typeof filePath !== "string") throw new TypeError("exists(path) expects a string path")
@@ -1192,6 +1198,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       `writeFile "${filePath}"`
     )
     const performWrite = async (): Promise<void> => {
+      throwIfAborted()
+      if (
+        resolveWorkspaceWritePath(context.workspacePath, filePath, `writeFile "${filePath}"`) !==
+        resolved
+      ) {
+        throw new WorkflowFatalError(`writeFile "${filePath}" changed while waiting for access`)
+      }
       await fsp.mkdir(dirname(resolved), { recursive: true })
       // If the target already exists it must be a REGULAR file: writing to an
       // existing FIFO/socket/device would block (the write parks for a reader),
@@ -1205,19 +1218,12 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       }
       await fsp.writeFile(resolved, content, "utf-8")
     }
-    // Route through the run-level exclusive write lock when injected, so a script
-    // writeFile() and a subagent's tool write (both keyed on the parent threadId)
-    // serialize TOGETHER, not just within their own silos. Fall back to the local
-    // chain when no lock is injected (unit harness / embedded caller). (#2)
+    const write = () =>
+      withFileOperation(context.workspacePath, resolved, "write", performWrite, signal)
     if (context.runExclusiveFileWrite) {
-      await context.runExclusiveFileWrite(performWrite)
+      await context.runExclusiveFileWrite(write, signal)
     } else {
-      const write = fileWriteChain.then(performWrite)
-      fileWriteChain = write.then(
-        () => undefined,
-        () => undefined
-      )
-      await write
+      await write()
     }
   }
 

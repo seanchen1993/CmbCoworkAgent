@@ -24,6 +24,7 @@ import {
 } from "./catalog-protocol"
 import { HARNESS_WORKER_RESOURCE_LIMITS, harnessWorkerOptions } from "./worker-limits"
 import { HARNESS_PROJECT_TEXT_MAX_CHARS } from "./store-limits"
+import { protectMarketDirectory } from "../services/market-content"
 import {
   HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
   HARNESS_FRAMEWORK_DEPLOY_UNIT_CONTEXT_MAX_ENTRIES
@@ -66,8 +67,7 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
       apiVersion: 1,
       inspectCommands: {
         [process.platform]: {
-          session_context_inject: "run",
-          pull_knowledge: "pull",
+          session_context_inject: "run --knowledge-path '${knowledgePath}'",
           dialog_tips: "Project ${projectCode} feature ${feature} token ${leanToken}"
         }
       }
@@ -111,6 +111,82 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
 }
 
 describe("Harness catalog reader", () => {
+  it.each(["owner", "whitelist"] as const)("preserves %s source access in project contexts", async (access) => {
+    const paths = await makeCatalog(1)
+    const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))
+    plugins[0].origin = "market"
+    plugins[0].sourceAccess = access
+    writeFileSync(paths.plugins, JSON.stringify(plugins))
+    const contexts = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+    expect(contexts.projects["project-0"]?.plugin).toMatchObject({ origin: "market", sourceAccess: access })
+  })
+  it.each([true, false, undefined])(
+    "preserves test project selection in project lists and contexts: %j",
+    async (isTestProject) => {
+      const paths = await makeCatalog(1)
+      const store = JSON.parse(readFileSync(paths.projects, "utf8"))
+      if (isTestProject !== undefined) store.projects[0].isTestProject = isTestProject
+      writeFileSync(paths.projects, JSON.stringify(store))
+
+      const page = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+      const contexts = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+      expect(page.projects).toHaveLength(1)
+      expect(page.projects[0].isTestProject).toBe(isTestProject)
+      expect(contexts.projects["project-0"]?.project.isTestProject).toBe(isTestProject)
+      if (isTestProject === undefined) {
+        expect(page.projects[0]).not.toHaveProperty("isTestProject")
+        expect(contexts.projects["project-0"]?.project).not.toHaveProperty("isTestProject")
+      }
+    }
+  )
+
+  it.each([false, true])(
+    "preserves artifact and knowledge actions in protected config: %s",
+    async (protectedContent) => {
+      const paths = await makeCatalog(1)
+      const configPath = join(paths.plugins, "..", "plugin", "board_core", "board_config.json")
+      const config = JSON.parse(readFileSync(configPath, "utf8"))
+      const artifactConfig = {
+        sync_type: "invoke_session",
+        nextAction: {
+          slashSkill: "artifact-sync",
+          userMessage: "${projectCode} ${feature} ${leanToken}",
+          dialogTips: "发起产物同步"
+        }
+      }
+      const knowledgeConfig = {
+        sync_type: "invoke_session",
+        nextAction: { slashSkill: "knowledge-sync" }
+      }
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          ...config,
+          ...(protectedContent ? { padding: "x".repeat(800_000) } : {}),
+          artifact_sync: artifactConfig,
+          knowledge_config: knowledgeConfig
+        })
+      )
+      if (protectedContent) protectMarketDirectory(join(paths.plugins, "..", "plugin"))
+      const result = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+      expect(result.projects["project-0"]?.configSnapshot?.value).toMatchObject({
+        artifact_sync: artifactConfig,
+        knowledge_config: knowledgeConfig
+      })
+    }
+  )
+
+  it("preserves every bound knowledge library in catalog and project context", async () => {
+    const paths = await makeCatalog(1)
+    const store = JSON.parse(readFileSync(paths.projects, "utf8"))
+    store.projects[0].knowledgeBaseIds = ["second", "first"]
+    writeFileSync(paths.projects, JSON.stringify(store))
+    const page = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(page.projects[0].knowledgeBaseIds).toEqual(["second", "first"])
+    const context = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
+    expect(context.projects["project-0"]?.project.knowledgeBaseIds).toEqual(["second", "first"])
+  })
+
   it("keeps a near-limit project/plugin response paged and below the IPC byte cap", async () => {
     const paths = await makeCatalog(1_000)
     const first = readHarnessCatalogPage(paths.projects, paths.plugins, {
@@ -119,6 +195,8 @@ describe("Harness catalog reader", () => {
     })
     expect(first.projects).toHaveLength(64)
     expect(first.registry).toHaveLength(64)
+    expect(first.registry[0]?.supportsKnowledgeBaseContext).toBe(true)
+    expect(first.projects[0]?.supportsKnowledgeBaseContext).toBe(true)
     expect(first.summary.totalProjects).toBe(1_000)
     expect(first.summary.totalRegistry).toBe(1_000)
     expect(first.projectNextCursor).toBe(64)

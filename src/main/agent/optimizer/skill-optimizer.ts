@@ -1,3 +1,4 @@
+import { findProtectedMarketRoot } from "../../services/market-content"
 /**
  * Skill Optimizer (Offline Optimization Loop)
  *
@@ -195,6 +196,7 @@ function readCustomSkillRecords(filterIds?: string[]): CustomSkillRecord[] {
   const filter = filterIds ? new Set(filterIds.map(normalizeSkillId).filter(Boolean)) : null
   try {
     return discoverSkillsSync(dir)
+      .filter((skill) => !findProtectedMarketRoot(skill.skillMdPath))
       .filter(
         (skill) =>
           !filter || getDiscoveredSkillAliases(skill).some((alias) => filter.has(alias))

@@ -39,6 +39,8 @@ it("exports 1,020 cumulative projects in sequential 100-project batches alongsid
     await tick()
     return {
       perProject: new Map(ids.map((id) => [id, 1])),
+      lastExecutionByProject: new Map(),
+      executionByFeature: new Map(),
       perProjectSuspectedTechnicalDetail: new Map(),
       perProjectDevStage: new Map(),
       perProjectDevAssociatedFeatures: new Map(),

@@ -1,4 +1,7 @@
+import { getModelClientOptions } from "../models/connection"
+import { isModelAvailable } from "../../shared/model-catalog"
 import { createHash } from "crypto"
+import { SelectedModelUnavailableError } from "../models/selection-error"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { getGlobalRoutingMode, DEFAULT_MAX_TOKENS, DEFAULT_TOP_P, DEFAULT_TOP_K } from "../storage"
@@ -470,7 +473,7 @@ function getInternalClassifierModel(): {
  *  The internal fallback is invisible to users and never used for task execution.
  */
 function pickClassifierModel() {
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const economyConfigs = configs.filter((c) => (c.tier ?? "premium") === "economy" && c.apiKey)
 
   // 1. User-configured Qwen economy model
@@ -592,7 +595,7 @@ async function classifyWithLlm(message: string): Promise<Layer3Result> {
     const llm = new ChatOpenAI({
       model: classifierModel.model,
       apiKey: classifierModel.apiKey,
-      configuration: { baseURL: classifierModel.baseUrl },
+      ...getModelClientOptions(classifierModel),
       // 1000 tokens: reasoning models emit a <think> block (~200-500 tok) before the final word
       maxTokens: 1000,
       ...samplingFields(classifierModel.model, { temperature: 0, topP: classifierModel.topP }),
@@ -707,7 +710,7 @@ Route "economy" only if BOTH dimensions are clearly NO.
 // ─── Fallback chain builder ───────────────────────────────────────────────────
 
 function buildFallbackChain(primaryTier: "premium" | "economy"): string[] {
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const fallbackTier: "premium" | "economy" = primaryTier === "economy" ? "premium" : "economy"
 
   const primary = configs
@@ -763,7 +766,7 @@ function guardContextCapacity(
   const lastInputTokens = state?.lastInputTokens
   if (!lastInputTokens || lastInputTokens <= 0) return result
 
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const currentCfg = getModelConfigByRef(result.resolvedModelId)
   const currentCfgRef = currentCfg ? toModelRef(currentCfg) : result.resolvedModelId
   const currentMax = currentCfg?.maxTokens ?? DEFAULT_MAX_TOKENS
@@ -859,7 +862,7 @@ function resolveFromTier(
   layer: "layer1" | "thread" | "layer2" | "layer3"
 ): RoutingResult {
   const model = getModelByTier(tier)
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const availableFallback = configs.find((config) => Boolean(config.apiKey))
   const fallbackId = model
     ? toModelRef(model)
@@ -984,13 +987,17 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
   // ── Pinned mode ─────────────────────────────────────────────────────────────
   if (ctx.routingMode === "pinned") {
     const t0 = Date.now()
-    const requestedId = ctx.requestedModelId
+    const requestedId = ctx.requestedModelId?.trim()
     const requestedConfig = requestedId ? getModelConfigByRef(requestedId) : null
-    const selectedConfig =
-      (requestedConfig?.apiKey ? requestedConfig : null) ?? getAvailableModelConfigOrDefault()
+    if (requestedId) {
+      if (!requestedConfig) throw new SelectedModelUnavailableError(requestedId, "missing_config")
+      if (!requestedConfig.apiKey?.trim())
+        throw new SelectedModelUnavailableError(requestedId, "missing_credentials")
+    }
+    const selectedConfig = requestedConfig ?? getAvailableModelConfigOrDefault()
     const modelId = selectedConfig ? toModelRef(selectedConfig) : ""
     const tier = selectedConfig?.tier ?? "premium"
-    const usedRequestedModel = Boolean(requestedConfig?.apiKey)
+    const usedRequestedModel = isModelAvailable(requestedConfig)
 
     recordLayer({
       layer: "pinned",
@@ -1067,7 +1074,7 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
       // resume/interrupt must reuse the exact previous model
       if (ctx.continuation && threadState.lastResolvedModelId) {
         const previousConfig = getModelConfigByRef(threadState.lastResolvedModelId)
-        if (previousConfig?.apiKey) {
+        if (isModelAvailable(previousConfig)) {
           const previousRef = toModelRef(previousConfig)
           recordLayer({
             layer: "thread",
@@ -1095,7 +1102,7 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
       if (threadState.failoverStickyModelId && (threadState.failoverStickyUntil ?? 0) > now) {
         const foCfg = getModelConfigByRef(threadState.failoverStickyModelId)
         // Only use sticky if the model is still configured and has an API key
-        if (foCfg?.apiKey) {
+        if (isModelAvailable(foCfg)) {
           const remainingMs = (threadState.failoverStickyUntil ?? 0) - now
           recordLayer({
             layer: "thread",

@@ -5,6 +5,11 @@ import {
   readStreamMessageWireMode,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
+import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
+import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../shared/message-role-collision"
+import { projectDisplayMessageId } from "../display-message-identity"
 
 const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
 
@@ -227,6 +232,17 @@ function messageRecord(message: unknown): Record<string, unknown> | undefined {
   return asRecord(record.kwargs) ?? record
 }
 
+/** Hidden Goal inputs and notification turns own a durable boundary. Same-task Bot feedback stays in the current turn. */
+export function isStreamUserTurnBoundary(message: unknown): boolean {
+  if (!isHumanMessage(message)) return false
+  const record = messageRecord(message)
+  const metadata = asRecord(record?.additional_kwargs)
+  if (metadata?.cmb_internal_bot_feedback === true) return false
+  return metadata?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true ||
+    metadata?.[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true ||
+    !isWorkflowPlumbingTranscriptContent(record?.content)
+}
+
 function messageRole(message: unknown): string {
   if (isHumanMessage(message)) return "user"
   const record = asRecord(message)
@@ -356,7 +372,7 @@ function canSerializeAppendedSuffix(
     return false
   }
   for (let index = previous.messageCount; index < messages.length; index += 1) {
-    if (isHumanMessage(messages[index]) || hasUnsafeIncrementalBoundary(messages[index]))
+    if (isStreamUserTurnBoundary(messages[index]) || hasUnsafeIncrementalBoundary(messages[index]))
       return false
   }
   return true
@@ -384,7 +400,7 @@ function projectStreamDataForSerialization(
 
   let currentTurnBoundary = 0
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isHumanMessage(messages[index])) {
+    if (isStreamUserTurnBoundary(messages[index])) {
       currentTurnBoundary = index
       break
     }
@@ -670,8 +686,9 @@ export function createStreamDataSerializer(
 
 /**
  * Retain one complete, plain current-turn snapshot while its wire payloads are
- * append/tail deltas. The array is mutated in place so bookkeeping stays O(K)
- * over the run rather than copying the accumulated turn on every graph step.
+ * append/tail deltas. Each accumulator owns its array and mutates it in place
+ * on incremental frames, so committed and provisional accumulators can consume
+ * the same frame without sharing their mutable message order.
  */
 export function createSerializedValuesMessageAccumulator(): SerializedValuesMessageAccumulator {
   let messages: unknown[] = []
@@ -689,7 +706,7 @@ export function createSerializedValuesMessageAccumulator(): SerializedValuesMess
       }
 
       if (serialized.valuesSnapshotKind === "full") {
-        messages = incoming
+        messages = [...incoming]
         valuesMessageIndexOffset = serialized.valuesMessageIndexOffset
       } else if (
         serialized.valuesSnapshotKind === "append" &&
@@ -707,7 +724,7 @@ export function createSerializedValuesMessageAccumulator(): SerializedValuesMess
         // A provenance mismatch should only be possible when a caller mixes
         // serializers. Keep the available snapshot bounded and deterministic;
         // the next conservative full frame restores completeness.
-        messages = incoming
+        messages = [...incoming]
         valuesMessageIndexOffset = serialized.valuesMessageIndexOffset
       }
       return { messages, valuesMessageIndexOffset }
@@ -738,13 +755,14 @@ function annotateWorkerSnapshotIndexForRenderer(message: unknown, index: number)
 
 function sanitizeValuesMessagesForRenderer(
   messages: unknown,
-  valuesMessageIndexOffset: number
+  valuesMessageIndexOffset: number,
+  projectMessage?: (message: unknown) => unknown
 ): unknown[] | undefined {
   if (!Array.isArray(messages)) return undefined
 
   let currentTurnStart = 0
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isHumanMessage(messages[index])) {
+    if (isStreamUserTurnBoundary(messages[index])) {
       currentTurnStart = index + 1
       break
     }
@@ -754,7 +772,7 @@ function sanitizeValuesMessagesForRenderer(
     .slice(currentTurnStart)
     .map((message, offset) =>
       annotateWorkerSnapshotIndexForRenderer(
-        message,
+        projectMessage ? projectMessage(message) : message,
         valuesMessageIndexOffset + currentTurnStart + offset
       )
     )
@@ -766,14 +784,95 @@ export function sanitizeStreamDataForRenderer(
   payload: unknown,
   valuesMessageIndexOffset = 0
 ): unknown {
-  if (mode !== "values" || !payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return payload
-  }
+  return mode === "values"
+    ? sanitizeValuesStreamDataForRenderer(payload, valuesMessageIndexOffset)
+    : payload
+}
 
-  const { messages, ...rest } = payload as Record<string, unknown>
-  const currentTurnMessages = sanitizeValuesMessagesForRenderer(messages, valuesMessageIndexOffset)
+function sanitizeValuesStreamDataForRenderer(
+  payload: unknown,
+  valuesMessageIndexOffset: number,
+  projectMessage?: (message: unknown) => unknown
+): unknown {
+  const values = asRecord(payload)
+  if (!values) return payload
+  const { messages, ...rest } = values
+  const currentTurnMessages = sanitizeValuesMessagesForRenderer(
+    messages,
+    valuesMessageIndexOffset,
+    projectMessage
+  )
   if (currentTurnMessages) {
     return { ...rest, messages: currentTurnMessages }
   }
   return rest
+}
+
+function projectTeamMessageIds(message: unknown): unknown {
+  const record = asRecord(message)
+  const kwargs = asRecord(record?.kwargs)
+  if (!kwargs) return message
+
+  let nextKwargs = projectToolIds(kwargs)
+  const additionalKwargs = asRecord(kwargs.additional_kwargs)
+  if (additionalKwargs) {
+    let projected = projectToolIds(additionalKwargs)
+    const sourceId = additionalKwargs[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
+    if (typeof sourceId === "string") {
+      const displayId = projectDisplayMessageId(sourceId, "provider-source")
+      if (displayId !== sourceId) {
+        projected = { ...projected, [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: displayId }
+      }
+    }
+    if (projected !== additionalKwargs) {
+      nextKwargs = { ...nextKwargs, additional_kwargs: projected }
+    }
+  }
+  return nextKwargs === kwargs ? message : { ...record, kwargs: nextKwargs }
+}
+
+function projectToolIds(fields: Record<string, unknown>): Record<string, unknown> {
+  let projected = fields
+  const resultId = fields.tool_call_id
+  if (typeof resultId === "string") {
+    const id = projectDisplayMessageId(resultId, "tool-call")
+    if (resultId !== id) projected = { ...fields, tool_call_id: id }
+  }
+  for (const key of ["tool_calls", "tool_call_chunks"] as const) {
+    const calls = fields[key]
+    if (!Array.isArray(calls)) continue
+    let nextCalls: unknown[] | undefined
+    for (const [index, rawCall] of calls.entries()) {
+      const call = asRecord(rawCall)
+      if (typeof call?.id !== "string") continue
+      const id = projectDisplayMessageId(call.id, "tool-call")
+      if (id === call.id) continue
+      nextCalls ??= calls.slice()
+      nextCalls[index] = { ...call, id }
+    }
+    if (nextCalls) {
+      if (projected === fields) projected = { ...fields }
+      projected[key] = nextCalls
+    }
+  }
+  return projected
+}
+
+/** Keep Team's renderer-only identities aligned with bounded checkpoint reads. */
+export function sanitizeCoordinatorWorkerStreamDataForRenderer(
+  mode: string,
+  payload: unknown,
+  valuesMessageIndexOffset: number
+): unknown {
+  if (mode === "messages" && Array.isArray(payload) && payload.length === 2) {
+    const message = projectTeamMessageIds(payload[0])
+    return payload[0] === message ? payload : [message, payload[1]]
+  }
+  return mode === "values"
+    ? sanitizeValuesStreamDataForRenderer(
+        payload,
+        valuesMessageIndexOffset,
+        projectTeamMessageIds
+      )
+    : payload
 }

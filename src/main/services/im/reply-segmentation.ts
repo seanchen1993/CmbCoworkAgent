@@ -220,6 +220,51 @@ function fenceAfter(chunk: string, open: ImOpenFence | null): ImOpenFence | null
   return fence
 }
 
+function hasInlineCode(value: string): boolean {
+  const openLengths = new Set<number>()
+  for (let index = 0; index < value.length; ) {
+    if (value[index] !== "`") {
+      index += 1
+      continue
+    }
+    const start = index
+    while (value[index] === "`") index += 1
+    const length = index - start
+    // Backslashes do not escape a closing delimiter inside an existing code span.
+    if (openLengths.has(length)) return true
+    let backslashStart = start
+    while (backslashStart > 0 && value[backslashStart - 1] === "\\") backslashStart -= 1
+    if ((start - backslashStart) % 2 === 0) openLengths.add(length)
+  }
+  return false
+}
+
+/**
+ * Zhaohu can drop the text of a fully bold line containing inline code.
+ * Remove only that outer emphasis, retaining the original text/code syntax.
+ * Do this before segmentation so stored replies and retries use the same body.
+ */
+function compatibleImMarkdown(text: string): string {
+  if (!text.includes("`") || (!text.includes("**") && !text.includes("__"))) return text
+  let fence: ImOpenFence | null = null
+  return text
+    .split("\n")
+    .map((line) => {
+      const nextFence = fenceAfter(line, fence)
+      if (fence || nextFence) {
+        fence = nextFence
+        return line
+      }
+      const match = /^( {0,3})(\*\*|__)([^\r\n]+)\2([ \t\r]*)$/u.exec(line)
+      if (!match) return line
+      const [, indent, emphasis, content, trailing] = match
+      // Several separate bold spans must not be mistaken for one outer wrapper.
+      if (content.includes(emphasis) || !hasInlineCode(content)) return line
+      return `${indent}${content}${trailing}`
+    })
+    .join("\n")
+}
+
 function tableCells(line: string): string[] {
   const value = line.trim().replace(/^\|/u, "").replace(/\|$/u, "")
   return value.split(/(?<!\\)\|/u).map((cell) => cell.trim())
@@ -262,12 +307,15 @@ function tableAfter(
 }
 
 /**
- * Prefix lines and the [i/n] marker each stand in their own paragraph. Joined
- * to the body by a single newline, a renderer that folds soft breaks runs them
- * into the first line, and a marker in front of "# 标题" stops it being one.
+ * Keep metadata and instructions compact with Markdown hard breaks, preserving
+ * only intentional paragraph gaps. The body and [i/n] marker stand apart so
+ * a leading heading, list or fence still renders on its own.
  */
 function markdownSegmentHeader(prefix: string, index: number, count: number): string {
-  const parts = index === 0 ? prefix.split("\n").filter((line) => line.trim()) : []
+  const parts =
+    index === 0 && prefix
+      ? prefix.split(/\n\s*\n/u).map((group) => group.split("\n").join("  \n"))
+      : []
   if (count > 1) parts.push(`[${index + 1}/${count}]`)
   return parts.length > 0 ? `${parts.join("\n\n")}\n\n` : ""
 }
@@ -372,7 +420,7 @@ export function segmentImMarkdownText(
     throw new Error("maxSegments must be between 1 and 8")
   }
 
-  const normalized = text.trim() || "处理完成。"
+  const normalized = compatibleImMarkdown(text).trim() || "处理完成。"
   const singleHeader = markdownSegmentHeader(prefix, 0, 1)
   if (
     lengthOf(singleHeader) + lengthOf(normalized) <= maxCharacters &&

@@ -1,0 +1,416 @@
+{
+  "recordedAt": "2026-11-17T12:12:58.421052+00:00",
+  "environment": {
+    "platform": "Darwin",
+    "arch": "arm64",
+    "node": "22.23.5"
+  },
+  "head": "0f13fc512b6bfe4a7a37399882c8e2704c473d8d",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "dirty": true,
+  "scope": "Bot skill acknowledgement and work-query performance; shared runtime unchanged, stale tests updated",
+  "before": "before.json",
+  "checks": [
+    {
+      "label": "architecture-01",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/standard-thread-turn-architecture.spec.ts"
+      ],
+      "exitCode": 0,
+      "seconds": 0.21,
+      "log": "architecture-01.log.txt"
+    },
+    {
+      "label": "bot-regression-01",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/main/bots",
+        "src/shared/bots",
+        "src/main/agent/bot-dispatch-feedback.test.ts",
+        "src/main/agent/bot-skill-dispatch.test.ts",
+        "src/main/agent/standard-thread-turn.test.ts",
+        "src/renderer/src/lib/electron-stream.test.ts",
+        "--maxWorkers=2"
+      ],
+      "exitCode": 0,
+      "seconds": 100.47,
+      "log": "bot-regression-01.log.txt"
+    },
+    {
+      "label": "build-01",
+      "args": [
+        "--import",
+        "tsx",
+        "scripts/run-bot-integration-e2e.mjs",
+        "--build-only"
+      ],
+      "exitCode": 0,
+      "seconds": 21.03,
+      "log": "build-01.log.txt"
+    },
+    {
+      "label": "build-02",
+      "args": [
+        "--import",
+        "tsx",
+        "scripts/run-bot-integration-e2e.mjs",
+        "--build-only"
+      ],
+      "exitCode": 0,
+      "seconds": 38.22,
+      "log": "build-02.log.txt"
+    },
+    {
+      "label": "desktop-01",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/desktop-agent-invoke-characterization.spec.ts"
+      ],
+      "exitCode": 0,
+      "seconds": 0.22,
+      "log": "desktop-01.log.txt"
+    },
+    {
+      "label": "focused-01",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/main/bots/work-projection.test.ts",
+        "src/main/bots/work-tools.test.ts",
+        "src/main/agent/bot-dispatch-feedback.test.ts",
+        "src/main/agent/bot-skill-dispatch.test.ts",
+        "--maxWorkers=2"
+      ],
+      "exitCode": 0,
+      "seconds": 3.73,
+      "log": "focused-01.log.txt"
+    },
+    {
+      "label": "focused-02",
+      "args": [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/main/bots/work-projection.test.ts",
+        "src/main/bots/work.test.ts",
+        "src/main/bots/work-tools.test.ts",
+        "src/main/agent/bot-dispatch-feedback.test.ts",
+        "src/main/agent/bot-skill-dispatch.test.ts",
+        "src/renderer/src/lib/electron-stream.test.ts",
+        "--maxWorkers=2"
+      ],
+      "exitCode": 1,
+      "seconds": 6.33,
+      "log": "focused-02.log.txt"
+    },
+    {
+      "label": "real-skill-01",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/bots-task-routing-app.spec.ts"
+      ],
+      "exitCode": 0,
+      "seconds": 84.45,
+      "log": "real-skill-01.log.txt"
+    },
+    {
+      "label": "stream-01",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/stream-message-ids.spec.ts"
+      ],
+      "exitCode": 1,
+      "seconds": 0.76,
+      "log": "stream-01.log.txt"
+    },
+    {
+      "label": "stream-02",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/stream-message-ids.spec.ts"
+      ],
+      "exitCode": 0,
+      "seconds": 0.74,
+      "log": "stream-02.log.txt"
+    },
+    {
+      "label": "stream-final",
+      "args": [
+        "--import",
+        "tsx",
+        "tests/stream-message-ids.spec.ts"
+      ],
+      "exitCode": 0,
+      "seconds": 0.68,
+      "log": "stream-final.log.txt"
+    },
+    {
+      "label": "typecheck-node-01",
+      "args": [
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.node.json",
+        "--composite",
+        "false"
+      ],
+      "exitCode": 2,
+      "seconds": 20.84,
+      "log": "typecheck-node-01.log.txt"
+    },
+    {
+      "label": "typecheck-node-02",
+      "args": [
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.node.json",
+        "--composite",
+        "false"
+      ],
+      "exitCode": 0,
+      "seconds": 32.69,
+      "log": "typecheck-node-02.log.txt"
+    },
+    {
+      "label": "typecheck-web-01",
+      "args": [
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.web.json",
+        "--composite",
+        "false"
+      ],
+      "exitCode": 2,
+      "seconds": 32.0,
+      "log": "typecheck-web-01.log.txt"
+    },
+    {
+      "label": "typecheck-web-02",
+      "args": [
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.web.json",
+        "--composite",
+        "false"
+      ],
+      "exitCode": 0,
+      "seconds": 45.21,
+      "log": "typecheck-web-02.log.txt"
+    }
+  ],
+  "final": {
+    "vitestFiles": 72,
+    "vitestPassed": 1959,
+    "streamScriptPassed": 37,
+    "desktopCharacterizationPassed": 10,
+    "architecturePassed": true,
+    "typechecksPassed": [
+      "node",
+      "web"
+    ],
+    "realModelRun": "../../runs/20261117T120837Z-4750e7d1/record.json",
+    "realModel": "deepseek-v4-flash",
+    "realInitialCases": 2,
+    "realFollowups": 2,
+    "queryComparison": "projection-plan-final.json",
+    "queryResultsEquivalent": true,
+    "sourceSnapshot": "source-final.json",
+    "build": "build-final.json",
+    "diffCheck": true,
+    "buildSourceMatches": [
+      "src/main/agent/bot-communication-prompt.ts",
+      "src/main/agent/bot-turn-context.ts",
+      "src/main/agent/bot-skill-dispatch.ts",
+      "src/main/agent/foreground-work-budget.ts",
+      "src/main/agent/bot-dispatch-feedback.ts",
+      "src/main/agent/opening-reply-reminder.ts",
+      "src/shared/bots/turn-feedback.ts",
+      "src/main/bots/prompt.ts",
+      "src/main/bots/work-input.ts",
+      "src/main/bots/work-tools.ts",
+      "src/main/agent/runtime.ts",
+      "src/main/bots/runtime-adapter.ts",
+      "src/main/bots/continuation.ts",
+      "src/main/agent/agent-run-service.ts",
+      "src/renderer/src/lib/bot-work-receipt.ts",
+      "src/main/bots/host.ts",
+      "src/main/bots/store.ts",
+      "src/main/agent/standard-thread-turn.ts",
+      "src/main/agent/current-run-message-queue.ts",
+      "src/main/ipc/agent.ts",
+      "src/shared/bots/contracts.ts"
+    ]
+  },
+  "limitations": [
+    "Local macOS sample; no Windows package or production Zhaohu test",
+    "Synthetic SQLite measurements are not production latency or ES results",
+    "Not a complete repository-wide green test claim"
+  ],
+  "artifacts": [
+    {
+      "file": "architecture-01.json",
+      "sha256": "4e9b3ef47e6d7383f829bd304334477a2d2ba7f1a75899dc866b6a659b4ae3a2"
+    },
+    {
+      "file": "architecture-01.log.txt",
+      "sha256": "06362db80448772f832aebc8c3b820dbb020853407e8639873b9d795e12352d0"
+    },
+    {
+      "file": "before-architecture.log.txt",
+      "sha256": "f782bc1ab1038a25bc52e311d55b23960c70145c61f69f5fcd6ca0b1b403db2c"
+    },
+    {
+      "file": "before-desktop.log.txt",
+      "sha256": "8200a75823597dd5bc927e242862d353d03488a5c3d2f2b36d7cc88366767133"
+    },
+    {
+      "file": "before-projection.log.txt",
+      "sha256": "bf5ac5d41e9708520edcddb321e6fb217a78345e3bb5e2f94f31895c790f8c38"
+    },
+    {
+      "file": "before-stream.log.txt",
+      "sha256": "c46329b07569076cf0ba2278c0bd7e52ace300cc9bbecddac63189b2f611d5be"
+    },
+    {
+      "file": "before.json",
+      "sha256": "5ba0305cb98f7337b1e91d57ee0083ad158c1b35bb68e1fa316019681243ee42"
+    },
+    {
+      "file": "bot-regression-01.json",
+      "sha256": "de53c793411acfb029020970f19778c391e17a01014edb7e4ecd6e2b647d9b3e"
+    },
+    {
+      "file": "bot-regression-01.log.txt",
+      "sha256": "2c92ca894be76eced8b3ccf26c20c12028e4d1627e8ce46ba330153a83573d8e"
+    },
+    {
+      "file": "build-01.json",
+      "sha256": "eb91ec89410e5352b2b756ac74d9009dd495f163a2e01fcbd66d170b782fca75"
+    },
+    {
+      "file": "build-01.log.txt",
+      "sha256": "f05dc9921d37ab23b72e0f1e6b30fadcf882132e08dd31eb14a7a1831a11a95a"
+    },
+    {
+      "file": "build-02.json",
+      "sha256": "4554c41278acb86cecd08d2d8cfb115b02215e0e09234a6f23511243464fc647"
+    },
+    {
+      "file": "build-02.log.txt",
+      "sha256": "795d83535084dba8729aee30180081f42cbbdac0e6f3bf5808be9d5429b48516"
+    },
+    {
+      "file": "build-final.json",
+      "sha256": "2b8e6330891655961e41cd8f29d4e5f8b9cfe18d5fb57ef3f270584285589c99"
+    },
+    {
+      "file": "desktop-01.json",
+      "sha256": "2c3451c065b7cc5766f6ae92f9e30c004f917b1f6f14e31b33e137b2a938bc44"
+    },
+    {
+      "file": "desktop-01.log.txt",
+      "sha256": "9926f1e87d6551fb55ccf9c07af58932a3a453561e4f08bfae63203767993edf"
+    },
+    {
+      "file": "focused-01.json",
+      "sha256": "ce74618a00fa9b0cd64a41127fc97e03aef71fae79021d4b393066193bbee732"
+    },
+    {
+      "file": "focused-01.log.txt",
+      "sha256": "46711750443cf93fb52f6ce40a9e73c06a04a113bf1df9822d258e947619ce5d"
+    },
+    {
+      "file": "focused-02.json",
+      "sha256": "c73c5509fa158645050aaba0f949bf8e14d3f5e080b5184f7a884848af317f12"
+    },
+    {
+      "file": "focused-02.log.txt",
+      "sha256": "fb130426d475accd5f344cf33c1dbbf361ee52544a4d031dc641ac0af602c9db"
+    },
+    {
+      "file": "projection-plan-before.json",
+      "sha256": "920f088adeb8f3a8b05d390224e0a0a0d94e1eb383df6e7929a781649bf23d65"
+    },
+    {
+      "file": "projection-plan-final.json",
+      "sha256": "0f625b88e9c4576cddc8e5e06974222b327d233390da28badd7cea27585eb5a2"
+    },
+    {
+      "file": "real-skill-01.json",
+      "sha256": "ecb44999f3a7844eb22eed6dd1e592b612c7df10d6e876a796e87eee0464089a"
+    },
+    {
+      "file": "real-skill-01.log.txt",
+      "sha256": "61f6e2691d65af79affa9e01f4e60e0c045c3808023cd7d393e0029592eebccc"
+    },
+    {
+      "file": "source-final.json",
+      "sha256": "47a483e52ffd136a0bb20925638726074247a21f0c219be97293a8e3925bdc00"
+    },
+    {
+      "file": "stream-01.json",
+      "sha256": "0dc54aa4da7f19f8059a6b28fa0c521dfb448151b86ba52acc7a51fb30f4495f"
+    },
+    {
+      "file": "stream-01.log.txt",
+      "sha256": "b886963288dfccf996780ab08a81a512914c21960384c2516a6bbfb06274cf4d"
+    },
+    {
+      "file": "stream-02.json",
+      "sha256": "48fd51d262d7ca25dcd7cd40126477fb6109ca28e6435fdaa99bf44a8927f5cd"
+    },
+    {
+      "file": "stream-02.log.txt",
+      "sha256": "ffbec3bab65ed71966096beeb639398ffcb0138833d1a2401fef8b379a07c346"
+    },
+    {
+      "file": "stream-final.json",
+      "sha256": "1e2bb83004083dac7dfc4466d138fffda1978f64e127cd05c16849a1dbad2b72"
+    },
+    {
+      "file": "stream-final.log.txt",
+      "sha256": "d63339f4bee8a1db73f502e8b231438e87aff8bf562e8ea3f5ff783a1601dbe3"
+    },
+    {
+      "file": "typecheck-node-01.json",
+      "sha256": "c62ed0254f318cba728afd471bbdc297c90b4de5baa2b0604c008a8b6fe6cec5"
+    },
+    {
+      "file": "typecheck-node-01.log.txt",
+      "sha256": "20081e2072c2140b8fc22bce74e0cba3dafae4aae5fe50b694d4672466a44d35"
+    },
+    {
+      "file": "typecheck-node-02.json",
+      "sha256": "99c90a41bb63a09eeded9016c311a6a7c92bea7be98303dd3c1ac47e27adac1d"
+    },
+    {
+      "file": "typecheck-node-02.log.txt",
+      "sha256": "a179494018a9fa9c36fee0a158f1807623ac39fac3167cae9e400642dde4bf76"
+    },
+    {
+      "file": "typecheck-web-01.json",
+      "sha256": "d6517a49e7ce32c292dc4b4973d82e7541fdbcd6f407e6fc23698201ed462eec"
+    },
+    {
+      "file": "typecheck-web-01.log.txt",
+      "sha256": "5800622c05ea62932eab1513106edd2662c4572823c900436c537ac92edc28a5"
+    },
+    {
+      "file": "typecheck-web-02.json",
+      "sha256": "28e527a89897d46e0bb2da8fedbfd8c9f0bba71446c4fbe6017ff2e82ea27ea7"
+    },
+    {
+      "file": "typecheck-web-02.log.txt",
+      "sha256": "4e78f8eea6a3e5977b5fe0bf3d258d546d1c2b244a8174fcf2af68e47540a074"
+    }
+  ]
+}

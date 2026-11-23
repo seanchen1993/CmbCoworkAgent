@@ -34,6 +34,8 @@ export type SchedulerEvent =
       type: "message-delta"
       id: string
       content: string
+      provider_source_id?: string
+      provider_occurrence?: number
       reasoning?: string
       contentMode?: StreamMessageWireMode
       reasoningMode?: StreamMessageWireMode
@@ -70,6 +72,8 @@ export type SchedulerEvent =
     }
   | {
       type: "turn-messages"
+      /** Host result arriving while a different model turn is streaming. */
+      independentBotPublication?: true
       messages: Array<{
         id: string
         role: "user" | "assistant" | "tool" | "system"
@@ -94,7 +98,7 @@ export interface StreamConverterChunkOptions {
 export type SchedulerLifecycleEvent =
   | { type: "started" }
   | { type: "done" }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; coordinatorNotificationRunId?: string; errorDetail?: Record<string, unknown> }
 
 export type SchedulerRendererEvent = SchedulerEvent | SchedulerLifecycleEvent
 
@@ -264,8 +268,14 @@ function convertValuesMessages(
 
       const reasoning = role === "assistant" ? extractVisibleReasoning(kwargs) : ""
       return {
-        id: (kwargs.id as string) || `msg-${messageIndexOffset + index}`,
+        id:
+          typeof kwargs.id === "string" && kwargs.id.trim()
+            ? kwargs.id
+            : `msg-${messageIndexOffset + index}`,
         role,
+        ...getMessageProviderTupleFromMetadata(
+          kwargs.additional_kwargs as Record<string, unknown> | undefined
+        ),
         content: extractContent(kwargs.content ?? message.content),
         ...(reasoning ? { reasoning } : {}),
         tool_calls: kwargs.tool_calls as unknown[] | undefined,
@@ -273,11 +283,12 @@ function convertValuesMessages(
           ? { tool_call_id: kwargs.tool_call_id as string }
           : {}),
         ...(role === "tool" && kwargs.name ? { name: kwargs.name as string } : {}),
+        ...(role === "tool" && kwargs.status ? { status: kwargs.status } : {}),
+        ...(role === "tool" && isToolMessageError(kwargs) ? { is_error: true } : {}),
         internalNotification: isInternalNotificationMessage(message)
       }
     })
-    .filter((message) => !message.internalNotification)
-    .map(({ internalNotification: _internalNotification, ...message }) => message)
+    .flatMap(({ internalNotification, ...message }) => (internalNotification ? [] : [message]))
 }
 
 const SUBAGENT_NAME_MAP: Record<string, string> = {
@@ -364,6 +375,32 @@ export class StreamConverter {
     private readonly runScope: string = crypto.randomUUID(),
     private readonly valuesTurnUserMessageId?: string
   ) {}
+
+  /** Share the values conversion contract without replaying completed tool/subagent effects. */
+  resetStreamAttempt(data: Record<string, unknown>): Record<string, unknown> {
+    const discarded = new Set(
+      Array.isArray(data.discardedMessageIds)
+        ? data.discardedMessageIds.filter((id): id is string => typeof id === "string")
+        : []
+    )
+    for (const [key, callId] of this.toolCallChunkIndexToId) {
+      const messageId = key.slice(0, key.lastIndexOf(":"))
+      if (!discarded.has(messageId)) continue
+      this.toolCallChunkIndexToId.delete(key)
+      this.accumulatedToolCalls.delete(callId)
+    }
+    return {
+      ...data,
+      discardedMessageIds: [...discarded],
+      messages: convertValuesMessages(
+        Array.isArray(data.messages) ? (data.messages as SerializedMsg[]) : [],
+        0
+      ).map((message) => ({
+        ...message,
+        type: message.role === "assistant" ? "ai" : message.role === "user" ? "human" : message.role
+      }))
+    }
+  }
 
   /** Convert one raw LangGraph `[mode, data]` chunk into ≥0 standardised events. */
   processChunk(
@@ -458,6 +495,9 @@ export class StreamConverter {
       const reasoning = reasoningUpdate.reasoning ?? ""
       const msgId = kwargs.id as string | undefined
       if (!msgId) return events
+      const providerIdentity = getMessageProviderTupleFromMetadata(
+        kwargs.additional_kwargs as Record<string, unknown> | undefined
+      )
 
       const toolCalls = this.collectToolCallsForAssistantMessage(
         kwargs.tool_calls,
@@ -475,6 +515,7 @@ export class StreamConverter {
             assistantMessage: {
               id: msgId,
               type: "ai",
+              ...providerIdentity,
               ...(contentSnapshot ? { content } : {}),
               ...(reasoningSnapshot ? { reasoning } : {})
             }
@@ -488,6 +529,7 @@ export class StreamConverter {
           type: "message-delta",
           id: msgId,
           content: deltaContent,
+          ...providerIdentity,
           ...(deltaReasoning || (subagentId && reasoningSnapshot)
             ? { reasoning: deltaReasoning }
             : {}),
@@ -839,6 +881,40 @@ export class StreamConverter {
   }
 
   // -- values mode ----------------------------------------------------------
+
+  /** The runtime persisted this boundary before the next model call. Paint it
+   * in that order, rather than waiting for the run's final history reload. */
+  processCurrentRunUserInjected(data: Record<string, unknown>): SchedulerEvent[] {
+    const events: SchedulerEvent[] = []
+    if (typeof data.completedAssistantId === "string" && data.completedAssistantId) {
+      events.push({
+        type: "custom",
+        data: {
+          type: "coordinator_ai_snapshot_message",
+          assistantMessage: {
+            id: data.completedAssistantId,
+            type: "ai",
+            content: extractContent(data.completedAssistantContent),
+            ...(typeof data.providerSourceId === "string" &&
+            Number.isInteger(data.providerOccurrence) &&
+            Number(data.providerOccurrence) > 0
+              ? {
+                  provider_source_id: data.providerSourceId,
+                  provider_occurrence: data.providerOccurrence
+                }
+              : {})
+          }
+        }
+      })
+    }
+    const messages = (Array.isArray(data.messages) ? data.messages : []).flatMap((message) =>
+      message && typeof message.id === "string" && message.id && typeof message.content === "string"
+        ? [{ id: message.id, role: "user" as const, content: message.content }]
+        : []
+    )
+    if (messages.length) events.push({ type: "turn-messages", messages })
+    return events
+  }
 
   private processValues(data: unknown, options: StreamConverterChunkOptions): SchedulerEvent[] {
     const events: SchedulerEvent[] = []

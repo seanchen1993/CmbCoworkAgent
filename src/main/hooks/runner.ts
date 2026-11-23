@@ -1,8 +1,10 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
+import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/market-content"
 import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import * as chardet from "jschardet"
-import * as iconv from "iconv-lite"
+import { decodeHookOutput } from "./output-encoding"
 import type { HookConfig, HookEvent, HookResult, HookUserContextField } from "./types"
 import { getHookModelRef, getTimeoutBounds } from "./types"
 import { executeHttpHook } from "./http-runner"
@@ -15,6 +17,9 @@ import { persistHookResultRecord } from "./log-record"
 import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
+import { withWorkspaceExecution } from "../agent/file-operation-lock"
+import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
+import { canonicalShellTaskMonitorToolName } from "../agent/shell-task-monitor"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -27,15 +32,9 @@ function getEffectiveTimeout(hook: HookConfig): number {
   return hook.timeout ?? bounds.default
 }
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
-const CHARDET_CONFIDENCE_THRESHOLD = 0.8
-const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
-const INVOCATION_CONTEXT_ENV_KEYS = new Set([
-  "AGENT_ID",
-  "WORKSPACE_PATH",
-  "CLAUDE_PROJECT_DIR"
-])
+const INVOCATION_CONTEXT_ENV_KEYS = new Set(["AGENT_ID", "WORKSPACE_PATH", "CLAUDE_PROJECT_DIR"])
 const DEFAULT_USER_CONTEXT_FIELDS = [
   "sap_id",
   "yst_id",
@@ -65,6 +64,10 @@ export interface HookContext {
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
+  /** Internal cancellation for queued synchronous command hooks; never sent to the hook process. */
+  abortSignal?: AbortSignal
+  /** Monotonic deadline for synchronous command hooks queued behind workspace activity. */
+  workspaceLockDeadline?: number
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
   /** Optional system identifier exposed to hook commands as SYSTEM_ID. */
@@ -127,7 +130,8 @@ export interface HookContext {
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   /**
-   * Harness workflow node name/status current at turn start. Exposed to hooks as
+   * Harness workflow node name/status, refreshed immediately before each hook
+   * executes when project/feature identity is available. Exposed to hooks as
    * `HARNESS_NODE_NAME` / `HARNESS_NODE_STATUS` env and `harness_node_name` /
    * `harness_node_status` in stdin JSON.
    */
@@ -375,12 +379,20 @@ function addHookUserContextEnv(env: Record<string, string>, hook: HookConfig): v
   }
 }
 
-function clearInheritedInvocationContextEnv(env: Record<string, string>): void {
+function clearInheritedInvocationContextEnv(
+  env: Record<string, string>,
+  projectFeature = false
+): void {
   for (const key of Object.keys(env)) {
     // Environment names are case-insensitive on Windows. POSIX permits distinct
     // mixed-case names, so retain its exact-key behaviour.
     const comparableKey = process.platform === "win32" ? key.toUpperCase() : key
-    if (INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey)) delete env[key]
+    if (
+      INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey) ||
+      (projectFeature &&
+        (comparableKey === "HARNESS_NODE_NAME" || comparableKey === "HARNESS_NODE_STATUS"))
+    )
+      delete env[key]
   }
 }
 
@@ -395,7 +407,7 @@ function buildHookEnv(
   // These keys describe the current hook invocation, not the Electron host.
   // Remove inherited values first so a parent process cannot leak stale context
   // into a hook whose invocation does not provide the corresponding field.
-  clearInheritedInvocationContextEnv(env)
+  clearInheritedInvocationContextEnv(env, Boolean(context.harnessProjectId && context.featureId))
   env.HOOK_EVENT = event
   if (context.toolName) env.TOOL_NAME = context.toolName
   if (context.hookSourceType) env.HOOK_SOURCE_TYPE = context.hookSourceType
@@ -576,71 +588,6 @@ function applyForcedOutcome(result: HookResult, hook: HookConfig): HookResult {
   }
 }
 
-function isValidUtf8(buf: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buf)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function detectHookOutputEncoding(buf: Buffer): string {
-  if (buf.length === 0) return "utf-8"
-  const detected = chardet.detect(buf)
-  if (!detected) return "utf-8"
-
-  const encoding = typeof detected === "string" ? detected : detected.encoding
-  const confidence = typeof detected === "object" ? detected.confidence : 1
-
-  if (!encoding || encoding.toLowerCase() === "ascii" || !iconv.encodingExists(encoding)) {
-    return "utf-8"
-  }
-
-  if (confidence >= CHARDET_CONFIDENCE_THRESHOLD) {
-    return encoding
-  }
-
-  // On Chinese Windows, short GBK/GB18030 output often comes back with low confidence
-  // even though the bytes are definitely not UTF-8. In that case, trust the detector.
-  if (!isValidUtf8(buf)) {
-    return encoding
-  }
-
-  return "utf-8"
-}
-
-function decodeHookOutput(
-  stdoutBuf: Buffer,
-  stderrBuf: Buffer
-): { stdout: string; stderr: string } {
-  if (process.platform !== "win32") {
-    return {
-      stdout: stdoutBuf.length > 0 ? stdoutBuf.toString("utf-8") : "",
-      stderr: stderrBuf.length > 0 ? stderrBuf.toString("utf-8") : ""
-    }
-  }
-  // Sample both streams in bounded chunks so stderr-only Chinese diagnostics still
-  // influence detection when stdout contains ASCII / JSON.
-  const perStreamSampleBytes = Math.floor(CHARDET_SAMPLE_BYTES / 2)
-  const sample = Buffer.concat([
-    stdoutBuf.subarray(0, perStreamSampleBytes),
-    stderrBuf.subarray(0, CHARDET_SAMPLE_BYTES - perStreamSampleBytes)
-  ])
-  const encoding = detectHookOutputEncoding(sample)
-  try {
-    return {
-      stdout: stdoutBuf.length > 0 ? iconv.decode(stdoutBuf, encoding) : "",
-      stderr: stderrBuf.length > 0 ? iconv.decode(stderrBuf, encoding) : ""
-    }
-  } catch {
-    return {
-      stdout: stdoutBuf.toString("utf-8"),
-      stderr: stderrBuf.toString("utf-8")
-    }
-  }
-}
-
 /**
  * Execute a single hook command and return its result.
  */
@@ -650,8 +597,26 @@ function executeCommandHook(
   stdinPayload: string,
   cwd: string
 ): Promise<HookResult> {
+  const prepared = prepareMarketCommand(
+    hook.command ?? "",
+    cwd,
+    [env.PLUGIN_ROOT, env.SKILL_ROOT].filter((value): value is string => Boolean(value))
+  )
+  const originalRoots = [env.PLUGIN_ROOT, env.SKILL_ROOT].filter((value): value is string =>
+    Boolean(value)
+  )
+  env = Object.fromEntries(
+    Object.entries(env).map(([key, value]) => [
+      key,
+      ["PLUGIN_ROOT", "SKILL_ROOT", "SKILL_PATH"].includes(key)
+        ? resolveMarketRuntimePath(value)
+        : value
+    ])
+  )
+  stdinPayload = prepareMarketCommand(stdinPayload, cwd, originalRoots).command
+  cwd = prepared.cwd
   return new Promise((resolve) => {
-    const command = hook.command ?? ""
+    const command = prepared.command
     if (!command.trim()) {
       resolve({ exitCode: 0, stdout: "", stderr: "Hook command is empty", blocked: false })
       return
@@ -842,7 +807,7 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     ? (getModelConfigByRef(modelId) ?? getAvailableModelConfigOrDefault())
     : getAvailableModelConfigOrDefault()
 
-  if (!config?.apiKey) return null
+  if (!isModelAvailable(config)) return null
 
   return new ChatOpenAI({
     model: config.model,
@@ -854,7 +819,7 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     modelKwargs: {
       ...topKModelKwargs(config.model, config.topK)
     },
-    configuration: { baseURL: config.baseUrl }
+    ...getModelClientOptions(config)
   })
 }
 
@@ -1191,7 +1156,6 @@ function applyConfiguredOnBlock(result: HookResult, hook: HookConfig): HookResul
  */
 async function executeHook(
   hook: HookConfig,
-  env: Record<string, string>,
   context: HookContext,
   event: HookEvent,
   onLateHookResult?: HookResultCallback
@@ -1204,12 +1168,8 @@ async function executeHook(
   // Setup owns workspace initialisation state, so its caller must observe the
   // real exit code before writing setup-state or starting SessionStart. Even
   // if a workspace/CC-imported config says async:true, run Setup synchronously.
-  if (
-    hook.async === true &&
-    event !== "Setup" &&
-    !(context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
-  ) {
-    void executeSyncHook(hook, env, context, event)
+  if (hookRunsAsynchronously(hook, event, context)) {
+    void executeSyncHook(hook, context, event)
       .then((late) => {
         const finalLate: HookResult = {
           ...applyForcedOutcome(late, hook),
@@ -1238,34 +1198,87 @@ async function executeHook(
       asyncStatus: "pending"
     }
   }
-  return executeSyncHook(hook, env, context, event)
+  return executeSyncHook(hook, context, event)
+}
+
+function hookRunsAsynchronously(hook: HookConfig, event: HookEvent, context: HookContext): boolean {
+  const source = context.hookSourceType ?? hook.hookSourceType
+  return (
+    hook.async === true &&
+    event !== "Setup" &&
+    !(source === "workspace" && context.forceSyncWorkspaceHooks)
+  )
+}
+
+export function postToolUseHookAffectsResult(hook: HookConfig, context: HookContext): boolean {
+  // Static overrides are applied even to an async hook's pending result.
+  return Boolean(hook.forcedOutcome) || !hookRunsAsynchronously(hook, "PostToolUse", context)
 }
 
 async function executeSyncHook(
   hook: HookConfig,
-  env: Record<string, string>,
   context: HookContext,
   event: HookEvent
 ): Promise<HookResult> {
   const startedAt = Date.now()
   const diagnostic = getHookLoggingConfig().diagnostic
   const hookType = hook.type ?? "command"
+  const synchronous =
+    hook.async !== true ||
+    event === "Setup" ||
+    (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
+  const signal = synchronous ? context.abortSignal : undefined
   let result: HookResult
   let stdinPayload: string | undefined
+  const refreshStage = async (): Promise<void> => {
+    // A feature binding is the runtime's project-mode identity. Ordinary chats
+    // and project sessions without a feature never enter the stage lookup path.
+    if (!context.harnessProjectId || !context.featureId) return
+    signal?.throwIfAborted()
+    const stage = await resolveHarnessExecutionStage(context.harnessProjectId, context.featureId)
+    signal?.throwIfAborted()
+    if (stage) {
+      // enrichContextFromHook creates a private object for every invocation.
+      // Keep env, stdin, diagnostics and telemetry on that same stage snapshot.
+      context.harnessNodeName = stage.nodeName ?? undefined
+      context.harnessNodeStatus = stage.nodeStatus ?? undefined
+    }
+  }
   if (hookType === "prompt") {
+    await refreshStage()
     if (diagnostic) {
       const policy = hook.prompt?.trim()
       if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
     }
     result = await executePromptHook(hook, context, event)
   } else if (hookType === "http") {
+    await refreshStage()
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
     result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
   } else {
-    const builtPayload = buildHookStdinPayload(event, context, hook)
-    if (diagnostic) stdinPayload = builtPayload
-    result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
+    const runCommand = async (): Promise<HookResult> => {
+      // Resolve after workspace admission: a command ahead of this hook may
+      // advance the workflow while the hook is queued.
+      await refreshStage()
+      const builtPayload = buildHookStdinPayload(event, context, hook)
+      if (diagnostic) stdinPayload = builtPayload
+      const cwd = getCommandCwd(context)
+      return executeCommandHook(hook, buildHookEnv(event, context, hook), builtPayload, cwd)
+    }
+    // Synchronous formatters and other command hooks may read/modify any file.
+    // Coordinate their actual process lifetime with tool IO, without acquiring
+    // the runtime gate again. Detached hooks retain their existing async policy.
+    result =
+      context.workspacePath && synchronous
+        ? await withWorkspaceExecution(
+            context.workspacePath,
+            "write",
+            runCommand,
+            context.abortSignal,
+            context.workspaceLockDeadline
+          )
+        : await runCommand()
   }
   const finalized = applyConfiguredOnBlock(
     normalizeHumanGateDecisionForEvent(parseHookJsonOutput(result), hook, event),
@@ -1386,18 +1399,44 @@ function enrichContextFromHook(hook: HookConfig, context: HookContext): HookCont
   }
 }
 
+function matchingHookContext(
+  hook: HookConfig,
+  event: HookEvent,
+  context: HookContext
+): HookContext | undefined {
+  if (!hook.enabled || hook.event !== event || shouldSkipOnceHook(hook, event, context)) {
+    return undefined
+  }
+  const legacyToolName = canonicalShellTaskMonitorToolName(context.toolName)
+  if (
+    legacyToolName !== context.toolName &&
+    (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure")
+  ) {
+    // Preserve the name broad legacy hooks inspect in their payload, and
+    // allow monitor-specific matchers when the hook rejects the legacy name.
+    const legacyContext = { ...context, toolName: legacyToolName }
+    if (
+      matchesEventMatcher(hook.matcher, event, legacyContext) &&
+      matchesIfCondition(hook.if, event, legacyContext)
+    ) {
+      return legacyContext
+    }
+  }
+  if (
+    matchesEventMatcher(hook.matcher, event, context) &&
+    matchesIfCondition(hook.if, event, context)
+  ) {
+    return context
+  }
+  return undefined
+}
+
 export function hookMatchesRunCriteria(
   hook: HookConfig,
   event: HookEvent,
   context: HookContext
 ): boolean {
-  return (
-    hook.enabled &&
-    hook.event === event &&
-    matchesEventMatcher(hook.matcher, event, context) &&
-    matchesIfCondition(hook.if, event, context) &&
-    !shouldSkipOnceHook(hook, event, context)
-  )
+  return matchingHookContext(hook, event, context) !== undefined
 }
 
 /**
@@ -1491,7 +1530,11 @@ export async function runHooks(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
-  const matched = hooks.filter((h) => hookMatchesRunCriteria(h, event, context))
+  const matched: { hook: HookConfig; matchedContext: HookContext }[] = []
+  for (const hook of hooks) {
+    const matchedContext = matchingHookContext(hook, event, context)
+    if (matchedContext) matched.push({ hook, matchedContext })
+  }
 
   if (matched.length === 0) return null
 
@@ -1503,16 +1546,10 @@ export async function runHooks(
     let humanGateDecision:
       | { systemMessage: string; decisionSource: NonNullable<HookResult["decisionSource"]> }
       | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1622,16 +1659,10 @@ export async function runHooks(
     const blockReasons: string[] = []
     let shouldHalt = false
     let haltReason: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1670,16 +1701,10 @@ export async function runHooks(
     const messages: string[] = []
     const revisionReasons: string[] = []
     const stopReasons: string[] = []
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1742,16 +1767,10 @@ export async function runHooks(
     const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1815,16 +1834,10 @@ export async function runHooks(
     const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
-        await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        ),
+        await executeHook(hook, hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1885,16 +1898,10 @@ export async function runHooks(
   // never be retried).
   if (event === "SessionEnd" || event === "Setup") {
     const TOTAL_TIMEOUT_MS = event === "Setup" ? 30_000 : 5_000
-    const tasks = matched.map(async (hook): Promise<HookResult> => {
-      const hookContext = enrichContextFromHook(hook, context)
+    const tasks = matched.map(async ({ hook, matchedContext }): Promise<HookResult> => {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       try {
-        const rawResult = await executeHook(
-          hook,
-          buildHookEnv(event, hookContext, hook),
-          hookContext,
-          event,
-          onHookResult
-        )
+        const rawResult = await executeHook(hook, hookContext, event, onHookResult)
         const result = applyForcedOutcome(rawResult, hook)
         console.log(
           `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
@@ -1972,9 +1979,9 @@ export async function runHooks(
   }
 
   // Notification / SessionStart: fire-and-forget
-  for (const hook of matched) {
-    const hookContext = enrichContextFromHook(hook, context)
-    executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult)
+  for (const { hook, matchedContext } of matched) {
+    const hookContext = enrichContextFromHook(hook, matchedContext)
+    executeHook(hook, hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(

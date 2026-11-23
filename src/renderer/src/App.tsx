@@ -1,3 +1,5 @@
+import { ProjectAgentWorkspaceHost } from "@/components/dashboard/ProjectAgentWorkspaceHost"
+import { ThreadSearchButton, ThreadSearchDialog } from "@/components/search/ThreadSearchDialog"
 import {
   useCallback,
   useDeferredValue,
@@ -37,6 +39,7 @@ import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
 import { ProductModeNavigation } from "@/components/requirement/ProductModeNavigation"
+const BotsWorkspace = lazy(() => import("@/components/bots/BotsWorkspace").then(m => ({ default: m.BotsWorkspace })))
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -74,7 +77,7 @@ import { ResizeHandle } from "@/components/ui/resizable"
 import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
-import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
+import { DEFAULT_BROWSER_CDP_CONFIG, initializeStartupWorkspace, useAppStore } from "@/lib/store"
 import {
   REQUIREMENT_CONVERSATION_ENTRY_KEY,
   REQUIREMENT_CONVERSATION_NAVIGATE_EVENT,
@@ -82,6 +85,7 @@ import {
 } from "@/lib/requirement-design-entry"
 import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
+import { BotConversationTransitions } from "@/components/bots/BotConversationTransitions"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { getThemeDefinition } from "@/lib/theme-registry"
 import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
@@ -214,10 +218,12 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
 
 function AnimatedThreadSidebar({
   hidden,
+  allowSearchAnchor = false,
   width,
   onResize
 }: {
   hidden: boolean
+  allowSearchAnchor?: boolean
   width: number
   onResize: (totalDelta: number) => void
 }): React.JSX.Element {
@@ -231,7 +237,7 @@ function AnimatedThreadSidebar({
       style={{ width: hidden ? 0 : width + LEFT_RESIZE_HANDLE_WIDTH }}
     >
       <div style={{ width }} className="shrink-0">
-        <ThreadSidebar />
+        <ThreadSidebar allowSearchAnchor={allowSearchAnchor && !hidden} />
       </div>
       <ResizeHandle onDrag={onResize} />
     </div>
@@ -247,12 +253,10 @@ function App(): React.JSX.Element {
   const toastTheme = getThemeDefinition(themePreference).colorScheme
   const {
     currentThreadId,
-    loadThreads,
     loadDashboardAllowed,
     loadGitChangeNoticeEnabled,
     loadModels,
     dashboardAllowed,
-    createThread,
     mainView,
     showCustomizeView,
     accountRevision,
@@ -279,12 +283,10 @@ function App(): React.JSX.Element {
   } = useAppStore(
     useShallow((state) => ({
       currentThreadId: state.currentThreadId,
-      loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
       loadGitChangeNoticeEnabled: state.loadGitChangeNoticeEnabled,
       loadModels: state.loadModels,
       dashboardAllowed: state.dashboardAllowed,
-      createThread: state.createThread,
       mainView: state.mainView,
       showCustomizeView: state.showCustomizeView,
       accountRevision: state.accountRevision,
@@ -855,37 +857,30 @@ function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    let disposed = false
     async function init(): Promise<void> {
       try {
         await migrateDisabledSkillsFromLocalStorage()
         const [, , loadedBrowserCdpConfig] = await Promise.all([
-          loadThreads({ selectInitialThread: true }),
+          initializeStartupWorkspace(() => !disposed),
           loadDashboardAllowed(),
           window.api.browser.getCdpConfig().catch((error: unknown) => {
             console.error("Failed to load Browser CDP config during initialization:", error)
             return DEFAULT_BROWSER_CDP_CONFIG
           })
         ])
+        if (disposed) return
         setBrowserCdpConfig(loadedBrowserCdpConfig)
-        const threads = useAppStore.getState().threads
-        if (threads.length === 0) {
-          await createThread()
-        }
         await loadGitChangeNoticeEnabled()
       } catch (error) {
         console.error("Failed to initialize:", error)
       } finally {
-        setIsLoading(false)
+        if (!disposed) setIsLoading(false)
       }
     }
     init()
-  }, [
-    loadThreads,
-    setBrowserCdpConfig,
-    loadDashboardAllowed,
-    loadGitChangeNoticeEnabled,
-    createThread
-  ])
+    return () => { disposed = true }
+  }, [setBrowserCdpConfig, loadDashboardAllowed, loadGitChangeNoticeEnabled])
 
   useEffect(() => {
     let cancelled = false
@@ -1075,6 +1070,10 @@ function App(): React.JSX.Element {
 
   return (
     <ThreadProvider>
+      <BotConversationTransitions />
+      <ThreadSearchDialog activateChat={() => {
+        if (previewFullscreen || browserFullscreen) setRightModule("work")
+      }} />
       {/*
         isolate：把 app 内部的 z-index 关进自己的层叠上下文。
 
@@ -1090,39 +1089,46 @@ function App(): React.JSX.Element {
       */}
       <div className="isolate flex flex-col h-screen overflow-hidden bg-background">
         {/* Titlebar - logo centered, right panel toggle on right */}
-        <div className="flex h-9 w-full shrink-0 app-drag-region items-center border-b border-border">
-          {/* Left: sidebar toggle and mode navigation */}
+        <div
+          className={`${renderedMainView === "bots" && !showCustomizeView ? "hidden" : "flex"} h-9 w-full shrink-0 app-drag-region items-center border-b border-border`}
+        >
+          {/* Left: sidebar toggle, conversation search, and mode navigation */}
           <div
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {!showCustomizeView && !isAgentFocusActive && (
-              <button
-                type="button"
-                className={`${panelToggleBaseClass} ${
-                  sidebarCollapsed
-                    ? "text-muted-foreground/90 hover:text-foreground hover:bg-muted/45"
-                    : "text-foreground bg-muted/35 hover:bg-muted/50"
-                }`}
-                onClick={toggleSidebar}
-                title={sidebarToggleText}
-                aria-label={sidebarToggleText}
-                aria-pressed={!sidebarCollapsed}
-              >
-                {sidebarCollapsed ? (
-                  <PanelLeftOpen
-                    size={18}
-                    className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
-                    strokeWidth={1.6}
-                  />
-                ) : (
-                  <PanelLeftClose
-                    size={18}
-                    className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
-                    strokeWidth={1.6}
-                  />
-                )}
-              </button>
+            {renderedMainView !== "bots" && !showCustomizeView && !isAgentFocusActive && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className={`${panelToggleBaseClass} ${
+                    sidebarCollapsed
+                      ? "text-muted-foreground/90 hover:text-foreground hover:bg-muted/45"
+                      : "text-foreground bg-muted/35 hover:bg-muted/50"
+                  }`}
+                  onClick={toggleSidebar}
+                  title={sidebarToggleText}
+                  aria-label={sidebarToggleText}
+                  aria-pressed={!sidebarCollapsed}
+                >
+                  {sidebarCollapsed ? (
+                    <PanelLeftOpen
+                      size={18}
+                      className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
+                      strokeWidth={1.6}
+                    />
+                  ) : (
+                    <PanelLeftClose
+                      size={18}
+                      className="shrink-0 text-muted-foreground/75 transition-transform group-hover:scale-[1.04]"
+                      strokeWidth={1.6}
+                    />
+                  )}
+                </button>
+                <ThreadSearchButton
+                  className={`${panelToggleBaseClass} text-muted-foreground/75 hover:bg-muted/45 hover:text-foreground`}
+                />
+              </div>
             )}
             <div role="tablist" aria-label="工作模式" className="ml-1 flex h-9 items-center gap-1">
               <button
@@ -1175,7 +1181,7 @@ function App(): React.JSX.Element {
               transform: `scale(${1 / zoomLevel})`,
               transformOrigin: "center center"
             }}
-            className="flex flex-1 min-w-0 items-center justify-center gap-1.5"
+            className={`flex flex-1 min-w-0 items-center justify-center gap-1.5 ${renderedMainView === "bots" ? "invisible" : ""}`}
           >
             <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
             <span className="app-badge-name">
@@ -1307,15 +1313,18 @@ function App(): React.JSX.Element {
                 className="relative flex flex-1 overflow-hidden bg-grid-subtle"
               >
                 {/* Left Sidebar */}
-                {!sidebarCollapsed && !isAgentFocusActive && (
+                {renderedMainView !== "bots" && !sidebarCollapsed && !isAgentFocusActive && (
                   <AnimatedThreadSidebar
                     hidden={browserFullscreen}
+                    allowSearchAnchor={renderedMainView === "thread"}
                     width={leftWidth}
                     onResize={handleLeftResize}
                   />
                 )}
 
-                {renderedMainView === "kanban" ? (
+                {renderedMainView === "bots" ? (
+                  <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-5 animate-spin" /></div>}><BotsWorkspace /></Suspense>
+                ) : renderedMainView === "kanban" ? (
                   <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                     <Suspense
                       fallback={
@@ -1356,7 +1365,7 @@ function App(): React.JSX.Element {
                           style={{ width: `${workerSplitLeftPercent}%` }}
                         >
                           {renderedThreadId ? (
-                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
+                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} floatingChat />
                           ) : (
                             <div className="flex flex-1 items-center justify-center text-muted-foreground">
                               选择或创建一个任务开始
@@ -1382,7 +1391,7 @@ function App(): React.JSX.Element {
                           style={fullscreenMainStyle}
                         >
                           {renderedThreadId ? (
-                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
+                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} floatingChat />
                           ) : (
                             <div className="flex flex-1 items-center justify-center text-muted-foreground">
                               选择或创建一个任务开始
@@ -1639,11 +1648,13 @@ function App(): React.JSX.Element {
                 </div>
               </div>
             )}
-            <ResourcePanelOverlay
-              isAgentFocusActive={isAgentFocusActive}
-              renderedMainView={renderedMainView}
-              renderedPanelThreadId={renderedRightPanelThreadId}
-            />
+            {renderedMainView !== "bots" && (
+              <ResourcePanelOverlay
+                isAgentFocusActive={isAgentFocusActive}
+                renderedMainView={renderedMainView}
+                renderedPanelThreadId={renderedRightPanelThreadId}
+              />
+            )}
           </div>
           {showCustomizeView && (
             <SettingsOverlay onClose={() => setShowCustomizeView(false)}>
@@ -1661,6 +1672,10 @@ function App(): React.JSX.Element {
         </div>
       </div>
       <PetStateBridge />
+      <ProjectAgentWorkspaceHost
+        accountRevision={accountRevision}
+        enabled={dashboardAllowed === true}
+      />
       <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>
   )

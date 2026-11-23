@@ -1,0 +1,19 @@
+{
+  "startedAt": "2026-11-17T12:26:40.814002+00:00",
+  "case": "baseline",
+  "args": [
+    "--import",
+    "tsx",
+    "tests/bot-performance-review.spec.ts"
+  ],
+  "head": "f91771b435c57c6548bb3292566161b3d7d52ef4",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "kind": "local synthetic or regression; no production load",
+  "platform": "Darwin",
+  "sourceHashes": {
+    "tests/bot-performance-review.spec.ts": "1ca27f5a3f1bbda68963f5a956c702bdf64972f61ba74f53e24e6e282323386e"
+  },
+  "exitCode": 0,
+  "seconds": 6.105,
+  "finishedAt": "2026-11-17T12:26:46.937303+00:00"
+}

@@ -13,6 +13,7 @@ describe("settings overlay navigation", () => {
     "kanban",
     "dashboard",
     "harness",
+    "bots",
     "claudecode"
   ] as const) {
     it(`preserves the entire ${mainView} workspace when settings opens and closes`, () => {

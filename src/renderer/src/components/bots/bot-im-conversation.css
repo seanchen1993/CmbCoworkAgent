@@ -1,0 +1,406 @@
+.bot-im-list {
+  margin-top: 22px;
+}
+.bot-chat-header.bot-im-header {
+  grid-template-columns: 70px minmax(0, 1fr) 70px;
+}
+.bot-im-header-actions {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  gap: 2px;
+}
+.bot-im-header > .bot-icon-button {
+  justify-self: end;
+}
+.bot-im-list > h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 20px 8px;
+  color: var(--bot-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.bot-im-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 68px;
+  height: 68px;
+  border-radius: 24px;
+  background: var(--bot-hover);
+  color: var(--bot-text);
+}
+.bot-im-avatar[data-small="true"] {
+  width: 36px;
+  height: 36px;
+  border-radius: 13px;
+}
+.bot-im-row-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+  text-align: left;
+}
+.bot-im-row-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 550;
+}
+.bot-im-row-caption {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--bot-muted);
+  font-size: 11px;
+}
+.bot-im-row-caption > svg {
+  display: inline;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.bot-im-unread-total {
+  color: var(--bot-text);
+  font-variant-numeric: tabular-nums;
+}
+.bot-im-sidebar-row {
+  position: relative;
+}
+.bot-im-sidebar-row .bot-list-item {
+  padding-right: 22px;
+}
+.bot-im-sidebar-row .bot-unread-dot {
+  position: absolute;
+  right: 8px;
+  top: 24px;
+  width: 6px;
+  height: 6px;
+}
+.bot-im-row-more {
+  position: absolute;
+  right: 3px;
+  bottom: 11px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--bot-muted);
+  opacity: 0;
+}
+.bot-im-sidebar-row:hover .bot-im-row-more,
+.bot-im-sidebar-row:focus-within .bot-im-row-more,
+.bot-im-row-more[data-state="open"] {
+  opacity: 1;
+}
+.bot-im-row-more:hover {
+  background: var(--bot-hover);
+  color: var(--bot-text);
+}
+.bot-im-menu-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.bot-im-menu-action > svg {
+  width: 15px;
+  height: 15px;
+}
+.bot-im-menu-action[data-destructive] {
+  color: var(--destructive);
+}
+.bot-im-menu-action:hover,
+.bot-im-menu-action:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+.bot-im-history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 12px 14px 8px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--bot-muted);
+}
+.bot-im-history-toggle:hover {
+  color: var(--bot-text);
+}
+.bot-im-history-toggle svg[data-expanded="true"] {
+  transform: rotate(90deg);
+}
+.bot-im-sidebar-row[data-revoked="true"] .bot-im-row-title,
+.bot-im-sidebar-row[data-revoked="true"] .bot-im-avatar {
+  color: var(--bot-muted);
+}
+.bot-im-new-messages {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 10px;
+  padding: 7px 12px;
+  border: 1px solid var(--bot-line);
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--bot-text);
+  background: var(--bot-panel);
+}
+.bot-im-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 30px 12px;
+  color: var(--bot-muted);
+  font-size: 11px;
+}
+.bot-im-context > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.bot-im-context > button {
+  display: flex;
+  padding: 5px;
+  border-radius: 8px;
+}
+.bot-im-context > button:hover {
+  background: var(--bot-hover);
+  color: var(--bot-text);
+}
+.bot-im-connection-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--bot-muted);
+}
+.bot-im-connection-dot[data-online="true"] {
+  background: var(--bot-online);
+}
+.bot-im-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 24px 32px;
+}
+.bot-im-message {
+  display: flex;
+  gap: 12px;
+  width: min(100%, 780px);
+  margin: 0 auto;
+  padding: 16px 0;
+}
+.bot-im-message-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  margin-top: 21px;
+  color: var(--bot-muted);
+}
+.bot-im-message-content {
+  min-width: 0;
+  flex: 1;
+}
+.bot-im-message .bot-group-author {
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.bot-im-message time {
+  font-size: 10px;
+  opacity: 0.75;
+}
+.bot-im-bubble {
+  max-width: min(640px, 100%);
+  padding: 10px 15px;
+}
+.bot-im-message[data-author="user"] .bot-im-bubble {
+  background: transparent;
+  border: 1px solid var(--bot-line);
+}
+.bot-im-bubble p + p,
+.bot-im-bubble ul,
+.bot-im-bubble ol {
+  margin-top: 7px;
+}
+.bot-im-bubble ul {
+  list-style: disc;
+  padding-left: 20px;
+}
+.bot-im-bubble ol {
+  list-style: decimal;
+  padding-left: 20px;
+}
+.bot-im-bubble h1,
+.bot-im-bubble h2,
+.bot-im-bubble h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 8px 0;
+}
+.bot-im-bubble pre {
+  overflow-x: auto;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--bot-panel);
+}
+.bot-im-bubble code {
+  font-size: 0.9em;
+}
+.bot-im-bubble a {
+  color: var(--bot-unread);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.bot-im-bubble table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.bot-im-bubble td,
+.bot-im-bubble th {
+  border-bottom: 1px solid var(--bot-line);
+  padding: 5px 10px;
+  text-align: left;
+}
+.bot-im-message-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--bot-muted);
+}
+.bot-im-message-meta button,
+.bot-im-text-button,
+.bot-im-history-note button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.bot-im-message-meta button:hover,
+.bot-im-text-button:hover {
+  color: var(--bot-text);
+}
+.bot-im-history-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 12px auto;
+  padding: 6px 14px;
+  border: 1px solid var(--bot-line);
+  border-radius: 20px;
+  font-size: 11px;
+  color: var(--bot-muted);
+}
+.bot-im-history-note {
+  margin: 12px auto;
+  text-align: center;
+  font-size: 12px;
+  color: var(--bot-muted);
+}
+.bot-im-history-note button {
+  margin-left: 8px;
+}
+.bot-im-empty-hint {
+  max-width: 300px;
+  color: var(--bot-muted);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
+}
+.bot-im-composer-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  margin: 0 24px 20px;
+  min-height: 48px;
+  border-top: 1px solid var(--bot-line);
+  color: var(--bot-muted);
+  font-size: 12px;
+  text-align: center;
+}
+.bot-im-profile h2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-width: 100%;
+  font-size: 20px;
+  font-weight: 550;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+.bot-im-type-label {
+  color: var(--bot-muted);
+  font-size: 12px;
+}
+.bot-im-text-button {
+  font-size: 12px;
+  margin-top: 8px;
+  color: var(--bot-muted);
+}
+@container bot-sidebar (max-width: 179px) {
+  .bot-im-list > h3,
+  .bot-im-row-copy,
+  .bot-im-row-more,
+  .bot-im-history-toggle > span {
+    display: none;
+  }
+  .bot-im-history-toggle {
+    justify-content: center;
+  }
+  .bot-im-sidebar-row .bot-list-item {
+    padding-right: 0;
+  }
+  .bot-im-list {
+    margin-top: 12px;
+  }
+}
+
+.bot-im-transcript[hidden] {
+  display: none;
+}
+.bot-im-execution-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+  padding: 10px 24px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.bot-im-execution-bar > span {
+  flex: 1;
+}
+.bot-im-execution-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.bot-im-execution-bar button:hover:not(:disabled) {
+  color: var(--foreground);
+}
+.bot-im-execution-bar button:disabled {
+  opacity: 0.5;
+}

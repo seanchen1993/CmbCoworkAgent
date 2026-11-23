@@ -1,3 +1,7 @@
+import {
+  decodeMarketContent,
+  getMarketContentStoredLimit
+} from "../services/market-content"
 import { constants } from "node:fs"
 import { open, type FileHandle } from "node:fs/promises"
 import { parseHarnessJsonInWorker, writeHarnessJsonInWorker } from "./json-codec-client"
@@ -101,7 +105,10 @@ export async function readHarnessJsonFileBounded(
     throw error
   }
   try {
-    const bytes = await readOpenedFileBounded(handle, maxBytes, label)
+    const storedLimit = getMarketContentStoredLimit(path, maxBytes)
+    const bytes = decodeMarketContent(await readOpenedFileBounded(handle, storedLimit, label))
+    if (bytes.byteLength > maxBytes)
+      throw new HarnessStoreLimitError(label, bytes.byteLength, maxBytes)
     if (bytes.byteLength === 0) return null
     if (bytes.byteLength < HARNESS_JSON_WORKER_THRESHOLD_BYTES) {
       return JSON.parse(bytes.toString("utf8")) as unknown

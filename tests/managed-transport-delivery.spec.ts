@@ -15,6 +15,9 @@
  */
 
 import assert from "node:assert/strict"
+import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { resolveDiscardedLiveMessageIds } from "../src/renderer/src/lib/message-discard-identities"
+import type { LiveStreamMessage } from "../src/renderer/src/lib/live-stream-messages"
 import {
   announceManagedTurnUserMessage,
   createManagedTransportAgentRunDelivery,
@@ -22,7 +25,7 @@ import {
 } from "../src/main/agent/managed-transport-delivery"
 import type { SchedulerRendererEvent } from "../src/main/agent/stream-converter"
 import { ImGoalRunBridge } from "../src/main/services/im/goal-runner"
-import { registerAgentRunImplementation, startAgentRun } from "../src/main/agent/agent-run-service"
+import { registerAgentRunImplementation, startAgentRun, sendCurrentAgentRunStreamEvent } from "../src/main/agent/agent-run-service"
 
 interface Mirrored {
   threadId: string
@@ -86,6 +89,91 @@ function testLifecycleAndCustomEventsSurviveTranslation(): void {
   const events = mirrored.map((entry) => entry.event)
   assert.deepEqual(events[1], { type: "custom", data: { type: "token_usage", total: 12 } })
   assert.deepEqual(events[2], { type: "error", error: "boom" })
+}
+
+function testErrorDetailsBelongToTheirOwnManagedRun(): void {
+  const { mirrored, deps } = recorder()
+  const delivery = createManagedTransportAgentRunDelivery(deps)
+  const detail = { status: 485, reason: "provider failure", coordinatorNotificationRunId: "A" }
+  delivery.send("agent:stream:t1", { type: "custom", data: { type: "error_detail", detail } })
+  delivery.send("agent:stream:t1", { type: "error", error: "485" })
+  assert.deepEqual(mirrored.at(-1)?.event, { type: "error", error: "485", errorDetail: detail })
+  delivery.send("agent:stream:t1", { type: "error", error: "new unrelated error" })
+  assert.deepEqual(mirrored.at(-1)?.event, { type: "error", error: "new unrelated error" })
+  delivery.send("agent:stream:t1", { type: "custom", data: { type: "error_detail", detail } })
+  delivery.send("agent:stream:t1", { type: "done" })
+  delivery.send("agent:stream:t1", { type: "error", error: "later error" })
+  assert.deepEqual(mirrored.at(-1)?.event, { type: "error", error: "later error" })
+}
+
+function testRetryResetNormalizesCheckpointAndClearsFailedToolArguments(): void {
+  const { mirrored, deps } = recorder()
+  const delivery = createManagedTransportAgentRunDelivery(deps)
+  const send = (payload: unknown) => delivery.send("agent:stream:t1", payload)
+  const chunk = (args: string) =>
+    send({
+      type: "stream",
+      mode: "messages",
+      data: [
+        new AIMessageChunk({
+          id: "failed",
+          content: "",
+          tool_call_chunks: [{ id: "retry-call", index: 0, name: "execute", args }]
+        }).toJSON(),
+        {}
+      ]
+    })
+  chunk('{"bad":')
+  send({
+    type: "custom",
+    data: {
+      type: "stream_retry_reset",
+      discardedMessageIds: ["failed"],
+      messages: [
+        new HumanMessage({ id: "u", content: "question" }).toJSON(),
+        new AIMessage({
+          id: "complete",
+          content: "run",
+          tool_calls: [{ id: "c", name: "execute", args: {} }]
+        }).toJSON(),
+        new ToolMessage({
+          id: "tool",
+          content: "done",
+          tool_call_id: "c",
+          status: "error"
+        }).toJSON()
+      ]
+    }
+  })
+  const reset = mirrored.at(-1)!.event
+  assert.equal(reset.type, "custom")
+  if (reset.type !== "custom") throw new Error("Missing reset")
+  const messages = reset.data.messages as LiveStreamMessage[]
+  assert.deepEqual(
+    messages.map((message) => [message.id, message.type]),
+    [
+      ["u", "human"],
+      ["complete", "ai"],
+      ["tool", "tool"]
+    ]
+  )
+  assert.deepEqual(
+    resolveDiscardedLiveMessageIds(
+      new Set(["failed"]),
+      [{ id: "failed", type: "ai", content: "partial" }],
+      messages
+    ),
+    new Set(["failed"])
+  )
+  assert.equal((messages[2] as unknown as { is_error: boolean }).is_error, true)
+  chunk('{"good":true}')
+  const resumed = mirrored.at(-1)!.event
+  assert.equal(resumed.type, "message-delta")
+  if (resumed.type === "message-delta") {
+    assert.deepEqual(resumed.toolCalls, [
+      { id: "retry-call", name: "execute", args: { good: true } }
+    ])
+  }
 }
 
 function testOnlyTheThreadWideChannelIsTranslated(): void {
@@ -285,6 +373,8 @@ async function main(): Promise<void> {
     testRunIsNeverGatedOnAWindow,
     testStreamFramesReachTheChannelTheRendererListensOn,
     testLifecycleAndCustomEventsSurviveTranslation,
+    testErrorDetailsBelongToTheirOwnManagedRun,
+    testRetryResetNormalizesCheckpointAndClearsFailedToolArguments,
     testOnlyTheThreadWideChannelIsTranslated,
     testTheCoordinatorInternalChannelReachesTheThreadStream,
     testWindowShimRoutesThroughTheSameTranslation,
@@ -299,8 +389,50 @@ async function main(): Promise<void> {
   }
   await testGoalRunSurvivesWithNoDesktopWindow()
   await testEverySettledRunClosesItsRendererStream()
+  await testRuntimeSteerEventsFollowTheirOwnRunDelivery()
   console.log("PASS testGoalRunSurvivesWithNoDesktopWindow")
   console.log("managed-transport-delivery.spec.ts passed")
+}
+
+async function testRuntimeSteerEventsFollowTheirOwnRunDelivery(): Promise<void> {
+  const first = recorder(), second = recorder()
+  let resume!: () => void
+  const barrier = new Promise<void>(resolve => { resume = resolve })
+  registerAgentRunImplementation(async request => {
+    await barrier
+    assert.equal(sendCurrentAgentRunStreamEvent("unrelated", {}), false)
+    sendCurrentAgentRunStreamEvent(request.threadId, { type: "custom", data: {
+      type: "message_id_alias", fromId: "raw", toId: `stable-${request.threadId}`,
+      role: "assistant", currentRunCompleted: true, providerSourceId: "raw", providerOccurrence: 1
+    } })
+    sendCurrentAgentRunStreamEvent(request.threadId, { type: "custom", data: {
+      type: "current_run_user_injected", completedAssistantId: `stable-${request.threadId}`,
+      completedAssistantContent: "finished", providerSourceId: "raw", providerOccurrence: 1,
+      messages: [{ id: `user-${request.threadId}`, content: "补充" }]
+    } })
+  })
+  const handles = await Promise.all([
+    startAgentRun({ threadId: "first", message: "start" }, createManagedTransportAgentRunDelivery(first.deps)),
+    startAgentRun({ threadId: "second", message: "start", streamRequestId: "foreground-request" }, {
+      window: {} as any, isAvailable: () => true,
+      send: (channel, payload) => second.broadcasts.push({ channel, payload })
+    })
+  ])
+  resume()
+  await Promise.all(handles.map(handle => handle.completion))
+  assert.equal(sendCurrentAgentRunStreamEvent("first", {}), false, "delivery is run scoped")
+  assert.equal(first.broadcasts.length, 0, "background events must reach scheduler subscribers")
+  assert.ok(first.mirrored.every(entry => entry.threadId === "first"))
+  assert.deepEqual(first.mirrored.map(entry => {
+    const event = entry.event
+    return event.type === "custom" ? event.data.type : event.type
+  }), ["started", "message_id_alias", "coordinator_ai_snapshot_message", "turn-messages", "done"])
+  assert.deepEqual(first.mirrored[3].event, { type: "turn-messages", messages: [
+    { id: "user-first", role: "user", content: "补充" }
+  ] })
+  assert.ok(second.broadcasts.every(event => event.channel === "agent:stream:second:request:foreground-request"))
+  assert.equal(second.broadcasts.length, 2)
+  console.log("PASS testRuntimeSteerEventsFollowTheirOwnRunDelivery")
 }
 
 async function testEverySettledRunClosesItsRendererStream(): Promise<void> {

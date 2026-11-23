@@ -818,6 +818,11 @@ function testTheTargetListOffersExactlyThePrintedNumbers(): void {
   const mode = controls.find((control) => control.feedbackKey === TARGET_BIND_MODE_KEY)
   assert.ok(mode, "the mode control is offered when the list can create a session")
   assert.equal(mode.required, false, "a mode must stay optional — omitting it is meaningful")
+  assert.equal(mode.promptText, "请选择", "the explanation must not be hidden in a clipped placeholder")
+  const body = components.filter((component) => component.type === "content")
+    .flatMap((component) => (component.list as Array<{ content: string }>).map((line) => line.content)).join("\n")
+  assert(body.includes("/文字模式 开，再发送 /会话"), "target cards explain the full text fallback")
+  assert(body.includes("仅在特性下新建时生效，已有会话请忽略"), "the mode scope is readable outside the selector")
 
   // Nothing in the list creates a session, so a mode control would be a field
   // whose every use the typed path refuses.
@@ -1106,9 +1111,9 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
   })
 
   assert.deepEqual(humanCalls, [
-    { notificationId: "gate-1", decision: "approve" },
-    { notificationId: "gate-2", decision: "reject" },
-    { notificationId: "gate-3", decision: "approve" }
+    { ...ROUTE, notificationId: "gate-1", decision: "approve" },
+    { ...ROUTE, notificationId: "gate-2", decision: "reject" },
+    { ...ROUTE, notificationId: "gate-3", decision: "approve" }
   ])
   assert.deepEqual(gateway.acknowledged.slice(0, 3), [
     "receipt-human-gate",
@@ -1686,7 +1691,23 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
   console.log("PASS testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued")
 }
 
+async function testDesktopGroupBindingGrantReachesTheWire(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const publisher = new ImCardPublisher({
+    gateway:gateway as never,interactions:new ImCardInteractionStore(),
+    isThreadLive:()=>true,warn:()=>undefined
+  })
+  await publisher.publish({...approvalCardInput(),botBindingRef:"binding:group:2"})
+  assert.equal(gateway.sent[0].botBindingRef,"binding:group:2")
+  assert.equal(gateway.sent[0].botEventId,undefined)
+  assertRemoteImCardSendV1(gateway.sent[0])
+  assert.throws(()=>assertRemoteImCardSendV1({...gateway.sent[0],botEventId:"another-event"}))
+  assert.throws(()=>assertRemoteImCardSendV1({...gateway.sent[0],botBindingRef:"missing"}))
+  console.log("PASS testDesktopGroupBindingGrantReachesTheWire")
+}
+
 async function main(): Promise<void> {
+  await testDesktopGroupBindingGrantReachesTheWire()
   testEveryBuiltCardSatisfiesTheContract()
   testEveryKvRowIsShapedTheWayTheClientParses()
   testEveryPendingCardPointsAtTextModeAboveItsBody()

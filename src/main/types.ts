@@ -1,3 +1,4 @@
+import type { ThreadIncarnationSnapshot } from "../shared/thread-incarnation"
 import type { HookConfig } from "./hooks/types"
 import type { TranscriptReasoningUpdate } from "../shared/transcript-reasoning"
 import type { ImChannelId } from "../shared/im-gateway-contract"
@@ -150,8 +151,12 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  /** May be selected now, even if a configured idle model is outside service hours. */
+  selectable?: boolean
   source: ProviderId
-  origin?: "remote" | "fallback"
+  origin?: "remote" | "fallback" | "local"
+  notice?: string
+  unavailableReason?: string
   maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
@@ -218,12 +223,17 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Added only to desktop history responses; storage and model inputs ignore it. */
+  botHistoryInputOrigin?: import("../shared/bots/message-reply").BotHistoryInputOrigin
+  botHistoryDeliveryScope?: import("../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
   provider_source_id?: string
   provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  /** Display diagnostic for a bounded persisted text preview. */
+  content_preview_notice?: string
   content_priority?: number
   /** Storage provenance; legacy or lossy previews must not become checkpoint authority. */
   recovery_integrity?: "verified" | "unverified"
@@ -263,6 +273,8 @@ export interface ThreadMessagesPageOptions {
    * 500-row page unsafe.
    */
   targetMessageId?: string
+  /** Verify the ordinals of cached rows in the same snapshot as the target. */
+  residentMessageIds?: readonly string[]
   /**
    * Read forward from this exact durable message (inclusive). This is mutually
    * exclusive with the backward compound cursor and is used to close a released
@@ -294,6 +306,7 @@ export interface ThreadMessagesPageOptions {
   notAfterCreatedAt?: number
   /** Checkpoint identity paired with notAfterCreatedAt for legacy ordinal fencing. */
   recoveryCheckpointId?: string
+  recoveryTranscriptRevision?: string
 }
 
 export interface ThreadHydrationOptions {
@@ -324,11 +337,7 @@ export interface ThreadGroupIdsOptions {
   selector: ThreadGroupSelector
 }
 
-/** Stable identity captured with a destructive group-selection snapshot. */
-export interface ThreadIncarnationSnapshot {
-  token: string | null
-  legacyCreatedAt: number
-}
+export type { ThreadIncarnationSnapshot } from "../shared/thread-incarnation"
 
 export interface ThreadGroupSelectionEntry {
   threadId: string
@@ -353,9 +362,18 @@ export interface ThreadDeleteOptions {
   groupGuard?: ThreadGroupDeleteGuard
 }
 
+/** The ordinary delete path returns no value. Work draft cleanup requires its exact committed owner. */
+export type ThreadDeleteResult = void | {
+  deletedWork: NonNullable<import("../shared/bots/conversation").BotConversationDeletionOutcome["deletedWork"]>
+}
+
 export interface ThreadMessagesPage {
   /** Messages are always returned in durable ascending transcript order. */
   messages: Message[]
+  /** Null identifies a requested cached row that is no longer saved. */
+  residentOrdinals?: Array<[messageId: string, ordinal: number | null, goalAnchorId?: string]>
+  /** Present on exact target pages, checked in the same snapshot as the returned rows. */
+  hasNewerMessages?: boolean
   /** Cursor for the next older page; explicit forward reads always return null here. */
   beforeOrdinal: number | null
   beforeMessageId: string | null
@@ -363,6 +381,8 @@ export interface ThreadMessagesPage {
   hasMore: boolean
   /** Echoed only for a successful explicit forward read after the durable anchor is verified. */
   verifiedAnchorMessageId?: string
+  /** Position and time of the verified durable anchor in the forward page's read snapshot. */
+  verifiedAnchor?: { messageId: string; ordinal: number; createdAt?: number }
   /** Total durable messages for the thread, independent of the cursor. */
   total: number
   /** Present only when includeVisibleMessagePresence was requested. */
@@ -370,9 +390,11 @@ export interface ThreadMessagesPage {
   /**
    * Present only with the initial presence summary. `migrating` means a legacy
    * checkpoint copy was interrupted and must be resumed before an empty
-   * conversation can be trusted; `complete` makes the durable table authoritative.
+   * conversation can be trusted. `complete` describes the stored copy.
    */
   legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
+  /** A previously completed copy has a changed source to verify. */
+  legacyCheckpointSourceNeedsVerification?: boolean
   /** Older completed imports may still need the worker's one-time timing backfill. */
   legacyMessageTimesPending?: boolean
   /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
@@ -396,6 +418,8 @@ export interface ThreadLegacyCheckpointBootstrapResult {
 }
 
 export interface ThreadMessageSearchOptions {
+  /** Bot's normal view excludes tool summaries and inline assistant reasoning. */
+  bodyOnly?: boolean
   /**
    * Cursor returned by the previous search page. Both fields must be supplied
    * together so duplicate legacy ordinals cannot skip or repeat messages.
@@ -830,6 +854,10 @@ export interface PluginMetadata {
    * and stop relying on the heuristic.
    */
   origin?: "market" | "local"
+  /** Market identity may differ from the name inside the uploaded ZIP manifest. */
+  marketplace?: { name: string; id?: string }
+  /** Main-verified source permission at the time of market installation. */
+  sourceAccess?: "owner" | "whitelist"
   createdAt: string
   updatedAt: string
 }
@@ -1183,17 +1211,26 @@ export interface UserInputQuestion {
   id: string
   question: string
   options: UserInputOption[]
+  /** Enabled by the trusted Bot question tool; absent in ordinary threads. */
+  allowMultiple?: boolean
 }
 
 export interface UserInputRequest {
   requestId: string
   threadId: string
+  /** A host-created, desktop-only choice bound to one Bot conversation operation. */
+  kind?: "bot_conversation_action" | "bot_result_confirmation"
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   createdAt: string
 }
 
 export type UserInputAnswer =
+  | {
+      type: "options"
+      questionId: string
+      options: Array<UserInputOption & { optionIndex: number }>
+    }
   | {
       type: "option"
       questionId: string
@@ -1234,6 +1271,7 @@ export interface HookLoggingConfig {
 
 // Skills types
 export interface SkillMetadata {
+  contentOrigin?: "local" | "market" | "builtin"
   id?: string
   name: string
   description: string

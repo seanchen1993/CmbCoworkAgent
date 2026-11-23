@@ -24,6 +24,7 @@ import { ImGoalRunBridge } from "./goal-runner"
 import { imRemoteCapabilityGuard } from "./capability-guard"
 import { imHumanGateAdapter } from "./human-gate-adapter"
 import { imBizRetryAdapter } from "./biz-retry-adapter"
+import { ImSessionSwitchCards } from "./session-switch-cards"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -40,6 +41,7 @@ export class ImUnifiedBotService {
   readonly replyClient: ImReplyClient
   readonly modeNotificationPump: ImRemoteModeNotificationPump
   readonly goalRuns: ImGoalRunBridge
+  readonly sessionSwitchCards: ImSessionSwitchCards
   private readonly unregisterSchedulerGateway: () => void
   private readonly unregisterDesktopCompletionReplyDrainer: () => void
   private readonly unregisterRemoteApprovalReplyDrainer: () => void
@@ -48,6 +50,7 @@ export class ImUnifiedBotService {
   private readonly unregisterManagedBizRetryReplyDrainer: () => void
   private readonly unregisterCardReceiptReplyDrainer: () => void
   private readonly unregisterCardReceiptCommandRouter: () => void
+  private readonly unregisterSessionSwitchCards: () => void
   private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
@@ -58,7 +61,20 @@ export class ImUnifiedBotService {
       goalRuns?: ImGoalRunBridge
     } = {}
   ) {
-    this.replyClient = new ImReplyClient(gateway)
+    this.sessionSwitchCards = new ImSessionSwitchCards({
+      gateway,
+      switchSession: (input) =>
+        this.commandRouter.handle({
+          ...input,
+          command: { name: "switch_target", argument: `@${input.code}` }
+        })
+    })
+    this.replyClient = new ImReplyClient(gateway, undefined, undefined, key =>
+      this.sessionSwitchCards.schedule(key)
+    )
+    this.unregisterSessionSwitchCards = imCardReceiptRouter.registerSessionSwitchCards(
+      this.sessionSwitchCards
+    )
     this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway, this.replyClient)
     this.unregisterDesktopCompletionReplyDrainer = registerImDesktopCompletionReplyDrainer(
       this.replyClient
@@ -159,7 +175,7 @@ export class ImUnifiedBotService {
           text: `已按你的明确指令重试事件 ${code}。原事件结果未知，文件或外部副作用可能重复，请核对。`
         })
       )
-      await this.replyClient.sendPending()
+      await this.replyClient.sendPending(event.conversationKey)
       if (result.event.state === "queued") {
         void this.turnQueue.notify(event.conversationKey).catch((error) => {
           console.error("[IM] Retry queue failed:", error)
@@ -215,6 +231,7 @@ export class ImUnifiedBotService {
     })
     await this.modeNotificationPump.recoverAndStart()
     this.startOutboxRetryLoop()
+    this.sessionSwitchCards.schedule()
     return recovered
   }
 
@@ -237,10 +254,10 @@ export class ImUnifiedBotService {
   }
 
   async resumeQueued(): Promise<void> {
-    await this.replyClient.sendPending()
-    await Promise.all(
-      imEventStore.listQueuedConversationKeys().map((key) => this.turnQueue.notify(key))
-    )
+    await Promise.all([
+      this.replyClient.sendPending(),
+      ...imEventStore.listQueuedConversationKeys().map((key) => this.turnQueue.notify(key))
+    ])
   }
 
   async handleLeaseRevoked(eventId: string, reasonCode = "LEASE_REVOKED"): Promise<void> {
@@ -264,15 +281,19 @@ export class ImUnifiedBotService {
     this.unregisterManagedBizRetryReplyDrainer()
     this.unregisterCardReceiptReplyDrainer()
     this.unregisterCardReceiptCommandRouter()
+    this.unregisterSessionSwitchCards()
     this.modeNotificationPump.stop()
-    return this.turnQueue.stop()
+    return Promise.all([this.turnQueue.stop(), this.sessionSwitchCards.stop()]).then(
+      () => undefined
+    )
   }
 
   private startOutboxRetryLoop(): void {
     if (this.outboxRetryTimer) return
     this.outboxRetryTimer = setInterval(() => {
       if (!this.gateway.isAuthenticated()) return
-      void this.replyClient.sendPending().catch(() => undefined)
+      void this.replyClient.wakePending().catch(error => console.warn("[IM] Reply scan deferred:", error))
+      this.sessionSwitchCards.schedule()
     }, 1_000)
     this.outboxRetryTimer.unref?.()
   }

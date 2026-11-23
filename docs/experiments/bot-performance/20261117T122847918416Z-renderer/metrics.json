@@ -1,0 +1,75 @@
+{
+  "kind": "production React hooks; simulated metadata IPC",
+  "recordedAt": "2026-11-17T12:28:48.284Z",
+  "cases": [
+    {
+      "name": "100 simultaneous unrelated changes",
+      "loaded": 40,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 2,
+        "list": 1
+      },
+      "peak": 2,
+      "maxBatch": 0,
+      "elapsedMs": 29.8,
+      "domWorkRows": 6
+    },
+    {
+      "name": "unrelated change with 400 loaded works",
+      "loaded": 400,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 1,
+        "list": 1,
+        "summaries": 9
+      },
+      "peak": 1,
+      "maxBatch": 40,
+      "elapsedMs": 132.9,
+      "domWorkRows": 6
+    },
+    {
+      "name": "10 spaced unrelated changes with 400 loaded works",
+      "loaded": 400,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 10,
+        "list": 10,
+        "summaries": 19
+      },
+      "peak": 2,
+      "maxBatch": 40,
+      "elapsedMs": 349.5,
+      "domWorkRows": 6
+    },
+    {
+      "name": "unrelated change with 2000 loaded works",
+      "loaded": 2000,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 1,
+        "list": 1
+      },
+      "peak": 1,
+      "maxBatch": 40,
+      "elapsedMs": 14.1,
+      "domWorkRows": 6
+    },
+    {
+      "name": "10 spaced unrelated changes with 2000 loaded works",
+      "loaded": 2000,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 10,
+        "summaries": 57,
+        "list": 10
+      },
+      "peak": 2,
+      "maxBatch": 40,
+      "elapsedMs": 909.3,
+      "domWorkRows": 6
+    }
+  ],
+  "status": "passed correctness; timing observations require review"
+}

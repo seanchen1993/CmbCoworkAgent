@@ -1,6 +1,8 @@
 import { requireHarnessFeatureWorkspace } from "../harness-board/service"
+import { validateProjectDirectorySelection } from "../harness-board/project-workspace"
 import {
   BrowserWindow,
+  dialog,
   shell,
   type IpcMain,
   type IpcMainInvokeEvent,
@@ -16,7 +18,9 @@ import {
   buildHarnessFeatureDialogTips,
   getHarnessDynamicWorkflowConfig,
   deleteHarnessProject,
+  getDefaultHarnessProjectDirectoryPreview,
   getHarnessProjectDetail,
+  prepareHarnessKnowledgeDeposition,
   getHarnessProjectDetails,
   getHarnessLocalAgentmdDeployUnitMappings,
   getHarnessProjectPublicAgentmdDeployUnits,
@@ -28,7 +32,6 @@ import {
   saveHarnessLeanTokenConfig,
   setHarnessFeatureImManagement,
   skipHarnessRunNode,
-  syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
   updateHarnessProjectMetadata,
   resolveHarnessRunDetailCurrentStage
@@ -39,7 +42,7 @@ import {
 } from "../harness-board/catalog-client"
 import {
   cancelHarnessKnowledgePreviewOwner,
-  readHarnessKnowledgePreviewInWorker
+  readKnowledgeBasePreviewInWorker
 } from "../harness-board/knowledge-preview-client"
 import {
   cancelHarnessEnterpriseRequestScope,
@@ -58,10 +61,22 @@ import {
 } from "../harness-board/watch-ref-watcher"
 import { managedRunStore } from "../harness-board/managed-run-store"
 import { createBrowserWindowAgentRunDelivery } from "../agent/agent-run-service"
+import { managedRunScheduler } from "../harness-board/managed-run-scheduler"
+import type {
+  ManagedRunScheduleInput,
+  ManagedRunScheduleUpdateInput,
+  ManagedRunScheduleIdentity
+} from "../../shared/managed-run-schedule"
 import { managedRunController } from "../harness-board/managed-run-controller"
 import { assertHarnessProjectCanBeDeleted } from "../harness-board/project-deletion-gate"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
+import {
+  deleteKnowledgeBase,
+  listKnowledgeBases,
+  refreshKnowledgeBases,
+  syncKnowledgeBase
+} from "../services/knowledge-base-manager"
 import { materializeHarnessFeatureThreadGrant } from "../services/im/feature-thread-grant"
 import { builtinRobotManager } from "../services/im/manager"
 import {
@@ -69,7 +84,8 @@ import {
   HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
 } from "../harness-board/adapter-detail-protocol"
 import {
-  markHarnessStageAttributionDirty,
+  getHarnessStageAttributionVersion,
+  harnessStageWatches,
   primeHarnessStageAttribution
 } from "../services/harness-stage-attribution"
 import type {
@@ -84,7 +100,6 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -110,6 +125,10 @@ import type {
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
+import type {
+  KnowledgeBaseListResult,
+  KnowledgeBaseSyncResult
+} from "../../shared/knowledge-base-types"
 import {
   EXTERNAL_FILE_READ_GRANT_TTL_MS,
   issueExternalFileReadGrant,
@@ -332,47 +351,81 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  ipcMain.handle("harnessBoard:listKnowledgeBases", (): Promise<KnowledgeBaseListResult> => {
+    return listKnowledgeBases()
+  })
+
+  ipcMain.handle("harnessBoard:refreshKnowledgeBases", (): Promise<KnowledgeBaseListResult> => {
+    return refreshKnowledgeBases()
+  })
+
+  ipcMain.handle("harnessBoard:deleteKnowledgeBase", (_event, idKey: string): Promise<void> => {
+    return deleteKnowledgeBase(idKey)
+  })
+
   ipcMain.handle(
-    "harnessBoard:syncProjectConstraints",
-    async (_event, adapterId: string): Promise<HarnessProjectConstraintSyncResult> => {
-      return syncHarnessProjectConstraints(adapterId)
+    "harnessBoard:prepareKnowledgeDeposition",
+    (_event, projectId: string, targetId?: string) => {
+      return prepareHarnessKnowledgeDeposition(projectId, targetId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:syncKnowledgeBase",
+    (_event, idKey: string): Promise<KnowledgeBaseSyncResult> => {
+      return syncKnowledgeBase(idKey)
     }
   )
 
   ipcMain.handle(
     "harnessBoard:getKnowledgePreview",
-    async (event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
+    async (event, idKey: string): Promise<HarnessKnowledgePreviewResult> => {
       ensureEnterpriseSenderCleanup(event)
-      const normalizedAdapterId =
-        typeof adapterId === "string" ? adapterId.trim().slice(0, 512) : ""
-      if (!normalizedAdapterId) throw new Error("Harness adapter id is required")
-      const scope = `harness-knowledge:${event.sender.id}:${normalizedAdapterId}`
-      const preview = await readHarnessKnowledgePreviewInWorker(normalizedAdapterId, scope)
-      if (!preview.exists || !preview.path) return preview
-      const previewablePaths = preview.files.filter((file) => !file.is_dir).map((file) => file.path)
-      if (previewablePaths.length === 0) return preview
-
-      // The knowledge root comes from the main-process Harness adapter config.
-      // The renderer receives only a sender-bound capability, never a path-to-
-      // capability minting primitive.
-      const issued = issueExternalFileReadGrant(
-        preview.path,
-        event.sender.id,
-        previewablePaths,
-        `harness-knowledge:${adapterId}`
+      const normalizedId = typeof idKey === "string" ? idKey.trim().slice(0, 512) : ""
+      if (!normalizedId) throw new Error("知识库 idKey 不能为空")
+      const item = (await listKnowledgeBases()).knowledgeBases.find(
+        (candidate) => candidate.idKey === normalizedId
       )
-      if ("error" in issued) {
+      if (!item) throw new Error("知识库配置不存在")
+      if (!item.localValid) {
         return {
-          ...preview,
-          error: preview.error ? `${preview.error}；${issued.error}` : issued.error
+          exists: false,
+          path: item.localPath,
+          files: []
         }
       }
-      return { ...preview, previewGrant: issued.grant }
+      const scope = `harness-knowledge:${event.sender.id}:${normalizedId}`
+      return readKnowledgeBasePreviewInWorker(
+        { idKey: item.idKey, name: item.name, path: item.localPath },
+        scope
+      )
     }
   )
 
   ipcMain.handle("harnessBoard:cancelKnowledgePreviewRequests", (event): void => {
     cancelHarnessKnowledgePreviewOwner(event.sender.id)
+  })
+
+  ipcMain.handle("harnessBoard:getDefaultProjectDirectoryPreview", (_event, projectId: string) =>
+    getDefaultHarnessProjectDirectoryPreview(projectId)
+  )
+
+  ipcMain.handle("harnessBoard:selectProjectDirectory", async (event) => {
+    const parent = BrowserWindow.fromWebContents(event.sender)
+    const options = {
+      title: "选择项目工作区文件夹",
+      message: "请选择空文件夹，或新建一个文件夹作为项目工作区",
+      properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">
+    }
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || !result.filePaths[0]) return null
+    const selectedPath = result.filePaths[0]
+    if (path.dirname(selectedPath) === selectedPath) {
+      throw new Error("请选择具体的项目文件夹，不能使用磁盘根目录")
+    }
+    return validateProjectDirectorySelection(selectedPath)
   })
 
   ipcMain.handle(
@@ -519,6 +572,31 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  ipcMain.handle("harnessBoard:getActiveManagedRunSchedules", () =>
+    managedRunScheduler.listActive()
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getManagedRunSchedule",
+    (_event, projectId: string, featureId: string) => managedRunScheduler.get(projectId, featureId)
+  )
+  ipcMain.handle(
+    "harnessBoard:scheduleManagedRun",
+    async (_event, input: ManagedRunScheduleInput) => {
+      await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
+      managedRunController.validateStart(input)
+      return managedRunScheduler.create(input)
+    }
+  )
+  ipcMain.handle(
+    "harnessBoard:cancelManagedRunSchedule",
+    (_event, input: ManagedRunScheduleIdentity) => managedRunScheduler.cancel(input)
+  )
+  ipcMain.handle(
+    "harnessBoard:updateManagedRunSchedule",
+    (_event, input: ManagedRunScheduleUpdateInput) => managedRunScheduler.reschedule(input)
+  )
+
   ipcMain.handle(
     "harnessBoard:stopManagedRun",
     async (_event, input: ManagedRunStopInput): Promise<boolean> => {
@@ -578,6 +656,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const projectDirectory = getHarnessProjectRootPath(projectId)
       const deleted = await deleteHarnessProject(projectId)
       managedRunStore.removeProject(projectId, projectDirectory)
+      managedRunScheduler.removeProject(projectId)
       // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
       // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
       void purgeProjectAnalytics(projectId)
@@ -685,6 +764,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       const watchScopeKey = `run:${payload.projectId}:${payload.slug}`
       desireWatchScope(event.sender.id, watchScopeKey)
       activeRunScopeBySender.set(event.sender.id, watchScopeKey)
+      const stageVersion = getHarnessStageAttributionVersion(payload.projectId, payload.slug)
       const detail = await getHarnessRunDetail(payload.projectId, payload.slug, {
         scope: `harness-run-detail:${event.sender.id}`
       })
@@ -694,7 +774,14 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       primeHarnessStageAttribution(
         payload.projectId,
         payload.slug,
-        resolveHarnessRunDetailCurrentStage(detail)
+        resolveHarnessRunDetailCurrentStage(detail),
+        stageVersion
+      )
+      harnessStageWatches.remember(
+        payload.projectId,
+        payload.slug,
+        detail.project.projectRootPath,
+        detail.run.watchRefs
       )
       if (desiredWatchScopesBySender.get(event.sender.id)?.has(watchScopeKey)) {
         startHarnessWatchRefs(watchScopeKey, detail.project.projectRootPath, detail.run.watchRefs, {
@@ -800,6 +887,12 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:getManagedRuns",
+    (_event, projectId: string, featureId: string): ManagedRunSummary[] =>
+      managedRunStore.listFeatureRunSummaries(projectId, featureId)
+  )
+
+  ipcMain.handle(
     "harnessBoard:getLatestManagedRun",
     (_event, projectId: string, featureId: string): ManagedRunSummary | null =>
       managedRunStore.getLatestRun(projectId, featureId)
@@ -808,9 +901,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:skipNode",
     async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
-      const result = await skipHarnessRunNode(input)
-      markHarnessStageAttributionDirty(result.projectId, result.slug)
-      return result
+      return skipHarnessRunNode(input)
     }
   )
 

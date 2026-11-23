@@ -1,4 +1,5 @@
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { cleanupMarketRuntimeContent, protectMarketDirectory } from "./market-content"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -23,6 +24,7 @@ async function createTrustedRoot(): Promise<{ root: string; file: string }> {
 }
 
 afterEach(async () => {
+  cleanupMarketRuntimeContent()
   revokeExternalFileReadGrantsForOwner(1)
   revokeExternalFileReadGrantsForOwner(2)
   vi.useRealTimers()
@@ -32,6 +34,64 @@ afterEach(async () => {
 })
 
 describe("external file read grants", () => {
+  it("allows only explicitly listed knowledge files without opening generic market previews", async () => {
+    const { root } = await createTrustedRoot()
+    const knowledge = path.join(root, "knowledge")
+    await mkdir(knowledge)
+    await writeFile(path.join(knowledge, "AGENTS.md"), "public knowledge")
+    await writeFile(path.join(root, "SKILL.md"), "private skill")
+    protectMarketDirectory(root)
+    expect(issueExternalFileReadGrant(knowledge, 1, ["AGENTS.md"], "generic")).toHaveProperty(
+      "error"
+    )
+    expect(
+      issueExternalFileReadGrant(root, 1, ["SKILL.md"], "knowledge", "market-knowledge")
+    ).toHaveProperty("error")
+    const issued = issueExternalFileReadGrant(
+      knowledge,
+      1,
+      ["AGENTS.md"],
+      "knowledge",
+      "market-knowledge"
+    )
+    if ("error" in issued) throw new Error(issued.error)
+    expect(issueExternalFileReadGrant(knowledge, 1, ["AGENTS.md"], "knowledge")).toHaveProperty(
+      "error"
+    )
+    expect(await resolveExternalFileReadGrant(issued.grant, 1, "../SKILL.md")).toHaveProperty(
+      "error"
+    )
+    expect(await resolveExternalFileReadGrant(issued.grant, 1, "not-listed.md")).toHaveProperty(
+      "error"
+    )
+    expect(await resolveExternalFileReadGrant(issued.grant, 2, "AGENTS.md")).toHaveProperty("error")
+    const resolved = await resolveExternalFileReadGrant(issued.grant, 1, "AGENTS.md")
+    if ("error" in resolved) throw new Error(resolved.error)
+    const page = await readPreviewTextPage(
+      { externalFullPath: resolved.filePath, trustedRootPath: resolved.rootPath },
+      undefined,
+      0,
+      new Int32Array(new SharedArrayBuffer(4))
+    )
+    expect(page.result.content).toBe("public knowledge")
+    // A directory junction added after issuance must not expose other plugin sources.
+    await symlink(
+      root,
+      path.join(knowledge, "escape"),
+      process.platform === "win32" ? "junction" : "dir"
+    )
+    const escaped = issueExternalFileReadGrant(
+      knowledge,
+      1,
+      ["escape/SKILL.md"],
+      "escape",
+      "market-knowledge"
+    )
+    if ("error" in escaped) throw new Error(escaped.error)
+    expect(await resolveExternalFileReadGrant(escaped.grant, 1, "escape/SKILL.md")).toHaveProperty(
+      "error"
+    )
+  })
   it("resolves descendants of a main-issued root and remains reusable for paging", async () => {
     const { root, file } = await createTrustedRoot()
     const issued = issueExternalFileReadGrant(root, 1, ["report.txt"], "test-preview")
@@ -42,9 +102,7 @@ describe("external file read grants", () => {
       filePath: await realpath(file),
       rootPath: await realpath(root)
     })
-    await expect(resolveExternalFileReadGrant(grant, 1, file)).resolves.toHaveProperty(
-      "filePath"
-    )
+    await expect(resolveExternalFileReadGrant(grant, 1, file)).resolves.toHaveProperty("filePath")
   })
 
   it("is sender-bound without letting another sender invalidate the grant", async () => {
@@ -112,18 +170,8 @@ describe("external file read grants", () => {
   it("keeps picker and knowledge scopes isolated even when they share a directory", async () => {
     const { root } = await createTrustedRoot()
     await writeFile(path.join(root, "picked.txt"), "picked")
-    const knowledge = issueExternalFileReadGrant(
-      root,
-      1,
-      ["report.txt"],
-      "harness-knowledge:test"
-    )
-    const picker = issueExternalFileReadGrant(
-      root,
-      1,
-      ["picked.txt"],
-      "attachment-picker:test"
-    )
+    const knowledge = issueExternalFileReadGrant(root, 1, ["report.txt"], "harness-knowledge:test")
+    const picker = issueExternalFileReadGrant(root, 1, ["picked.txt"], "attachment-picker:test")
     const knowledgeGrant = "grant" in knowledge ? knowledge.grant : ""
     const pickerGrant = "grant" in picker ? picker.grant : ""
     expect(knowledgeGrant).not.toBe(pickerGrant)
@@ -144,18 +192,14 @@ describe("external file read grants", () => {
     expect("filePath" in resolved).toBe(true)
     if (!("filePath" in resolved)) return
 
-    const cancellation = new Int32Array(
-      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-    )
+    const cancellation = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
     const page = await readPreviewTextPage(
       { externalFullPath: resolved.filePath, trustedRootPath: resolved.rootPath },
       undefined,
       0,
       cancellation
     )
-    expect(page.result.contentBytes).toBeLessThanOrEqual(
-      WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES
-    )
+    expect(page.result.contentBytes).toBeLessThanOrEqual(WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES)
     expect(page.result.hasMore).toBe(true)
   })
 })

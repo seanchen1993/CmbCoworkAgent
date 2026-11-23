@@ -1,6 +1,10 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  readonly MAIN_VITE_IDLE_MODEL_PROD_BASE_URL?: string
+  readonly MAIN_VITE_IDLE_MODEL_PROD_API_KEY?: string
+  readonly MAIN_VITE_IDLE_MODEL_UAT_BASE_URL?: string
+  readonly MAIN_VITE_IDLE_MODEL_UAT_API_KEY?: string
   readonly VITE_UNIFIED_IM_GATEWAY_WS_URL?: string
   readonly VITE_API_BASE_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_URL?: string
@@ -20,6 +24,7 @@ interface ImportMetaEnv {
   readonly VITE_BUILTIN_ROBOT_DEBUG_YST_IDS?: string
   readonly VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_SKILL_EVAL_YST_IDS?: string
+  readonly VITE_PROJECT_ANALYSIS_AGENT_ENABLED?: string
   readonly VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS?: string
   readonly VITE_KNOWLEDGE_COMMIT_RATE_URL?: string
   /** 知识文档入库率接口的室编号映射，JSON 对象：{"室名称": "室编号"} */

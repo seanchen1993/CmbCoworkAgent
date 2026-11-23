@@ -1,0 +1,126 @@
+stage: launching isolated App <temp>/m05-local-work-app-7Kmp2y
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+stage: real-work-runtime-file-delivery
+Local model fixture failed: AssertionError [ERR_ASSERTION]: host-linked original request must reach the executor through its system context
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: host-linked original request must reach the executor through its system context
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: host-linked original request must reach the executor through its system context
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: host-linked original request must reach the executor through its system context
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: host-linked original request must reach the executor through its system context
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: host-linked original request must reach the executor through its system context
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: host-linked original request must reach the executor through its system context
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: the automatic report must know the task runtime is idle
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:76:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: the automatic report must know the task runtime is idle
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:76:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: the automatic report must know the task runtime is idle
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:76:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: the automatic report must know the task runtime is idle
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:76:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+artifact-directory <temp>/m05-local-work-app-7Kmp2y last model phases [[],[],[],[],[],["bot_work_read"],["write_file"],["write_file","bot_deliver_files"],[],[],[],[],[],[]]
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-7Kmp2y
+locator.waitFor: Timeout 90000ms exceeded.
+Call log:
+  - waiting for getByText('已将修改要求交办给原任务。', { exact: true }).last() to be visible
+
+    at main (<repository>/tests/bots-local-work-app.spec.ts:566:10) {
+  log: [
+    "  - waiting for getByText('已将修改要求交办给原任务。', { exact: true }).last() to be visible"
+  ],
+  name: 'TimeoutError'
+}

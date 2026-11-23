@@ -1,0 +1,57 @@
+{
+  "date": "2026-11-17",
+  "scope": "Only host-confirmed slash skill selections in local main Bot conversations",
+  "tests": [
+    {
+      "kind": "unit-and-runtime",
+      "passed": 496,
+      "failed": 0,
+      "exitCode": 0,
+      "log": "bot-slash-dispatch-regression-final-2.log.txt"
+    },
+    {
+      "kind": "mode-and-skill-boundaries",
+      "passed": 21,
+      "failed": 0,
+      "exitCode": 0,
+      "log": "bot-slash-dispatch-mode-boundaries.log.txt"
+    },
+    {
+      "kind": "typescript-main",
+      "exitCode": 0,
+      "log": "bot-slash-dispatch-typecheck-final-2.log.txt"
+    },
+    {
+      "kind": "typescript-renderer",
+      "exitCode": 0,
+      "log": "bot-slash-dispatch-web-types.log.txt"
+    },
+    {
+      "kind": "actual-electron-mock-model-work-loop",
+      "exitCode": 0,
+      "modelCalls": 16,
+      "log": "bot-slash-dispatch-work-app.log.txt"
+    }
+  ],
+  "realRuns": [
+    "20261117T112148Z-36291000",
+    "20261117T112516Z-f381f06f",
+    "20261117T112931Z-ea7f9b92",
+    "20261117T113159Z-074498fe",
+    "20261117T113345Z-b8d3b9f8"
+  ],
+  "productionFingerprintsMatchingFinalTestedBuild": 18,
+  "earlyFailures": [
+    "TypeScript projectId mismatch and generic test typing",
+    "Thinking-mode API rejects forced named tool_choice",
+    "Legacy test expected selected skill to steer into main run",
+    "Nested dispatch operation identifiers contained unsupported colon"
+  ],
+  "limits": [
+    "Real model: deepseek-v4-flash only; synthetic macOS App fixtures, no production IM/ES/Windows",
+    "No server cache metrics; no controlled single-factor latency benchmark",
+    "Worker tool retries are not exhaustively counted by the existing main toolErrors field",
+    "One result report imprecisely refers to an attachment above; the actual file card is in the task conversation",
+    "Initial screenshot captured loading; final hydrated screenshots reviewed locally and withheld from Git because they contain temporary paths"
+  ]
+}

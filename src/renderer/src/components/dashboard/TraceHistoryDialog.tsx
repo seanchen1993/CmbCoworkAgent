@@ -44,8 +44,7 @@ import type {
 } from "./use-dashboard"
 import { unwrapThreadTracesResponse } from "./thread-traces-response"
 import { DrilldownArrow } from "./DrilldownArrow"
-import type { DashboardThreadSkillSource } from "../../../../shared/dashboard-thread-skills"
-import { ThreadSkillUsagePanel } from "./ThreadSkillUsagePanel"
+import { ThreadSkillUsageMetric } from "./ThreadSkillUsageMetric"
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -404,7 +403,7 @@ function outcomeLabel(outcome: string): string {
   if (outcome === "success") return "成功"
   if (outcome === "error") return "错误"
   if (outcome === "cancelled") return "取消"
-  if (outcome === "unknown") return "未定"
+  if (outcome === "unknown") return "未确认完成"
   return outcome || "未知"
 }
 
@@ -540,6 +539,7 @@ function TraceCard({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       className={cn(
         "w-full rounded-lg border bg-card p-3 text-left transition-colors hover:bg-muted/30",
         selected ? "border-primary shadow-sm" : "border-border",
@@ -849,68 +849,6 @@ export function TraceTriggerScopeToggle({
   )
 }
 
-function SkillSourceConversation({
-  skill,
-  source,
-  loadThreadTraces,
-  onClose
-}: {
-  skill: string
-  source: DashboardThreadSkillSource
-  loadThreadTraces: (threadId: string) => Promise<DashboardTraceDetail[]>
-  onClose: () => void
-}): React.JSX.Element {
-  const [traces, setTraces] = useState<DashboardTraceDetail[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    void loadThreadTraces(source.threadId!)
-      .then((rows) => {
-        if (!cancelled) setTraces(rows)
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : "读取会话加载失败")
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [source.threadId, loadThreadTraces])
-  const matched = traces.find((trace) => trace.traceId === source.traceId)
-  return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex h-[82vh] max-w-[1100px] flex-col gap-0 p-0">
-        <DialogHeader className="border-b px-5 py-4">
-          <DialogTitle className="break-all">
-            {skill} · {source.label}
-          </DialogTitle>
-        </DialogHeader>
-        {!loading && !error && traces.length > 0 && !matched && (
-          <p className="px-5 py-2 text-xs text-muted-foreground">
-            该次读取记录未在已加载范围内，以下展示来源会话的其他记录。
-          </p>
-        )}
-        <TraceExplorer
-          traces={matched ? [matched] : traces}
-          loading={loading}
-          error={error}
-          defaultViewMode="trace"
-          showCodeStats={false}
-          showViewModeToggle={false}
-          allowFullscreen={false}
-          loadThreadTraces={loadThreadTraces}
-          title="技能读取会话"
-          emptyText="没有可还原的读取会话"
-          className="min-h-0 flex-1"
-        />
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 export function TraceExplorer({
   traces,
   codeStats = null,
@@ -927,6 +865,8 @@ export function TraceExplorer({
   showViewModeToggle = true,
   allowFullscreen = true,
   loadThreadTraces,
+  completeThreadId,
+  initialTraceId,
   className
 }: {
   traces: DashboardTraceDetail[]
@@ -943,10 +883,13 @@ export function TraceExplorer({
   onViewModeChange?: (mode: DashboardTraceViewMode) => void
   showViewModeToggle?: boolean
   allowFullscreen?: boolean
+  /** All supplied records belong to this already-loaded thread, including linked child traces. */
+  completeThreadId?: string | null
+  initialTraceId?: string
   loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
   className?: string
 }): React.JSX.Element {
-  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(initialTraceId ?? null)
   const [localViewMode, setLocalViewMode] = useState<DashboardTraceViewMode>(defaultViewMode)
   const [fullscreen, setFullscreen] = useState(false)
   // 按 threadId 缓存「完整 thread」拉取结果，避免重复请求。
@@ -954,14 +897,6 @@ export function TraceExplorer({
     loader?: (threadId: string) => Promise<DashboardTraceDetail[]>
     traces: Record<string, DashboardTraceDetail[]>
   }>({ traces: {} })
-  const [threadLoadingId, setThreadLoadingId] = useState<string | null>(null)
-  // 最近一次失败的会话 id。只记一个：横幅只讲当前选中的会话，切走再切回会重试。
-  const [threadLoadErrorId, setThreadLoadErrorId] = useState<string | null>(null)
-  const [skillSource, setSkillSource] = useState<{
-    skill: string
-    source: DashboardThreadSkillSource
-    loader: (threadId: string) => Promise<DashboardTraceDetail[]>
-  } | null>(null)
   const activeViewMode = viewMode ?? localViewMode
   const handleViewModeChange = (mode: DashboardTraceViewMode): void => {
     if (!viewMode) setLocalViewMode(mode)
@@ -988,7 +923,13 @@ export function TraceExplorer({
   )
 
   // 概览分组（来自分页接口，每个 thread 仅含预览的若干条 trace）。
-  const baseGroups = useMemo(() => buildTraceThreadGroups(traces), [traces])
+  const baseGroups = useMemo(
+    () =>
+      completeThreadId && traces.length
+        ? [summarizeThreadGroup(completeThreadId, traces)]
+        : buildTraceThreadGroups(traces),
+    [traces, completeThreadId]
+  )
   // 若某 thread 已拉到完整 trace，则用完整数据重建该分组。
   const traceGroups = useMemo(
     () =>
@@ -1025,41 +966,48 @@ export function TraceExplorer({
 
   // thread 模式下选中某个 thread 时，懒加载其完整 trace 列表。
   const selectedThreadId = selectedThreadGroup?.threadId ?? null
+  const threadRequest = useMemo(() => {
+    if (
+      completeThreadId ||
+      activeViewMode !== "thread" ||
+      !selectedThreadId ||
+      selectedThreadId === "unknown-thread" ||
+      threadTraceCache[selectedThreadId]
+    )
+      return null
+    return { threadId: selectedThreadId, load: effectiveLoadThreadTraces }
+  }, [
+    activeViewMode,
+    completeThreadId,
+    selectedThreadId,
+    threadTraceCache,
+    effectiveLoadThreadTraces
+  ])
+  const [failedRequest, setFailedRequest] = useState<typeof threadRequest>(null)
+  const threadLoadFailed = !!threadRequest && failedRequest === threadRequest
+  const threadLoading = !!threadRequest && !threadLoadFailed
   useEffect(() => {
-    if (activeViewMode !== "thread") return
-    if (!selectedThreadId || selectedThreadId === "unknown-thread") return
-    if (threadTraceCache[selectedThreadId]) return
+    if (!threadRequest) return
+    const { threadId, load } = threadRequest
     let cancelled = false
-    setThreadLoadingId(selectedThreadId)
-    setThreadLoadErrorId((current) => (current === selectedThreadId ? null : current))
-    void effectiveLoadThreadTraces(selectedThreadId)
+    void load(threadId)
       .then((full) => {
         if (cancelled) return
         setThreadCacheState((prev) => ({
-          loader: effectiveLoadThreadTraces,
-          traces: {
-            ...(prev.loader === effectiveLoadThreadTraces ? prev.traces : {}),
-            [selectedThreadId]: Array.isArray(full) ? full : []
-          }
+          loader: load,
+          traces: { ...(prev.loader === load ? prev.traces : {}), [threadId]: full }
         }))
       })
       .catch((error) => {
-        // 关键：失败不写缓存。写进去的话 `if (threadTraceCache[id]) return` 会把这
-        // 个会话永久锁在「只有摘要」的状态；不写则切走再切回就会重试。
         if (cancelled) return
         console.warn("[Dashboard] 加载完整会话失败:", error)
-        setThreadLoadErrorId(selectedThreadId)
-      })
-      .finally(() => {
-        if (!cancelled)
-          setThreadLoadingId((current) => (current === selectedThreadId ? null : current))
+        setFailedRequest(threadRequest)
       })
     return () => {
       cancelled = true
     }
-  }, [activeViewMode, selectedThreadId, threadTraceCache, effectiveLoadThreadTraces])
+  }, [threadRequest])
 
-  const threadLoading = threadLoadingId !== null && threadLoadingId === selectedThreadId
   const metricMode = activeViewMode === "thread" && selectedThreadGroup ? "thread" : "trace"
   const metricStartedAt =
     metricMode === "thread" ? selectedThreadGroup?.latestStartedAt : selectedTrace?.startedAt
@@ -1199,8 +1147,6 @@ export function TraceExplorer({
   // 加载完成后 threadTraceCache 会用带 _raw 的完整 trace 覆盖它。加载失败时预览行
   // 同样没有 raw，但原因不是「这条 trace 缺内容」，得说清楚，否则用户既不知道
   // 发生了什么、也不知道还能重试。
-  const threadLoadFailed =
-    activeViewMode === "thread" && !threadLoading && selectedThreadId === threadLoadErrorId
   const rawMissingNotice = threadLoadFailed
     ? "完整会话加载失败，当前仅显示摘要。切换到其他会话再切回可重试。"
     : selectedTrace && !selectedTrace.rawAvailable && !threadLoading
@@ -1210,36 +1156,18 @@ export function TraceExplorer({
   const enriched = selectedThreadGroup?.traces.find(
     (trace) => trace.threadSkillUsage !== undefined || trace.threadSkillUsageError
   )
+  const metricSkills = Array.from(
+    new Set(
+      metricMode === "thread"
+        ? (enriched?.threadSkillUsage?.map((entry) => entry.skill) ??
+            selectedThreadGroup?.traces.flatMap((trace) => trace.usedSkills) ??
+            [])
+        : (selectedTrace?.usedSkills ?? [])
+    )
+  ).filter((skill) => skill.trim())
+  const fillThreadHeight = fullscreen || !!completeThreadId
   const conversationContent = (
     <>
-      {activeViewMode === "thread" && selectedThreadGroup && (
-        <ThreadSkillUsagePanel
-          skills={enriched?.threadSkillUsage}
-          error={enriched?.threadSkillUsageError}
-          onRetry={() =>
-            setThreadCacheState((prev) => {
-              const next = { ...prev.traces }
-              delete next[selectedThreadGroup.threadId]
-              return { ...prev, traces: next }
-            })
-          }
-          onViewSource={(skill, source) =>
-            setSkillSource({
-              skill,
-              source,
-              loader: effectiveLoadThreadTraces
-            })
-          }
-        />
-      )}
-      {skillSource && skillSource.loader === effectiveLoadThreadTraces && (
-        <SkillSourceConversation
-          key={skillSource.skill + skillSource.source.threadId}
-          {...skillSource}
-          loadThreadTraces={effectiveLoadThreadTraces}
-          onClose={() => setSkillSource(null)}
-        />
-      )}
       {rawMissingNotice && (
         <div className="mb-3 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           {rawMissingNotice}
@@ -1249,10 +1177,10 @@ export function TraceExplorer({
         activeViewMode === "thread" && selectedThreadGroup ? (
           <TraceThreadConversation
             traces={selectedThreadGroup.traces}
-            className={fullscreen ? "min-h-0 flex-1" : undefined}
+            className={fillThreadHeight ? "min-h-0 flex-1" : undefined}
             loading={threadLoading}
             loadFailed={threadLoadFailed}
-            fillAvailableHeight={fullscreen}
+            fillAvailableHeight={fillThreadHeight}
             selectedTraceId={selectedTrace.traceId}
           />
         ) : (
@@ -1323,6 +1251,19 @@ export function TraceExplorer({
                     </p>
                   </div>
                 </div>
+                <ThreadSkillUsageMetric
+                  skills={metricSkills}
+                  loading={metricMode === "thread" && threadLoading}
+                  error={metricMode === "thread" ? enriched?.threadSkillUsageError : undefined}
+                  onRetry={() => {
+                    if (!selectedThreadGroup) return
+                    setThreadCacheState((prev) => {
+                      const next = { ...prev.traces }
+                      delete next[selectedThreadGroup.threadId]
+                      return { ...prev, traces: next }
+                    })
+                  }}
+                />
                 <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
                   <Hash className="size-3.5 shrink-0 text-muted-foreground" />
                   <div>
@@ -1426,7 +1367,7 @@ export function TraceExplorer({
               </div>
             )}
 
-            {fullscreen && activeViewMode === "thread" && selectedThreadGroup ? (
+            {fillThreadHeight && activeViewMode === "thread" && selectedThreadGroup ? (
               <div className="flex min-h-0 flex-1 flex-col p-4">{conversationContent}</div>
             ) : (
               <ScrollArea className="min-h-0 flex-1">
@@ -1459,7 +1400,8 @@ export function TraceHistoryDialog({
   exporting = false,
   loading,
   error,
-  onPageChange
+  onPageChange,
+  loadThreadTraces
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -1480,6 +1422,7 @@ export function TraceHistoryDialog({
   loading: boolean
   error: string | null
   onPageChange?: (page: number) => void
+  loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const displayTotalTraces = Math.max(totalTraces, traces.length)
   const totalPages = Math.max(1, Math.ceil(displayTotalTraces / Math.max(1, tracePageSize)))
@@ -1507,6 +1450,7 @@ export function TraceHistoryDialog({
           </div>
         </DialogHeader>
         <TraceExplorer
+          loadThreadTraces={loadThreadTraces}
           traces={traces}
           codeStats={codeStats}
           loading={loading}

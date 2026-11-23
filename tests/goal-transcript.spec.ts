@@ -10,6 +10,7 @@ import {
   buildCheckpointTranscriptForDisplay,
   filterGoalEventsForDurablePage,
   formatGoalEventMessage,
+  getGoalTranscriptPageRange,
   getInternalGoalPromptIdentity,
   goalNoticeEventsToGoalUiEvents,
   hasGoalResumeUserEvent,
@@ -18,6 +19,7 @@ import {
   isVisibleCheckpointTranscriptMessage,
   mergeGoalUserEventsIntoDurablePage,
   mergeGoalUserEventsIntoTranscript,
+  resolveGoalEventsForTargetPage,
   restoreDurableTranscriptOrdinals
 } from "../src/renderer/src/lib/goal-transcript.ts"
 import { buildGoalContinuationPrompt, buildGoalStartPrompt } from "../src/main/agent/goals/goal-manager.ts"
@@ -930,6 +932,30 @@ function testHiddenGoalPromptStillUsesRawDurablePageBoundary(): void {
     ["/goal hidden objective"],
     "a hidden durable prompt should provide the page boundary without suppressing its UI alias"
   )
+  const moved = { ...hiddenPrompt, ordinal: 71 }
+  const rebased = mergeGoalUserEventsIntoDurablePage([], events, [moved])
+  assertArrayEqual(rebased.map((item) => [item.content, item.ordinal]), [
+    ["/goal hidden objective", 71]
+  ], "a restored latest page should rebase the cached event against its current anchor")
+  const unrelated = message("earlier-row", "assistant", "earlier", new Date(), { ordinal: 1 })
+  assertEqual(resolveGoalEventsForTargetPage(events, [unrelated],
+    new Map([["goal-user-event-4", hiddenPrompt.id]])).length, 0,
+  "the stale ordinal must not add a Goal event to a target window missing its current anchor")
+  assertArrayEqual(mergeGoalUserEventsIntoDurablePage([unrelated], events).map((item) => item.id),
+    [unrelated.id], "the same rule must apply when paging toward the latest tail")
+  const after = { ...unrelated, id: "later", ordinal: 2, created_at: new Date(unrelated.created_at.getTime() + 5) }
+  const unanchored = { ...events[0], event_id: 5, transcript_message_id: null, transcript_ordinal: null,
+    created_at: new Date(unrelated.created_at.getTime() + 2) }
+  const resolved = resolveGoalEventsForTargetPage([...events, unanchored], [unrelated, after], new Map())
+  assertArrayEqual(mergeGoalUserEventsIntoDurablePage([unrelated, after], resolved, [unrelated, after],
+    getGoalTranscriptPageRange([unrelated, after], true, { kind: "target" })).map((item) => item.id),
+    [unrelated.id, "goal-user-event-5", after.id],
+    "the target page should retain an unanchored event whose timestamp is inside its bounds")
+  const savedCommand = message("saved-canonical-command", "user", "/goal hidden objective",
+    unanchored.created_at, { ordinal: 3, goal_id: unanchored.goal_id, active_window_id: unanchored.active_window_id })
+  assertArrayEqual(mergeGoalUserEventsIntoDurablePage([unrelated, after], resolved, [unrelated, after],
+    getGoalTranscriptPageRange([unrelated, after], true, { kind: "target" }), [savedCommand]).map((item) => item.id),
+    [unrelated.id, after.id], "a visible canonical Goal in the retained tail should suppress the sidecar")
 }
 
 function testShortDurableGoalKeepsPositionWithoutDuplication(): void {

@@ -1,8 +1,15 @@
 import type { DatabaseSync } from "node:sqlite"
+import { matchesThreadIncarnationSnapshot } from "../../shared/thread-incarnation"
+import { threadSearchIdentitySql, threadSearchRouteFromRow } from "../thread-search/reader"
+import { sameThreadSearchRoute } from "../../shared/thread-search-scope"
 import {
   isVisibleGoalUserEventMessage,
   isStaleCheckpointBoundaryNoticeMessage
 } from "../../shared/goal-events"
+import {
+  GOAL_EVENT_TRANSCRIPT_ANCHOR_JOIN,
+  readGoalEventTranscriptOrdinal
+} from "../goal-event-transcript-anchor"
 import type { Thread, ThreadGroupSelectionEntry } from "../types"
 import type {
   ThreadGoalHydrationEvent,
@@ -16,6 +23,8 @@ import type {
 } from "./protocol"
 import type { ThreadGitMetadataProjection } from "./protocol"
 import { THREAD_METADATA_HYDRATION_CANCELLED } from "./protocol"
+import { THREAD_SUMMARY_METADATA_SQL } from "./summary-sql"
+import { THREAD_LIST_PRIORITY_KEYS } from "../../shared/thread-directory-metadata"
 
 interface ThreadProjectionRow {
   thread_id?: unknown
@@ -57,39 +66,6 @@ const THREAD_LIST_SMALL_OBJECT_KEYS = new Set([
   // plain local threads.
   "imDeliveryContext"
 ])
-const THREAD_LIST_PRIORITY_KEYS = [
-  // Remote IM session identity: the sidebar and chat banner classify threads by
-  // these, so they must lead the priority queue — priority keys consume the
-  // per-row char budget in array order, and a large known key later would
-  // otherwise starve them and degrade remote inbox / Feature sessions to plain
-  // local threads.
-  "targetKind",
-  "remoteState",
-  "remoteThread",
-  "remoteReadOnly",
-  "imDeliveryContext",
-  "workspacePath",
-  "harnessFeature",
-  "harnessProjectSession",
-  "harnessProjectName",
-  "projectName",
-  "agentMode",
-  "coordinatorMode",
-  "subagentsEnabled",
-  "model",
-  "routingState",
-  "memoryEnabled",
-  "outputStyle",
-  "conciseModeEnabled",
-  "isWorktree",
-  "worktreeBranch",
-  "worktreeBaseBranch",
-  "gitRoot",
-  "gitContext",
-  "scheduledTaskId",
-  "isHeartbeat",
-  "title"
-] as const
 const MAX_GOAL_EVENT_MESSAGE_BYTES = 128 * 1024
 const THREAD_LIST_PAGE_MAX_ROWS = 128
 const THREAD_LIST_PAGE_MAX_BYTES = 512 * 1024
@@ -300,9 +276,7 @@ function goalEventFromRow(row: GoalEventProjectionRow): ThreadGoalHydrationEvent
     active_window_id: typeof row.active_window_id === "string" ? row.active_window_id : null,
     message: row.message,
     created_at: createdAt,
-    transcript_ordinal: Number.isSafeInteger(Number(row.transcript_ordinal))
-      ? Number(row.transcript_ordinal)
-      : null,
+    transcript_ordinal: readGoalEventTranscriptOrdinal(row.transcript_ordinal),
     transcript_message_id:
       typeof row.transcript_message_id === "string" ? row.transcript_message_id : null
   }
@@ -325,42 +299,20 @@ export function readThreadGoalEventsProjection(
     Math.min(4 * 1024 * 1024, Math.floor(request.byteBudget))
   )
   const statement = database.prepare(
-    `SELECT * FROM (
-       SELECT event.event_id, event.thread_id, event.goal_id, event.active_window_id,
-              event.message, event.created_at,
-              anchor.ordinal AS transcript_ordinal,
-              anchor.message_id AS transcript_message_id
-       FROM thread_goal_events AS event
-       LEFT JOIN thread_messages AS anchor
-         ON anchor.rowid = COALESCE(
-           (
-             SELECT candidate.rowid
-             FROM thread_messages AS candidate
-             WHERE candidate.thread_id = event.thread_id
-               AND event.active_window_id IS NOT NULL AND event.active_window_id != ''
-               AND candidate.active_window_id IS NOT NULL
-               AND candidate.active_window_id != ''
-               AND candidate.active_window_id = event.active_window_id
-             ORDER BY CASE WHEN candidate.role = 'user' THEN 0 ELSE 1 END,
-                      candidate.ordinal ASC, candidate.message_id ASC
-             LIMIT 1
-           ),
-           (
-             SELECT candidate.rowid
-             FROM thread_messages AS candidate
-             WHERE candidate.thread_id = event.thread_id
-               AND event.goal_id IS NOT NULL AND event.goal_id != ''
-               AND candidate.goal_id IS NOT NULL AND candidate.goal_id != ''
-               AND candidate.goal_id = event.goal_id
-             ORDER BY CASE WHEN candidate.role = 'user' THEN 0 ELSE 1 END,
-                      candidate.ordinal ASC, candidate.message_id ASC
-             LIMIT 1
-           )
-         )
-       WHERE event.thread_id = ?
-       ORDER BY event.created_at DESC, event.event_id DESC
+    `WITH recent AS MATERIALIZED (
+       SELECT event_id, thread_id, goal_id, active_window_id, message, created_at,
+              transcript_message_id
+       FROM thread_goal_events
+       WHERE thread_id = ?
+       ORDER BY created_at DESC, event_id DESC
        LIMIT ?
-     ) ORDER BY created_at ASC, event_id ASC`
+     )
+     SELECT event.event_id, event.thread_id, event.goal_id, event.active_window_id,
+            event.message, event.created_at, anchor.ordinal AS transcript_ordinal,
+            anchor.message_id AS transcript_message_id
+     FROM recent AS event
+     ${GOAL_EVENT_TRANSCRIPT_ANCHOR_JOIN}
+     ORDER BY event.created_at ASC, event.event_id ASC`
   )
   const scanned: ThreadGoalHydrationEvent[] = []
   let sourceBytes = 0
@@ -414,19 +366,35 @@ export function readThreadHydrationProjection(
   const startedAt = performance.now()
   const cancellation = new Int32Array(request.cancellationBuffer)
   throwIfCancelled(cancellation)
+  const search = request.search
+  if (search) {
+    const expectedRoute = search.route
+    const isProject = expectedRoute !== undefined && expectedRoute.kind !== "ordinary"
+    const row = database.prepare(threadSearchIdentitySql(search.includeSummary, isProject))
+      .get(request.threadId)
+    if (isProject && row && expectedRoute) {
+      const currentRoute = threadSearchRouteFromRow(row)
+      if (!currentRoute || !sameThreadSearchRoute(expectedRoute, currentRoute)) {
+        return { thread: null, stats: stats(startedAt, 0, 0) }
+      }
+    }
+    throwIfCancelled(cancellation)
+    const matches = row && !row.oversized_token && matchesThreadIncarnationSnapshot({
+      token: typeof row.token === "string" && row.token ? row.token : null,
+      legacyCreatedAt: Number(row.created_at)
+    }, search.incarnation)
+    if (!row || !matches || (search.includeSummary && typeof row.summary_metadata !== "string")) {
+      return { thread: null, stats: stats(startedAt, 0, 0) }
+    }
+    const thread = rowToThread({ ...row, thread_id: request.threadId, metadata: row.summary_metadata },
+      cancellation, true)
+    const admitted = thread && Buffer.byteLength(JSON.stringify(thread)) <= 32 * 1024
+    return { thread: admitted ? thread : null, stats: stats(startedAt, admitted ? 1 : 0, 0) }
+  }
   const row = database
     .prepare(
       `SELECT thread_id, created_at, updated_at,
-              CASE
-                WHEN metadata IS NULL THEN NULL
-                WHEN json_valid(metadata) THEN json_remove(
-                  metadata,
-                  '$.llmFileHistory',
-                  '$.llmModifiedFiles',
-                  '$.llmRecentlyRevertedFiles'
-                )
-                ELSE '{}'
-              END AS metadata,
+              ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
               status, title,
               '{}' AS hydration_values
        FROM threads
@@ -561,25 +529,15 @@ export function readThreadSummaryPage(
   if (hasUpdatedCursor !== hasIdCursor) {
     throw new Error("Thread summary page cursor requires updated time and thread id together")
   }
-  const metadataProjection = `CASE
-    WHEN metadata IS NULL THEN NULL
-    WHEN json_valid(metadata) THEN json_remove(
-      metadata,
-      '$.llmFileHistory',
-      '$.llmModifiedFiles',
-      '$.llmRecentlyRevertedFiles'
-    )
-    ELSE '{}'
-  END`
   const statement = database.prepare(
     hasUpdatedCursor
-      ? `SELECT thread_id, created_at, updated_at, ${metadataProjection} AS metadata,
+      ? `SELECT thread_id, created_at, updated_at, ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
                 status, title
          FROM threads
          WHERE updated_at < ? OR (updated_at = ? AND thread_id < ?)
          ORDER BY updated_at DESC, thread_id DESC
          LIMIT ?`
-      : `SELECT thread_id, created_at, updated_at, ${metadataProjection} AS metadata,
+      : `SELECT thread_id, created_at, updated_at, ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
                 status, title
          FROM threads
          ORDER BY updated_at DESC, thread_id DESC

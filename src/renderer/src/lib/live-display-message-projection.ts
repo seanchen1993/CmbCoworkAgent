@@ -161,6 +161,8 @@ export interface DynamicLiveVisibilityProjectionInput {
   displayContentVersion: number
   displayStructureVersion: number
   hasHookLogChip: (message: Message) => boolean
+  /** Optional presentation filter; the ordinary workbench keeps its existing visibility rules. */
+  hasVisibleRow?: (message: Message, hasHookLogChip: boolean) => boolean
 }
 
 export interface DynamicLiveVisibilityProjection {
@@ -190,6 +192,7 @@ export function createDynamicLiveVisibilityProjector(): (
   let previousDisplayStructureVersion = -1
   let previousDisplayIndexById: ReadonlyMap<string, number> | null = null
   let previousHasHookLogChip: DynamicLiveVisibilityProjectionInput["hasHookLogChip"] | null = null
+  let previousHasVisibleRow: DynamicLiveVisibilityProjectionInput["hasVisibleRow"]
   let visibility = new Map<number, boolean>()
   let orderedVisibleIndexes: number[] = []
   let version = 0
@@ -202,7 +205,10 @@ export function createDynamicLiveVisibilityProjector(): (
       if (displayIndex === undefined) continue
       const displayMessage = input.displayMessages[displayIndex]
       if (!displayMessage) continue
-      const visible = messageHasVisibleRow(displayMessage, input.hasHookLogChip(displayMessage))
+      const visible = (input.hasVisibleRow ?? messageHasVisibleRow)(
+        displayMessage,
+        input.hasHookLogChip(displayMessage)
+      )
       visibility.set(displayIndex, visible)
       if (visible) orderedVisibleIndexes.push(displayIndex)
     }
@@ -215,7 +221,8 @@ export function createDynamicLiveVisibilityProjector(): (
       input.live.structureVersion !== previousLiveStructureVersion ||
       input.displayStructureVersion !== previousDisplayStructureVersion ||
       input.displayIndexById !== previousDisplayIndexById ||
-      input.hasHookLogChip !== previousHasHookLogChip
+      input.hasHookLogChip !== previousHasHookLogChip ||
+      input.hasVisibleRow !== previousHasVisibleRow
     const liveContentChanged = input.live.contentVersion !== previousLiveContentVersion
     const displayContentChanged =
       input.displayContentVersion !== previousDisplayContentVersion
@@ -229,7 +236,7 @@ export function createDynamicLiveVisibilityProjector(): (
         const displayMessage = input.displayMessages[displayIndex]
         if (!displayMessage) continue
         const previousVisible = visibility.get(displayIndex) === true
-        const nextVisible = messageHasVisibleRow(
+        const nextVisible = (input.hasVisibleRow ?? messageHasVisibleRow)(
           displayMessage,
           input.hasHookLogChip(displayMessage)
         )
@@ -251,6 +258,7 @@ export function createDynamicLiveVisibilityProjector(): (
     previousDisplayStructureVersion = input.displayStructureVersion
     previousDisplayIndexById = input.displayIndexById
     previousHasHookLogChip = input.hasHookLogChip
+    previousHasVisibleRow = input.hasVisibleRow
     return { byIndex: visibility, orderedVisibleIndexes, version }
   }
 }

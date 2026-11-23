@@ -1,0 +1,3 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T084258Z-1350c7ff/record.json
+{"case":"short-shell","actual":"inline","preferred":"inline","seconds":4.1,"mainSeconds":4,"mainModelRequests":2,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":["execute"]}
+Routing evaluation report: <temp>/bot-integration-build-NSdWZU/artifacts/routing-1794904978790.json

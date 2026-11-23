@@ -1,0 +1,49 @@
+import { constants } from "node:fs"
+import { access, readdir, stat } from "node:fs/promises"
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+
+export function resolveHarnessProjectDirectory(
+  workspace: string,
+  projectDir: string
+): string | null {
+  if (!workspace.trim() || !projectDir) return null
+  const workspacePath = resolve(workspace)
+  const projectPath = resolve(workspacePath, projectDir)
+  const relativePath = relative(workspacePath, projectPath)
+  return relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath) &&
+    basename(projectPath) === projectDir ? projectPath : null
+}
+
+export async function validateProjectDirectorySelection(projectPath: string): Promise<{
+  workspacePath: string
+  projectDir: string
+  validationError: string | null
+}> {
+  let validationError: string | null = null
+  try {
+    await assertEmptyProjectDirectory(projectPath)
+  } catch (error) {
+    validationError = error instanceof Error ? error.message : String(error)
+  }
+  return { workspacePath: dirname(projectPath), projectDir: basename(projectPath), validationError }
+}
+
+export async function assertEmptyProjectDirectory(projectPath: string): Promise<void> {
+  let info
+  try {
+    info = await stat(projectPath)
+  } catch {
+    throw new Error("项目工作区文件夹不存在或无法访问，请重新选择")
+  }
+  if (!info.isDirectory()) {
+    throw new Error("请选择空文件夹作为插件工作区")
+  }
+  if ((await readdir(projectPath)).length > 0) {
+    throw new Error("插件工作区必须为空，不能包含隐藏文件或文件夹")
+  }
+  try {
+    await access(projectPath, constants.W_OK)
+  } catch {
+    throw new Error("插件工作区不可写，请选择其他文件夹")
+  }
+}

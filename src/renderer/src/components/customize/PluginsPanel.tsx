@@ -1,3 +1,5 @@
+import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
+import { canReadPluginSource } from "../../../../shared/market-source-access"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
@@ -446,12 +448,9 @@ export function PluginsPanel(): React.JSX.Element {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [fileEditorOpen, setFileEditorOpen] = useState(false)
 
-  // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
-  // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
-  // 保留入参以兼容调用点签名（恒返回 false）。
+  // Source access follows the origin persisted by the main process.
   const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
-    void plugin
-    return false
+    return !!plugin && !canReadPluginSource(plugin)
   }, [])
 
   // Clean up debounce timer on unmount
@@ -812,12 +811,14 @@ export function PluginsPanel(): React.JSX.Element {
                 variant="ghost"
                 size="sm"
                 className="h-7 w-7 p-0 shrink-0"
+                aria-label="安装 Plugin"
                 onClick={() => setUploadDialogOpen(true)}
               >
                 <Plus className="size-4" />
               </Button>
             </div>
           </div>
+          <ProjectPluginDevelopmentGuide entry="plugins" />
         </div>
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-1">
@@ -944,7 +945,9 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
         onPublish={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin &&
+          (selectedPlugin.origin === "local" || selectedPlugin.sourceAccess === "owner") &&
+          !shouldHideSelectedPluginDetails
             ? () => openPublishDialog(selectedPlugin)
             : undefined
         }
@@ -960,7 +963,7 @@ export function PluginsPanel(): React.JSX.Element {
         }
         hideComponentDetails={shouldHideSelectedPluginDetails}
         onEditFiles={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin && canReadPluginSource(selectedPlugin) && !shouldHideSelectedPluginDetails
             ? () => setFileEditorOpen(true)
             : undefined
         }
@@ -1044,10 +1047,11 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false,
+    hideComponentDetails: requestedHideComponentDetails = false,
     isMarketPlugin = false,
     onEditFiles
   } = props
+  const hideComponentDetails = requestedHideComponentDetails || !canReadPluginSource(plugin)
 
   if (!plugin) {
     return (

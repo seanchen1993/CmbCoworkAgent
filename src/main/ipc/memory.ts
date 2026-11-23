@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { IpcMain } from "electron"
 import { existsSync, readFileSync, unlinkSync } from "fs"
 import { join, basename } from "path"
@@ -315,14 +317,14 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
         return { archived: 0, merged: 0, created: 0, skipped: 0 }
       }
       const config = getDefaultModelConfig()
-      if (!config?.apiKey) {
+      if (!isModelAvailable(config)) {
         return { archived: 0, merged: 0, created: 0, skipped: 0 }
       }
       return consolidateMemories({
         model: new ChatOpenAI({
           model: config.model,
           apiKey: config.apiKey,
-          configuration: { baseURL: config.baseUrl }
+          ...getModelClientOptions(config)
         }),
         memoryDir
       })

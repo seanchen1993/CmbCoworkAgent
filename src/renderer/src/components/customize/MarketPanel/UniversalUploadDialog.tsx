@@ -1,3 +1,4 @@
+import { parseSourceAccessUserIds } from "../../../../../shared/market-source-access"
 import React, { useState } from "react"
 import {
   Upload,
@@ -230,6 +231,7 @@ function buildExtraJson(options: {
   orgs: string[]
   existingExtraJson?: string
   includeSkills?: boolean
+  sourceAccessUserIds?: string[]
 }): string {
   const { skills, userIds, orgs, existingExtraJson, includeSkills = false } = options
   const normalizedSkills = sanitizeSkillNames(skills)
@@ -258,6 +260,12 @@ function buildExtraJson(options: {
     payload.grayOrgs = normalizedOrgs
   } else {
     delete payload.grayOrgs
+  }
+
+  if (options.sourceAccessUserIds !== undefined) {
+    const sourceIds = sanitizeUserIds(options.sourceAccessUserIds)
+    if (sourceIds.length) payload.sourceAccessUserIds = sourceIds
+    else delete payload.sourceAccessUserIds
   }
 
   return JSON.stringify(payload)
@@ -390,6 +398,7 @@ export function UniversalUploadDialog({
   const [pluginSkills, setPluginSkills] = useState<string[]>([])
   const [grayUserIds, setGrayUserIds] = useState<string[]>([])
   const [grayOrgs, setGrayOrgs] = useState<string[]>([])
+  const [sourceAccessUsers, setSourceAccessUsers] = useState("")
   const [nameFromFile, setNameFromFile] = useState(false) // name 是否来自文件解析（锁定）
   const [versionFromSkillFile, setVersionFromSkillFile] = useState(false)
   const [versionFoundInSkillFrontmatter, setVersionFoundInSkillFrontmatter] = useState(false)
@@ -441,7 +450,9 @@ export function UniversalUploadDialog({
         userIds: normalizeUserIdsForForm(userIds),
         orgs: normalizeOrgsForForm(orgs),
         existingExtraJson: existingItem?.extra_json,
-        includeSkills: isPluginResource
+        includeSkills: isPluginResource,
+        sourceAccessUserIds: resourceType === "mcp"
+          ? undefined : sourceAccessUsers.split(/[,，;；\s]+/).filter(Boolean)
       })
 
       const uploadUserId = shouldPreserveExistingPublisherMetadata
@@ -467,6 +478,8 @@ export function UniversalUploadDialog({
       existingItem?.user_id,
       grayOrgs,
       grayUserIds,
+      sourceAccessUsers,
+      resourceType,
       guidance,
       isAdminModeActive,
       isUpdate,
@@ -547,6 +560,7 @@ export function UniversalUploadDialog({
       )
       setGrayUserIds(parseGrayUserIdsFromExtraJson(existingItemExtraJson))
       setGrayOrgs(parseGrayOrgsFromExtraJson(existingItemExtraJson))
+      setSourceAccessUsers(parseSourceAccessUserIds(existingItemExtraJson).join("\n"))
       setNameFromFile(false)
       setVersionFromSkillFile(false)
       setVersionFoundInSkillFrontmatter(false)
@@ -564,6 +578,7 @@ export function UniversalUploadDialog({
     setPluginSkills([])
     setGrayUserIds([])
     setGrayOrgs([])
+    setSourceAccessUsers("")
     setNameFromFile(false)
     setVersionFromPluginFile(false)
   }, [
@@ -881,6 +896,7 @@ export function UniversalUploadDialog({
         setPluginSkills([])
         setGrayUserIds([])
         setGrayOrgs([])
+        setSourceAccessUsers("")
         setError(null)
         setShowJsonTemplate(false)
         setNameFromFile(false)
@@ -1439,6 +1455,30 @@ export function UniversalUploadDialog({
                 </FieldBlock>
               </div>
             </FormSection>
+
+            {resourceType !== "mcp" && (
+              <FormSection title="原文访问白名单" description="按当前技能或插件单独授权。">
+                <FieldBlock
+                  label="授权用户账号"
+                  htmlFor="source-access-users"
+                  helper="上传者本人自动拥有原文权限。填写完整 SAP ID 或一事通 ID，每行一个，也可用逗号分隔；仅精确匹配，不支持姓名、组织或模糊匹配。"
+                >
+                  <textarea
+                    id="source-access-users"
+                    className={textareaClassName}
+                    value={sourceAccessUsers}
+                    onChange={(event) => setSourceAccessUsers(event.target.value)}
+                    disabled={uploading}
+                    maxLength={32000}
+                    placeholder="例如：12345678"
+                  />
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    白名单用户下载或重新安装后可查看、编辑和导出原文，但不能因此修改市场条目。
+                    留空时仅上传者拥有原文权限。名单变更在下次安装时生效，已下载的原文不会被远程收回。
+                  </p>
+                </FieldBlock>
+              </FormSection>
+            )}
 
             <FormSection title="高级配置" description="可选项，按需要填写。">
               <div className="space-y-5">

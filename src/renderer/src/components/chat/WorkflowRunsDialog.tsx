@@ -245,15 +245,18 @@ function RunDetail({
 }): JSX.Element {
   const [run, setRun] = useState<PersistedWorkflowRunDTO | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [agentPageSelection, setAgentPageSelection] = useState({ runId: "", page: 0 })
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true)
+    setLoadError(null)
     try {
       const raw = await window.api.workflows.getRun(threadId, runId)
       setRun(raw as PersistedWorkflowRunDTO | null)
     } catch (error) {
       console.warn("[WorkflowRunsDialog] Failed to load run:", error)
+      setLoadError("加载运行详情失败，请重试。")
       toast.error("加载运行详情失败")
     } finally {
       setLoading(false)
@@ -325,10 +328,23 @@ function RunDetail({
     )
   }
   if (!run) {
-    return <div className="p-4 text-sm text-muted-foreground">未找到该运行记录。</div>
+    return (
+      <div className="space-y-2 p-4 text-sm text-muted-foreground">
+        <p role={loadError ? "alert" : undefined}>{loadError ?? "未找到该运行记录。"}</p>
+        <div className="flex gap-3">
+          <button type="button" onClick={onBack}>
+            返回列表
+          </button>
+          <button type="button" onClick={() => void load()}>
+            重试
+          </button>
+        </div>
+      </div>
+    )
   }
 
   const chip = statusChip(run.status)
+  const worktrees = (run.worktrees ?? []).map(toWorktreeView).filter((record) => record !== null)
   const requestedAgentPage = agentPageSelection.runId === runId ? agentPageSelection.page : 0
   const agentPageCount = Math.max(1, Math.ceil(run.agents.length / WORKFLOW_AGENT_DETAIL_PAGE_SIZE))
   const agentPage = Math.min(requestedAgentPage, agentPageCount - 1)
@@ -421,6 +437,15 @@ function RunDetail({
         </pre>
       )}
 
+      {(loadError || run.worktreeReadError) && (
+        <div
+          role="alert"
+          className="rounded-md bg-amber-50 p-2 text-[11px] text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          {loadError ?? run.worktreeReadError}
+        </div>
+      )}
+
       {run.status !== "completed" && run.status !== "running" && (
         <div className="flex items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 text-[11px] text-sky-800 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
           <span className="min-w-0 flex-1">
@@ -430,13 +455,14 @@ function RunDetail({
         </div>
       )}
 
-      {(run.worktrees?.length ?? 0) > 0 && (
-        <Section title={`Worktree 交付物(${run.worktrees?.length ?? 0})`} defaultOpen>
+      {worktrees.length > 0 && (
+        <Section title={`Worktree 交付物(${worktrees.length})`} defaultOpen>
           <WorkflowWorktreeList
+            key={`${threadId}:${run.runId}`}
             threadId={threadId}
             runId={run.runId}
-            worktrees={run.worktrees ?? []}
-            manageAllowed={run.status !== "running"}
+            worktrees={worktrees}
+            manageAllowed={run.status !== "running" && !loadError && !run.worktreeReadError}
             onRecordChange={(record) => {
               setRun((current) =>
                 current

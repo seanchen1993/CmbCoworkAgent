@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, statSync } from "node:fs"
-import { basename, isAbsolute, join, relative, resolve } from "node:path"
+import { getMarketContentStoredLimit, readContentFileSync } from "../services/market-content"
+import { existsSync, statSync } from "node:fs"
+import { join } from "node:path"
 import { serialize } from "node:v8"
 import type { PluginMetadata } from "../types"
 import type {
@@ -38,6 +39,7 @@ import {
   HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
   requireCompleteHarnessDeployUnitContext
 } from "./context-integrity"
+import { resolveHarnessProjectDirectory } from "./project-workspace"
 
 const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
 const APP_BOARD_API_VERSION = 1
@@ -55,7 +57,6 @@ const PROJECT_CONTEXT_COMMAND_KEYS = [
   "project_status",
   "feature_status",
   "skip_node",
-  "knowledge_path",
   "session_context_inject",
   "system_prompt_inject",
   "plugin_dir_hook"
@@ -112,14 +113,18 @@ function fileSignature(path: string): string {
 function assertFileWithin(path: string, maxBytes: number, label: string): void {
   if (!existsSync(path)) return
   const size = statSync(path).size
-  if (size > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
+  if (
+    size > getMarketContentStoredLimit(path, maxBytes) ||
+    (size > maxBytes && readContentFileSync(path).byteLength > maxBytes)
+  )
+    throw new Error(`${label} exceeded ${maxBytes} bytes`)
 }
 
 function readJsonArray(path: string, maxBytes: number, label: string): unknown[] {
   if (!existsSync(path)) return []
   assertFileWithin(path, maxBytes, label)
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
     return Array.isArray(parsed) ? parsed : []
   } catch {
     return []
@@ -133,7 +138,7 @@ function readProjects(path: string): unknown[] {
   let rows: unknown[] = []
   if (existsSync(path)) {
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+      const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
       rows = isRecord(parsed) && Array.isArray(parsed.projects) ? parsed.projects : []
     } catch {
       rows = []
@@ -216,6 +221,8 @@ function projectPluginMetadata(plugin: PluginMetadata): PluginMetadata {
     ...(Number.isFinite(plugin.hookCount) ? { hookCount: Math.max(0, plugin.hookCount!) } : {}),
     ...(text(plugin.hookPath, 2_048) ? { hookPath: text(plugin.hookPath, 2_048) } : {}),
     ...(plugin.origin === "market" || plugin.origin === "local" ? { origin: plugin.origin } : {}),
+    ...(plugin.sourceAccess === "owner" || plugin.sourceAccess === "whitelist"
+      ? { sourceAccess: plugin.sourceAccess } : {}),
     createdAt: text(plugin.createdAt, 128),
     updatedAt: text(plugin.updatedAt, 128)
   }
@@ -266,6 +273,8 @@ function projectBoardConfigForDetails(
   }
   const knowledgeConfig = isRecord(config.knowledge_config) ? config.knowledge_config : null
   const nextAction = projectNextAction(knowledgeConfig?.nextAction)
+  const artifactConfig = isRecord(config.artifact_sync) ? config.artifact_sync : null
+  const artifactNextAction = projectNextAction(artifactConfig?.nextAction)
   const apiVersion =
     typeof config.apiVersion === "number" || typeof config.apiVersion === "string"
       ? config.apiVersion
@@ -279,6 +288,14 @@ function projectBoardConfigForDetails(
           knowledge_config: {
             sync_type: text(knowledgeConfig.sync_type, 256),
             ...(nextAction ? { nextAction } : {})
+          }
+        }
+      : {}),
+    ...(artifactConfig
+      ? {
+          artifact_sync: {
+            sync_type: text(artifactConfig.sync_type, 256),
+            ...(artifactNextAction ? { nextAction: artifactNextAction } : {})
           }
         }
       : {})
@@ -350,7 +367,7 @@ function readBoardConfig(pluginPath: string): BoardConfigSnapshot {
     return snapshot
   }
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
     const value = isRecord(parsed) ? parsed : null
     const snapshot = { value, error: null, exists: true }
     setConfigCache(path, signature, snapshot)
@@ -441,6 +458,14 @@ function supportsSessionContext(plugin: PluginMetadata | null): boolean {
   if (!isRecord(commands)) return false
   const platform = commands[process.platform]
   return isRecord(platform) && Boolean(text(platform.session_context_inject).trim())
+}
+
+function supportsKnowledgeBaseContext(plugin: PluginMetadata | null): boolean {
+  if (!plugin) return false
+  const config = readBoardConfig(plugin.path)
+  if (config.error || !config.value || !isRecord(config.value.inspectCommands)) return false
+  const platform = config.value.inspectCommands[process.platform]
+  return isRecord(platform) && text(platform.session_context_inject).includes("${knowledgePath}")
 }
 
 function creator(value: unknown): HarnessProjectCreatorMetadata | undefined {
@@ -536,6 +561,7 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
     ),
     projectCode,
     projectFromLean: value.projectFromLean === true,
+    ...(typeof value.isTestProject === "boolean" ? { isTestProject: value.isTestProject } : {}),
     projectDir:
       boundedStoredText(
         value.projectDir,
@@ -563,6 +589,11 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
         HARNESS_PROJECT_PATH_MAX_CHARS,
         "Harness legacy project workspace path"
       ),
+    knowledgeBaseIds: Array.isArray(value.knowledgeBaseIds)
+      ? value.knowledgeBaseIds
+          .filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+          .map((id) => id.trim())
+      : [],
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
     ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
@@ -586,27 +617,12 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
   }
 }
 
-function isInsideDirectory(basePath: string, targetPath: string): boolean {
-  const relativePath = relative(resolve(basePath), resolve(targetPath))
-  return (
-    relativePath === "" ||
-    (Boolean(relativePath) && !relativePath.startsWith("..") && !isAbsolute(relativePath))
-  )
-}
-
 function projectDirectoryExists(project: HarnessProjectMetadata): boolean {
   try {
-    const workspacePath = resolve(project.workspacePath)
-    const projectDir = project.projectDir.trim() || project.projectCode.trim()
-    const projectPath = resolve(workspacePath, projectDir)
-    if (
-      projectPath === workspacePath ||
-      basename(projectPath) !== projectDir ||
-      !isInsideDirectory(workspacePath, projectPath)
-    ) {
-      return false
-    }
-    return existsSync(projectPath)
+    const projectPath = resolveHarnessProjectDirectory(
+      project.workspacePath, project.projectDir.trim() || project.projectCode.trim()
+    )
+    return projectPath !== null && existsSync(projectPath)
   } catch {
     return false
   }
@@ -619,7 +635,7 @@ function readLeanToken(path: string): string {
   if (signature !== "missing") {
     assertFileWithin(path, MAX_LEAN_TOKEN_STORE_BYTES, "Harness Lean token store")
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+      const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
       leanToken = isRecord(parsed) ? text(parsed.leanToken, MAX_LEAN_TOKEN_CHARS).trim() : ""
     } catch {
       leanToken = ""
@@ -661,7 +677,7 @@ function readFeatureBindingRows(path: string): unknown[] {
   }
   if (featureBindingCache?.signature === signature) return featureBindingCache.value
   assertFileWithin(path, HARNESS_CONFIG_V2_STORE_MAX_BYTES, "Harness feature binding store")
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+  const parsed = JSON.parse(readContentFileSync(path, "utf8")) as unknown
   if (!isRecord(parsed) || parsed.version !== 2 || !Array.isArray(parsed.bindings)) {
     throw new Error("Harness feature binding store has an invalid bindings field")
   }
@@ -993,10 +1009,12 @@ function toProjectListItem(
     description: project.description,
     projectCode: project.projectCode,
     projectFromLean: project.projectFromLean,
+    ...(typeof project.isTestProject === "boolean" ? { isTestProject: project.isTestProject } : {}),
     projectDir: project.projectDir,
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
+    knowledgeBaseIds: project.knowledgeBaseIds ?? [],
     ...(project.systemConstraintFirstLoadedAt
       ? { systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt }
       : {}),
@@ -1013,6 +1031,8 @@ function toProjectListItem(
     supportsDeployUnits: boardCompatibility.compatible,
     supportsSessionContextInjection:
       boardCompatibility.compatible && supportsSessionContext(plugin),
+    supportsKnowledgeBaseContext:
+      boardCompatibility.compatible && supportsKnowledgeBaseContext(plugin),
     lifecycle: project.lifecycle
   }
 }
@@ -1030,7 +1050,8 @@ function toRegistryItem(plugin: PluginMetadata): HarnessAdapterRegistryItem {
     type: "plugin",
     description: text(plugin.description, MAX_REGISTRY_TEXT),
     ...(text(plugin.useScenario, 512) ? { useScenario: text(plugin.useScenario, 512) } : {}),
-    pullKnowledgeAvailable: isRecord(commands) && Boolean(text(commands.pull_knowledge).trim()),
+    supportsKnowledgeBaseContext:
+      isRecord(commands) && text(commands.session_context_inject).includes("${knowledgePath}"),
     boardCompatibility
   }
 }

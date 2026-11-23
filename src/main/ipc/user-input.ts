@@ -6,7 +6,7 @@ import {
   submitUserInputResponse
 } from "../services/user-input"
 
-function isUserInputResponse(value: unknown): value is UserInputResponse {
+export function isUserInputResponse(value: unknown): value is UserInputResponse {
   if (!value || typeof value !== "object") return false
   const candidate = value as Partial<UserInputResponse>
   return (
@@ -61,7 +61,9 @@ export function registerUserInputHandlers(ipcMain: IpcMain): void {
       return
     }
 
-    if (!submitUserInputResponse(response)) {
+    if (!submitUserInputResponse(response, {
+      desktopMainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender.mainFrame)
+    })) {
       console.warn("[UserInput] Received response for unknown request:", response.requestId)
     }
   })

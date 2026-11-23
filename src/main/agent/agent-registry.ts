@@ -1,3 +1,8 @@
+import {
+  decodeMarketContent,
+  getMarketContentStoredLimit,
+  readContentFileSync
+} from "../services/market-content"
 /**
  * Shared agent-type registry.
  *
@@ -17,7 +22,7 @@
  * `tools`/`disallowedTools` frontmatter (CC tool names are auto-mapped) or the
  * coarse `workload` shortcut.
  */
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs"
+import { existsSync, readdirSync, realpathSync, statSync } from "fs"
 import {
   opendir,
   realpath as realpathAsync
@@ -82,7 +87,8 @@ const CC_TOOL_ALIASES: Record<string, string> = {
   glob: "glob",
   grep: "grep",
   ls: "ls",
-  taskoutput: "task_output"
+  taskoutput: "task_output",
+  monitor: "task_output"
 }
 
 /** The write tools a read-only/verify agent must never get. */
@@ -218,12 +224,8 @@ function deriveToolPolicy(fm: Record<string, string>): ToolPolicy {
       return policyFromDisallowed(denyExplicit)
     }
     const allow = new Set(allowTokens.map(normalizeToolName).filter(Boolean) as string[])
-    // task_output is the read-side companion of execute's background mode: a
-    // background command is started via execute(run_in_background) and its result
-    // is fetched via task_output. Granting execute (Bash) but blocking task_output
-    // leaves background commands half-broken (startable, unreadable), so when the
-    // allowlist grants execute, grant task_output too. An EXPLICIT
-    // `disallowedTools: task_output` still wins (denyExplicit is applied below).
+    // Grant Bash's background result tools with execute. Both names normalize to
+    // task_output for policy matching, and the explicit denylist still wins.
     if (allow.has("execute")) allow.add("task_output")
     // Block every known fs tool AND every fixed non-fs side-effect tool
     // (code_exec / deferred bridge / orchestration) not in the allowlist, then
@@ -567,14 +569,15 @@ function parseAgentContent(
 function parseAgentFile(filePath: string, fallbackName: string): AgentProfile | null {
   try {
     const bytes = statSync(filePath).size
-    if (bytes > MAX_AGENT_FILE_BYTES) {
+    if (bytes > getMarketContentStoredLimit(filePath, MAX_AGENT_FILE_BYTES)) {
       console.warn(
         `[AgentRegistry] Agent file ${filePath} is ${bytes} bytes (> ${MAX_AGENT_FILE_BYTES}); skipped to bound load cost and injected prompt size.`
       )
       return null
     }
-    const content = readFileSync(filePath, "utf-8")
-    return parseAgentContent(filePath, fallbackName, content)
+    const content = readContentFileSync(filePath)
+    if (content.byteLength > MAX_AGENT_FILE_BYTES) return null
+    return parseAgentContent(filePath, fallbackName, content.toString("utf-8"))
   } catch (error) {
     console.warn(`[AgentRegistry] Failed to parse agent file ${filePath}:`, error)
     return null
@@ -588,10 +591,14 @@ async function parseAgentFileAsync(
   let opened: Awaited<ReturnType<typeof openStableFileHandle>> | undefined
   try {
     opened = await openStableFileHandle(dirname(filePath), filePath)
-    const content = (
-      await readStableFileHandleBounded(opened, MAX_AGENT_FILE_BYTES)
-    ).toString("utf-8")
-    return parseAgentContent(filePath, fallbackName, content)
+    const content = decodeMarketContent(
+      await readStableFileHandleBounded(
+        opened,
+        getMarketContentStoredLimit(filePath, MAX_AGENT_FILE_BYTES)
+      )
+    )
+    if (content.byteLength > MAX_AGENT_FILE_BYTES) return null
+    return parseAgentContent(filePath, fallbackName, content.toString("utf-8"))
   } catch (error) {
     if (error instanceof StableBoundedReadError) {
       if (error.failure === "initial-too-large") {

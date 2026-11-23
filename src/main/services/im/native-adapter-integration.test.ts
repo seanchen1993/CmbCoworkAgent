@@ -6,6 +6,9 @@ import { openNativeSqliteDatabase, type NativeSqliteAdapter } from "../../db/nat
 import type { RemoteImEventV1, RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
 import { ImConversationStateStore } from "./conversation-state"
 import { ImEventStore } from "./event-store"
+import { ImReplyClient } from "./reply-client"
+import { buildImProactiveReplies } from "./reply-segmentation"
+import { unavailableImGatewayClient } from "./gateway-client"
 import type { ImPersistenceDependencies } from "./persistence"
 import { ImRemoteApprovalAuditStore } from "./remote-approval-audit-store"
 import { ImRemoteGrantStore } from "./remote-grant-store"
@@ -99,6 +102,46 @@ function seedReply(eventId: string): RemoteImReplyV1 {
 }
 
 describe("IM stores on the native sqlite adapter", () => {
+  it("delivers other routes during a slow send and keeps later replies behind a retry", async () => {
+    const { eventStore } = openProductionWiredStore()
+    const enqueue = (conversationKey: string, text: string) =>
+      eventStore.enqueueProactiveReplies(buildImProactiveReplies({ conversationKey, deliveryId: text, text }))
+    let now = Date.now() + 1000
+    let release!: () => void, entered!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const delivered: string[] = []
+    let failFirst = true
+    const gateway = { ...unavailableImGatewayClient, submitReply: async (reply: RemoteImReplyV1) => {
+      if (reply.deliveryId === "first" && failFirst) {
+        failFirst = false
+        entered()
+        await blocked
+        throw new Error("temporary")
+      }
+      delivered.push(reply.deliveryId)
+      return { state: "accepted" as const }
+    }}
+    const client = new ImReplyClient(gateway, eventStore, () => now)
+    await enqueue("group-1", "first")
+    const first = client.sendPending("group-1")
+    await started
+    try {
+      await enqueue("group-1", "second")
+      for (const key of ["group-2", "private", "ordinary"]) {
+        await enqueue(key, key)
+        await client.sendPending(key)
+      }
+      expect(delivered).toEqual(["group-2", "private", "ordinary"])
+    } finally { release() }
+    expect((await first).deferred).toBe(1)
+    expect((await client.sendPending()).sent).toBe(0)
+    now += 60000
+    const restarted = new ImReplyClient(gateway, eventStore, () => now)
+    expect((await restarted.sendPending()).sent).toBe(2)
+    expect(delivered.slice(-2)).toEqual(["first","second"])
+  })
+
   it("recovers built-in robot state (recoverAndStart sequence) on the native adapter", async () => {
     const { database, eventStore, selection } = openProductionWiredStore()
     // Seed like the production snapshot: terminal events across conversations.
@@ -188,6 +231,9 @@ describe("IM stores on the native sqlite adapter", () => {
 
     const queued = await eventStore.queueEvent(event.eventId)
     expect(queued.state).toBe("queued")
+    expect(eventStore.countQueuedConversationEvents("conv-1")).toBe(1)
+    expect(eventStore.countQueuedConversationEvents("conv-other")).toBe(0)
+    expect(eventStore.hasReplyDelivery(`delivery-${event.eventId}`)).toBe(false)
 
     const permit = await eventStore.recordExecutionPermit({
       eventId: event.eventId,
@@ -208,6 +254,20 @@ describe("IM stores on the native sqlite adapter", () => {
     expect(completed.permitState).toBe("revoked")
     expect(eventStore.getStatusSummary().eventCounts).toEqual({ completed: 1 })
     expect(eventStore.listOutbox("pending")).toHaveLength(1)
+    expect(eventStore.countQueuedConversationEvents("conv-1")).toBe(0)
+    expect(eventStore.hasReplyDelivery(`delivery-${event.eventId}`)).toBe(true)
+    const code = eventStore.sessionLinks.prepare({
+      principalId: "principal-1",
+      conversationKey: "conv-1",
+      threadId: "thread-1",
+      kind: "thread",
+      label: "原生数据库会话",
+      deliveryId: `delivery-${event.eventId}`
+    })
+    expect(eventStore.sessionLinks.get(code)?.thread_id).toBe("thread-1")
+    const card = eventStore.sessionLinks.getCard(`delivery-${event.eventId}`)!
+    expect(await eventStore.sessionLinks.claimCard(card, "native-click")).toBe(true)
+    expect(eventStore.sessionLinks.getCard(card.delivery_id)?.state).toBe("handling")
   })
 
   it("writes remote grants and approval audits on the native adapter", async () => {

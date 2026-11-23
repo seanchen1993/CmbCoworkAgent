@@ -80,9 +80,9 @@ export interface WorkflowLaunchRequest {
   /** Registry snapshot whose fingerprint was approved for this exact launch. */
   agentProfiles?: readonly AgentProfile[]
   subagentDeps: WorkflowSubagentDeps
-  /** Run-level exclusive file-write lock, shared with subagent tool writes (see
-   * WorkflowEngineOptions.runExclusiveFileWrite). Threaded straight to the engine. (#2) */
-  runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
+  /** File-operation admission shared with agent tools (see
+   * WorkflowEngineOptions.runExclusiveFileWrite). Threaded straight to the engine. */
+  runExclusiveFileWrite?: <T>(fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>
 }
 
 export interface WorkflowLaunchResult {
@@ -94,6 +94,14 @@ export interface WorkflowLaunchResult {
   whenInitialPersisted: Promise<boolean>
 }
 
+/** Exact detached instance identity; a resumed run may reuse runId. */
+export interface WorkflowRunReference {
+  threadId: string
+  workspacePath: string
+  runId: string
+  startedAt: string
+}
+
 interface ActiveWorkflowRun {
   threadId: string
   workspacePath: string
@@ -101,6 +109,7 @@ interface ActiveWorkflowRun {
   workspaceKey: string
   runId: string
   workflowName: string
+  startedAt: string
   controller: AbortController
   userCancelled: boolean
   settled: Promise<void>
@@ -661,6 +670,21 @@ class WorkflowRunManager {
     return this.active.get(threadId)?.runId
   }
 
+  /** Read-only instance identity. runId alone cannot distinguish a resumed run.
+   * Callers that need an exact cancel compare this snapshot and call cancel
+   * synchronously, without an intervening await. */
+  activeRunReference(threadId: string): WorkflowRunReference | undefined {
+    const run = this.active.get(threadId)
+    return run
+      ? {
+          threadId: run.threadId,
+          workspacePath: run.workspacePath,
+          runId: run.runId,
+          startedAt: run.startedAt
+        }
+      : undefined
+  }
+
   /** A renderer can observe the engine's terminal event while manager-owned
    * worktree reclaim/final persistence is still finishing. Let a matching UI
    * action wait for that short lifecycle tail instead of failing as "active". */
@@ -1141,6 +1165,7 @@ class WorkflowRunManager {
       runId: request.runId,
       workflowName: request.parsed.meta.name,
       controller,
+      startedAt: now,
       userCancelled: false,
       settled: Promise.resolve(),
       worktrees: new WorkflowWorktreeLedger({
@@ -1533,10 +1558,12 @@ class WorkflowRunManager {
   async findPendingNotificationAsync(
     workspacePath: string,
     threadId: string,
-    options: { owner?: WorkflowNotificationOwner } = {}
+    options: { owner?: WorkflowNotificationOwner; runId?: string; startedAt?: string } = {}
   ): Promise<PersistedWorkflowRun | null> {
     const ownedByCaller = (run: PersistedWorkflowRun): boolean =>
-      options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner
+      (options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner) &&
+      (options.runId === undefined || run.runId === options.runId) &&
+      (options.startedAt === undefined || run.startedAt === options.startedAt)
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
@@ -1562,7 +1589,7 @@ class WorkflowRunManager {
   async claimPendingNotificationAsync(
     workspacePath: string,
     threadId: string,
-    options: { owner?: WorkflowNotificationOwner } = {}
+    options: { owner?: WorkflowNotificationOwner; runId?: string; startedAt?: string } = {}
   ): Promise<PersistedWorkflowRun | null> {
     const run = await this.findPendingNotificationAsync(workspacePath, threadId, options)
     if (!run || this.inFlightNotifications.has(run.runId)) return null

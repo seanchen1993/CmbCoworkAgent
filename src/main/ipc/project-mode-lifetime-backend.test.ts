@@ -8,15 +8,24 @@ import * as operational from "./project-mode-operational-metrics"
 import * as costs from "./project-mode-run-cost-metrics"
 import * as dev from "./project-mode-metrics"
 import * as scope from "./project-mode-query-scope"
+import * as execution from "./project-mode-execution-metrics"
 import * as snapshots from "./project-mode-snapshot-filters"
 import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
 import { ProjectModePageCache } from "./project-mode-page-cache"
+import { projectModeTestScopeCacheKey } from "./project-mode-test-projects"
 import {
   compareProjectAttentionValues,
   isProjectAttentionSortKey
 } from "../../shared/project-attention"
 import { ProjectAttentionRankingCache } from "./project-attention-ranking"
 import { mapAwardBatches } from "./dashboard-awards-skill"
+import type {
+  RunAnalysisData,
+  RunAnalysisOptions,
+  RunAnalysisSessionRequest
+} from "../../shared/project-run-analysis"
+import type { RunAnalysisScope } from "./project-run-analysis"
+import { matches } from "./es-aggregation-test-fixture"
 
 vi.mock("../services/event-reporter", () => ({ trackEvent: () => undefined }))
 
@@ -31,6 +40,7 @@ const names = [
   "asRecord",
   "asString",
   "asNumber",
+  "getTotalHits",
   "clampLimit",
   "parseStageBucketCodeStats",
   "buildStageBuckets",
@@ -53,7 +63,10 @@ const names = [
   "fetchProjectModeProjectMetrics",
   "enrichProjectModeProjectViews",
   "fetchProjectModeMetricSortedPage",
-  "fetchProjectModeProjectPage"
+  "fetchProjectModeProjectPage",
+  "runAnalysisSnapshotFilters",
+  "runAnalysisDetailFilters",
+  "fetchProjectRunAnalysis"
 ]
 const functions = source.statements.filter(
   (node) => isFunctionDeclaration(node) && names.includes(node.name?.text ?? "")
@@ -78,6 +91,7 @@ function fixture(featureCount = 1) {
   const view = {
     projectId: "p",
     name: "project",
+    lifecycleCreatedAt: "2023-11-13T22:13:20.000Z",
     features: slugs.map((slug) => ({ slug, title: slug })),
     featureCount
   }
@@ -98,10 +112,17 @@ function fixture(featureCount = 1) {
                   key: "p",
                   main_agent_conversations: {
                     doc_count: 2,
+                    last_execution: { value: 1700000000000 },
+                    last_execution_end: { value: 1700000060000 },
                     by_node: { buckets: [{ key: "Dev-实现", doc_count: 1 }] },
                     by_feature: {
                       buckets: [
-                        { key: "f", by_node: { buckets: [{ key: "Dev-实现", doc_count: 1 }] } }
+                        {
+                          key: "f",
+                          execution_duration: { count: 1, sum: 1234 },
+                          last_execution: { value: 1700000000000 },
+                          by_node: { buckets: [{ key: "Dev-实现", doc_count: 1 }] }
+                        }
                       ]
                     }
                   },
@@ -164,6 +185,7 @@ function fixture(featureCount = 1) {
       new Map(ids.map((projectId) => [projectId, { projectId, name: projectId }]))
   )
   const context: Record<string, unknown> = {
+    projectModeTestScopeCacheKey,
     ...code,
     ...stages,
     ...operational,
@@ -171,6 +193,7 @@ function fixture(featureCount = 1) {
     ...dev,
     ...scope,
     ...snapshots,
+    ...execution,
     fetchCompleteProjectDevMetrics,
     mapAwardBatches,
     compareProjectAttentionValues,
@@ -207,6 +230,13 @@ function fixture(featureCount = 1) {
   runInNewContext(compiled, context)
   return {
     api: context.testFunctions as {
+      runAnalysisDetailFilters: (
+        request: RunAnalysisSessionRequest
+      ) => Promise<Record<string, unknown>[]>
+      fetchProjectRunAnalysis: (
+        selectedRange: typeof range,
+        options: RunAnalysisOptions
+      ) => Promise<RunAnalysisData>
       fetchProjectModeProjectPage: (...args: unknown[]) => Promise<{
         projects: Array<{
           features: Array<{ codeStats: { generatedLines: number } }>
@@ -230,6 +260,119 @@ function fixture(featureCount = 1) {
 }
 
 describe("project list lifetime IPC flow", () => {
+  it.each([1, { value: 1, relation: "eq" }])(
+    "permits detail drilldown with a matching snapshot and total %j",
+    async (total) => {
+      const { api, esQuery } = fixture()
+      esQuery.mockResolvedValueOnce({ hits: { total } })
+      const filters = await api.runAnalysisDetailFilters({
+        projectId: "p",
+        featureSlug: "f",
+        upperOrgLv1: "本室",
+        fromLeanOnly: true,
+        adapterName: "研发插件"
+      })
+      expect(filters).toContainEqual({ term: { harnessProjectId: "p" } })
+      expect(filters).toContainEqual({ term: { harnessFeatureSlug: "f" } })
+      const query = JSON.stringify(esQuery.mock.calls[0][1])
+      expect(query).toContain('"properties.projectId":"p"')
+      expect(query).toContain('"upperOrgLv1":"本室"')
+      expect(query).toContain('"properties.projectFromLean":true')
+      expect(query).toContain('"properties.adapterName":"研发插件"')
+      expect(query).not.toContain("lifecycleStatus")
+    }
+  )
+  it.each([0, { value: 0, relation: "eq" }, undefined, -1, NaN])(
+    "refuses unavailable or invalid detail access results (%j)",
+    async (total) => {
+      const { api, esQuery } = fixture()
+      esQuery.mockResolvedValueOnce({ hits: { total } })
+      await expect(
+        api.runAnalysisDetailFilters({ projectId: "p", featureSlug: "f" })
+      ).rejects.toThrow(
+        total === 0 || (typeof total === "object" && total?.value === 0)
+          ? "未找到该项目"
+          : "校验结果不完整"
+      )
+    }
+  )
+  it("all analysis includes archived and dormant projects while retaining organization and Lean filters", async () => {
+    const { api, context } = fixture()
+    const fetchAnalysis = vi.fn(async (queryScope: RunAnalysisScope) => ({
+      rows: [],
+      membership: queryScope.membership
+    }))
+    Object.assign(context, {
+      structuredClone,
+      runAnalysisCache: new ProjectModePageCache(),
+      fetchRunAnalysis: fetchAnalysis
+    })
+    const options: RunAnalysisOptions = {
+      membership: "all",
+      upperOrgLv1: "本室",
+      fromLeanOnly: true,
+      adapterName: "研发插件"
+    }
+    expect(await api.fetchProjectRunAnalysis(range, options)).toMatchObject({ membership: "all" })
+    const allScope = fetchAnalysis.mock.calls[0][0]
+    const archived = {
+      eventName: "harness.project.snapshot",
+      upperOrgLv1: "本室",
+      properties: {
+        lifecycleStatus: "archived",
+        lifecycleCreatedAt: "2020-01-01",
+        projectFromLean: true,
+        adapterName: "研发插件"
+      }
+    }
+    const allQuery = { bool: { filter: allScope.snapshotFilters } }
+    expect(matches(archived, allQuery)).toBe(true)
+    expect(matches({ ...archived, upperOrgLv1: "其他室" }, allQuery)).toBe(false)
+    expect(
+      matches(
+        { ...archived, properties: { ...archived.properties, projectFromLean: false } },
+        allQuery
+      )
+    ).toBe(false)
+    await api.fetchProjectRunAnalysis(range, { ...options, membership: "active" })
+    expect(fetchAnalysis).toHaveBeenCalledTimes(2)
+    expect(
+      matches(archived, { bool: { filter: fetchAnalysis.mock.calls[1][0].snapshotFilters } })
+    ).toBe(false)
+  })
+  it.each(["active", "archived"])(
+    "routes elapsed sorting for %s projects through the ranking",
+    async (status) => {
+      const { api, ranking, rankedViews, hits } = fixture()
+      ranking.mockResolvedValue(new Map([["p", 12345]]))
+      rankedViews.mockResolvedValue(
+        new Map([
+          [
+            "p",
+            {
+              projectId: "p",
+              name: "project",
+              features: [],
+              lifecycleCreatedAt: "2023-11-13T22:13:20Z"
+            }
+          ]
+        ])
+      )
+      const page = await api.fetchProjectModeProjectPage(range, {
+        status,
+        sortBy: "elapsedMs",
+        sortOrder: "asc"
+      })
+      expect(ranking).toHaveBeenCalledWith(expect.anything(), "elapsedMs", expect.anything())
+      expect(hits).not.toHaveBeenCalled()
+      expect(page).toMatchObject({
+        sortBy: "elapsedMs",
+        sortOrder: "asc",
+        projects: [{ elapsedMs: 12345 }]
+      })
+    }
+  )
+
   it.each([{ timed_out: true }, { _shards: { failed: 1 } }])(
     "rejects incomplete snapshots without caching a partial page: %j",
     async (bad) => {
@@ -259,6 +402,21 @@ describe("project list lifetime IPC flow", () => {
         string,
         { composite?: { sources: Record<string, unknown>[]; after?: unknown } }
       >
+      if (aggs.features?.composite) {
+        return {
+          aggregations: {
+            features: {
+              buckets: [
+                {
+                  key: { project: "p", feature: "f" },
+                  execution_duration: { count: 1, sum: 4567 },
+                  last_execution: { value: 1700000000000 }
+                }
+              ]
+            }
+          }
+        }
+      }
       const composite = aggs.dev_metrics?.composite
       if (composite) {
         expect(body.size).toBe(0)
@@ -303,59 +461,106 @@ describe("project list lifetime IPC flow", () => {
       devAssociatedFeatureCount: 1,
       codeStats: { generatedLines: 100, adoptedLines: 40 }
     })
-    expect(esQuery).toHaveBeenCalledTimes(6)
+    expect(esQuery).toHaveBeenCalledTimes(7)
   })
 
-  it("globally orders projects before paging and reuses metrics for paging, reversals and unfiltered date changes", async () => {
-    const { api, ranking, rankedViews } = fixture()
-    const values = new Map<string, number | null>(
-      Array.from({ length: 25 }, (_, i) => [`p${i}`, i])
-    )
-    values.set("unknown", null)
-    ranking.mockResolvedValue(values)
-    const options = { createdInRangeOnly: false, pageSize: 10 }
-    const first = await api.fetchProjectModeMetricSortedPage(
-      range,
-      { ...options, page: 1 },
-      {},
-      "conversationCount",
-      "desc"
-    )
-    const second = await api.fetchProjectModeMetricSortedPage(
-      range,
-      { ...options, page: 2 },
-      {},
-      "conversationCount",
-      "desc"
-    )
-    const reverse = await api.fetchProjectModeMetricSortedPage(
-      { from: "2026-09-01", to: "2026-09-30" },
-      { ...options, page: 1 },
-      {},
-      "conversationCount",
-      "asc"
-    )
-    expect(first.total).toBe(26)
-    expect(first.projects.map((project) => project.projectId)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `p${24 - i}`)
-    )
-    expect(second.projects.map((project) => project.projectId)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `p${14 - i}`)
-    )
-    expect(reverse.projects.map((project) => project.projectId)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `p${i}`)
-    )
-    const last = await api.fetchProjectModeMetricSortedPage(
-      range,
-      { ...options, page: 3 },
-      {},
-      "conversationCount",
-      "asc"
-    )
-    expect(last.projects.at(-1)?.projectId).toBe("unknown")
-    expect(ranking).toHaveBeenCalledTimes(1)
-    expect(rankedViews.mock.calls.every(([ids]) => ids.length <= 10)).toBe(true)
+  it("completes execution stats on shard-count errors even when no feature bucket is omitted", async () => {
+    const { api, esQuery } = fixture()
+    const original = esQuery.getMockImplementation()!
+    esQuery.mockImplementation(async (index, body) => {
+      const aggs = body.aggs as Record<string, unknown>
+      if (aggs.features) {
+        expect(JSON.stringify(body.query)).toContain('"harnessFeatureSlug":["f"]')
+        expect(JSON.stringify(body.query)).not.toContain('"range"')
+        return {
+          aggregations: {
+            features: {
+              buckets: [
+                {
+                  key: { project: "p", feature: "f" },
+                  execution_duration: { count: 3, sum: 9999 },
+                  last_execution: { value: 1700000001000 }
+                }
+              ]
+            }
+          }
+        }
+      }
+      const raw = await original(index, body)
+      if (index === "traces") {
+        const aggregate = raw.aggregations as {
+          by_project: {
+            buckets: Array<{
+              main_agent_conversations: { by_feature: { doc_count_error_upper_bound?: number } }
+            }>
+          }
+        }
+        aggregate.by_project.buckets[0].main_agent_conversations.by_feature.doc_count_error_upper_bound = 2
+      }
+      return raw
+    })
+    const result = await api.fetchProjectModeProjectPage(range, { createdInRangeOnly: false })
+    expect(result.projects[0]).toMatchObject({
+      lastExecutedAt: "2023-11-14T22:13:20.000Z",
+      features: [{ totalDurationMs: 9999, lastExecutedAt: "2023-11-14T22:13:21.000Z" }]
+    })
+    // One compact trace query + one code query + one scalar fallback, not one per feature.
+    expect(esQuery).toHaveBeenCalledTimes(3)
   })
+
+  it.each(["conversationCount", "elapsedMs"])(
+    "globally orders %s projects before paging and reuses metrics for paging, reversals and unfiltered date changes",
+    async (sortKey) => {
+      const { api, ranking, rankedViews } = fixture()
+      const values = new Map<string, number | null>(
+        Array.from({ length: 25 }, (_, i) => [`p${i}`, i])
+      )
+      values.set("unknown", null)
+      ranking.mockResolvedValue(values)
+      const options = { createdInRangeOnly: false, pageSize: 10 }
+      const first = await api.fetchProjectModeMetricSortedPage(
+        range,
+        { ...options, page: 1 },
+        {},
+        sortKey,
+        "desc"
+      )
+      const second = await api.fetchProjectModeMetricSortedPage(
+        range,
+        { ...options, page: 2 },
+        {},
+        sortKey,
+        "desc"
+      )
+      const reverse = await api.fetchProjectModeMetricSortedPage(
+        { from: "2026-09-01", to: "2026-09-30" },
+        { ...options, page: 1 },
+        {},
+        sortKey,
+        "asc"
+      )
+      expect(first.total).toBe(26)
+      expect(first.projects.map((project) => project.projectId)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `p${24 - i}`)
+      )
+      expect(second.projects.map((project) => project.projectId)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `p${14 - i}`)
+      )
+      expect(reverse.projects.map((project) => project.projectId)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `p${i}`)
+      )
+      const last = await api.fetchProjectModeMetricSortedPage(
+        range,
+        { ...options, page: 3 },
+        {},
+        sortKey,
+        "asc"
+      )
+      expect(last.projects.at(-1)?.projectId).toBe("unknown")
+      expect(ranking).toHaveBeenCalledTimes(1)
+      expect(rankedViews.mock.calls.every(([ids]) => ids.length <= 10)).toBe(true)
+    }
+  )
 
   it("separates rankings by rooms, metrics and the created-date filter", async () => {
     const { api, ranking } = fixture()
@@ -397,6 +602,16 @@ describe("project list lifetime IPC flow", () => {
   it("keeps root-only conversations and all-agent costs while omitting dates in both index queries", async () => {
     const { api, esQuery, hits } = fixture()
     const page = await api.fetchProjectModeProjectPage(range, { createdInRangeOnly: true })
+    const traceQuery = esQuery.mock.calls.find(([index]) => index === "traces")![1]
+    expect(traceQuery.aggs).toMatchObject({
+      by_project: {
+        aggs: {
+          main_agent_conversations: {
+            aggs: { last_execution_end: { max: { field: "endedAt" } } }
+          }
+        }
+      }
+    })
     expect(hits).toHaveBeenCalledTimes(1)
     expect(esQuery).toHaveBeenCalledTimes(2)
     for (const [, body] of esQuery.mock.calls) {
@@ -404,12 +619,21 @@ describe("project list lifetime IPC flow", () => {
     }
     expect(page.projects[0]).toMatchObject({
       conversationCount: 2,
+      elapsedMs: 86_460_000,
+      lastExecutedAt: "2023-11-14T22:13:20.000Z",
       devStageConversationCount: 1,
       devAssociatedFeatureCount: 1,
       runCost: { toolCalls: 100, modelCalls: 20, totalTokens: 3000, traceDocs: 3 },
       userInputRequestCountComplete: false,
       codeStats: { generatedLines: 100, adoptedLines: 40 },
-      features: [{ slug: "f", codeStats: { generatedLines: 30 } }]
+      features: [
+        {
+          slug: "f",
+          codeStats: { generatedLines: 30 },
+          totalDurationMs: 1234,
+          lastExecutedAt: "2023-11-14T22:13:20.000Z"
+        }
+      ]
     })
   })
 

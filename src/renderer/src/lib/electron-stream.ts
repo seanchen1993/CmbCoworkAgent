@@ -6,6 +6,7 @@ import {
   toMessageDict,
   type EventStreamEvent
 } from "@langchain/langgraph-sdk/ui"
+import { replaceLiveStreamMessageId, type LiveStreamMessage } from "./live-stream-messages"
 
 type StreamValues = Record<string, unknown>
 type SubmitOptions = Parameters<UseStreamCustom<StreamValues>["submit"]>[1]
@@ -105,6 +106,47 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
     return messages
   }
 
+  /** Rekey both the cumulative frame and the SDK chunk seed at a steer boundary.
+   * Rekeying only ThreadContext leaves the provider row in subsequent frames. */
+  renameAssistant(
+    frame: Message[],
+    fromId: string,
+    toId: string,
+    providerSourceId?: string,
+    providerOccurrence?: number
+  ): Message[] {
+    if (!fromId || !toId || fromId === toId) return frame
+    const source = frame.find((message) => message.id === fromId)
+    const target = frame.find((message) => message.id === toId)
+    const sourceTuple = super.get(fromId)
+    const targetTuple = super.get(toId)
+    if (
+      (source && source.type !== "ai") ||
+      (target && target.type !== "ai") ||
+      (sourceTuple?.chunk && sourceTuple.chunk.getType() !== "ai") ||
+      (targetTuple?.chunk && targetTuple.chunk.getType() !== "ai")
+    )
+      return frame
+    const renamed = replaceLiveStreamMessageId(
+      frame as LiveStreamMessage[],
+      fromId,
+      toId,
+      providerSourceId,
+      providerOccurrence
+    ) as Message[]
+    const replacement = renamed.find((message) => message.id === toId)
+    if (replacement) {
+      const seed = new MessageTupleManager()
+      seed.add(replacement, targetTuple?.metadata ?? sourceTuple?.metadata)
+      this.chunks[toId] = seed.get(toId)!
+      delete this.chunks[fromId]
+      if (this.authoritativeContentIds.delete(fromId)) this.authoritativeContentIds.add(toId)
+    }
+    this.indexes = null
+    this.writtenId = null
+    return renamed
+  }
+
   override get(id: string | null | undefined, defaultIndex?: number) {
     const tuple = super.get(id)
     if (!tuple || id == null || defaultIndex == null) return tuple
@@ -177,6 +219,39 @@ export function createElectronStream(options: ElectronStreamOptions) {
               }
               yield { ...event, data }
             } else {
+              if (
+                event.event === "custom" &&
+                event.data &&
+                typeof event.data === "object" &&
+                "type" in event.data &&
+                event.data.type === "message_id_alias" &&
+                "role" in event.data &&
+                event.data.role === "assistant" &&
+                "fromId" in event.data &&
+                typeof event.data.fromId === "string" &&
+                "toId" in event.data &&
+                typeof event.data.toId === "string"
+              ) {
+                const data = event.data,
+                  fromId = event.data.fromId,
+                  toId = event.data.toId
+                // Let the renderer rekey its accumulator first; the next frame
+                // must already carry the same identity, not reintroduce the old one.
+                yield event
+                const messages = tuples.renameAssistant(
+                  readMessages(manager.values),
+                  fromId,
+                  toId,
+                  "providerSourceId" in data && typeof data.providerSourceId === "string"
+                    ? data.providerSourceId
+                    : undefined,
+                  "providerOccurrence" in data && typeof data.providerOccurrence === "number"
+                    ? data.providerOccurrence
+                    : undefined
+                )
+                manager.setStreamValues({ ...manager.values, messages })
+                continue
+              }
               if (
                 event.event === "custom" &&
                 event.data &&

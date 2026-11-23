@@ -1,0 +1,19 @@
+stage: launching isolated App <temp>/m05-local-work-app-v9RjNN
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+stage: real-work-runtime-file-delivery
+artifact-directory <temp>/m05-local-work-app-v9RjNN last model phases [[],[],[],[],[],["bot_work_read"],["write_file"],["write_file","bot_deliver_files"],[],[],[],["edit_file"],["edit_file","bot_deliver_files"],[]]
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-v9RjNN
+AssertionError [ERR_ASSERTION]: each returned result needs its own task link
+
+1 !== 2
+
+    at checkReturned (<repo>/tests/bots-local-work-app.spec.ts:541:14)
+    at async main (<repo>/tests/bots-local-work-app.spec.ts:598:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 1,
+  expected: 2,
+  operator: 'strictEqual',
+  diff: 'simple'
+}

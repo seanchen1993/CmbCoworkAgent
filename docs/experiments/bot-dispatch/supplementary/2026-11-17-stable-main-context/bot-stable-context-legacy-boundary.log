@@ -1,0 +1,6 @@
+legacy disconnection proof {
+  reachableModules: 1316,
+  legacyModules: 0,
+  localBetaBotImRetained: true,
+  excludedFeatureModules: 0
+}

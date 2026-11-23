@@ -117,7 +117,7 @@ export async function createThreadService(
   const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
   nextMetadata.title = title
 
-  const thread = dbCreateThread(threadId, nextMetadata)
+  const thread = dbCreateThread(threadId, nextMetadata, { newDurableTranscript: true })
   return {
     thread_id: thread.thread_id,
     created_at: new Date(thread.created_at),

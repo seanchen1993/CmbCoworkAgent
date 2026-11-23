@@ -18,7 +18,7 @@ function serialized(type: string, id: string, content = "history") {
   return { id: ["langchain_core", "messages", type], kwargs: { id, content } }
 }
 
-function reasoning(id?: string, occurrence?: number): IPCEvent {
+function reasoning(id?: string, occurrence?: number): Extract<IPCEvent, { type: "stream" }> {
   return {
     type: "stream",
     mode: "messages",
@@ -64,6 +64,52 @@ function reset(
 }
 
 describe("retry discard IDs delivered through the IPC converter", () => {
+  it.each([false, true])(
+    "retains completed provider occurrences on resume (alias: %s)",
+    (alias) => {
+      const convert = createTransport()
+      const history = [
+        {
+          ...serialized("AIMessage", "provider", "calling tool"),
+          kwargs: {
+            id: "provider",
+            content: "calling tool",
+            tool_calls: [{ id: "c", name: "execute", args: {} }]
+          }
+        },
+        {
+          ...serialized("ToolMessage", "tool", "done"),
+          kwargs: { id: "tool", content: "done", tool_call_id: "c" }
+        }
+      ]
+      const values: IPCEvent = { type: "stream", mode: "values", data: { messages: history } }
+      const scoped = (scope: string): IPCEvent => {
+        const event = reasoning("provider")
+        ;(event.data as unknown[])[1] = { langgraph_node: "agent", checkpoint_ns: scope }
+        return event
+      }
+      convert(scoped("model:first"))
+      if (alias)
+        convert({
+          type: "custom",
+          data: {
+            type: "message_id_alias",
+            fromId: "provider",
+            toId: "completed-canonical",
+            role: "assistant",
+            currentRunCompleted: true,
+            providerSourceId: "provider",
+            providerOccurrence: 1
+          }
+        })
+      convert(values)
+      const failedId = messageId(convert(scoped("model:retry")))
+      expect(failedId).not.toBe("provider")
+      reset(convert, ["provider", failedId], history)
+      convert(values)
+      expect(messageId(convert(scoped("model:retry")))).toBe(failedId)
+    }
+  )
   it("includes renderer fallback IDs absent from the main-process reset", () => {
     const convert = createTransport()
     const firstId = messageId(convert(reasoning()))

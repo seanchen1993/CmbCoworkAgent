@@ -63,7 +63,8 @@ class ManagedBizRetryService {
         message: input.message,
         channel: origin.channel,
         delivery: context?.delivery,
-        route: context?.route
+        route: context?.route,
+        isCurrent: origin.isCurrent
       })
     })
   }
@@ -190,6 +191,7 @@ class ManagedBizRetryService {
     channel: "desktop" | "im"
     delivery?: AgentRunDelivery
     route?: { principalId: string; conversationKey: string }
+    isCurrent?: () => boolean
   }): Promise<AppDecisionResult> {
     if (
       !["stop", "continue", "new_thread"].includes(input.choice) ||
@@ -227,7 +229,8 @@ class ManagedBizRetryService {
         choice: input.choice,
         message: input.message,
         channel: input.channel,
-        route: input.route
+        route: input.route,
+        isCurrent: input.isCurrent
       })
       if (result.applied) this.removeNotification(input.notificationId)
       return result

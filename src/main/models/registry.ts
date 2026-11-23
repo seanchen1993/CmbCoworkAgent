@@ -1,6 +1,18 @@
 import { BrowserWindow } from "electron"
 import type { RemoteModelCatalog, RemoteModelCatalogItem } from "../../shared/model-catalog"
 import {
+  IDLE_MODEL_ID,
+  IDLE_MODEL_NAME,
+  IDLE_MODEL_MODE,
+  IDLE_MODEL_MAX_TOKENS,
+  IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
+  IDLE_MODEL_UAT_NOTICE,
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
+  isModelAvailable,
+  isValidSapId,
+  type BuiltinModelLockedField
+} from "../../shared/model-catalog"
+import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_TEMPERATURE,
@@ -19,6 +31,8 @@ import {
   getBuiltinModelOverrides,
   getCustomModelConfigs,
   getStoredDefaultModelId,
+  getStoredIdleModelUseUat,
+  getUserInfo,
   resetBuiltinModelOverride as resetStoredBuiltinModelOverride,
   setStoredDefaultModelId,
   setBuiltinModelOverride as setStoredBuiltinModelOverride,
@@ -31,7 +45,7 @@ import { calculateSummarizationTriggerTokens } from "../../shared/model-token-bu
 import { getHiddenEndpoint } from "../security/hidden-endpoints"
 
 export type ModelSource = "builtin" | "custom"
-export type BuiltinModelOrigin = "remote" | "fallback"
+export type BuiltinModelOrigin = "remote" | "fallback" | "local"
 export type ModelRef = `builtin:${string}` | `custom:${string}`
 
 export interface ResolvedModelConfig extends CustomModelConfig {
@@ -43,7 +57,7 @@ export interface ResolvedModelConfig extends CustomModelConfig {
 export interface BuiltinModelPublicConfig extends Omit<ResolvedModelConfig, "apiKey"> {
   source: "builtin"
   hasApiKey: boolean
-  lockedFields: Array<"baseUrl" | "model" | "apiKey">
+  lockedFields: BuiltinModelLockedField[]
 }
 
 interface BuiltinModelDefinition extends CustomModelConfig {
@@ -243,8 +257,43 @@ function normalizeCatalog(catalog: unknown): BuiltinModelDefinition[] | null {
 }
 
 function getBaseDefinitions(): BuiltinModelDefinition[] {
-  if (remoteDefinitions?.length) return remoteDefinitions
-  return FALLBACK_CATALOG.map((item) => normalizeDefinition(item, "fallback"))
+  const definitions = remoteDefinitions?.length
+    ? remoteDefinitions
+    : FALLBACK_CATALOG.map((item) => normalizeDefinition(item, "fallback"))
+  const environment = getStoredIdleModelUseUat()
+    ? {
+        idleModelEnvironment: "uat" as const,
+        baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_BASE_URL,
+        apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_UAT_API_KEY
+      }
+    : {
+        idleModelEnvironment: "production" as const,
+        baseUrl: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_BASE_URL,
+        apiKey: import.meta.env.MAIN_VITE_IDLE_MODEL_PROD_API_KEY
+      }
+  const baseUrl = (environment.baseUrl ?? "").trim()
+  if (!baseUrl) return definitions
+  const idleModel: BuiltinModelDefinition = {
+    ...normalizeDefinition(
+      {
+        id: IDLE_MODEL_ID,
+        name: IDLE_MODEL_NAME,
+        baseUrl,
+        model: IDLE_MODEL_MODE,
+        maxTokens:
+          environment.idleModelEnvironment === "uat"
+            ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS
+            : IDLE_MODEL_MAX_TOKENS,
+        apiKey: environment.apiKey,
+        tier: "premium"
+      },
+      "local"
+    ),
+    transport: "idle-gateway",
+    idleModelEnvironment: environment.idleModelEnvironment,
+    notice: environment.idleModelEnvironment === "uat" ? IDLE_MODEL_UAT_NOTICE : undefined
+  }
+  return [idleModel, ...definitions.filter((item) => item.id !== IDLE_MODEL_ID)]
 }
 
 function normalizeOverride(
@@ -305,18 +354,29 @@ function normalizeOverride(
 export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
   const overrides = getBuiltinModelOverrides()
   return getBaseDefinitions().map((base) => {
+    const isIdle = base.transport === "idle-gateway"
     let override: BuiltinModelOverride = {}
     try {
-      override = normalizeOverride(overrides[base.id], base)
+      const stored = overrides[base.id]
+      override = normalizeOverride(
+        base.idleModelEnvironment === "production" && stored
+          ? { ...stored, maxTokens: IDLE_MODEL_MAX_TOKENS }
+          : stored,
+        base
+      )
     } catch (error) {
       console.warn(`[Models] Ignoring invalid local override for ${base.id}:`, error)
     }
     return {
       ...base,
       ...override,
-      apiKey:
-        base.apiKey?.trim() ||
-        getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
+      apiKey: isIdle
+        ? base.apiKey
+        : base.apiKey?.trim() ||
+          getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
+      ...(isIdle && !isValidSapId(getUserInfo()?.sapId)
+        ? { unavailableReason: IDLE_MODEL_SAP_REQUIRED_MESSAGE }
+        : {}),
       ref: `builtin:${base.id}`,
       source: "builtin",
       origin: base.origin
@@ -329,7 +389,12 @@ export function getBuiltinModelPublicConfigs(): BuiltinModelPublicConfig[] {
     ...config,
     source: "builtin",
     hasApiKey: Boolean(apiKey),
-    lockedFields: ["baseUrl", "model", "apiKey"]
+    lockedFields: [
+      "baseUrl",
+      "model",
+      "apiKey",
+      ...(config.idleModelEnvironment === "production" ? ["maxTokens" as const] : [])
+    ]
   }))
 }
 
@@ -366,6 +431,8 @@ function resolveModelConfigFromList(
     configs.find((config) => config.source === "custom" && config.id === raw) ??
     configs.find((config) => config.source === "custom" && config.model === raw) ??
     configs.find((config) => config.id === raw || config.model === raw) ??
+    // Older callers could select the built-in by its previous wire model name.
+    (raw === "ultra" ? configs.find((config) => config.transport === "idle-gateway") : null) ??
     null
   )
 }
@@ -375,7 +442,7 @@ export function getModelConfigs(): ResolvedModelConfig[] {
   const configs = collectModelConfigs()
   const selectedDefault =
     resolveModelConfigFromList(configs, getStoredDefaultModelId()) ??
-    configs.find((config) => Boolean(config.apiKey)) ??
+    configs.find(isModelAvailable) ??
     configs[0]
   if (!selectedDefault) return configs
   const defaultRef = toModelRef(selectedDefault)
@@ -407,7 +474,7 @@ export function getDefaultModelConfig(): ResolvedModelConfig | null {
   if (configs.length === 0) return null
   return (
     resolveModelConfigFromList(configs, getStoredDefaultModelId()) ??
-    configs.find((config) => Boolean(config.apiKey)) ??
+    configs.find(isModelAvailable) ??
     configs[0] ??
     null
   )
@@ -418,20 +485,27 @@ export function getAvailableModelConfigOrDefault(
   value?: string | null
 ): ResolvedModelConfig | null {
   const requested = getModelConfigByRef(value)
-  if (requested?.apiKey) return requested
+  if (isModelAvailable(requested)) return requested
   const selectedDefault = getDefaultModelConfig()
-  if (selectedDefault?.apiKey) return selectedDefault
-  return getModelConfigs().find((config) => Boolean(config.apiKey)) ?? null
+  if (isModelAvailable(selectedDefault)) return selectedDefault
+  return getModelConfigs().find(isModelAvailable) ?? null
 }
 
 export function getModelByTier(tier: "premium" | "economy"): ResolvedModelConfig | null {
-  const configs = getModelConfigs().filter((config) => Boolean(config.apiKey))
+  const configs = getModelConfigs().filter(isModelAvailable)
   return configs.find((config) => (config.tier ?? "premium") === tier) ?? configs[0] ?? null
 }
 
 export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverride): void {
   const base = getBaseDefinitions().find((item) => item.id === id)
   if (!base) throw new Error("未找到内置模型")
+  if (
+    base.idleModelEnvironment === "production" &&
+    input.maxTokens !== undefined &&
+    input.maxTokens !== IDLE_MODEL_MAX_TOKENS
+  ) {
+    throw new Error(`${IDLE_MODEL_NAME}在生产环境的上下文窗口固定为 128k，不能修改`)
+  }
   const normalized = normalizeOverride(input, base)
   const diff: BuiltinModelOverride = {}
   const keys: Array<keyof BuiltinModelOverride> = [
@@ -452,18 +526,30 @@ export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverri
       ;(diff as Record<string, unknown>)[key] = normalized[key]
     }
   }
-  if (Object.keys(diff).length === 0) {
-    resetStoredBuiltinModelOverride(id)
+  persistBuiltinModelOverride(base, diff)
+}
+
+function persistBuiltinModelOverride(
+  base: BuiltinModelDefinition,
+  override: BuiltinModelOverride
+): void {
+  if (base.idleModelEnvironment === "production") {
+    // Keep the UAT context override when saving or resetting production settings.
+    const uatMaxTokens = getBuiltinModelOverrides()[base.id]?.maxTokens
+    if (uatMaxTokens !== undefined) override.maxTokens = uatMaxTokens
+  }
+  if (Object.keys(override).length === 0) {
+    resetStoredBuiltinModelOverride(base.id)
   } else {
-    setStoredBuiltinModelOverride(id, diff)
+    setStoredBuiltinModelOverride(base.id, override)
   }
   notifyModelChanges()
 }
 
 export function resetBuiltinModelOverride(id: string): void {
-  if (!getBaseDefinitions().some((item) => item.id === id)) throw new Error("未找到内置模型")
-  resetStoredBuiltinModelOverride(id)
-  notifyModelChanges()
+  const base = getBaseDefinitions().find((item) => item.id === id)
+  if (!base) throw new Error("未找到内置模型")
+  persistBuiltinModelOverride(base, {})
 }
 
 function catalogSignature(): string {
@@ -520,7 +606,6 @@ export function startBuiltinModelCatalogRefresh(): Promise<void> {
 }
 
 export function stopBuiltinModelCatalogRefresh(): void {
-  if (!refreshTimer) return
-  clearInterval(refreshTimer)
+  if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = null
 }

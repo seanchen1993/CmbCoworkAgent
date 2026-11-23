@@ -1,3 +1,7 @@
+import { registerThreadSearchHandlers, closeThreadSearchWorker } from "./ipc/thread-search"
+import { closeDurableMessageSearchWorker } from "./thread-search/durable-message-search-client"
+import { cleanupMarketRuntimeContent } from "./services/market-content"
+import { harnessStageWatches } from "./services/harness-stage-attribution"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
@@ -78,6 +82,7 @@ import {
 } from "./app-tray"
 import { setAppAttentionHandler } from "./app-attention-events"
 import { APP_ATTENTION_CHANNEL, isRendererAppAttentionPayload } from "../shared/app-attention"
+import { STARTUP_VIEW_GET_CHANNEL, STARTUP_VIEW_SET_CHANNEL } from "../shared/startup-view"
 import {
   closePromptActionToBehavior,
   isCloseToTrayPromptResponse,
@@ -121,6 +126,7 @@ const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 const nativeClosePrompt = createNativeClosePrompt()
 const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
+let mainWindowStartupReady = false
 let mainWindowUnresponsive = false
 const trustedMainRendererUrl = resolveTrustedRendererUrl(
   app.isPackaged
@@ -347,6 +353,8 @@ import { registerSkillsHandlers } from "./ipc/skills"
 import { closeSkillPluginCatalogWorker } from "./skill-plugin-catalog/client"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
+import { registerBotHandlers } from "./ipc/bots"
+import { hasActiveBotRuns, stopLocalBotHost } from "./bots/local-service"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
 import { closeMemoryCatalogWorker } from "./memory-catalog/client"
@@ -370,6 +378,9 @@ import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { managedRunController } from "./harness-board/managed-run-controller"
+import { managedRunScheduler } from "./harness-board/managed-run-scheduler"
+import { createBrowserWindowAgentRunDelivery } from "./agent/agent-run-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
@@ -409,6 +420,10 @@ import {
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
+import {
+  startKnowledgeBaseManager,
+  stopKnowledgeBaseManager
+} from "./services/knowledge-base-manager"
 import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
 import {
   startRegisteredGitHookEventSync,
@@ -445,6 +460,7 @@ import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollb
 import {
   getGitChangeNoticeEnabled,
   getOpenworkDir,
+  getStartupView,
   getStoredAgentGraphRecursionLimit,
   getStoredAgentToolStrategy,
   getStoredWorkflowWorktreeRemoveTimeoutMinutes,
@@ -452,6 +468,7 @@ import {
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
   setGitChangeNoticeEnabled,
+  setStartupView,
   setStoredAgentGraphRecursionLimit,
   setStoredAgentToolStrategy,
   setStoredWorkflowWorktreeRemoveTimeoutMinutes,
@@ -631,6 +648,7 @@ function clearCloseToTrayPromptState(): void {
 function hasActiveForegroundRuns(): boolean {
   return (
     hasAnyActiveAgentTasks() ||
+    hasActiveBotRuns() ||
     hasActiveScheduledTaskRuns() ||
     isHeartbeatRunning() ||
     builtinRobotManager.hasActiveRuns()
@@ -931,6 +949,7 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
+  if (isAppQuitting() || !mainWindowStartupReady) return null
   clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
@@ -1132,9 +1151,9 @@ if (browserNativeMessagingHostLaunch) {
     await initializeDatabase()
     initializeNotificationRuntime()
     await notificationService.recover()
+    // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
+    // 标记是单调的，重复写是空操作，所以每次启动都跑一遍也没关系。不 await，不挡启动。
     if (harnessConfigAvailable) {
-      // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
-      // 标记是单调的，重复写是空操作，所以每次启动都跑一遍也没关系。不 await，不挡启动。
       const { projectIdsWithRuns } = recoverManagedRunsAtStartup()
       for (const projectId of projectIdsWithRuns) {
         void markHarnessProjectManagedRunStarted(projectId).catch(() => undefined)
@@ -1153,7 +1172,9 @@ if (browserNativeMessagingHostLaunch) {
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
     registerWorkflowHandlers(ipcMain)
-    registerThreadHandlers(ipcMain)
+    const deleteThread = registerThreadHandlers(ipcMain)
+    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow)
+    registerThreadSearchHandlers(ipcMain)
     registerModelHandlers(ipcMain)
     registerWorkspaceFilePreviewHandlers(ipcMain)
     registerWorkspaceFilePreviewProtocol()
@@ -1190,6 +1211,7 @@ if (browserNativeMessagingHostLaunch) {
       acknowledgeUiGuide(getDb(), config)
     )
     registerHarnessBoardHandlers(ipcMain)
+    startKnowledgeBaseManager()
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     registerPathOpenersHandlers(ipcMain)
@@ -1235,6 +1257,20 @@ if (browserNativeMessagingHostLaunch) {
         throw new Error("Invalid window close behavior")
       }
       return saveWindowCloseBehavior(behavior)
+    })
+
+    ipcMain.handle(STARTUP_VIEW_GET_CHANNEL, (event) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+        throw new Error("Startup settings are only available to the main window")
+      }
+      return getStartupView()
+    })
+
+    ipcMain.handle(STARTUP_VIEW_SET_CHANNEL, (event, view: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+        throw new Error("Startup settings are only available to the main window")
+      }
+      return setStartupView(view)
     })
 
     ipcMain.handle(GIT_CHANGE_NOTICE_GET_CHANNEL, (event) => {
@@ -1558,6 +1594,34 @@ if (browserNativeMessagingHostLaunch) {
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
+    mainWindowStartupReady = true
+    if (harnessConfigAvailable) {
+      managedRunScheduler.initialize({
+        async start(schedule) {
+          const window = mainWindow
+          if (!window || window.isDestroyed()) {
+            throw new Error("没有可用的应用主窗口，无法开始托管")
+          }
+          return managedRunController.start({
+            projectId: schedule.projectId,
+            featureId: schedule.featureId,
+            workspacePath: schedule.workspacePath,
+            initialUserMessage: schedule.initialUserMessage,
+            existingThreadId: schedule.existingThreadId,
+            modelSelection: schedule.modelSelection,
+            scheduledStartId: schedule.scheduleId,
+            delivery: createBrowserWindowAgentRunDelivery(window)
+          })
+        },
+        changed(event) {
+          for (const window of BrowserWindow.getAllWindows()) {
+            if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+              window.webContents.send("harnessBoard:managedRunScheduleChanged", event)
+            }
+          }
+        }
+      })
+    }
     // An IM turn must not depend on someone having the desktop open, and must
     // not be tied to whichever window happened to be focused when it arrived.
     // The managed delivery broadcasts on the thread-scoped channel the renderer
@@ -1583,7 +1647,7 @@ if (browserNativeMessagingHostLaunch) {
 
     // Start scheduled task scheduler and heartbeat service
     await builtinRobotManager.start(app.getVersion())
-    startScheduler()
+    startScheduler(harnessConfigAvailable ? (now) => managedRunScheduler.tick(now) : undefined)
     startHeartbeat()
     startHookConfigWatcher()
     startUpdateChecker()
@@ -1612,7 +1676,7 @@ if (browserNativeMessagingHostLaunch) {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" || isAppQuitting()) {
       app.quit()
     }
   })
@@ -1654,6 +1718,7 @@ if (browserNativeMessagingHostLaunch) {
     void (async () => {
       try {
         const shutdownResults = await Promise.allSettled([
+          waitBestEffort(stopLocalBotHost(), 5_000),
           shutdownAllAgentTasks(5_000),
           stopSchedulerAndWait(5_000),
           stopHeartbeatAndWait(5_000),
@@ -1691,6 +1756,7 @@ if (browserNativeMessagingHostLaunch) {
       pet: getPetWindowDebugInfo()
     })
     if (quitCleanupDone) {
+      cleanupMarketRuntimeContent()
       // Cleanup already finished during a previous will-quit cycle.
       // Let Electron quit naturally — this gives Chromium time to properly
       // release the CDP debug socket, preventing zombie sockets on Windows.
@@ -1716,6 +1782,7 @@ if (browserNativeMessagingHostLaunch) {
     stopHookConfigWatcher()
     stopAllWatching()
     stopRegisteredGitHookEventSync()
+    stopKnowledgeBaseManager()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
     try {
@@ -1725,11 +1792,14 @@ if (browserNativeMessagingHostLaunch) {
     }
 
     const cleanup = Promise.all([
+      stopLocalBotHost().catch((error) => console.warn("[Bots] Shutdown failed", error)),
       builtinRobotManager
         .stop()
         .catch((err) => console.warn("[Main] stop built-in robot error:", err)),
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      closeThreadSearchWorker(),
+      closeDurableMessageSearchWorker(),
       closeThreadMessageHydrationWorker().catch((err) =>
         console.warn("[Main] closeThreadMessageHydrationWorker error:", err)
       ),
@@ -1771,6 +1841,9 @@ if (browserNativeMessagingHostLaunch) {
       ),
       closeHarnessWatchRefWorker().catch((err) =>
         console.warn("[Main] closeHarnessWatchRefWorker error:", err)
+      ),
+      harnessStageWatches.close().catch((err) =>
+        console.warn("[Main] closeHarnessStageWatches error:", err)
       ),
       closeDashboardEsWorker().catch((err) =>
         console.warn("[Main] closeDashboardEsWorker error:", err)

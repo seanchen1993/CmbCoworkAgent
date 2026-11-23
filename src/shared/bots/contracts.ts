@@ -1,0 +1,715 @@
+import type { BotImClient } from "./im-channel"
+import type {
+  BotReactionTarget,
+  BotMessageReactions,
+  BotMessageReactionUpdate
+} from "./message-reactions"
+import type { BotWorkClient } from "./work"
+import type { BotMockSource } from "./mock-channel"
+import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
+import type { BotDeliveredFile, BotDeliveredFileSource } from "./file-delivery"
+import type { UserInputRequest } from "../../main/types"
+import type {
+  WorkspaceFilePreviewReadRequest,
+  WorkspaceFilePreviewReadResult,
+  WorkspaceFilePreviewOpenMediaRequest,
+  WorkspaceFilePreviewOpenMediaResult,
+  WorkspaceFilePreviewCancelRequest,
+  WorkspaceFilePreviewReleaseRequest
+} from "../workspace-file-preview"
+
+/** Transport-neutral contracts. Resource identifiers are meaningful only on their owning host. */
+export const BOT_PROTOCOL_VERSION = 1 as const
+export const LOCAL_BOT_HOST_ID = "local"
+export const BOT_REQUEST_RECEIPT_LIMIT = 32
+export const BOT_REQUEST_RECEIPT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
+export interface BotRequestCheck {
+  requestId: string
+  messageHash: string
+}
+export interface BotRequestReceipt {
+  requestId: string
+  /** Acceptance is independent of execution success. No other conversation's data is returned. */
+  state: "accepted" | "conflict" | "absent"
+}
+export const BOT_AVATAR_SHAPES = [
+  "circle",
+  "cloud",
+  "squircle",
+  "spark",
+  "clover",
+  "heart",
+  "flower",
+  "drop",
+  "pill",
+  "triangle",
+  "house",
+  "star",
+  "hexagon"
+] as const
+export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number]
+
+export const BOT_MEMORY_MODES = ["enabled", "disabled"] as const
+export type BotMemoryMode = (typeof BOT_MEMORY_MODES)[number]
+
+export interface BotHostInfo {
+  id: string
+  kind: "local" | "remote"
+  name: string
+  protocolVersion: typeof BOT_PROTOCOL_VERSION
+  capabilities: { browser: boolean; groups: boolean; schedules: boolean }
+}
+
+export interface BotDefinition {
+  id: string
+  hostId: string
+  threadId: string
+  name: string
+  instructions: string
+  modelRef: string | null
+  /** Bot-scoped long-term memory. Defaults to enabled when omitted. */
+  memoryMode?: BotMemoryMode
+  /** null/omitted: all enabled skills; []: none; names are portable template references. */
+  allowedSkillNames?: string[] | null
+  color: string
+  shape?: BotAvatarShape
+  /** User-facing profile label; never treated as runtime instructions. */
+  label?: string
+  archived: boolean
+  /** Durable fence while thread cleanup is in progress; deletion can be retried. */
+  deleting?: boolean
+  version: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface CreateBotInput {
+  name: string
+  instructions: string
+  modelRef: string | null
+  memoryMode?: BotMemoryMode
+  /** null/omitted: all enabled skills; []: none; names are portable template references. */
+  allowedSkillNames?: string[] | null
+  color: string
+  shape?: BotAvatarShape
+  /** User-facing profile label; never treated as runtime instructions. */
+  label?: string
+}
+
+export interface UpdateBotInput extends CreateBotInput {
+  id: string
+  expectedVersion: number
+  archived: boolean
+}
+
+export type BotTaskState =
+  | "queued"
+  | "running"
+  | "waiting_user"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "superseded"
+  | "outcome_unknown"
+
+export interface BotTask {
+  /** Persisted owner of a consumed input receipt; not a separate execution. */
+  injectedInto?: string
+  id: string
+  botId: string
+  threadId: string
+  requestId: string
+  workId?: string
+  /** Frozen by the host, including when the desktop views/continues an external work. */
+  mockSource?: BotMockSource
+  message: string
+  state: BotTaskState
+  error: string | null
+  createdAt: number
+  updatedAt: number
+  origin: BotTaskOrigin
+}
+
+/** Interactive turn capability only; this does not grant profile or memory-write authority. */
+export function botTaskAcceptsUserInput(task: Pick<BotTask, "origin" | "workId">): boolean {
+  return (
+    task.origin.kind === "user" ||
+    task.origin.kind === "introduction" ||
+    (task.origin.kind === "work" && Boolean(task.workId))
+  )
+}
+
+/** One actual dispatch and its receipt, not either participant's private transcript. */
+export interface BotExchange {
+  taskId: string
+  sender: Pick<BotDefinition, "id" | "name" | "color" | "shape">
+  recipient: Pick<BotDefinition, "id" | "name" | "color" | "shape">
+  message: string
+  createdAt: number
+  state: BotTaskState
+  reply: { message: string; createdAt: number; delivered: boolean } | null
+}
+
+export interface BotExchangePage {
+  anchor: BotExchange
+  items: BotExchange[]
+  /** Stable task cursor, scoped to the same pair and group by the host. */
+  before?: string
+}
+
+export type BotMessageOrigin = Pick<BotTask, "id" | "requestId" | "origin" | "state">
+
+export function botTaskStateLabel(state: BotTaskState): string {
+  return {
+    queued: "待处理",
+    running: "正在处理",
+    waiting_user: "等待你确认",
+    completed: "已完成",
+    failed: "执行失败",
+    cancelled: "已停止",
+    interrupted: "执行已中断",
+    superseded: "已由新消息接续",
+    outcome_unknown: "执行结果待确认"
+  }[state]
+}
+
+export type BotTaskOrigin =
+  | { kind: "mock"; bindingId: string; eventId: string }
+  | {
+      kind: "user"
+      replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role"> & {
+        /** Host-validated quote transferred from another thread; never a local jump target. */
+        sourceThreadId?: string
+      }
+      mentions?: BotMessageMention[]
+      /** Exact picker/drop receipts accepted with this request; text alone grants nothing. */
+      inputFileIds?: string[]
+      /** Host receipt from this submission's actual prompt preparation. */
+      allowedInputFileIds?: string[]
+      explicitSkill?: import("./skill-selection").BotSkillSelection
+    }
+  | { kind: "introduction" }
+  | {
+      kind: "work"
+      sourceTaskId: string
+      /** Present on new dispatches; their message is the actual Bot-authored instruction. */
+      dispatch?: "create" | "follow_up" | "repair"
+      /** Host-owned original execution request for a bounded automatic repair. */
+      reviewRequestTaskId?: string
+      delivery?: import("./work").BotResultDelivery
+      inputFileIds?: string[]
+      allowedInputFileIds?: string[]
+      /** Host-captured source references, scoped to the original conversation. */
+      sourceMessageIds?: string[]
+      /** New dispatches opt in to original-input delivery. Older tasks keep their original contract. */
+      sourceContext?: { version: 1; references: BotMessageReply[]; routingNoteLength?: number; namedSkill?: import("./work").BotNamedSkill }
+      /** Legacy forwarded turns kept the Bot's brief separate from the user message. */
+      instructionSummary?: string
+    }
+  | {
+      /** Host-recorded result of one independent task turn, delivered to this Bot's main chat. */
+      kind: "work_result"
+      workId: string
+      workTitle: string
+      workThreadId: string
+      executionTaskId: string
+      executionState: BotTaskState
+      /** Private verification or committed publication of the same result. */
+      review?: { requestTaskId: string; phase: "review" | "confirm" | "publish"; attempt?: number; previewInWork?: true }
+    }
+  | {
+      kind: "bot"
+      fromBotId: string
+      /** Captured by the host at delivery, never supplied by the receiving model. */
+      fromBotName?: string
+      rootTaskId: string
+      /** Exact caller turn; preserves IM audience across asynchronous handoffs. */
+      sourceTaskId?: string
+      /** Host-captured return route; a peer cannot choose another private conversation. */
+      returnWorkId?: string
+      /** Trusted work lineage shared by all async collaborators, separate from the return hop. */
+      rootWorkId?: string
+      /** Host-owned source turn for this private handoff; never a peer-selected return route. */
+      upstreamTaskId?: string
+      /** Accepted work input at dispatch, retained when returning this handoff. */
+      workReviewScopeId?: string
+      depth: number
+      expectsReply: boolean
+      /** Host-owned feedback delivery, not a model-selected task or user grant. */
+      feedbackForTaskId?: string
+      feedbackMessageId?: string
+      groupId?: string
+      /** Declared by the dispatch tool; verified by the host before a successful file reply. */
+      outputFiles?: string[]
+      /** Host-verified outputs of this exact internal handoff, not model-supplied grants. */
+      replyFiles?: BotDeliveredFile[]
+      /** Verified declared names for this exact handoff's retained versions. */
+      replyOutputBindings?: Record<string, string>
+    }
+  | {
+      kind: "notification"
+      notificationKind: "workflow" | "coordinator" | "command" | "reaction"
+      /** Workflow continuation inherits the verified launcher's collaboration family. */
+      rootTaskId?: string
+      /** Host-owned originating turn, used to retain an authenticated IM route or a work receipt. */
+      sourceTaskId?: string
+      /** Local work command provenance, fixed at admission before command and task receipts can be pruned. */
+      commandReviewSource?: { requestTaskId: string; executionTaskId: string; scopeId?: string }
+      /** Inherits the host-owned collaboration quota; never an owner permission. */
+      rootWorkId?: string
+      key: string
+      /** Host-recorded command outcome; only a known success can be quiet. Missing means unverified. */
+      commandSucceeded?: boolean
+      /** Workflow run IDs survive retry; the original instance timestamp fences its receipt. */
+      runStartedAt?: string
+      groupId?: string
+    }
+  | {
+      kind: "schedule"
+      scheduleId: string
+      sourceTaskId?: string
+      /** Snapshot of the skill selected when this occurrence was scheduled. */
+      explicitSkill?: import("./skill-selection").BotSkillSelection
+      delivery?: import("./work").BotResultDelivery
+      observation?: import("./schedule-observation").BotScheduledWorkObservation
+      fixedReminder?: import("./schedule-observation").BotScheduledFixedReminder
+    }
+  | { kind: "discussion"; groupId: string; messageId: string; round: number }
+  | { kind: "group"; groupId: string; messageId: string }
+
+export function botTaskWorkFamily(task: Pick<BotTask, "workId" | "origin">): string | undefined {
+  return (
+    task.workId ??
+    (task.origin.kind === "bot" || task.origin.kind === "notification"
+      ? task.origin.rootWorkId
+      : undefined)
+  )
+}
+
+export function botTaskGroupId(task: Pick<BotTask, "origin">): string | undefined {
+  return task.origin.kind === "group" ||
+    task.origin.kind === "discussion" ||
+    task.origin.kind === "notification" ||
+    task.origin.kind === "bot"
+    ? task.origin.groupId
+    : undefined
+}
+
+/** A member's group browser has separate pages while files stay in the group workspace. */
+export function botGroupBrowserScope(groupId: string, botId: string): string {
+  return `group-${groupId}--${botId}`
+}
+
+export interface BotGroup {
+  deleting?: boolean
+  /** Automatic discussion stopped at its budget; a new user instruction can continue. */
+  discussionLimit?: { messageId: string }
+  id: string
+  hostId: string
+  name: string
+  memberIds: string[]
+  version: number
+}
+export interface BotGroupInput {
+  name: string
+  memberIds: string[]
+}
+export interface BotGroupMessage {
+  id: string
+  ordinal: number
+  groupId: string
+  authorBotId: string | null
+  text: string
+  mentions?: BotGroupMention[]
+  /** Resolved by the host from this group's persisted message, never caller-supplied quote text. */
+  replyTo?: { id: string; ordinal: number; authorBotId: string | null; text: string }
+  createdAt: number
+  exchange?: { taskId: string; botId: string }
+  files?: BotDeliveredFile[]
+  /** A group transcript entry; answers are read from the exact original Runtime receipt. */
+  question?: {
+    taskId: string
+    request: UserInputRequest
+    resultId?: string
+    result?: { content: string; is_error?: boolean }
+    state?: BotTaskState
+  }
+}
+/** UTF-16 ranges in the persisted message; identity never depends on the display label. */
+export interface BotGroupMention {
+  start: number
+  end: number
+  botId: string | null
+  label: string
+}
+/** Private identity references never broadcast; legacy Bot identity bytes stay unchanged. */
+export type BotMessageMention = Omit<BotGroupMention, "botId"> &
+  (
+    | { botId: string; kind?: never; groupId?: never }
+    | { kind: "group"; groupId: string; groupSource?: "app" | "zhaohu"; botId?: never }
+  )
+export interface SendBotGroupMessageInput {
+  groupId: string
+  requestId: string
+  text: string
+  targetBotIds: string[]
+  mentions?: BotGroupMention[]
+  replyToId?: string
+}
+
+export interface BotScheduleInput {
+  name: string
+  message: string
+  frequency: "once" | "daily" | "weekly" | "interval"
+  runAt?: string
+  runAtTime?: string
+  weekday?: number
+  intervalMinutes?: number
+  enabled: boolean
+}
+export interface BotDesktopWorkScheduleBinding {
+  imConversationId?: string
+  workId?: string
+  operationId: string
+}
+export interface BotScheduleEditInput {
+  id: string
+  version: number
+  /** Explicitly change the saved deadline of a fixed reminder or observation. */
+  expiresAt?: string
+  /** Explicitly edit the target and condition of an existing desktop observation. */
+  workMonitor?: Pick<import("./schedule-observation").BotWorkScheduleMonitorInput, "workId" | "mode">
+  /** Withdraw the exact occurrence displayed by the desktop card. */
+  withdrawTaskId?: string
+}
+export interface BotSchedule extends BotScheduleInput {
+  /** Host-captured source; cannot be chosen by model or renderer input. */
+  sourceTaskId?: string
+  audienceKey?: string
+  workId?: string
+  /** This schedule created the work once and reuses it for every execution. */
+  dedicatedWork?: true
+  /** A group routine created in the App is bound to its persisted work source. */
+  groupWorkSchedule?: true
+  explicitSkill?: import("./skill-selection").BotSkillSelection
+  /** New skill routines return formal files through their originating Bot. */
+  delivery?: import("./work").BotResultDelivery
+  /** Execution stays on this exact local work; no channel source is inherited. */
+  desktopWork?: true
+  workUnavailable?: true
+  /** Read-only source work, never an execution destination. */
+  workMonitor?: import("./schedule-observation").BotWorkScheduleMonitor
+  fixedReminder?: import("./schedule-observation").BotFixedReminder
+  id: string
+  botId: string
+  version: number
+  nextRunAt: string | null
+  timezone: string
+  /** Persisted when a trigger actually enters the queue; not a completion receipt. */
+  lastTriggeredAt?: string
+  /** Host snapshot only, for an accepted one-shot desktop work occurrence that has not begun. */
+  pendingOccurrenceId?: string
+}
+
+export interface SendBotMessageInput {
+  /** Older desktop drafts retained this run ID. Never replay them as new task turns. */
+  supplementRunId?: string
+  botId: string
+  workId?: string
+  /** Client-generated identity retained when retrying an unacknowledged submission. */
+  requestId: string
+  message: string
+  replyToId?: string
+  /** UTF-16 ranges in message, including any existing transport decorations. */
+  mentions?: BotMessageMention[]
+  inputFileIds?: string[]
+  explicitSkill?: import("./skill-selection").BotSkillSelection
+  /** This desktop draft was deliberately sent from the Bot's main chat to the selected work. */
+  skillDraftFromMain?: true
+  /** Exact main conversation whose explicit skill draft selected this work. */
+  skillDraftSourceThreadId?: string
+}
+
+/** A bounded reference resolved from this Bot's existing durable private transcript. */
+export interface BotMessageReply {
+  id: string
+  ordinal: number
+  role: "user" | "assistant"
+  text: string
+  /** Compact file label; text retains the verified attachment reference for execution. */
+  preview?: string
+}
+
+export interface BotSnapshot {
+  host: BotHostInfo
+  revision: number
+  bots: BotDefinition[]
+  /** Bounded recent tasks with 600-character message previews; full history belongs to the thread store. */
+  tasks: BotTask[]
+  schedules: BotSchedule[]
+  groups: BotGroup[]
+  activities: BotConversationActivity[]
+  /** Per-Bot aggregate only; individual work activity is returned with its paginated summary. */
+  workActivity?: Array<{
+    botId: string
+    version: number
+    updatedAt: number
+    preview: string
+    unread: boolean
+  }>
+  /** Conversations with outstanding commands/workflows, including result and process cleanup. */
+  backgroundThreads?: string[]
+  /** Conversations with outstanding delegated work; does not imply their own turn is busy. */
+  collaborationThreads?: string[]
+  /** Verified owner DMs linked to the personal main conversation; no account identifiers. */
+  personalIm?: Array<{ botId: string; connected: boolean }>
+  imConversations?: import("./im-channel").BotImConversation[]
+}
+
+/** The overview has its own read cursor; opening a Bot does not mark its task conversations read. */
+export type BotReadKind = BotConversationActivity["kind"] | "work-bot"
+
+/** Bounded list metadata, not a second transcript. Revisions also survive clock changes. */
+export interface BotConversationActivity {
+  kind: "bot" | "group" | "work" | "im"
+  id: string
+  version: number
+  updatedAt: number
+  preview: string
+  unread: boolean
+}
+
+export interface BotWorkChange {
+  botId: string
+  audience: string
+  workIds: string[]
+  removedIds: string[]
+  /** A large transaction invalidates this scope; never silently drops IDs. */
+  reset?: true
+}
+
+export interface BotChangeEvent {
+  /** Present even when empty on scoped hosts; absent on legacy clients. */
+  workChanges?: BotWorkChange[]
+  /** Group routes available to the project's association picker have changed. */
+  featureTargetsChanged?: true
+  featureScope?: { botId: string; audience: string; projectId?: string; slug?: string; followId?: string }
+  hostId: string
+  revision: number
+  /** Invalidate only this reaction view; no transcript or emoji payload travels in the event. */
+  reactionTarget?: BotReactionTarget
+  /** Invalidate this Bot's memory view; never carries private memory content. */
+  memoryBotId?: string
+  /** The already-persisted assistant reminder has no Agent lifecycle. */
+  reminder?: { threadId: string; id: string; content: string; createdAt: number }
+}
+
+export interface BotMemory {
+  id: string
+  name: string
+  content: string
+  version: string
+  /** Legacy entries without a scope remain private. */
+  scope?: import("./memory-scope").BotMemoryScope
+}
+
+export interface BotBrowserHumanAction {
+  action: "back" | "forward" | "reload" | "new" | "close"
+  pageId?: string
+}
+
+export interface BotBrowserState {
+  pages: Array<{
+    id: string
+    title: string
+    url: string
+    canGoBack?: boolean
+    canGoForward?: boolean
+  }>
+  pageId: string | null
+  generation: number
+  control: "bot" | "requesting" | "human" | "other-human"
+  image: string | null
+  /** Capture failed for this live target; control and page metadata remain current. */
+  captureError?: string
+  /** A JavaScript dialog on the selected page currently prevents page capture. */
+  dialogPending?: boolean
+  /** Present only for this target's user-help lease; never exposed to other Bot scopes. */
+  helpInstruction?: string
+}
+
+export interface BotFilePage {
+  files: WorkspaceFileScanEntry[]
+  cursor: string | null
+}
+/** Same bounded preview protocol as the workbench; paths are relative to host-owned thread identities. */
+export interface BotFilePreviewTransport {
+  readFilePreview(request: WorkspaceFilePreviewReadRequest): Promise<WorkspaceFilePreviewReadResult>
+  openMediaPreview(
+    request: WorkspaceFilePreviewOpenMediaRequest
+  ): Promise<WorkspaceFilePreviewOpenMediaResult>
+  cancelFilePreview(request: WorkspaceFilePreviewCancelRequest): Promise<{ success: boolean }>
+  releaseFilePreview(request: WorkspaceFilePreviewReleaseRequest): Promise<{ success: boolean }>
+}
+
+export interface WriteBotMemoryInput {
+  id?: string
+  expectedVersion?: string
+  name: string
+  content: string
+  scope?: import("./memory-scope").BotMemoryScope
+}
+
+/** The local implementation uses IPC. A future remote implementation must preserve this contract. */
+export type BotGroupHistoryCursor = number | { targetMessageId: string }
+
+export interface BotClient {
+  im?: BotImClient
+  readonly hostId: string
+  readonly filePreview: BotFilePreviewTransport
+  readonly features?: import("./feature").BotFeatureClient
+  readonly works?: BotWorkClient
+  readonly conversations?: import("./conversation").BotConversationClient
+  /** Optional group scope resolves to its shared workspace after validating current membership. */
+  listFiles(botId: string, cursor?: string, groupId?: string, workId?: string): Promise<BotFilePage>
+  /** User access to a retained group's library does not require an active member. */
+  listGroupFiles(groupId: string, cursor?: string): Promise<BotFilePage>
+  cancelFileList(cursor: string): Promise<void>
+  importFiles(
+    botId: string,
+    groupId?: string,
+    maxFiles?: number,
+    workId?: string
+  ): Promise<string[]>
+  attachFiles(
+    botId: string,
+    maxFiles: number,
+    maxChars: number,
+    groupId?: string,
+    workId?: string
+  ): Promise<import("../file-attachment").FileAttachment[]>
+  /** Dropped file bytes are retained on the owning host; no renderer filesystem path is accepted. */
+  attachFileBytes(
+    botId: string,
+    files: Array<{ fileName: string; bytes: ArrayBuffer }>,
+    maxChars: number,
+    groupId?: string,
+    workId?: string
+  ): Promise<import("../file-attachment").FileAttachment[]>
+  /** Retain a selected file from the exact local Bot conversation's workspace. */
+  attachWorkspaceFile?(
+    botId: string, threadId: string, fileId: string, maxChars: number, workId?: string
+  ): Promise<import("../file-attachment").FileAttachment>
+  /** Accepts a relative file ID or a preview's host path, always confined to this workspace. */
+  exportFile(botId: string, fileId: string, groupId?: string, workId?: string, suggestedName?: string): Promise<boolean>
+  authorizeDeliveredFile?(source: BotDeliveredFileSource): Promise<{
+    filePath: string
+    grant: string
+    expiresAt?: number
+    markdownBasePath?: string
+  }>
+  exportDeliveredFile?(source: BotDeliveredFileSource): Promise<boolean>
+  /** User access to retained group files, including groups with no remaining members. */
+  exportGroupFile(groupId: string, fileId: string, suggestedName?: string): Promise<boolean>
+  /** Host-owned path used only to resolve retained public Markdown file links. */
+  groupFileWorkspace(groupId: string): Promise<string>
+  shareFile(
+    botId: string,
+    fileId: string,
+    targetBotId: string,
+    groupId?: string,
+    workId?: string
+  ): Promise<string>
+  /** Browser methods accept a Bot ID or a host-validated botGroupBrowserScope. */
+  browserPreview(botId: string, pageId?: string): Promise<BotBrowserState>
+  takeOverBrowser(botId: string, pageId?: string): Promise<void>
+  giveBackBrowser(botId: string, expectedGeneration?: number, outcome?: "skipped"): Promise<void>
+  navigateBrowser(botId: string, pageId: string, url: string): Promise<void>
+  operateBrowser(
+    botId: string,
+    action: BotBrowserHumanAction,
+    expectedGeneration: number
+  ): Promise<string | null>
+  snapshot(): Promise<BotSnapshot>
+  /** Whether any conversation or work has unread activity on this host. */
+  hasUnread?(): Promise<boolean>
+  exchange(botId: string, taskId: string, groupId?: string, workId?: string, imConversationId?: string): Promise<BotExchange>
+  messageOrigins(
+    botId: string,
+    messageIds: string[],
+    groupId?: string,
+    workId?: string
+  ): Promise<BotMessageOrigin[]>
+  messageReply(botId: string, messageId: string, workId?: string): Promise<BotMessageReply>
+  messageReactions(target: BotReactionTarget, messageIds: string[]): Promise<BotMessageReactions>
+  setMessageReaction(
+    target: BotReactionTarget,
+    messageId: string,
+    emoji: string,
+    present: boolean
+  ): Promise<BotMessageReactionUpdate>
+  requestReceipts(
+    botId: string,
+    checks: BotRequestCheck[],
+    workId?: string
+  ): Promise<BotRequestReceipt[]>
+  exchangeHistory(
+    botId: string,
+    taskId: string,
+    groupId?: string,
+    before?: string,
+    workId?: string,
+    imConversationId?: string
+  ): Promise<BotExchangePage>
+  markUnread(kind: "bot" | "group", id: string): Promise<void>
+  markRead(kind: BotReadKind, id: string, throughVersion: number): Promise<void>
+  open(botId: string, workId?: string): Promise<{ threadId: string }>
+  listMemory(botId: string, groupId?: string): Promise<BotMemory[]>
+  writeMemory(botId: string, input: WriteBotMemoryInput): Promise<BotMemory>
+  removeMemory(botId: string, id: string, expectedVersion: string): Promise<void>
+  shareMemory(
+    botId: string,
+    id: string,
+    expectedVersion: string,
+    targetBotId: string
+  ): Promise<BotMemory>
+  saveSchedule(
+    botId: string,
+    input: BotScheduleInput,
+    existing?: BotScheduleEditInput,
+    desktopWork?: BotDesktopWorkScheduleBinding
+  ): Promise<BotSchedule>
+  removeSchedule(id: string, version: number): Promise<void>
+  saveGroup(input: BotGroupInput, existing?: { id: string; version: number }): Promise<BotGroup>
+  removeGroup(groupId: string, expectedVersion: number): Promise<void>
+  groupMessages(groupId: string, cursor?: BotGroupHistoryCursor): Promise<BotGroupMessage[]>
+  sendGroup(input: SendBotGroupMessageInput): Promise<void>
+  create(input: CreateBotInput): Promise<BotDefinition>
+  update(input: UpdateBotInput): Promise<BotDefinition>
+  remove(botId: string, expectedVersion: number): Promise<void>
+  send(input: SendBotMessageInput): Promise<BotTask>
+  /** Stops private conversation work from the inbox authority, including unseen accepted requests. */
+  stopConversation(botId: string, groupId?: string, workId?: string, scope?: "background"): Promise<void>
+  /** Stops this group's work and its peer owners, preserving members' other conversations. */
+  stopGroup(groupId: string): Promise<void>
+  cancel(taskId: string): Promise<void>
+  subscribe(listener: (event: BotChangeEvent) => void): () => void
+}
+
+export type BotErrorCode =
+  | "INVALID_INPUT"
+  | "NOT_FOUND"
+  | "CONFLICT"
+  | "UNSUPPORTED_HOST"
+  | "STOPPING"
+
+export class BotError extends Error {
+  constructor(
+    readonly code: BotErrorCode,
+    message: string
+  ) {
+    super(message)
+    this.name = "BotError"
+  }
+}

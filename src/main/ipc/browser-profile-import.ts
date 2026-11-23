@@ -40,7 +40,7 @@ let cookieBridgeServer: BrowserCookieBridgeServerInstance | null = null
 let browserProfileImportActiveForSession = false
 let browserProfileImportRuntimeEnabled = false
 let browserProfileImportRuntimeStartPromise: Promise<void> | null = null
-let browserProfileAutoImportAttempted = false
+let browserProfileAutoImportPromise: Promise<BrowserProfileImportResult> | null = null
 
 function profileImportFailure(
   error: string,
@@ -294,13 +294,31 @@ async function importBrowserProfileData(
     return profileImportFailure("浏览器数据导入功能在当前会话未生效，请保存配置后重启应用", options)
   }
 
-  if (options.autoImport) {
-    if (browserProfileAutoImportAttempted) {
-      return extensionImportFailure("本次会话已完成自动导入尝试", "import_in_progress")
-    }
-    browserProfileAutoImportAttempted = true
-  }
+  return runBrowserProfileImport(browserService, options)
+}
 
+/** Bot startup shares the exact same opt-in and one automatic attempt as the workbench. */
+export function isBrowserProfileImportActive(): boolean {
+  return browserProfileImportActiveForSession
+}
+
+export async function ensureBrowserProfileAutoImport(browserService: BrowserService): Promise<void> {
+  if (!browserProfileImportActiveForSession) return
+  await runBrowserProfileImport(browserService, { sourceBrowser: "chrome", autoImport: true })
+}
+
+function runBrowserProfileImport(
+  browserService: BrowserService,
+  options: BrowserProfileImportOptions
+): Promise<BrowserProfileImportResult> {
+  if (!options.autoImport) return performBrowserProfileImport(browserService, options)
+  return browserProfileAutoImportPromise ??= performBrowserProfileImport(browserService, options)
+}
+
+async function performBrowserProfileImport(
+  browserService: BrowserService,
+  options: BrowserProfileImportOptions
+): Promise<BrowserProfileImportResult> {
   if (process.platform === "win32") {
     const result = await importWindowsCookieData(
       browserService,

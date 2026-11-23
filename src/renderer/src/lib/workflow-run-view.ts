@@ -76,6 +76,8 @@ export interface WorkflowRunView {
   error?: string
   /** Non-fatal advisory (e.g. completed but ran 0 agents). */
   warning?: string
+  /** Read-time worktree verification failed; keep delivery actions disabled. */
+  worktreeReadError?: string
   stats: WorkflowRunStatsView | null
   startedAtMs: number
 }
@@ -322,6 +324,7 @@ export interface PersistedWorkflowRunDTO {
     resultPreview?: string
   }>
   worktrees?: WorkflowWorktreeView[]
+  worktreeReadError?: string
   logs: string[]
   result?: unknown
   error?: string
@@ -393,6 +396,7 @@ export function workflowRunViewFromPersisted(run: PersistedWorkflowRunDTO): Work
     logs: [...run.logs],
     error: run.error,
     warning: run.warning,
+    worktreeReadError: run.worktreeReadError,
     stats: run.status === "running" ? null : run.stats,
     startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : Date.now()
   }

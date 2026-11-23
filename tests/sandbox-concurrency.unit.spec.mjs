@@ -45,9 +45,13 @@ test("runtime only shares read-only execute calls", () => {
   const sharedSection = sectionBetween(runtimeSource, "const SHARED_TOOL_NAMES = new Set", "function isRecord")
   const classifierSection = sectionBetween(runtimeSource, "function classifyToolConcurrency", "/**")
 
-  assert.match(exclusiveSection, /"write_file"/, "write_file should be exclusive")
-  assert.match(exclusiveSection, /"edit_file"/, "edit_file should be exclusive")
-  assert.doesNotMatch(sharedSection, /"write_file"|"edit_file"/, "mutating file tools should not be shared")
+  assert.doesNotMatch(
+    exclusiveSection,
+    /"write_file"|"edit_file"/,
+    "file resources are locked in the backend"
+  )
+  assert.match(sharedSection, /"write_file"/, "different file writes can overlap")
+  assert.match(sharedSection, /"edit_file"/, "different file edits can overlap")
   assert.match(
     classifierSection,
     /toolName === "execute"[\s\S]*classifyCommandConcurrency\(command\) === "parallel_safe"[\s\S]*\? "shared"[\s\S]*: "exclusive"/,
@@ -60,7 +64,7 @@ test("runtime allows parallel task subagent spawns", () => {
   const sharedSection = sectionBetween(runtimeSource, "const SHARED_TOOL_NAMES = new Set", "function isRecord")
 
   assert.doesNotMatch(exclusiveSection, /"task"/, "task should not serialize subagent spawns")
-  assert.match(sharedSection, /"task"/, "task should be eligible for parallel subagent spawning")
+  assert.doesNotMatch(sharedSection, /"task"/, "task must not hold a resource read lock")
   assert.match(
     runtimeSource,
     /const MAX_PARALLEL_TASK_SUBAGENTS = 3/,
@@ -68,12 +72,12 @@ test("runtime allows parallel task subagent spawns", () => {
   )
   assert.match(
     runtimeSource,
-    /toolCall\?\.name === "task"[\s\S]*taskLimiter\.run\(runSharedTool, signal\)/,
+    /tier === "bypass"[\s\S]*taskLimiter\.run\(async \(\) => handler\(request\), signal\)/,
     "task tool calls should pass through the task-specific limiter"
   )
 })
 
-test("subagents use their own concurrency gate to avoid parent task deadlock", () => {
+test("subagents share resource admission after task orchestration bypasses the gate", () => {
   const subagentSection = sectionBetween(runtimeSource, "const subagentMiddleware: any[] = [", "const generalPurposeSubagent =")
   const mainAgentSection = runtimeSource.includes("const agentOptions = {")
     ? sectionBetween(runtimeSource, "const agentOptions = {", "const agent = createAgent(")
@@ -81,8 +85,8 @@ test("subagents use their own concurrency gate to avoid parent task deadlock", (
 
   assert.match(
     runtimeSource,
-    /const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware\(\s*`\$\{toolConcurrencyQueueId\}:subagent`\s*\)/,
-    "subagents should have a separate queue id from the parent agent"
+    /const subagentToolConcurrencyMiddleware =\s*createGradedToolConcurrencyMiddleware\(\s*toolConcurrencyQueueId\s*\)/,
+    "parent and children must coordinate unknown writes in the same resource queue"
   )
   assert.match(
     subagentSection,

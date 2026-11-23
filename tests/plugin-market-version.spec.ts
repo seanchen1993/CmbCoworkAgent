@@ -32,6 +32,7 @@ function createPluginMetadata(path: string, patch: Partial<PluginMetadata> = {})
     author: "tester",
     path,
     enabled: true,
+    origin: "local",
     skillCount: 1,
     mcpServerCount: 0,
     hookCount: 0,

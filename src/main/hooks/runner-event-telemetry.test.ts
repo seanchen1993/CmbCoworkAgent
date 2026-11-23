@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 vi.mock("../services/event-reporter", () => ({
   trackEvent: vi.fn()
 }))
+vi.mock("../harness-board/service", () => ({
+  resolveHarnessFeatureCurrentStage: vi.fn(async () => ({ name: "Test-测试", status: "已完成" }))
+}))
 
 import { trackEvent } from "../services/event-reporter"
 import type { HookConfig } from "./types"
@@ -60,8 +63,8 @@ describe("hook execution telemetry", () => {
         harnessFeatureSlug: "feature-1",
         harnessAdapterName: "adapter-1",
         harnessAdapterVersion: "1.0.0",
-        harnessNodeName: "Dev-代码实现",
-        harnessNodeStatus: "进行中",
+        harnessNodeName: "Test-测试",
+        harnessNodeStatus: "已完成",
         blocked: false
       })
     )

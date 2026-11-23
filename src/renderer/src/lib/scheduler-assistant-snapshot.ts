@@ -26,9 +26,27 @@ export function applySchedulerAssistantSnapshot(
   const hasContent = typeof snapshot.content === "string"
   const hasReasoning = typeof snapshot.reasoning === "string"
   if (!hasContent && !hasReasoning) return undefined
-  const identity = normalizeAppendedMessageIds(messages, [{ id: snapshot.id, role: "assistant" }], {
-    splitAssistantAfterTool: true
-  })[0]
+  const identity = normalizeAppendedMessageIds(
+    messages,
+    [
+      {
+        id: snapshot.id,
+        role: "assistant",
+        ...(typeof snapshot.provider_source_id === "string" &&
+        typeof snapshot.provider_occurrence === "number" &&
+        Number.isInteger(snapshot.provider_occurrence) &&
+        snapshot.provider_occurrence > 0
+          ? {
+              provider_source_id: snapshot.provider_source_id,
+              provider_occurrence: snapshot.provider_occurrence
+            }
+          : {})
+      }
+    ],
+    {
+      splitAssistantAfterTool: true
+    }
+  )[0]
   const existing = messages.find(
     (message) => message.id === identity.id && message.role === "assistant"
   )

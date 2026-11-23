@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
+import { BOT_WORK_REMOTE_ACCESS_BLOCKED } from "../../../shared/bots/conversation"
 import { coordinatorWorkerManager } from "../../agent/coordinator-worker-manager"
 import { SqlGoalStore } from "../../agent/goals/goal-store"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
@@ -9,7 +10,10 @@ import {
   type StandardThreadMetadata
 } from "../../agent/standard-thread-turn"
 import { workflowRunManager } from "../../agent/workflow/run-manager"
+import { findBotWorkThreadOwner } from "../../bots/conversation-link-authority"
 import { deleteThread, getThread, type ThreadRow } from "../../db"
+import { withThreadRunMutationLock } from "../../ipc/thread-run-mutation-lock"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../thread-incarnation"
 import { hasPendingUserInputForThread } from "../user-input"
 import {
   imConversationStateStore,
@@ -132,15 +136,21 @@ export class ImRemoteAccessService {
     route: ImGrantRouteIdentity
     threadId: string
   }): Promise<ImThreadGrantRecord> {
+    const original = this.dependencies.getThread(input.threadId)
+    if (!original)
+      throw new ImRemoteAccessError("REMOTE_THREAD_UNAVAILABLE", "会话不存在或已删除。")
+    const incarnation = captureThreadIncarnation(original)
     await this.dependencies.conversations.ensureConversation(input.route)
-    const validation = this.validateGrantableThread(input.threadId)
-    return this.dependencies.grants.enableThreadGrant({
-      route: input.route,
-      threadId: validation.thread.thread_id,
-      title: await this.threadLabel(
-        validation.thread,
-        `会话 ${validation.thread.thread_id.slice(0, 8)}`
-      )
+    return withThreadRunMutationLock(input.threadId, async () => {
+      const { thread } = this.validateGrantableThread(input.threadId)
+      if (!matchesThreadIncarnation(thread, incarnation))
+        throw new ImRemoteAccessError("REMOTE_THREAD_UNAVAILABLE", "原会话已变化，请重新选择后接入。")
+      const title = await this.threadLabel(thread, `会话 ${thread.thread_id.slice(0, 8)}`)
+      // The Bot link's active-grant check uses the same thread lock. Check the
+      // journal after awaits, including preparing and never-exposed native work.
+      if (findBotWorkThreadOwner(thread.thread_id))
+        throw new ImRemoteAccessError("REMOTE_THREAD_UNSUPPORTED", BOT_WORK_REMOTE_ACCESS_BLOCKED)
+      return this.dependencies.grants.enableThreadGrant({ route: input.route, threadId: thread.thread_id, title })
     })
   }
 
@@ -288,6 +298,8 @@ export class ImRemoteAccessService {
     route: ImGrantRouteIdentity
     grantId: string
     grantVersion: number
+    /** Exact-ID switches only need this thread's title, not the whole target catalog. */
+    direct?: boolean
   }): Promise<Extract<ImTargetSnapshot, { kind: "thread" }>> {
     const grant = this.dependencies.grants.getThreadGrantById(input.grantId)
     if (!grant || grant.grantVersion !== input.grantVersion || grant.state !== "active") {
@@ -300,10 +312,26 @@ export class ImRemoteAccessService {
       threadId: grant.threadId
     })
     const validation = this.validateGrantableThread(grant.threadId)
-    const title =
-      (await this.listAuthorizedTargets(input.route)).find(
-        (target) => target.kind === "thread_grant" && target.grantId === grant.grantId
-      )?.label ?? (await this.threadLabel(validation.thread, grant.titleSnapshot))
+    const title = input.direct
+      ? await this.threadLabel(validation.thread, grant.titleSnapshot)
+      : ((await this.listAuthorizedTargets(input.route)).find(
+          (target) => target.kind === "thread_grant" && target.grantId === grant.grantId
+        )?.label ?? (await this.threadLabel(validation.thread, grant.titleSnapshot)))
+    // Title resolution may await project data. Revocation during that wait must win.
+    try {
+      this.dependencies.grants.assertActiveThreadGrant({
+        grantId: input.grantId,
+        grantVersion: input.grantVersion,
+        route: input.route,
+        threadId: grant.threadId
+      })
+    } catch {
+      throw new ImRemoteAccessError(
+        "REMOTE_GRANT_STALE",
+        "会话授权已变化，切换没有生效。请在桌面重新确认接入权限。"
+      )
+    }
+    this.validateGrantableThread(grant.threadId)
     const reusable = this.dependencies.conversations
       .listTargets(input.route.conversationKey)
       .find(
@@ -415,8 +443,8 @@ export class ImRemoteAccessService {
     return this.dependencies.grants.getFeatureGrant(projectId, featureSlug)
   }
 
-  listThreadGrants(): ImThreadGrantRecord[] {
-    return this.dependencies.grants.listThreadGrants()
+  listThreadGrants(conversationKey?: string): ImThreadGrantRecord[] {
+    return this.dependencies.grants.listThreadGrants(conversationKey)
   }
 
   listFeatureGrants(principalId?: string): ImFeatureGrantRecord[] {
@@ -468,7 +496,7 @@ export class ImRemoteAccessService {
       parsed.metadata.targetKind === "inbox" ||
       (parsed.metadata.remoteThread === true && parsed.metadata.targetKind !== "feature")
     ) {
-      throw new ImRemoteAccessError("REMOTE_THREAD_UNSUPPORTED", "远程收件箱不能作为会话授权目标。")
+      throw new ImRemoteAccessError("REMOTE_THREAD_UNSUPPORTED", "默认聊天无需单独接入招乎。")
     }
     return { thread, workspacePath, parsed }
   }

@@ -10,6 +10,7 @@ export type WorkspaceFilePreviewWorkerSource =
       workspacePathKind: WorkspaceFilePreviewWorkspacePathKind
     }
   | { externalFullPath: string; trustedRootPath: string }
+  | { knowledgeBaseRootPath: string; filePath: string }
 
 interface WorkspaceFilePreviewWorkerRequestBase {
   requestId: number
@@ -21,6 +22,7 @@ export interface WorkspaceFilePreviewReadWorkerRequest extends WorkspaceFilePrev
   source: WorkspaceFilePreviewWorkerSource
   workspacePath?: string
   offset: number
+  officePreview?: true
 }
 
 export interface WorkspaceFilePreviewInspectWorkerRequest extends WorkspaceFilePreviewWorkerRequestBase {

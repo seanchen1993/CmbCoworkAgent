@@ -27,10 +27,13 @@ import {
 } from "@/lib/workspace-file-load"
 import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
+import { botDefaultWorkspaceOwner, botWorkspaceDisplay } from "@/lib/bot-workspace-display"
+import { useBotWorkspaceProfiles } from "../bots/use-bot-workspace-profiles"
 
 interface WorkspacePickerProps {
   threadId: string
   environmentRailCollapsed: boolean
+  workspaceLockedReason?: string
   onGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
 
@@ -110,6 +113,7 @@ export const WorkspacePicker = memo(WorkspacePickerImpl)
 function WorkspacePickerImpl({
   threadId,
   environmentRailCollapsed,
+  workspaceLockedReason,
   onGitStatusChange
 }: WorkspacePickerProps): React.JSX.Element {
   const workspacePath = useThreadStateSelector(
@@ -117,10 +121,11 @@ function WorkspacePickerImpl({
     useCallback((state) => state.workspacePath, [])
   )
   const canChangeWorkspace =
-    useThreadStateSelector(
+    (useThreadStateSelector(
       threadId,
       useCallback((state) => canChangeThreadWorkspace(state), [])
-    ) ?? false
+    ) ?? false) && !workspaceLockedReason
+  const switchLockedMessage = workspaceLockedReason ?? WORKSPACE_SWITCH_LOCKED_MESSAGE
   const threadActions = useThreadActions(threadId)
   const setWorkspacePath = threadActions?.setWorkspacePath
   const setWorkspaceFiles = threadActions?.setWorkspaceFiles
@@ -128,6 +133,7 @@ function WorkspacePickerImpl({
     (state) => state.threads.find((candidate) => candidate.thread_id === threadId) ?? null
   )
   const concealWorkspacePath = isRemoteInboxThread(thread)
+  const botProfiles = useBotWorkspaceProfiles(Boolean(botDefaultWorkspaceOwner(workspacePath)))
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const worktreeCreateInFlightRef = useRef(false)
@@ -325,7 +331,7 @@ function WorkspacePickerImpl({
   }, [canChangeWorkspace, isWorktree])
 
   async function handleSelectFolder(): Promise<void> {
-    if (!setWorkspacePath || !setWorkspaceFiles) return
+    if (workspaceLockedReason || !setWorkspacePath || !setWorkspaceFiles) return
     const selection = await selectWorkspaceFolder(
       threadId,
       (path) => {
@@ -362,7 +368,7 @@ function WorkspacePickerImpl({
     // Enter keydown in the same tick need a synchronous re-entry guard.
     if (worktreeCreateInFlightRef.current) return
     if (!canChangeWorkspace) {
-      toast.error(WORKSPACE_SWITCH_LOCKED_MESSAGE)
+      toast.error(switchLockedMessage)
       return
     }
     if (!gitRoot || !branchName.trim()) return
@@ -400,7 +406,7 @@ function WorkspacePickerImpl({
 
   function handleModeSelect(selected: WorkspaceMode): void {
     if (selected === "worktree" && !canChangeWorkspace) {
-      toast.error(WORKSPACE_SWITCH_LOCKED_MESSAGE)
+      toast.error(switchLockedMessage)
       return
     }
     setMode(selected)
@@ -446,7 +452,11 @@ function WorkspacePickerImpl({
     }
   }
 
-  const folderName = getFolderName(workspacePath)
+  const botWorkspace =
+    workspacePath && botDefaultWorkspaceOwner(workspacePath)
+      ? botWorkspaceDisplay(workspacePath, botProfiles)
+      : null
+  const folderName = botWorkspace?.name ?? getFolderName(workspacePath)
   const workspaceName = concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : folderName
 
   return (
@@ -481,7 +491,7 @@ function WorkspacePickerImpl({
                   ? `${worktreeBaseBranch} ← ${worktreeBranch}`
                   : worktreeBranch
                 : workspaceName
-              : "选择工作区"}
+              : workspaceLockedReason ? "任务工作区" : "选择工作区"}
           </span>
           <ChevronDown className="size-3 opacity-50" />
         </Button>
@@ -669,9 +679,9 @@ function WorkspacePickerImpl({
                 </p>
               )}
 
-              {!canChangeWorkspace && !isWorktree && (
+              {!canChangeWorkspace && (!isWorktree || workspaceLockedReason) && (
                 <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  {WORKSPACE_SWITCH_LOCKED_MESSAGE}
+                  {switchLockedMessage}
                 </p>
               )}
 
@@ -711,6 +721,8 @@ function WorkspacePickerImpl({
                 重新初始化工作区
               </Button>
             </div>
+          ) : workspaceLockedReason ? (
+            <p className="text-[11px] text-muted-foreground leading-relaxed">{workspaceLockedReason}</p>
           ) : (
             <div className="space-y-2">
               <p className="text-[11px] text-muted-foreground leading-relaxed">

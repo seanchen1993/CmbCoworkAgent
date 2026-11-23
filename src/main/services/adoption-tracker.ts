@@ -42,7 +42,7 @@ import {
   sep
 } from "path"
 import { createHash, randomUUID } from "crypto"
-import { execFile } from "child_process"
+import { execFile, type ExecFileException } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
 import {
@@ -78,6 +78,12 @@ import {
   type IEventReporter
 } from "./event-reporter"
 import { getGitRootForPath } from "./git-repository-discovery"
+import {
+  loadHarnessDeployUnitSnapshot,
+  parseStoredDeployUnitIds,
+  resolveCodeDeployUnit,
+  type HarnessDeployUnitSnapshot
+} from "./harness-deploy-unit-attribution"
 import {
   attributeChangeKind,
   normalizeChangeKind,
@@ -161,11 +167,9 @@ const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
 const MAX_LINES_FOR_MEASURE = 20000 // skip giant files (applied symmetrically at gen + measure)
-// One live entry per active TraceCollector. Multi-agent runs (coordinator
-// workers + workflow subagents) can keep dozens alive at once, and eviction is
-// insertion-ordered — the root thread goes first — so leave ample headroom.
-// Entries are ~KB-sized; 256 stays well under 1 MB.
-const MAX_CONTEXT_ENTRIES = 256 // bound in-memory context size
+// Only untraced metadata is evictable. Trace-owned attribution is execution
+// state and is released when its Trace finishes, even under cache pressure.
+const MAX_CONTEXT_ENTRIES = 256 // bound contexts without a live Trace owner
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 const LOCAL_SOURCE_TEXT_MAX_BYTES = 2 * 1024 * 1024 // per-gen local-only source payload cap
 const LOCAL_PENDING_SOURCE_MAX_BYTES = 50 * 1024 * 1024
@@ -327,6 +331,10 @@ export interface AdoptionContext extends Partial<TraceObservabilityContext> {
   harnessNodeStatus?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  /** Local-only per-turn promise; resolved before a generation is persisted. */
+  harnessDeployUnitSnapshot?: Promise<HarnessDeployUnitSnapshot | null>
+  harnessDeployUnitIds?: string[]
+  harnessDeployUnitId?: string
 }
 
 export interface RecordGenInput {
@@ -436,8 +444,10 @@ let outboxLifecycleController = new AbortController()
 let commitJobDrainPromise: Promise<void> | null = null
 const inFlightCommitJobs = new Map<string, Promise<boolean>>()
 
-/** threadId → AdoptionContext. Evicted oldest-first at MAX_CONTEXT_ENTRIES. */
+/** Untraced metadata is a bounded cache; running Trace state must not be evicted. */
 const threadContexts = new Map<string, AdoptionContext>()
+/** Released by TraceCollector.finish(), guarded by traceId for continuations. */
+const traceOwnedContexts = new Map<string, AdoptionContext>()
 
 type GenIndexObservabilityColumns = Pick<
   GenIndexRow,
@@ -574,6 +584,7 @@ async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
   const inFlight = gitWorkTreeRequests.get(dir)
   if (inFlight) return inFlight
 
+  const startedAt = Date.now()
   const request = execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
     cwd: dir,
     encoding: "utf-8",
@@ -581,8 +592,27 @@ async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
     maxBuffer: 1024 * 1024,
     windowsHide: true
   })
-    .then(({ stdout }) => rememberGitWorkTreeResult(dir, stdout.trim() === "true"))
-    .catch(() => rememberGitWorkTreeResult(dir, false))
+    .then(({ stdout }) => {
+      const result = stdout.trim()
+      if (result !== "true") {
+        console.info("[AdoptionTracker] git work tree check returned non-true", {
+          dir,
+          stdout: result.slice(0, 120)
+        })
+      }
+      return rememberGitWorkTreeResult(dir, result === "true")
+    })
+    .catch((error: ExecFileException) => {
+      console.info("[AdoptionTracker] git work tree check failed", {
+        dir,
+        code: error.code,
+        signal: error.signal,
+        killed: error.killed,
+        elapsedMs: Date.now() - startedAt,
+        detail: (error.stderr?.trim() || error.message).slice(0, 512)
+      })
+      return rememberGitWorkTreeResult(dir, false)
+    })
     .finally(() => {
       if (gitWorkTreeRequests.get(dir) === request) gitWorkTreeRequests.delete(dir)
     })
@@ -985,14 +1015,24 @@ function buildPendingObservabilityEventProperties(
 
 export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void {
   if (!threadId) return
+  // Skill inheritance is captured once at task startup. Evicting a live
+  // context silently loses that snapshot until the child reads its own Skill,
+  // giving otherwise identical Workflow children different attribution.
+  // Keep live execution state for its owner's lifetime, not a FIFO cache's.
+  // Merge so a later Skill update doesn't wipe the model or Trace linkage.
+  const merged = { ...getContext(threadId), ...ctx }
+  if (merged.traceId) {
+    traceOwnedContexts.set(threadId, merged)
+    threadContexts.delete(threadId)
+    return
+  }
+  traceOwnedContexts.delete(threadId)
   // Evict oldest if size cap would be exceeded (Map preserves insertion order).
   if (!threadContexts.has(threadId) && threadContexts.size >= MAX_CONTEXT_ENTRIES) {
     const oldest = threadContexts.keys().next().value
     if (oldest !== undefined) threadContexts.delete(oldest)
   }
-  // Merge so a later setUsedSkills call doesn't wipe modelId set earlier.
-  const prior = threadContexts.get(threadId)
-  threadContexts.set(threadId, { ...(prior ?? {}), ...ctx })
+  threadContexts.set(threadId, merged)
 }
 
 /** Apply a late asynchronous enrichment only while the originating trace still owns the thread. */
@@ -1001,19 +1041,28 @@ export function patchAdoptionContextForTrace(
   expectedTraceId: string,
   ctx: AdoptionContext
 ): boolean {
-  const prior = threadContexts.get(threadId)
-  if (!prior || prior.traceId !== expectedTraceId) return false
-  threadContexts.set(threadId, { ...prior, ...ctx })
+  const prior = getContext(threadId)
+  if (prior.traceId !== expectedTraceId) return false
+  setAdoptionContext(threadId, ctx)
   return true
 }
 
-export function clearAdoptionContext(threadId: string, expectedTraceId?: string): void {
-  if (expectedTraceId && threadContexts.get(threadId)?.traceId !== expectedTraceId) return
+/** When finishing the owning trace, snapshot the same Skill attribution used by code_gen. */
+export function clearAdoptionContext(
+  threadId: string,
+  expectedTraceId?: string
+): boolean | undefined {
+  const context = getContext(threadId)
+  if (expectedTraceId && context.traceId !== expectedTraceId) return
   threadContexts.delete(threadId)
+  traceOwnedContexts.delete(threadId)
+  return expectedTraceId && context.usedSkills !== undefined
+    ? normalizeUsedSkills(context.usedSkills).length > 0
+    : undefined
 }
 
 function getContext(threadId: string): AdoptionContext {
-  return threadContexts.get(threadId) ?? {}
+  return traceOwnedContexts.get(threadId) ?? threadContexts.get(threadId) ?? {}
 }
 
 function snapshotContext(threadId: string): AdoptionContext {
@@ -1379,6 +1428,8 @@ function buildCodeGenerationProperties(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...(ctx.harnessDeployUnitIds ? { harnessDeployUnitIds: ctx.harnessDeployUnitIds } : {}),
+    ...(ctx.harnessDeployUnitId ? { harnessDeployUnitId: ctx.harnessDeployUnitId } : {}),
     ...buildObservabilityEventProperties(ctx, input.threadId),
     ...(testMatchRule ? { testMatchRule } : {}),
     // note: filePath / content / fingerprint intentionally withheld
@@ -1424,11 +1475,18 @@ async function doRecordGen(
           harnessNodeName: input.harnessStage.nodeName ?? undefined,
           harnessNodeStatus: input.harnessStage.nodeStatus ?? undefined
         }
-      : turnContext
+      : { ...turnContext }
 
     const absPath = input.workspacePath
       ? resolvePath(input.workspacePath, input.filePath)
       : resolvePath(input.filePath)
+
+    if (ctx.harnessProjectId && ctx.harnessFeatureSlug) {
+      const snapshot = await (ctx.harnessDeployUnitSnapshot ??
+        loadHarnessDeployUnitSnapshot(ctx.harnessProjectId, ctx.harnessFeatureSlug))
+      ctx.harnessDeployUnitIds = snapshot?.ids
+      ctx.harnessDeployUnitId = resolveCodeDeployUnit(snapshot, absPath)
+    }
 
     // git-gate: only report generations that live inside a git work tree (see
     // isInsideGitWorkTree). Non-git files never reach a commit and are where
@@ -1587,6 +1645,10 @@ async function doRecordGen(
         harness_node_status: ctx.harnessNodeStatus ?? null,
         harness_adapter_name: ctx.harnessAdapterName ?? null,
         harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+        harness_deploy_unit_id: ctx.harnessDeployUnitId ?? null,
+        harness_deploy_unit_ids: ctx.harnessDeployUnitIds
+          ? JSON.stringify(ctx.harnessDeployUnitIds)
+          : null,
         // Persisted so the commit-time `code_adopt` event can carry the bucket
         // without re-deriving it from a diff that has since moved on.
         new_ratio: changeAttribution.newRatio,
@@ -1702,6 +1764,8 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...(ctx.harnessDeployUnitIds ? { harnessDeployUnitIds: ctx.harnessDeployUnitIds } : {}),
+    ...(ctx.harnessDeployUnitId ? { harnessDeployUnitId: ctx.harnessDeployUnitId } : {}),
     netNewRatio: changeAttribution.newRatio,
     changeKind: changeAttribution.changeKind,
     ...observabilityProps
@@ -1928,6 +1992,8 @@ async function buildSupersededAdoptionWrite(
     harnessNodeStatus: pending.harness_node_status ?? null,
     harnessAdapterName: pending.harness_adapter_name ?? null,
     harnessAdapterVersion: pending.harness_adapter_version ?? null,
+    harnessDeployUnitIds: parseStoredDeployUnitIds(pending.harness_deploy_unit_ids),
+    harnessDeployUnitId: pending.harness_deploy_unit_id ?? undefined,
     ...observabilityProps
   })
 
@@ -2194,6 +2260,8 @@ async function buildMeasurementsForFile(
         harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null,
+        harnessDeployUnitIds: parseStoredDeployUnitIds(pending.harness_deploy_unit_ids),
+        harnessDeployUnitId: pending.harness_deploy_unit_id ?? undefined,
         // Carried over from gen time. The adopted/effective line counts live on
         // this event, so the bucket has to travel with them — otherwise slicing
         // adoption by 新增/存量 would need a join back to code_gen.
@@ -3650,4 +3718,5 @@ export function shutdownAdoptionTracker(): void {
     // ignore
   }
   threadContexts.clear()
+  traceOwnedContexts.clear()
 }

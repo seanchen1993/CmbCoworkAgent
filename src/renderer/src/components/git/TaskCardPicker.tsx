@@ -3,6 +3,7 @@ import { AlertTriangle, Check, ChevronDown, ClipboardList, Loader2, RefreshCw } 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { orderTaskCardsByUpdateTime } from "@/lib/task-card-order"
 import { cn } from "@/lib/utils"
 import { preferredTextMatchesTaskKey, type TaskCardItem } from "../../../../shared/task-card-types"
 
@@ -17,6 +18,8 @@ interface TaskCardPickerProps {
   popoverAlign?: ComponentProps<typeof PopoverContent>["align"]
   popoverSide?: ComponentProps<typeof PopoverContent>["side"]
   popoverWidth?: "trigger" | "panel"
+  // 将卡片列表留在提交弹窗内，避免滚轮被弹窗的滚动锁拦截。
+  portalContainer?: HTMLElement | null
   className?: string
 }
 
@@ -73,6 +76,7 @@ export function TaskCardPicker({
   popoverAlign = "start",
   popoverSide,
   popoverWidth = "trigger",
+  portalContainer,
   className
 }: TaskCardPickerProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -127,6 +131,7 @@ export function TaskCardPicker({
       cards.find((card) => normalizeText(card.taskKey) === normalizeText(selectedValue)) ?? null,
     [cards, selectedValue]
   )
+  const orderedCards = useMemo(() => orderTaskCardsByUpdateTime(cards), [cards])
 
   useEffect(() => {
     if (selectedValue) {
@@ -228,6 +233,7 @@ export function TaskCardPicker({
         </button>
       </PopoverTrigger>
       <PopoverContent
+        portalContainer={portalContainer}
         align={popoverAlign}
         side={popoverSide}
         sideOffset={6}
@@ -310,7 +316,7 @@ export function TaskCardPicker({
             <div className="px-3 py-6 text-center text-sm text-muted-foreground">暂无任务卡片</div>
           ) : (
             <div className="space-y-0.5">
-              {cards.map((card) => {
+              {orderedCards.map((card) => {
                 const selected = normalizeText(card.taskKey) === normalizeText(selectedValue)
                 const meta = getRowMeta(card)
                 return (

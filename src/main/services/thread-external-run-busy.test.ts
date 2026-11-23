@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import type { LocalThreadRunLease } from "../agent/thread-run-lease"
 
 const ownerMocks = vi.hoisted(() => ({
   hasActiveBackgroundTasks: vi.fn<(threadId: string) => boolean>(),
-  getLocalThreadRunLease: vi.fn<(threadId: string) => object | undefined>(),
+  getLocalThreadRunLease: vi.fn<(threadId: string) => Partial<LocalThreadRunLease> | undefined>(),
   isHeartbeatRunning: vi.fn<() => boolean>(),
   isTaskRunning: vi.fn<(taskId: string) => boolean>()
 }))
@@ -19,7 +20,10 @@ vi.mock("./heartbeat", () => ({ isHeartbeatRunning: ownerMocks.isHeartbeatRunnin
 vi.mock("./heartbeat-session", () => ({ HEARTBEAT_THREAD_ID: "heartbeat" }))
 vi.mock("./scheduler", () => ({ isTaskRunning: ownerMocks.isTaskRunning }))
 
-import { isExternallyManagedThreadRunBusy } from "./thread-external-run-busy"
+import {
+  hasExternalThreadRunOwner,
+  isExternallyManagedThreadRunBusy
+} from "./thread-external-run-busy"
 
 describe("isExternallyManagedThreadRunBusy", () => {
   beforeEach(() => {
@@ -37,6 +41,18 @@ describe("isExternallyManagedThreadRunBusy", () => {
 
     expect(isExternallyManagedThreadRunBusy("remote", {})).toBe(true)
     expect(isExternallyManagedThreadRunBusy("other", {})).toBe(false)
+    expect(hasExternalThreadRunOwner("remote", {})).toBe(true)
+    expect(hasExternalThreadRunOwner("other", {})).toBe(false)
+  })
+
+  it("distinguishes a desktop lease from a scheduler lease", () => {
+    ownerMocks.getLocalThreadRunLease.mockImplementation((threadId) =>
+      threadId === "scheduled" ? { owner: "scheduler" } : { owner: "desktop" }
+    )
+
+    expect(isExternallyManagedThreadRunBusy("desktop", {})).toBe(true)
+    expect(hasExternalThreadRunOwner("desktop", {})).toBe(false)
+    expect(hasExternalThreadRunOwner("scheduled", {})).toBe(true)
   })
 
   it("blocks only the fixed heartbeat thread while heartbeat is running", () => {
@@ -44,6 +60,7 @@ describe("isExternallyManagedThreadRunBusy", () => {
 
     expect(isExternallyManagedThreadRunBusy("heartbeat", {})).toBe(true)
     expect(isExternallyManagedThreadRunBusy("ordinary", { isHeartbeat: true })).toBe(false)
+    expect(hasExternalThreadRunOwner("heartbeat", {})).toBe(true)
   })
 
   it("uses the persisted scheduled task id without treating invalid metadata as busy", () => {
@@ -53,6 +70,7 @@ describe("isExternallyManagedThreadRunBusy", () => {
       isExternallyManagedThreadRunBusy("scheduled", { scheduledTaskId: " task-1 " })
     ).toBe(true)
     expect(isExternallyManagedThreadRunBusy("scheduled", { scheduledTaskId: 1 })).toBe(false)
+    expect(hasExternalThreadRunOwner("scheduled", { scheduledTaskId: " task-1 " })).toBe(true)
     expect(ownerMocks.isTaskRunning).toHaveBeenCalledWith("task-1")
   })
 
@@ -63,6 +81,7 @@ describe("isExternallyManagedThreadRunBusy", () => {
 
     expect(isExternallyManagedThreadRunBusy("background", {})).toBe(true)
     expect(isExternallyManagedThreadRunBusy("idle", {})).toBe(false)
+    expect(hasExternalThreadRunOwner("background", {})).toBe(false)
   })
 
   it("returns false when none of the external owners is active", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   applyThreadMetadataPatch,
+  assertBotWorkModelRoutingPatch,
   assertNoActiveAgentModeTransition,
   assertNoTranscriptAgentModeTransition,
   getThreadExecutionMode,
@@ -10,6 +11,20 @@ import {
 } from "./thread-metadata"
 
 describe("thread metadata patch", () => {
+  it("admits only a bounded local Bot model choice and leaves ordinary model changes alone", () => {
+    const metadata = { botHostId: "local", botId: "a", botWorkId: "w", botAudienceKey: "desktop",
+      botLocalConversation: true, botWorkOrigin: "created" }
+    for (const mode of ["pinned", "default"]) {
+      const patch = { set: { botWorkModelRoutingMode: mode } }
+      expect(() => validateRendererThreadMetadataPatch(patch)).not.toThrow()
+      expect(() => assertBotWorkModelRoutingPatch(metadata, patch)).not.toThrow()
+      expect(() => assertBotWorkModelRoutingPatch({}, patch)).toThrow("仅 Bot")
+      expect(() => assertBotWorkModelRoutingPatch({ ...metadata, botWorkOrigin: "existing" }, patch)).toThrow("仅 Bot")
+    }
+    expect(() => validateRendererThreadMetadataPatch({ set: { botWorkModelRoutingMode: "other" } })).toThrow("Invalid")
+    expect(() => assertBotWorkModelRoutingPatch(metadata, { remove: ["botWorkModelRoutingMode"] })).toThrow("不能删除")
+    expect(() => assertBotWorkModelRoutingPatch({}, { set: { model: "ordinary" } })).not.toThrow()
+  })
   it("rebases owned fields without replacing unrelated current metadata", () => {
     expect(
       applyThreadMetadataPatch(

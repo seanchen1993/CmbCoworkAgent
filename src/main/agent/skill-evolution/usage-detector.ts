@@ -1,14 +1,9 @@
-import { readFileSync } from "fs"
-import { posix as pathPosix } from "path"
-import {
-  getEnabledPluginSkillSourceMetadata,
-  type PluginSkillSourceMetadata
-} from "../../storage"
-import {
-  ensureVersionedSkillIdentifier,
-  parseYamlFrontmatter
-} from "../../utils/skill-identifiers"
+import { readContentFileSync } from "../../services/market-content"
+import { posix as pathPosix, win32 as pathWin32 } from "path"
+import { getEnabledPluginSkillSourceMetadata, type PluginSkillSourceMetadata } from "../../storage"
+import { ensureVersionedSkillIdentifier, parseYamlFrontmatter } from "../../utils/skill-identifiers"
 import { makePluginSkillSourceRef } from "../../utils/skill-source"
+import { MAX_SKILL_DISCOVERY_DEPTH } from "../../skills/discovery"
 
 const CLOUD_EVOLVER_NAME = "CMBDevClaw Trace Evolver"
 
@@ -19,7 +14,14 @@ export interface SkillMetadataLite {
 }
 
 function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "")
+  const value = path.trim()
+  if (!value) return ""
+  const windowsPath = process.platform === "win32" || /^[a-z]:[\\/]|^\\\\|^\/\//i.test(value)
+  const normalized = (windowsPath ? pathWin32 : pathPosix)
+    .normalize(value)
+    .replace(/\\/g, "/")
+    .replace(/\/$/, "")
+  return windowsPath ? normalized.toLowerCase() : normalized
 }
 
 function isSameOrChildPath(targetPath: string, parentPath: string): boolean {
@@ -59,7 +61,7 @@ function getSkillPathAliases(skillPath: string): string[] {
 
 function readSkillFrontmatter(skillDocPath: string): Record<string, string> | null {
   try {
-    return parseYamlFrontmatter(readFileSync(skillDocPath, "utf8"))
+    return parseYamlFrontmatter(readContentFileSync(skillDocPath, "utf8"))
   } catch {
     return null
   }
@@ -124,6 +126,7 @@ export class SkillUsageDetector {
   private readonly loadedSkillsByRootDir = new Map<string, string>()
   private readonly evolvedSkillIdentifiers = new Set<string>()
   private readonly localSkillLookupCache = new Map<string, string | null>()
+  private readonly directPluginSkillLookupCache = new Map<string, string | null>()
   private readonly usedSkillNames = new Set<string>()
   private readonly usedEvolvedSkillNames = new Set<string>()
   private readonly skillSourceByIdentifier = new Map<string, string>()
@@ -166,7 +169,11 @@ export class SkillUsageDetector {
       (() => {
         const pluginSource = findPluginSkillSource(normalizedSkillPath)
         return pluginSource
-          ? makePluginSkillSourceRef(pluginSource.pluginId, skillIdentifier, pluginSource.pluginName)
+          ? makePluginSkillSourceRef(
+              pluginSource.pluginId,
+              skillIdentifier,
+              pluginSource.pluginName
+            )
           : ""
       })()
     if (resolvedSkillSourceRef) {
@@ -221,7 +228,7 @@ export class SkillUsageDetector {
       }
     }
 
-    return ""
+    return this.resolveDirectPluginSkillIdentifier(normalized) ?? ""
   }
 
   private markSkillUsed(skillIdentifier: string): void {
@@ -231,6 +238,46 @@ export class SkillUsageDetector {
     }
     const skillSourceRef = this.skillSourceByIdentifier.get(skillIdentifier)
     if (skillSourceRef) this.usedSkillSourceRefs.add(skillSourceRef)
+  }
+
+  private resolveDirectPluginSkillIdentifier(normalizedPath: string): string | null {
+    if (pathPosix.basename(normalizedPath).toLowerCase() !== "skill.md") return null
+    if (this.directPluginSkillLookupCache.has(normalizedPath)) {
+      return this.directPluginSkillLookupCache.get(normalizedPath) ?? null
+    }
+    // A direct read can precede the middleware's catalogue snapshot. Resolve
+    // only the document actually read, within an enabled Skill source; never
+    // scan the plugin tree or count ordinary plugin files as Skill usage.
+    let source: PluginSkillSourceMetadata | undefined
+    try {
+      source = getEnabledPluginSkillSourceMetadata().find((candidate) => {
+        if (!isSameOrChildPath(normalizedPath, candidate.sourceDir)) return false
+        const relativeDir = pathPosix.relative(
+          normalizePath(candidate.sourceDir),
+          pathPosix.dirname(normalizedPath)
+        )
+        const depth = relativeDir ? relativeDir.split("/").length : 0
+        return depth <= (candidate.maxDepth ?? MAX_SKILL_DISCOVERY_DEPTH)
+      })
+    } catch {
+      return null
+    }
+    if (!source) return null
+    const { identifier, evolved } = resolveSkillInfo(
+      pathPosix.basename(pathPosix.dirname(normalizedPath)),
+      undefined,
+      normalizedPath,
+      { fallbackWhenUnreadable: false }
+    )
+    this.directPluginSkillLookupCache.set(normalizedPath, identifier || null)
+    if (!identifier) return null
+    this.registerSkillPath(
+      normalizedPath,
+      identifier,
+      evolved,
+      makePluginSkillSourceRef(source.pluginId, identifier, source.pluginName)
+    )
+    return identifier
   }
 
   /**

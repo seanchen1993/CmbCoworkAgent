@@ -1,3 +1,4 @@
+import { submitFormattedImReply } from "./submit-formatted-reply"
 import type { RemoteImReplyFormat, RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
 import { trackEvent } from "../event-reporter"
 import { imEventStore, type ImEventStore, type ImReplyOutboxRecord } from "./event-store"
@@ -6,7 +7,6 @@ import {
   type ImGatewayClientPort,
   type ImReplySubmissionResult
 } from "./gateway-client"
-import { conversationSwitchedToText } from "./withheld-text-notices"
 
 export interface ImReplySendError extends Error {
   /** True when the gateway may already have durably accepted the reply. */
@@ -29,9 +29,6 @@ function toReply(record: ImReplyOutboxRecord, type: RemoteImReplyFormat): Remote
   }
 }
 
-const warnReplyMode = (message: string, error?: unknown): void =>
-  console.warn(`[IM] Reply delivery: ${message}`, error ?? "")
-
 function errorDetails(error: unknown): {
   reasonCode: string
   resultUnknown: boolean
@@ -52,33 +49,83 @@ export interface ImReplyDrainResult {
   deferred: number
 }
 
-// Scheduler, ingress and Agent completion can all request an outbox drain.
-// Serialize by store rather than by client instance so those entry points can
-// never submit the same durable segment concurrently.
-const activeDrains = new WeakMap<ImEventStore, Promise<ImReplyDrainResult>>()
+// All clients backed by one store share ownership of a conversation's active submission.
+interface ConversationDrain {
+  wake: boolean
+  done: Promise<ImReplyDrainResult>
+}
+const activeDrains = new WeakMap<ImEventStore, Map<string, ConversationDrain>>()
+const emptyResult = (): ImReplyDrainResult => ({ sent: 0, unknown: 0, failed: 0, deferred: 0 })
 
 export class ImReplyClient {
   constructor(
     private readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
     private readonly eventStore: ImEventStore = imEventStore,
     private readonly now: () => number = Date.now,
-    private readonly usesTextReplies: (conversationKey: string) => boolean = (conversationKey) =>
-      conversationSwitchedToText(conversationKey, warnReplyMode)
+    private readonly afterDrain?: (key?: string) => void
   ) {}
 
-  async sendPending(): Promise<ImReplyDrainResult> {
+  async wakePending(): Promise<void> {
     const active = activeDrains.get(this.eventStore)
-    if (active) return active
-    const drain = this.drainPending().finally(() => {
-      if (activeDrains.get(this.eventStore) === drain) activeDrains.delete(this.eventStore)
-    })
-    activeDrains.set(this.eventStore, drain)
-    return drain
+    for (const key of this.eventStore.pendingReplyConversations()) {
+      if (!active?.has(key)) void this.sendPending(key).catch(error => console.warn("[IM] Reply remains queued:", error))
+    }
   }
 
-  private async drainPending(): Promise<ImReplyDrainResult> {
-    const result = { sent: 0, unknown: 0, failed: 0, deferred: 0 }
-    const records = this.eventStore.listOutbox()
+  async sendPending(conversationKey?: string): Promise<ImReplyDrainResult> {
+    let active = activeDrains.get(this.eventStore)
+    if (!active) {
+      active = new Map()
+      activeDrains.set(this.eventStore, active)
+    }
+    const keys = conversationKey ? [conversationKey]
+      : new Set([...this.eventStore.pendingReplyConversations(), ...active.keys()])
+    const drains = Array.from(keys, key => {
+      const running = active.get(key)
+      if (running) {
+        running.wake = true
+        return running.done
+      }
+      const lane: ConversationDrain = {
+        wake: true,
+        done: Promise.resolve().then(async () => {
+          const result = emptyResult()
+          try {
+            while (lane.wake) {
+              lane.wake = false
+              await this.drainConversation(key, result)
+            }
+            return result
+          } finally {
+            active.delete(key)
+            this.notifyDrained(key)
+          }
+        })
+      }
+      active.set(key, lane)
+      return lane.done
+    })
+    if (!drains.length) this.notifyDrained()
+    const total = emptyResult()
+    for (const result of await Promise.all(drains)) {
+      total.sent += result.sent
+      total.unknown += result.unknown
+      total.failed += result.failed
+      total.deferred += result.deferred
+    }
+    return total
+  }
+
+  private notifyDrained(key?: string): void {
+    try {
+      this.afterDrain?.(key)
+    } catch (error) {
+      console.warn("[IM] Auxiliary switch cards deferred:", error)
+    }
+  }
+
+  private async drainConversation(key: string, result: ImReplyDrainResult): Promise<void> {
+    const records = this.eventStore.conversationOutbox(key)
     const deliveryStates = new Map<string, Map<number, ImReplyOutboxRecord["state"]>>()
     for (const record of records) {
       const states = deliveryStates.get(record.deliveryId) ?? new Map()
@@ -86,12 +133,8 @@ export class ImReplyClient {
       deliveryStates.set(record.deliveryId, states)
     }
     for (const record of records) {
-      if (
-        record.state !== "pending" ||
-        (record.nextAttemptAt !== null && record.nextAttemptAt > this.now())
-      ) {
-        continue
-      }
+      if (record.state === "sending") return
+      if (record.state !== "pending") continue
       const states = deliveryStates.get(record.deliveryId)!
       let precedingSegmentsSent = true
       for (let index = 0; index < record.segmentIndex; index += 1) {
@@ -101,32 +144,35 @@ export class ImReplyClient {
         }
       }
       if (!precedingSegmentsSent) continue
-      const outcome = await this.sendOne(record)
-      result[outcome] += 1
-      states.set(
-        record.segmentIndex,
-        outcome === "sent"
-          ? "sent"
-          : outcome === "unknown"
-            ? "unknown"
-            : outcome === "failed"
-              ? "failed"
-              : "pending"
-      )
+      if (record.nextAttemptAt !== null && record.nextAttemptAt > this.now()) return
+      let release: (() => void) | undefined
+      try {
+        if (this.gateway.deliveryOrder) {
+          release = await this.gateway.deliveryOrder.acquire(key, "reply", record.deliveryOrder ?? record.createdAt * 1024)
+          if (!this.eventStore.isOutboxPending(record.outboxId)) continue
+        }
+        const outcome = await this.sendOne(record)
+        result[outcome] += 1
+        if (outcome === "deferred") return
+        states.set(record.segmentIndex, outcome)
+        if (this.gateway.deliveryOrder && outcome === "sent" && record.segmentIndex === record.segmentCount - 1)
+          this.notifyDrained(key)
+      } finally {
+        release?.()
+      }
     }
-    return result
   }
 
   /**
    * Decided per send, not when the reply was queued: the connection a reply
    * leaves on — and so what the gateway accepts — can differ from the one it
-   * was queued under, and /文字模式 covers everything not yet sent. Checked in
-   * this order so the reply mode is only read when it can make a difference.
+   * was queued under. /文字模式 changes forms and notices, not the Agent's
+   * answer: headings, lists and code should still render in that mode.
    */
   private wireFormat(record: ImReplyOutboxRecord): RemoteImReplyFormat {
     if (record.contentFormat !== "markdown") return "text"
     if (this.gateway.supportsMarkdownReplies?.() !== true) return "text"
-    return this.usesTextReplies(record.conversationKey) ? "text" : "markdown"
+    return "markdown"
   }
 
   /**
@@ -141,17 +187,7 @@ export class ImReplyClient {
     record: ImReplyOutboxRecord,
     format: RemoteImReplyFormat
   ): Promise<ImReplySubmissionResult> {
-    if (format === "text") return this.gateway.submitReply(toReply(record, "text"))
-    try {
-      return await this.gateway.submitReply(toReply(record, "markdown"))
-    } catch (error) {
-      if (errorDetails(error).reasonCode !== "INVALID_PAYLOAD") throw error
-      console.warn("[IM] Gateway refused a markdown reply; sending it as text.", {
-        deliveryId: record.deliveryId,
-        segmentIndex: record.segmentIndex
-      })
-      return this.gateway.submitReply(toReply(record, "text"))
-    }
+    return submitFormattedImReply(this.gateway, toReply(record, format))
   }
 
   private async sendOne(

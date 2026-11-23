@@ -14,13 +14,10 @@ import {
   transformSerializedValuesMessages,
   type TransformedValuesMessage
 } from "../src/renderer/src/lib/electron-transport.ts"
+import { createElectronStream } from "../src/renderer/src/lib/electron-stream.ts"
+import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import { isSerializedSummarizationMessage } from "../src/shared/context-compaction-messages.ts"
-import {
-  mergeLiveStreamMessages,
-  normalizeAppendedLiveStreamMessageIds,
-  replaceLiveStreamMessageId,
-  type LiveStreamMessage
-} from "../src/renderer/src/lib/live-stream-messages.ts"
+import type { LiveStreamMessage } from "../src/renderer/src/lib/live-stream-messages.ts"
 import {
   buildMessageSameRoleDuplicateId,
   getMessageProviderOccurrence,
@@ -1194,7 +1191,7 @@ function testIdlessCurrentRunCompletionReservesStableSlot(): void {
   )
 }
 
-function testIdlessCurrentRunCompletionRekeysPreBoundaryPartial(): void {
+async function testIdlessCurrentRunCompletionRekeysPreBoundaryPartial(): Promise<void> {
   const transport = new ElectronIPCTransport()
   const convertToSDKEvents = (
     transport as unknown as {
@@ -1272,40 +1269,24 @@ function testIdlessCurrentRunCompletionRekeysPreBoundaryPartial(): void {
     "the renderer fallback alias must bypass durable id migration"
   )
 
-  let liveMessages: LiveStreamMessage[] = []
-  const appendMessage = (message: LiveStreamMessage): void => {
-    liveMessages = mergeLiveStreamMessages(
-      liveMessages,
-      normalizeAppendedLiveStreamMessageIds(liveMessages, [message])
-    )
-  }
-  if (partialMessage?.[0]) appendMessage(partialMessage[0])
-  for (const event of boundaryEvents) {
-    if (
-      event.event === "custom" &&
-      (event.data as { type?: string }).type === "message_id_alias"
-    ) {
-      const alias = event.data as {
-        fromId: string
-        toId: string
-        providerSourceId?: string
-        providerOccurrence?: number
-      }
-      liveMessages = replaceLiveStreamMessageId(
-        liveMessages,
-        alias.fromId,
-        alias.toId,
-        alias.providerSourceId,
-        alias.providerOccurrence
-      )
-      continue
-    }
-    if (event.event === "messages" && Array.isArray(event.data) && event.data[0]) {
-      appendMessage(event.data[0] as LiveStreamMessage)
+  // Consume the real stream pipeline: completion is an authoritative custom
+  // snapshot, not another messages delta. The old test silently dropped it.
+  const wire: UseStreamTransport = {
+    async stream() {
+      return (async function* () { yield* [...partialEvents, ...boundaryEvents] })()
     }
   }
-
-  const assistants = liveMessages.filter((message) => message.type === "ai")
+  const errors: unknown[] = []
+  const stream = createElectronStream({ transport: wire, threadId: "thread-pre-boundary", onError: error => errors.push(error) })
+  let duplicateFrame = false
+  stream.subscribe(() => {
+    if (stream.messages.filter(message => message.type === "ai").length > 1) duplicateFrame = true
+  })
+  await stream.submit(null)
+  assertEqual(errors.length, 0, "the actual stream consumer must accept the completion boundary")
+  assertEqual(duplicateFrame, false, "no intermediate frame may show duplicate assistant bubbles")
+  assertEqual(stream.messages[1]?.id, "guided-user-pre-boundary", "the completed assistant precedes the correction")
+  const assistants = stream.messages.filter((message) => message.type === "ai")
   assertEqual(
     assistants.length,
     1,
@@ -1365,16 +1346,22 @@ function testFragmentedIdlessCurrentRunCompletionKeepsStableSlot(): void {
     "thread-1",
     "normal"
   )
-  const syntheticCompleted = injectionEvents.find(
+  const completedSnapshotIndex = injectionEvents.findIndex(
     (event) =>
-      event.event === "messages" &&
-      (event.data as [{ id?: string }])?.[0]?.id === stableCompletedId
-  )?.data as [{ id?: string; content?: string }] | undefined
+      event.event === "custom" &&
+      (event.data as { type?: string }).type === "coordinator_ai_snapshot_message"
+  )
+  const syntheticCompleted = injectionEvents[completedSnapshotIndex]?.data as
+    { assistantMessage?: { id?: string; content?: string } } | undefined
+  assertEqual(syntheticCompleted?.assistantMessage?.id, stableCompletedId,
+    "the authoritative snapshot must use the durable completion id")
   assertEqual(
-    syntheticCompleted?.[0]?.content,
+    syntheticCompleted?.assistantMessage?.content,
     "first final",
     "an id-less completion must render durably before delayed transport chunks arrive"
   )
+  assertEqual(completedSnapshotIndex < injectionEvents.findIndex(event => event.event === "messages"),
+    true, "the completion snapshot must precede the injected user message")
 
   const prefix = streamIdlessAssistant("first ").find(
     (event) => event.event === "messages"
@@ -2961,7 +2948,7 @@ function testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState(): v
   assertEqual(alias?.toId, "retry-ai-final", "retry values should adopt the checkpoint id")
 }
 
-const tests: Array<[string, () => void]> = [
+const tests: Array<[string, () => void | Promise<void>]> = [
   ["testExplicitIdWins", testExplicitIdWins],
   [
     "testSummarizationMessagesUseStructuralFiltering",
@@ -3100,7 +3087,10 @@ const tests: Array<[string, () => void]> = [
   ]
 ]
 
-for (const [name, fn] of tests) {
-  fn()
-  console.log(`✓ ${name}`)
+async function runTests() {
+  for (const [name, fn] of tests) {
+    await fn()
+    console.log(`✓ ${name}`)
+  }
 }
+void runTests().catch(error => { console.error(error); process.exitCode = 1 })

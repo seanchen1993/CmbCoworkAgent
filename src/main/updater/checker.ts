@@ -5,6 +5,7 @@ import https from "https"
 import { getUserInfo, type UserInfoConfig } from "../storage"
 import type { FeatureGatesConfig } from "../../shared/feature-gates"
 import type { RemoteModelCatalog } from "../../shared/model-catalog"
+import type { ConversationShortcutsConfig } from "../../shared/market-skill-shortcut"
 import { evaluateStaging } from "./gray-release"
 import { compareSemver } from "./semver"
 import { DEFAULT_UPDATE_MANIFEST_FILE } from "./channel-config"
@@ -97,6 +98,7 @@ export interface LatestJson {
   featureGates?: FeatureGatesConfig
   /** Optional managed model catalog. Independent from app-update staging. */
   modelCatalog?: RemoteModelCatalog
+  conversationShortcuts?: ConversationShortcutsConfig
 }
 
 export type UpdateType = "asar" | "full"
@@ -170,8 +172,9 @@ export function fetchLatestJson(
       }
 
       let data = ""
-      res.on("data", (chunk: Buffer) => {
-        data += chunk.toString()
+      res.setEncoding("utf8")
+      res.on("data", (chunk: string) => {
+        data += chunk
       })
       res.on("end", () => {
         try {

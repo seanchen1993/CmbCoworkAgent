@@ -294,7 +294,7 @@ async function testSuccessfulRunAndDurableOutbox(): Promise<void> {
     // of its own — and still goes out as text on a gateway that never agreed.
     assert.equal(context.events.listOutbox("sent")[0].contentFormat, "markdown")
     assert.equal(gateway.replies[0].message.type, "text")
-    assert.equal(gateway.replies[0].message.content, "【远程收件箱】\n\n完成回复")
+    assert.equal(gateway.replies[0].message.content, "【默认聊天】\n\n完成回复")
     assert.equal(gateway.acknowledgements.at(-1)?.type, "completed")
     assert.equal(getLocalThreadRunLease(target.threadId), undefined)
   } finally {
@@ -381,7 +381,7 @@ async function runForeignOwnerReleaseWakeScenario(
     // And the run that finally happens uses a permit acquired for it, not one
     // taken minutes earlier on an attempt that never ran.
     assert.equal(gateway.permitAcquisitions, 1)
-    assert.equal(gateway.replies.at(-1)?.message.content, `【远程收件箱】\n\n${owner} released`)
+    assert.equal(gateway.replies.at(-1)?.message.content, `【默认聊天】\n\n${owner} released`)
   } finally {
     await queue.stop()
     releaseLocalThreadRunLease(target.threadId, owner, foreignRunId)
@@ -524,7 +524,9 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
   }
 }
 
-function testTheLastReplyOfADetachedTurnShowsTheWayBack(): void {
+async function testTheLastReplyOfADetachedTurnShowsTheWayBack(): Promise<void> {
+  const context = await createContext()
+  try {
   // The mark says the target is not the bound one; on its own it does not say
   // under this message goes wherever the person is bound now, not to the
   // session that produced it. The way back must be in the message, and it must
@@ -534,12 +536,26 @@ function testTheLastReplyOfADetachedTurnShowsTheWayBack(): void {
     join(resolve(__dirname, ".."), "src/main/services/im/remote-runner.ts"),
     "utf8"
   )
-  const terminal = runner.slice(
-    runner.indexOf("private terminalPrefixForEvent("),
-    runner.indexOf("private targetPrefixForEvent(")
-  )
-  assert(terminal.length > 0, "the terminal prefix must still be composed here")
-  assert(terminal.includes("/切换 "), "the terminal prefix must name the way back")
+  const sourceTarget = { ...target, kind: "thread", title: "接口排障", grantId: "grant-1", grantVersion: 1 } as ImTargetSnapshot
+  let boundSnapshot: ImTargetSnapshot = { ...target, targetId: "another-target", threadId: "another-thread" }
+  const instance = new ImRemoteRunner({
+    eventStore: context.events,
+    getThread: () => ({ ...testThreadRow(), title: "接口排障", metadata: "{}" }),
+    conversationState: { getSelectedTarget: () => ({ snapshot: boundSnapshot }) } as never
+  })
+  const prefixes = instance as unknown as {
+    terminalPrefixForEvent(event: unknown): string
+    targetPrefixForEvent(event: unknown): string
+  }
+  const event = { eventId: "switch-guidance", principalId: "principal-1", conversationKey: "conversation-1", targetSnapshot: sourceTarget }
+  const terminal = prefixes.terminalPrefixForEvent(event)
+  assert.match(terminal, /先单独发送：\/切换 @[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}/u)
+  const code = terminal.match(/\/切换 @([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})/u)![1]
+  assert.equal(context.events.sessionLinks.get(code)?.thread_id, sourceTarget.threadId)
+  assert(terminal.includes("切换成功后再发送你的问题"), terminal)
+  assert(!prefixes.targetPrefixForEvent(event).includes("先单独发送"), "pending notices keep their existing actions")
+  boundSnapshot = { ...sourceTarget, targetId: "rebound-same-thread" }
+  assert(!prefixes.terminalPrefixForEvent(event).includes("非当前绑定会话"), "rebinding the same thread is not another session")
   assert(
     !/\/绑定\s*<?\d/u.test(terminal),
     "a number here would point at a selection context that has expired"
@@ -563,6 +579,7 @@ function testTheLastReplyOfADetachedTurnShowsTheWayBack(): void {
     !/buildImEventReplies\(\{[^}]*targetPrefixForEvent/su.test(runner),
     "a terminal reply that kept the plain prefix would silently lose the way back"
   )
+  } finally { context.database.close() }
 }
 
 function testEnteringAWaitArmsNoTimer(): void {

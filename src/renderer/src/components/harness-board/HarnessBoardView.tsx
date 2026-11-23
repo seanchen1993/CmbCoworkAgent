@@ -1,3 +1,13 @@
+import {
+  cancelThreadSearchNavigation,
+  cancelThreadSearchForExternalRoute,
+  finishThreadSearchNavigation,
+  useThreadSearch,
+  withOwnedThreadSearchTransition
+} from "@/lib/thread-search-navigation"
+import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
+import { canReadPluginSource } from "../../../../shared/market-source-access"
+import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
@@ -7,7 +17,8 @@ import {
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
-import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectWorkspaceAdvancedSettings, ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectTestField } from "./ProjectTestField"
 import {
   Fragment,
   startTransition,
@@ -18,7 +29,8 @@ import {
   useRef,
   useState,
   type MutableRefObject,
-  type ReactNode
+  type ReactNode,
+  type SetStateAction
 } from "react"
 import { createPortal } from "react-dom"
 import { useShallow } from "zustand/react/shallow"
@@ -36,6 +48,7 @@ import {
   CircleDot,
   CircleDashed,
   CircleHelp,
+  Clock,
   FileText,
   FolderOpen,
   GitBranch,
@@ -83,11 +96,24 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
+import { revealSidebarThread } from "@/components/sidebar/sidebar-thread-anchor"
+import { selectBoundedSidebarWindow } from "@/components/sidebar/thread-sidebar-window"
 import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheckpointDialog"
 import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteDialog"
-import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
+import { KnowledgeBaseSelector } from "@/components/harness-board/KnowledgeBaseSelector"
+import { KnowledgeBaseSyncPanel } from "@/components/harness-board/KnowledgeBaseSyncPanel"
+import { useKnowledgeBases } from "@/components/harness-board/useKnowledgeBases"
+import { useKnowledgePreviews } from "@/components/harness-board/useKnowledgePreviews"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
-import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
+import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
+import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
+import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
+import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
+import { useManagedRunSchedule, useManagedRunScheduleIndex } from "@/lib/use-managed-run-schedule"
+import { FeatureBotLinkButton, linkFeatureToBot } from "./FeatureBotLinkButton"
+import type { BotFeatureTarget } from "../../../../shared/bots/feature"
+import { ManagedRunStartDialog } from "./ManagedRunStartDialog"
+import { buildManagedRunSessionOptions } from "@/lib/managed-run-session-options"
 import {
   createBoundedLatestTaskQueue,
   type BoundedTaskContext
@@ -118,6 +144,7 @@ import {
   HARNESS_SIDEBAR_PROJECT_LOOKUP_BATCH_SIZE,
   takeHarnessSidebarProjectLookupBatch
 } from "@/lib/harness-sidebar-project-lookup"
+import { canCurrentUserViewMarketItem, getMarketViewerIdCandidates } from "@/lib/market-visibility"
 import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
 import { cn } from "@/lib/utils"
@@ -128,13 +155,6 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
-import {
-  clearRequirementDevelopmentIntent,
-  type RequirementDevelopmentIntent
-} from "@/lib/requirement-development"
-import { useRequirementDevelopmentOnboarding } from "./use-requirement-development-sessions"
-import { RequirementProjectSelectionDialog } from "./RequirementProjectSelectionDialog"
-import { completeRequirementDevelopment } from "./complete-requirement-development"
 import { marketApi, type MarketItem } from "../../api/market"
 import { formatTopUserOrgName } from "@/components/dashboard/use-dashboard"
 import { UpdateVersionTooltip } from "@/components/customize/MarketPanel/MarketUpdateBadge"
@@ -154,7 +174,6 @@ import type {
   HarnessHookLogView,
   HarnessProjectCreateInput,
   HarnessProjectDetailViewModel,
-  HarnessKnowledgePreviewResult,
   HarnessProjectListItem,
   HarnessBoardCatalogPageResult,
   HarnessProjectMetadataUpdateInput,
@@ -187,11 +206,16 @@ import {
   type HarnessSessionWorkspace,
   type ManagedRunViewStatus
 } from "../../../../shared/harness-board-types"
+import type { KnowledgeBaseListResult } from "../../../../shared/knowledge-base-types"
+import {
+  filterProjectDialogInstalledAdapters,
+  findInstalledPluginForAdapter,
+  findSelectedAdapter
+} from "./project-dialog-plugin-visibility"
 import {
   HARNESS_PROJECT_DETAIL_BATCH_SIZE,
   MAX_HARNESS_PROJECT_DETAIL_CACHE_ENTRIES,
   cacheHarnessBoardCatalog,
-  cacheHarnessBoardRegistry,
   cacheHarnessProjectDetails,
   invalidateHarnessProjectDetails,
   loadHarnessProjectDetailsCached,
@@ -254,6 +278,7 @@ const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const PINNED_HARNESS_PROJECTS_STORAGE_KEY = "harness:pinnedProjects"
 const PINNED_HARNESS_FEATURES_STORAGE_KEY = "harness:pinnedFeatures"
+const COLLAPSED_HARNESS_GROUPS_STORAGE_KEY = "harness:collapsedSessionGroups"
 const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
 const FEATURE_SESSION_INITIAL_VISIBLE_COUNT = 5
 const FEATURE_SESSION_VISIBLE_INCREMENT = 8
@@ -274,7 +299,6 @@ const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
 const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
 const ENTERPRISE_PROJECT_DETAIL_QUERY_BATCH_SIZE = 32
 const ENTERPRISE_PROJECT_DETAIL_STATE_MAX_ENTRIES = 128
-type ProjectSidebarScrollIntent = "preserve" | "top" | null
 const LEAN_TOKEN_VISIBLE_PREFIX_LENGTH = 6
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<
@@ -316,11 +340,15 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
     description: "",
     systemId: "",
     systemName: "",
-    workspacePath: ""
+    workspacePath: "",
+    knowledgeBaseIds: []
   }
 }
 
-function createEmptyProjectForm(adapterId = ""): HarnessProjectCreateInput {
+type ProjectCreateForm = HarnessProjectCreateInput &
+  Pick<HarnessProjectMetadataUpdateInput, "workspacePath" | "projectDir">
+
+function createEmptyProjectForm(adapterId = ""): ProjectCreateForm {
   return createEmptyProjectMetadataForm(adapterId)
 }
 
@@ -442,6 +470,9 @@ interface SelectedFeature {
   projectId: string
   slug: string
   activeSessionThreadId?: string
+  searchSessionThreadId?: string
+  historyOnly?: true
+  searchAccessId?: number
   deleted?: boolean
 }
 
@@ -449,6 +480,9 @@ interface SelectedProjectSession {
   projectId: string
   threadId: string
   deleted?: boolean
+  searchOwned?: boolean
+  historyOnly?: true
+  searchAccessId?: number
 }
 
 type PendingProjectAction = {
@@ -469,6 +503,7 @@ interface ProjectFeatureSessionGroup {
   slug: string
   title: string
   sessions: HarnessSessionBinding[]
+  managedRunThreadId?: string
   section: ProjectFeatureSessionGroupSection
   deleted?: boolean
 }
@@ -539,6 +574,7 @@ interface HarnessMarketUploaderProfile {
 
 interface ProjectDialogMarketSnapshot {
   marketPlugins: MarketItem[]
+  visibleMarketPlugins: MarketItem[]
   uploaderProfiles: Record<string, HarnessMarketUploaderProfile>
 }
 
@@ -650,10 +686,6 @@ function sanitizeHarnessNameInput(value: string): string {
   return value.replace(/\s+/g, "")
 }
 
-function sanitizeProjectDirFromProjectName(value: string): string {
-  return value.replace(/[^\u4e00-\u9fffA-Za-z0-9_-]/gu, "")
-}
-
 function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
   const harnessFeature = thread.metadata?.harnessFeature
   if (!harnessFeature || typeof harnessFeature !== "object") return null
@@ -723,6 +755,7 @@ function makeDeletedProjectSidebarItem(
     systemId: "",
     systemName: "",
     workspacePath: "",
+    knowledgeBaseIds: [],
     harnessAdapter: {
       id: "",
       name: "",
@@ -952,16 +985,19 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
   return createHarnessFeatureThread({ projectId, slug, workspacePath, nextAction, createThread })
 }
 
-function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
+function metadataRequiredMissing(
+  form: HarnessProjectMetadataUpdateInput,
+  requireWorkspace = true
+): boolean {
+  if (typeof form.isTestProject !== "boolean") return true
+  if (requireWorkspace && (!form.workspacePath.trim() || !form.projectDir.trim())) return true
   return [
     form.adapterId,
     form.adapterType,
     form.name,
     form.projectCode,
-    form.projectDir,
     form.systemId,
-    form.systemName,
-    form.workspacePath
+    form.systemName
   ].some((value) => !value.trim())
 }
 
@@ -1006,11 +1042,13 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     name: project.name,
     projectCode: project.projectCode,
     projectFromLean: project.projectFromLean ?? false,
+    isTestProject: project.isTestProject,
     projectDir: project.projectDir,
     description: project.description,
     systemId: project.systemId,
     systemName: project.systemName,
-    workspacePath: project.workspacePath
+    workspacePath: project.workspacePath,
+    knowledgeBaseIds: project.knowledgeBaseIds
   }
 }
 
@@ -1433,20 +1471,6 @@ function boardCompatibilityMessage(
   return compatibility.message || "插件看板协议与当前 APP 不兼容。"
 }
 
-function findSelectedAdapter(
-  registry: ProjectModeAdapterItem[],
-  adapterId: string
-): ProjectModeAdapterItem | null {
-  if (!adapterId) return null
-  const exactMatch = registry.find((adapter) => adapter.id === adapterId)
-  if (exactMatch) return exactMatch
-
-  const nameMatches = registry.filter(
-    (adapter) => adapter.type === "plugin" && adapter.name === adapterId
-  )
-  return nameMatches.length === 1 ? nameMatches[0] : null
-}
-
 function normalizeAdapterCategory(value?: string): string {
   const normalized = value?.trim()
   return normalized || OTHER_ADAPTER_SCENARIO
@@ -1474,24 +1498,12 @@ function normalizeAdapterMatchKey(value?: string): string {
   return normalizeAdapterMarketName(value).toLocaleLowerCase()
 }
 
-function findInstalledPluginForAdapter(
-  installedPlugins: PluginMetadata[],
-  adapter: HarnessAdapterRegistryItem
-): PluginMetadata | undefined {
-  const adapterKeys = new Set(
-    [adapter.id, adapter.name].map(normalizeAdapterMatchKey).filter(Boolean)
-  )
-  return installedPlugins.find((plugin) =>
-    [plugin.id, plugin.name].some((value) => adapterKeys.has(normalizeAdapterMatchKey(value)))
-  )
-}
-
 function findMarketPluginForAdapter(
   marketPlugins: MarketItem[],
   installedPlugin: PluginMetadata | undefined,
   adapter: HarnessAdapterRegistryItem
 ): MarketItem | undefined {
-  if (installedPlugin?.origin === "local") return undefined
+  if (canReadPluginSource(installedPlugin)) return undefined
 
   const adapterKeys = new Set(
     [adapter.id, adapter.name].map(normalizeAdapterMatchKey).filter(Boolean)
@@ -1945,14 +1957,23 @@ async function loadHarnessInstalledPlugins(): Promise<PluginMetadata[]> {
   }
 }
 
-function takeHarnessMarketPluginWindow(items: readonly MarketItem[], limit = 64): MarketItem[] {
-  const result: MarketItem[] = []
-  for (const item of items) {
-    if (!isProjectModeMarketPlugin(item)) continue
-    result.push(item)
-    if (result.length >= limit) break
-  }
-  return result
+function getProjectDialogAdapters(
+  registry: HarnessAdapterRegistryItem[],
+  installedPlugins: PluginMetadata[],
+  snapshot: ProjectDialogMarketSnapshot
+): ProjectModeAdapterItem[] {
+  const visibleRegistry = filterProjectDialogInstalledAdapters(
+    registry,
+    installedPlugins,
+    snapshot.marketPlugins,
+    snapshot.visibleMarketPlugins
+  )
+  return applyMarketAdapterDisplayData(
+    visibleRegistry,
+    snapshot.visibleMarketPlugins,
+    installedPlugins,
+    snapshot.uploaderProfiles
+  )
 }
 
 interface WorkspaceChangeRefreshTask {
@@ -2109,6 +2130,7 @@ function AdapterOptionHeader({
 function AdapterPicker({
   registry,
   value,
+  selectedAdapter,
   installingPluginNames,
   portalContainer,
   onInstallPlugin,
@@ -2116,6 +2138,7 @@ function AdapterPicker({
 }: {
   registry: ProjectModeAdapterItem[]
   value: string
+  selectedAdapter: HarnessAdapterRegistryItem | null
   installingPluginNames: Set<string>
   portalContainer?: HTMLElement | null
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
@@ -2125,7 +2148,6 @@ function AdapterPicker({
   const [query, setQuery] = useState("")
   const searchRef = useRef<HTMLInputElement>(null)
   const resultsRef = useRef<HTMLDivElement>(null)
-  const selectedAdapter = findSelectedAdapter(registry, value)
   const keyword = query.trim().toLocaleLowerCase()
   const filteredRegistry = registry.filter((adapter) =>
     [adapter.name, adapter.description, normalizeAdapterCategory(adapter.category)].some((text) =>
@@ -2532,7 +2554,9 @@ function EnterpriseProjectSearchInput({
           onFocus={() => {
             if (keyword) setOpen(true)
           }}
-          placeholder={`输入${searchLabel}搜索`}
+          placeholder={
+            searchField === "code" ? "输入项目编号搜索，存在 T+1 延迟" : `输入${searchLabel}搜索`
+          }
           className={harnessProjectCreateInputClassName}
           aria-autocomplete="list"
           aria-invalid={ariaInvalid ? true : undefined}
@@ -2856,38 +2880,45 @@ function DeployUnitSearchInput({
 function ProjectFormDialog({
   open,
   creating,
+  workspaceValidating,
+  workspaceError,
   form,
   registry,
+  knowledgeBases,
   installingPluginNames,
   error,
   verification,
   onOpenChange,
   onChange,
   onInstallPlugin,
+  onOpenSystemConstraints,
   onPickWorkspace,
+  onUseDefaultWorkspace,
   onSubmit
 }: {
   open: boolean
   creating: boolean
-  form: HarnessProjectCreateInput
+  workspaceValidating: boolean
+  workspaceError: string | null
+  form: ProjectCreateForm
   registry: ProjectModeAdapterItem[]
+  knowledgeBases: KnowledgeBaseListResult | null
   installingPluginNames: Set<string>
   error: string | null
   verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
-  onChange: (form: HarnessProjectCreateInput) => void
+  onChange: React.Dispatch<React.SetStateAction<ProjectCreateForm>>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onPickWorkspace: () => void
+  onUseDefaultWorkspace: () => void
+  onOpenSystemConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
-  const projectDirEditedRef = useRef(false)
-  useEffect(() => {
-    if (!open) projectDirEditedRef.current = false
-  }, [open])
   const projectDirError =
     getHarnessNameError("项目文件夹", form.projectDir) ??
-    getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS)
+    getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS) ??
+    workspaceError
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
   const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
   const projectCodeLengthError = getTextLengthError(
@@ -2943,10 +2974,7 @@ function ProjectFormDialog({
                         name: project.projectName,
                         projectCode: project.projectCode,
                         systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
+                        systemName: project.systemName || form.systemName
                       })
                     }}
                     portalContainer={dialogPortalContainer}
@@ -2965,10 +2993,7 @@ function ProjectFormDialog({
                     onValueChange={(name) => {
                       onChange({
                         ...form,
-                        name,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(name)
-                          : form.projectDir
+                        name
                       })
                     }}
                     onSelect={(project) => {
@@ -2977,10 +3002,7 @@ function ProjectFormDialog({
                         name: project.projectName,
                         projectCode: project.projectCode,
                         systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: !projectDirEditedRef.current
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
+                        systemName: project.systemName || form.systemName
                       })
                     }}
                     portalContainer={dialogPortalContainer}
@@ -2990,7 +3012,7 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -3003,6 +3025,10 @@ function ProjectFormDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -3025,10 +3051,12 @@ function ProjectFormDialog({
             </section>
 
             <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">插件配置</div>
+              <div className="mb-3 text-sm font-semibold">项目开发配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                插件选择 *
                 <AdapterPicker
                   value={form.adapterId}
+                  selectedAdapter={selectedAdapter}
                   registry={registry}
                   installingPluginNames={installingPluginNames}
                   portalContainer={dialogPortalContainer}
@@ -3041,22 +3069,34 @@ function ProjectFormDialog({
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
               </label>
-              <ProjectWorkspaceField
+              <ProjectPluginDevelopmentGuide
+                entry="project"
+                disabled={creating || workspaceValidating}
+              />
+              <KnowledgeBaseSelector
+                items={knowledgeBases?.knowledgeBases ?? []}
+                selectedIds={form.knowledgeBaseIds ?? []}
+                supportsKnowledgeBaseContext={
+                  selectedAdapter?.supportsKnowledgeBaseContext === true
+                }
+                disabled={creating}
+                portalContainer={dialogPortalContainer}
+                onOpenSystemConstraints={onOpenSystemConstraints}
+                onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
+              />
+              <ProjectWorkspaceAdvancedSettings
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
                 error={projectDirError}
+                disabled={creating || workspaceValidating}
                 onPickWorkspace={onPickWorkspace}
-                onProjectDirChange={(value) => {
-                  const projectDir = sanitizeHarnessNameInput(value)
-                  projectDirEditedRef.current = Boolean(projectDir.trim())
-                  onChange({ ...form, projectDir })
+                onUseDefault={onUseDefaultWorkspace}
+                onPreviewDefaultPath={() => {
+                  const projectId = form.projectId ?? crypto.randomUUID()
+                  if (!form.projectId) onChange((current) => ({ ...current, projectId }))
+                  return window.api.harnessBoard.getDefaultProjectDirectoryPreview(projectId)
                 }}
               />
-              {form.workspacePath.trim() && form.projectDir.trim() && (
-                <p className="mt-1.5 break-all text-xs leading-relaxed text-muted-foreground">
-                  将在 {resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。
-                </p>
-              )}
             </section>
 
             {error && (
@@ -3067,15 +3107,21 @@ function ProjectFormDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={creating}>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={creating || workspaceValidating}
+          >
             取消
           </Button>
           <Button
             onClick={onSubmit}
             disabled={
               creating ||
+              workspaceValidating ||
+              Boolean(workspaceError) ||
               verification.pending ||
-              metadataRequiredMissing(form) ||
+              metadataRequiredMissing(form, false) ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form, { validateProjectDir: true }) ||
               !selectedAdapter?.boardCompatibility.compatible
@@ -3092,28 +3138,32 @@ function ProjectFormDialog({
 }
 
 function ProjectEditDialog({
-  open,
+  project,
   saving,
   form,
   registry,
+  knowledgeBases,
   installingPluginNames,
   error,
   verification,
   onOpenChange,
   onChange,
   onInstallPlugin,
+  onOpenSystemConstraints,
   onSubmit
 }: {
-  open: boolean
+  project: HarnessProjectListItem | null
   saving: boolean
   form: HarnessProjectMetadataUpdateInput
   registry: ProjectModeAdapterItem[]
+  knowledgeBases: KnowledgeBaseListResult | null
   installingPluginNames: Set<string>
   error: string | null
   verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
+  onOpenSystemConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
@@ -3130,11 +3180,11 @@ function ProjectEditDialog({
     PROJECT_DESCRIPTION_MAX_CHARS
   )
   const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
-  const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
+  const selectedAdapter = findSelectedAdapter(registry, form.adapterId, project)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogPortalContainer}
         className={cn(
@@ -3205,7 +3255,7 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectNameLengthError}</span>
                   )}
                 </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   项目描述
                   <Input
                     value={form.description}
@@ -3218,6 +3268,10 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
+                <ProjectTestField
+                  value={form.isTestProject}
+                  onChange={(isTestProject) => onChange({ ...form, isTestProject })}
+                />
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -3240,10 +3294,12 @@ function ProjectEditDialog({
             </section>
 
             <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">插件配置</div>
+              <div className="mb-3 text-sm font-semibold">项目开发配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                插件选择 *
                 <AdapterPicker
                   value={form.adapterId}
+                  selectedAdapter={selectedAdapter}
                   registry={registry}
                   installingPluginNames={installingPluginNames}
                   portalContainer={dialogPortalContainer}
@@ -3256,6 +3312,18 @@ function ProjectEditDialog({
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
               </label>
+              <ProjectPluginDevelopmentGuide entry="project" disabled={saving} />
+              <KnowledgeBaseSelector
+                items={knowledgeBases?.knowledgeBases ?? []}
+                selectedIds={form.knowledgeBaseIds ?? []}
+                supportsKnowledgeBaseContext={
+                  selectedAdapter?.supportsKnowledgeBaseContext === true
+                }
+                disabled={saving}
+                portalContainer={dialogPortalContainer}
+                onOpenSystemConstraints={onOpenSystemConstraints}
+                onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
+              />
               <ProjectWorkspaceField
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
@@ -3539,8 +3607,6 @@ function FeatureCreateDialog({
   selectedWorkflowNodeIds,
   agentsReadyDeployUnits,
   localAgentmdDeployUnitMappings,
-  publicConstraintsSyncAvailable,
-  syncingPublicConstraints,
   rows,
   deployUnitMappingsLoading,
   selectedDeployUnitIds,
@@ -3552,7 +3618,6 @@ function FeatureCreateDialog({
   onWorkflowNodeToggle,
   onDeployUnitToggle,
   onOpenDeployUnitSettings,
-  onSyncPublicConstraints,
   onSubmit
 }: {
   workspace: HarnessSessionWorkspace
@@ -3568,8 +3633,6 @@ function FeatureCreateDialog({
   selectedWorkflowNodeIds: Set<string>
   agentsReadyDeployUnits: string[]
   localAgentmdDeployUnitMappings: string[]
-  publicConstraintsSyncAvailable: boolean
-  syncingPublicConstraints: boolean
   rows: HarnessDeployUnitMapping[]
   deployUnitMappingsLoading: boolean
   selectedDeployUnitIds: Set<string>
@@ -3581,13 +3644,16 @@ function FeatureCreateDialog({
   onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
   onDeployUnitToggle: (deployUnitIdMapping: string, checked: boolean) => void
   onOpenDeployUnitSettings: () => void
-  onSyncPublicConstraints: () => void
-  onSubmit: () => void
+  onSubmit: (target: BotFeatureTarget | null) => void
 }): React.JSX.Element {
   const [pathPickerId, setPathPickerId] = useState<string | null>(null)
   const [dialogContentElement, setDialogContentElement] = useState<HTMLDivElement | null>(null)
   const workspaceInputRef = useRef<HTMLInputElement>(null)
   const dialogTitleRef = useRef<HTMLHeadingElement>(null)
+  const [botTarget, setBotTarget] = useState<BotFeatureTarget | null>(null)
+  useEffect(() => {
+    setBotTarget(null)
+  }, [project?.projectId, mode])
   const editing = mode === "edit"
   const featureNameError = getHarnessNameError("特性名称", featureName)
   const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
@@ -3689,19 +3755,6 @@ function FeatureCreateDialog({
           >
             管理发布单元
           </Button>
-          {publicConstraintsSyncAvailable && (
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              className="h-auto min-w-0 px-0 py-0 text-xs"
-              disabled={syncingPublicConstraints || creating}
-              onClick={onSyncPublicConstraints}
-            >
-              {syncingPublicConstraints && <Loader2 className="mr-1 size-3 animate-spin" />}
-              拉取最新公共系统约束
-            </Button>
-          )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <div className="text-xs text-muted-foreground">已选择 {selectedDeployUnitCount} 个发布单元</div>
@@ -3914,8 +3967,8 @@ function FeatureCreateDialog({
           className="grid min-h-0 min-w-0 gap-4 overflow-x-hidden overflow-y-auto py-1"
           onSubmit={(event) => {
             event.preventDefault()
-            if (syncingPublicConstraints || !workspacePath.trim()) return
-            onSubmit()
+            if (!workspacePath.trim()) return
+            onSubmit(editing ? null : botTarget)
           }}
         >
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -4014,6 +4067,16 @@ function FeatureCreateDialog({
             </div>
           )}
           <DialogFooter>
+            {!editing && (
+              <div className="min-w-0 sm:mr-auto sm:max-w-[55%]">
+                <FeatureBotLinkButton
+                  mode="create"
+                  target={botTarget}
+                  onSelect={setBotTarget}
+                  disabled={creating}
+                />
+              </div>
+            )}
             <Button
               type="button"
               variant="ghost"
@@ -4026,7 +4089,6 @@ function FeatureCreateDialog({
               type="submit"
               disabled={
                 creating ||
-                syncingPublicConstraints ||
                 (!editing && workflowLoading) ||
                 !featureName.trim() ||
                 !workspacePath.trim() ||
@@ -4523,11 +4585,13 @@ function FeatureCard({
   projectId,
   run,
   workflowNodes,
+  scheduledAt,
   onOpen
 }: {
   projectId: string
   run: HarnessFeatureSummary
   workflowNodes: Array<{ id: string; label: string }>
+  scheduledAt?: string
   onOpen: () => void
 }): React.JSX.Element {
   const pendingDecision = useHarnessNotifications().some(
@@ -4564,9 +4628,17 @@ function FeatureCard({
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {pendingDecision ? (
             <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
-          ) : (
-            managedRunStatus && <StatusPill status={managedRunStatus} />
-          )}
+          ) : managedRunStatus ? (
+            <StatusPill status={managedRunStatus} />
+          ) : scheduledAt ? (
+            <span
+              className="inline-flex h-6 max-w-full shrink-0 items-center gap-1.5 rounded border border-status-nominal/50 bg-status-nominal/10 px-2 text-[11px] font-medium text-status-nominal"
+              title={`预约启动时间：${scheduledAt}`}
+            >
+              <Clock className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">已预约托管运行</span>
+            </span>
+          ) : null}
           <StatusPill status={run.overallStatus} />
         </div>
       </div>
@@ -4644,7 +4716,6 @@ function ProjectCard({
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const pluginCompatibilityStatus = boardCompatibilityStatus(project.boardCompatibility)
   const archivedStatus: HarnessStatus = { label: "已归档", uiKind: "archived" }
-  const projectRootPath = resolveProjectRootPath(project)
 
   useEffect(() => {
     if (archived || !projectCode) return
@@ -4807,19 +4878,7 @@ function ProjectCard({
           )}
         </div>
 
-        <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2 border-t border-border/70 pt-2.5 text-[11px] text-muted-foreground">
-          <div className="flex min-w-0 items-center gap-1">
-            <FolderOpen className="size-3 shrink-0" />
-            <span className="truncate" title={projectRootPath}>
-              {getWorkspaceName(projectRootPath)}
-            </span>
-            {/*<span*/}
-            {/*  className="max-w-28 truncate rounded-full border border-border/80 bg-muted/70 px-2.5 py-1 text-[11px] text-muted-foreground"*/}
-            {/*  title={project.harnessAdapter.name}*/}
-            {/*>*/}
-            {/*  {project.harnessAdapter.name}*/}
-            {/*</span>*/}
-          </div>
+        <div className="mt-2.5 flex min-w-0 items-center justify-end border-t border-border/70 pt-2.5 text-[11px] text-muted-foreground empty:hidden">
           {pluginUpdateInfo ? (
             <ProjectPluginUpdateButton
               pluginUpdateInfo={pluginUpdateInfo}
@@ -5323,11 +5382,15 @@ function FeatureConversationPanel({
   threadId,
   chatSurface = "harness-project",
   readOnlyReason,
+  historyOnly,
+  searchAccessPending,
   onHarnessSessionCreated,
 }: {
   threadId: string | null
   chatSurface?: "harness-project" | "harness-feature-session"
   readOnlyReason?: string | null
+  historyOnly?: boolean
+  searchAccessPending?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
 }): React.JSX.Element {
   return (
@@ -5340,60 +5403,14 @@ function FeatureConversationPanel({
             chatSurface={chatSurface}
             hideWelcomeSkillTabs
             readOnlyReason={readOnlyReason}
+            historyOnly={historyOnly}
+            searchAccessPending={searchAccessPending}
             onHarnessSessionCreated={onHarnessSessionCreated}
           />
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
           从左侧特性工作区选择会话，或发起新会话。
-        </div>
-      )}
-    </section>
-  )
-}
-
-function FeatureDeployUnitsPanel({
-  deployUnits
-}: {
-  deployUnits: HarnessDeployUnitMapping[]
-}): React.JSX.Element {
-  return (
-    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-background-elevated")}>
-      <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-4 py-3 text-sm font-semibold">
-        <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-        <span className="truncate">当前特性绑定的发布单元</span>
-      </div>
-      {deployUnits?.length === 0 ? (
-        <div className="px-4 py-8 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
-      ) : (
-        <div className="divide-y divide-border/70">
-          {deployUnits?.map((deployUnit) => (
-            <div key={deployUnit.deployUnitIdMapping} className="px-4 py-3">
-              <div className="truncate text-sm font-medium" title={deployUnit.deployUnitId}>
-                {deployUnit.deployUnitId}
-              </div>
-              <div className="mt-1 flex min-w-0 items-center gap-2">
-                <div
-                  className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-                  title={deployUnit.localRepoPath}
-                >
-                  {deployUnit.localRepoPath}
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="size-7 shrink-0"
-                  title="打开代码库路径"
-                  onClick={() =>
-                    void openPathInFileManager(deployUnit.localRepoPath, "无法打开代码库路径")
-                  }
-                >
-                  <FolderOpen className="size-3.5" />
-                </Button>
-              </div>
-            </div>
-          ))}
         </div>
       )}
     </section>
@@ -5831,188 +5848,6 @@ function ProjectReviewSummary({
   )
 }
 
-function ProjectConstraintSyncPanel({
-  registry,
-  hasMore,
-  loadingMore,
-  syncingAdapterIds,
-  syncedPaths,
-  expandedAdapterIds,
-  knowledgePreviews,
-  loadingKnowledgePreviewAdapterIds,
-  selectedKnowledgePreviewPaths,
-  onSync,
-  onToggleKnowledgePreview,
-  onRefreshKnowledgePreview,
-  onSelectKnowledgePreviewPath,
-  onLoadMore
-}: {
-  registry: HarnessAdapterRegistryItem[]
-  hasMore: boolean
-  loadingMore: boolean
-  syncingAdapterIds: Set<string>
-  syncedPaths: Record<string, string>
-  expandedAdapterIds: Set<string>
-  knowledgePreviews: Record<string, HarnessKnowledgePreviewResult>
-  loadingKnowledgePreviewAdapterIds: Set<string>
-  selectedKnowledgePreviewPaths: Record<string, string | null>
-  onSync: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
-  onToggleKnowledgePreview: (adapter: HarnessAdapterRegistryItem) => void
-  onRefreshKnowledgePreview: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
-  onSelectKnowledgePreviewPath: (adapter: HarnessAdapterRegistryItem, path: string | null) => void
-  onLoadMore: () => void
-}): React.JSX.Element {
-  const adapters = registry.filter((adapter) => adapter.boardCompatibility.compatible)
-
-  return (
-    <section className="rounded-md border border-border bg-background shadow-sm">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h2 className="text-sm font-semibold text-foreground">拉取公共系统约束</h2>
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          className="h-auto min-w-0 px-0 py-0 text-xs"
-          onClick={() => {
-            void window.electron.openManagedLink("knowledgeGuide")
-          }}
-        >
-          知识库使用指引
-        </Button>
-      </div>
-      <div className="space-y-3 p-4">
-        {adapters.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
-            暂无支持项目模式的插件。
-          </div>
-        ) : (
-          <>
-            {adapters.map((adapter) => {
-              const syncing = syncingAdapterIds.has(adapter.id)
-              const disabled = syncing || !adapter.pullKnowledgeAvailable
-              const syncedPath = syncedPaths[adapter.id]
-              const expanded = expandedAdapterIds.has(adapter.id)
-              return (
-                <div
-                  key={adapter.id}
-                  className="min-w-0 rounded-md border border-border bg-muted/20 px-4 py-3"
-                >
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={expanded}
-                    className="flex min-w-0 cursor-pointer items-center justify-between gap-4 rounded-sm outline-none transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring"
-                    onClick={() => onToggleKnowledgePreview(adapter)}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter" && event.key !== " ") return
-                      event.preventDefault()
-                      onToggleKnowledgePreview(adapter)
-                    }}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <AdapterOptionHeader adapter={adapter} />
-                        {adapter.useScenario && (
-                          <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                            {adapter.useScenario}
-                          </span>
-                        )}
-                      </div>
-                      <AdapterPublisherInfo adapter={adapter} className="mt-1" />
-                      {adapter.description && (
-                        <div
-                          className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground"
-                          title={adapter.description}
-                        >
-                          {adapter.description}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {syncedPath && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          title={syncedPath}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            void openPathInFileManager(syncedPath, "无法打开项目约束目录")
-                          }}
-                        >
-                          <FolderOpen className="size-3.5" />
-                        </Button>
-                      )}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        title={expanded ? "收起知识库预览" : "展开知识库预览"}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          onToggleKnowledgePreview(adapter)
-                        }}
-                      >
-                        {expanded ? (
-                          <ChevronDown className="size-3.5" />
-                        ) : (
-                          <ChevronRight className="size-3.5" />
-                        )}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="gap-2"
-                        disabled={disabled}
-                        title={
-                          adapter.pullKnowledgeAvailable
-                            ? "拉取最新公共系统约束"
-                            : "插件未配置 pull_knowledge"
-                        }
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          void onSync(adapter)
-                        }}
-                      >
-                        {syncing ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : (
-                          <RefreshCw className="size-4" />
-                        )}
-                        拉取最新约束
-                      </Button>
-                    </div>
-                  </div>
-                  {expanded && (
-                    <KnowledgePreviewPanel
-                      preview={knowledgePreviews[adapter.id] ?? null}
-                      loading={loadingKnowledgePreviewAdapterIds.has(adapter.id)}
-                      selectedPath={selectedKnowledgePreviewPaths[adapter.id] ?? null}
-                      onSelectPath={(path) => onSelectKnowledgePreviewPath(adapter, path)}
-                      onRefresh={() => onRefreshKnowledgePreview(adapter)}
-                    />
-                  )}
-                </div>
-              )
-            })}
-            {hasMore && (
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                disabled={loadingMore}
-                onClick={onLoadMore}
-              >
-                {loadingMore && <Loader2 className="mr-2 size-4 animate-spin" />}
-                加载更多插件
-              </Button>
-            )}
-          </>
-        )}
-      </div>
-    </section>
-  )
-}
 
 function ProjectDetailPage({
   project,
@@ -6024,12 +5859,15 @@ function ProjectDetailPage({
   loading,
   creatingFeature,
   creatingSystemConstraintUpdate,
+  knowledgeSyncing,
+  knowledgeWriteAvailable,
   leanToken,
   leanTokenLoading,
   onBackToList,
   onCreateFeature,
   onOpenSystemConstraintUpdate,
   onRefresh,
+  managedScheduleRefreshRevision,
   onEditProject,
   onUpdatePlugin,
   onOpenLeanTokenSettings,
@@ -6044,6 +5882,8 @@ function ProjectDetailPage({
   loading: boolean
   creatingFeature: boolean
   creatingSystemConstraintUpdate: boolean
+  knowledgeSyncing: boolean
+  knowledgeWriteAvailable?: boolean
   leanToken: string
   leanTokenLoading: boolean
   onBackToList: () => void
@@ -6053,11 +5893,13 @@ function ProjectDetailPage({
     config: NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]>
   ) => void
   onRefresh: (projectId: string) => void
+  managedScheduleRefreshRevision: number
   onEditProject: (project: HarnessProjectListItem) => void
   onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
   onOpenLeanTokenSettings: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
@@ -6069,7 +5911,10 @@ function ProjectDetailPage({
   const projectRootPath = resolveProjectRootPath(project)
   const hasProjectCode = project.projectCode.trim().length > 0
   const hasLeanToken = leanToken.trim().length > 0
-  const canOpenSystemConstraintUpdate = hasProjectCode && hasLeanToken && !leanTokenLoading
+  const hasKnowledgePath =
+    knowledgeWriteAvailable ?? Boolean(detail?.systemConstraintUpdate?.knowledgePath)
+  const canOpenSystemConstraintUpdate =
+    hasProjectCode && hasLeanToken && !leanTokenLoading && hasKnowledgePath && !knowledgeSyncing
   const openProjectWorkspaceInFileManager = useCallback((): void => {
     void openPathInFileManager(projectRootPath, "无法打开项目工作区")
   }, [projectRootPath])
@@ -6107,18 +5952,24 @@ function ProjectDetailPage({
                         ) : (
                           <RefreshCcw className="size-4" />
                         )}
-                        知识库沉淀
+                        系统约束沉淀
                       </Button>
                     </span>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" sideOffset={6}>
-                    {!hasProjectCode
-                      ? "请先编辑项目信息，填写项目编号"
-                      : !hasLeanToken
-                        ? "请先配置精益平台token"
-                        : leanTokenLoading
-                          ? "正在加载配置..."
-                          : "沉淀本项目的变更，更新知识库"}
+                    {knowledgeSyncing
+                      ? "知识库正在同步，请稍后再运行沉淀任务"
+                      : !hasProjectCode
+                        ? "请先编辑项目信息，填写项目编号"
+                        : !hasKnowledgePath
+                          ? project.knowledgeBaseIds.length === 0
+                            ? "请先在项目设置中配置知识库"
+                            : "知识沉淀工作区不可用，请前往公共系统约束 Tab 下载或处理"
+                          : !hasLeanToken
+                            ? "请先配置精益平台token"
+                            : leanTokenLoading
+                              ? "正在加载配置..."
+                              : "沉淀本项目的变更，更新知识库"}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -6224,15 +6075,6 @@ function ProjectDetailPage({
                       {project.systemName || "-"}
                     </strong>
                   </span>
-                  <span
-                    className="shrink-0 max-w-52 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground"
-                    title={projectRootPath}
-                  >
-                    工作区{" "}
-                    <strong className="font-medium text-foreground">
-                      {getWorkspaceName(projectRootPath)}
-                    </strong>
-                  </span>
                   <span className="shrink-0 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[11px] text-muted-foreground">
                     特性{" "}
                     <strong className="font-medium text-foreground">
@@ -6245,17 +6087,13 @@ function ProjectDetailPage({
                       {loading || !detail ? "-" : activeCount}
                     </strong>
                   </span>
-                  <Button
+                  <button
                     type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    className="ml-auto size-7 shrink-0"
-                    title="打开项目工作区"
-                    aria-label="打开项目工作区"
+                    className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onClick={openProjectWorkspaceInFileManager}
                   >
-                    <FolderOpen className="size-3.5" />
-                  </Button>
+                    打开工作区
+                  </button>
                 </div>
               </section>
               <HarnessProjectPhaseFlow steps={phaseSteps} />
@@ -6332,6 +6170,9 @@ function ProjectDetailPage({
                               projectId={project.projectId}
                               key={run.slug}
                               run={run}
+                              scheduledAt={managedScheduleIndex.get(
+                                JSON.stringify([project.projectId, run.slug])
+                              )}
                               workflowNodes={workflowForProjectRun(detail, run).nodes}
                               onOpen={() => onOpenFeature(project.projectId, run.slug)}
                             />
@@ -6361,6 +6202,9 @@ function ProjectSessionPage({
   project,
   thread,
   deleted,
+  historyOnly = false,
+  searchAccessPending = false,
+  featureSlug,
   onBackToList,
   onBackToProject,
   onHarnessSessionCreated,
@@ -6368,12 +6212,18 @@ function ProjectSessionPage({
   project: ProjectFeatureSidebarProject
   thread: Thread | null
   deleted?: boolean
+  historyOnly?: boolean
+  searchAccessPending?: boolean
+  featureSlug?: string
   onBackToList: () => void
   onBackToProject: () => void
   onHarnessSessionCreated?: (threadId: string) => void
 }): React.JSX.Element {
   const title = thread ? getThreadTitle(thread) : "项目会话"
-  const readOnlyReason = deleted ? "所属项目已删除，当前会话只读。" : null
+  const readOnlyReason = deleted ? "所属项目已删除，当前会话只读。"
+    : project.lifecycle.status === "archived" ? "所属项目已归档，当前会话只读。"
+      : historyOnly ? "此会话暂时只读。你可以从左侧「项目列表」重新进入项目。确认项目可用后，再打开此会话继续对话。"
+        : searchAccessPending ? "正在确认项目状态，请稍候。" : null
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -6381,7 +6231,8 @@ function ProjectSessionPage({
         <div className={harnessPageHeaderContentClassName}>
           <div className="min-w-0 space-y-2">
             <HarnessBreadcrumb
-              project={project as HarnessProjectListItem}
+              project={project}
+              featureTitle={featureSlug}
               sessionTitle={title}
               onBack={onBackToProject}
               onProjectList={onBackToList}
@@ -6399,9 +6250,11 @@ function ProjectSessionPage({
       <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
         <FeatureConversationPanel
           threadId={thread?.thread_id ?? null}
-          chatSurface="harness-feature-session"
+          chatSurface={featureSlug ? "harness-project" : "harness-feature-session"}
           readOnlyReason={readOnlyReason}
-          onHarnessSessionCreated={onHarnessSessionCreated}
+          historyOnly={historyOnly}
+          searchAccessPending={searchAccessPending}
+          onHarnessSessionCreated={historyOnly || searchAccessPending ? undefined : onHarnessSessionCreated}
         />
       </div>
     </div>
@@ -6550,7 +6403,10 @@ function FeatureDetailPage({
   loading,
   unbound,
   projectDeleted,
+  projectArchived,
+  searchAccessPending,
   activeSessionThreadId,
+  searchSessionThreadId,
   isViewingSession,
   fallbackProjectName,
   fallbackFeatureTitle,
@@ -6558,6 +6414,7 @@ function FeatureDetailPage({
   onBackToProject,
   onEditDeployUnits,
   onRefresh,
+  managedScheduleRefreshRevision,
   onFeatureImManagementSaved,
   onActiveSessionChange,
   onSessionViewChange,
@@ -6567,7 +6424,10 @@ function FeatureDetailPage({
   loading: boolean
   unbound?: boolean
   projectDeleted?: boolean
+  projectArchived?: boolean
+  searchAccessPending?: boolean
   activeSessionThreadId?: string
+  searchSessionThreadId?: string
   isViewingSession: boolean
   fallbackProjectName?: string
   fallbackFeatureTitle?: string
@@ -6575,6 +6435,7 @@ function FeatureDetailPage({
   onBackToProject: () => void
   onEditDeployUnits: () => void
   onRefresh: () => void | Promise<void>
+  managedScheduleRefreshRevision: number
   onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
@@ -6601,9 +6462,6 @@ function FeatureDetailPage({
     detail?.run.nodes.find((node) => node.id === effectiveSelectedNodeId) ??
     detail?.run.nodes[0] ??
     null
-  const completedArtifactCount =
-    selectedNode?.artifacts?.filter((artifact) => artifact.artifactStatus === "generated").length ??
-    0
   const selectedNodeHooks = useMemo(
     () => [...(selectedNode?.hooks ?? [])].sort((a, b) => (b.ts || "").localeCompare(a.ts || "")),
     [selectedNode]
@@ -6627,6 +6485,11 @@ function FeatureDetailPage({
     selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
   const managedRun = detail?.run.managedRun
   const managedRunIsRunning = managedRun?.status === "running"
+  const managedSchedule = useManagedRunSchedule(
+    projectDeleted ? undefined : detail?.project.projectId,
+    detail?.run.slug,
+    managedScheduleRefreshRevision
+  )
   const managedRunSessionThreadId = managedRun?.currentSession?.threadId
   const managedRunStatus = managedRun ? managedRunStatusToHarnessStatus(managedRun.status) : null
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
@@ -6687,12 +6550,19 @@ function FeatureDetailPage({
     null
   )
   const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
-  const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
-  const [managedRunUserMessage, setManagedRunUserMessage] = useState("")
-  const managedRunDefaultUserMessageRef = useRef("")
-  const [managedRunImEnabled, setManagedRunImEnabled] = useState(true)
+  const managedRunSessionOptions = useMemo(
+    () =>
+      managedRunDialogOpen
+        ? buildManagedRunSessionOptions(
+            detail?.sessions ?? [],
+            threadsById,
+            allThreadStates,
+            allStreamLoadingStates
+          )
+        : [],
+    [managedRunDialogOpen, detail?.sessions, threadsById, allThreadStates, allStreamLoadingStates]
+  )
   const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
-  const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
   const managedRunActionInFlightRef = useRef(false)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
@@ -6701,7 +6571,7 @@ function FeatureDetailPage({
   const [activeDetailTab, setActiveDetailTab] = useState<"feature" | "session">(() =>
     isViewingSession && activeSessionThreadId ? "session" : "feature"
   )
-  const projectInteractionDisabled = Boolean(unbound || projectDeleted)
+  const projectInteractionDisabled = Boolean(unbound || projectDeleted || projectArchived || searchAccessPending)
   const featureImManagementAvailable =
     featureImRobotStatus?.settings.enabled === true &&
     featureImRobotStatus.connectionState === "online" &&
@@ -6741,11 +6611,11 @@ function FeatureDetailPage({
       return
     }
 
-    const activeThreadId =
+    const activeThreadId = searchSessionThreadId ?? (
       activeSessionThreadId &&
       detail.sessions.some((session) => session.threadId === activeSessionThreadId)
         ? activeSessionThreadId
-        : null
+        : null)
     const firstThreadId = activeThreadId ?? detail.sessions[0]?.threadId ?? null
     setSelectedSessionState((current) => {
       if (current.detailKey !== detailKey) {
@@ -6762,7 +6632,7 @@ function FeatureDetailPage({
       }
       return { detailKey, threadId: firstThreadId }
     })
-  }, [activeSessionThreadId, detail, detailKey])
+  }, [activeSessionThreadId, detail, detailKey, searchSessionThreadId])
 
   useEffect(() => {
     setActiveDetailTab(isViewingSession && activeSessionThreadId ? "session" : "feature")
@@ -6792,8 +6662,9 @@ function FeatureDetailPage({
       node.status.uiKind === "active" &&
       hasRunningFeatureSession
     )
-  const activeSessionThreadIdForView =
-    activeDetailTab === "session" ? selectedSessionThreadId : null
+  const activeSessionThreadIdForView = isViewingSession && searchSessionThreadId
+    ? searchSessionThreadId
+    : activeDetailTab === "session" ? selectedSessionThreadId : null
   const effectiveActiveDetailTab = activeSessionThreadIdForView ? "session" : "feature"
 
   useEffect(() => {
@@ -6818,37 +6689,49 @@ function FeatureDetailPage({
   )
 
   useEffect(() => {
-    if (!activeSessionThreadIdForView) return
+    if (!activeSessionThreadIdForView || activeSessionThreadIdForView === useAppStore.getState().currentThreadId) return
+    const pendingSearch = useThreadSearch.getState().navigation
+    if (pendingSearch && pendingSearch.stage !== "chat") return
     void selectThread(activeSessionThreadIdForView, { preserveView: true })
   }, [activeSessionThreadIdForView, selectThread])
 
-  const handleCreateSession = useCallback(async (): Promise<void> => {
-    if (!detail || sessionBusy || projectInteractionDisabled) return
-    setSessionBusy("create")
-    try {
-      const thread = await createHarnessSession({
-        projectId: detail.project.projectId,
-        slug: detail.run.slug,
-        sessionWorkspacePath: detail.run.resolvedSessionWorkspacePath,
-        nextAction: getHarnessRunNextAction(detail),
-        createThread
-      })
-      setSelectedSessionState({ detailKey, threadId: thread.thread_id })
-      onActiveSessionChange?.(thread.thread_id)
-      setActiveDetailTab("session")
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setSessionBusy(null)
-    }
-  }, [
-    createThread,
-    detail,
-    detailKey,
-    onActiveSessionChange,
-    projectInteractionDisabled,
-    sessionBusy
-  ])
+  const handleCreateSession = useCallback(
+    async (nextAction?: HarnessWorkflowNextAction, initialAgentMode?: "multi"): Promise<void> => {
+      if (!detail || sessionBusy || projectInteractionDisabled) return
+      setSessionBusy("create")
+      try {
+        const thread = await createHarnessSession({
+          projectId: detail.project.projectId,
+          slug: detail.run.slug,
+          sessionWorkspacePath: detail.run.resolvedSessionWorkspacePath,
+          nextAction: nextAction ?? getHarnessRunNextAction(detail),
+          createThread:
+            initialAgentMode === "multi"
+              ? (metadata, options) =>
+                  createThread(
+                    { ...metadata, agentMode: "normal", subagentsEnabled: true },
+                    options
+                  )
+              : createThread
+        })
+        setSelectedSessionState({ detailKey, threadId: thread.thread_id })
+        onActiveSessionChange?.(thread.thread_id)
+        setActiveDetailTab("session")
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setSessionBusy(null)
+      }
+    },
+    [
+      createThread,
+      detail,
+      detailKey,
+      onActiveSessionChange,
+      projectInteractionDisabled,
+      sessionBusy
+    ]
+  )
 
   const setCombinedFeatureImManagement = useCallback(
     async (enabled: boolean): Promise<void> => {
@@ -6944,19 +6827,6 @@ function FeatureDetailPage({
     [detail, setCombinedFeatureImManagement, updatingFeatureImManagement]
   )
 
-  const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
-    if (pickingManagedRunWorkspace) return
-    setPickingManagedRunWorkspace(true)
-    try {
-      const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
-      if (workspacePath) setManagedRunWorkspacePath(workspacePath)
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setPickingManagedRunWorkspace(false)
-    }
-  }, [pickingManagedRunWorkspace])
-
   const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
     if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled)
       return
@@ -6968,32 +6838,23 @@ function FeatureDetailPage({
       })
       const defaultWorkspacePath = normalizeWorkspacePath(detail.run.resolvedSessionWorkspacePath)
       if (!defaultWorkspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
-      setManagedRunWorkspacePath(defaultWorkspacePath)
-      const defaultUserMessage = getHarnessRunNextAction(detail)?.userMessage ?? ""
-      managedRunDefaultUserMessageRef.current = defaultUserMessage
-      setManagedRunUserMessage(defaultUserMessage)
-      setManagedRunImEnabled(featureImManagementAvailable)
-      setPickingManagedRunWorkspace(false)
       setManagedRunDialogOpen(true)
     } catch (error) {
       toast.error(cleanIpcError(error))
     } finally {
       setOpeningManagedRunDialog(false)
     }
-  }, [
-    detail,
-    featureImManagementAvailable,
-    openingManagedRunDialog,
-    projectInteractionDisabled,
-    updatingManagedRun
-  ])
+  }, [detail, openingManagedRunDialog, projectInteractionDisabled, updatingManagedRun])
 
   const handleManagedRunChange = useCallback(
     async (
       shouldStart: boolean,
       workspacePath?: string,
       enableImManagement = true,
-      initialUserMessage?: string
+      initialUserMessage?: string,
+      existingThreadId?: string,
+      scheduledAt?: string,
+      modelSelection?: ManagedRunModelSelection
     ): Promise<boolean> => {
       if (
         !detail ||
@@ -7013,12 +6874,35 @@ function FeatureDetailPage({
           const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
           if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
           await setCombinedFeatureImManagement(enableImManagement)
+          if (scheduledAt) {
+            await window.api.harnessBoard.scheduleManagedRun({
+              projectId: detail.project.projectId,
+              featureId: detail.run.slug,
+              workspacePath: confirmedWorkspacePath,
+              initialUserMessage,
+              existingThreadId,
+              modelSelection,
+              scheduledAt
+            })
+            toast.success("已预约托管运行")
+            return true
+          }
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
             workspacePath: confirmedWorkspacePath,
-            initialUserMessage
+            initialUserMessage,
+            existingThreadId,
+            modelSelection
           })
+          if (existingThreadId) {
+            void window.api.threads
+              .get(existingThreadId)
+              .then((thread) => {
+                if (thread) useAppStore.getState().addThreadSummary(thread)
+              })
+              .catch((error) => console.warn("[ManagedRun] Failed to refresh session:", error))
+          }
           startStatus = startedRun.status
           startFailureReason = startedRun.failureReason
         } else {
@@ -7058,21 +6942,6 @@ function FeatureDetailPage({
       updatingManagedRun
     ]
   )
-
-  const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
-    const userMessage = managedRunUserMessage.trim()
-    const initialUserMessage =
-      userMessage && userMessage !== managedRunDefaultUserMessageRef.current.trim()
-        ? userMessage
-        : undefined
-    const started = await handleManagedRunChange(
-      true,
-      managedRunWorkspacePath,
-      managedRunImEnabled,
-      initialUserMessage
-    )
-    if (started) setManagedRunDialogOpen(false)
-  }, [handleManagedRunChange, managedRunImEnabled, managedRunUserMessage, managedRunWorkspacePath])
 
   const handleContextReminderSessionCreated = useCallback(
     (threadId: string): void => {
@@ -7343,14 +7212,14 @@ function FeatureDetailPage({
               onBack={
                 projectDeleted
                   ? onBackToList
-                  : effectiveActiveDetailTab === "session"
+                  : !searchAccessPending && effectiveActiveDetailTab === "session"
                     ? handleBackToFeature
                     : onBackToProject
               }
               onProjectList={onBackToList}
               onProject={projectDeleted ? undefined : onBackToProject}
               onFeature={
-                projectDeleted
+                projectDeleted || searchAccessPending
                   ? undefined
                   : effectiveActiveDetailTab === "session"
                     ? handleBackToFeature
@@ -7383,11 +7252,17 @@ function FeatureDetailPage({
                       !detail ||
                       projectInteractionDisabled ||
                       openingManagedRunDialog ||
-                      updatingManagedRun
+                      updatingManagedRun ||
+                      (!managedRunIsRunning &&
+                        (managedSchedule.loading ||
+                          Boolean(managedSchedule.schedule) ||
+                          Boolean(managedSchedule.error)))
                     }
                   >
-                    {(openingManagedRunDialog || updatingManagedRun) && (
+                    {openingManagedRunDialog || updatingManagedRun ? (
                       <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <ManagedRunIcon />
                     )}
                     {managedRunIsRunning ? "停止托管运行" : "托管运行当前特性"}
                   </Button>
@@ -7409,6 +7284,15 @@ function FeatureDetailPage({
                   )}
                 </div>
               </TooltipProvider>
+              {detail?.artifactAccumulation && (
+                <ArtifactAccumulationButton
+                  disabled={loading || projectInteractionDisabled}
+                  creating={sessionBusy !== null}
+                  onClick={() =>
+                    void handleCreateSession(detail.artifactAccumulation?.nextAction, "multi")
+                  }
+                />
+              )}
               <Button
                 type="button"
                 variant="ghost"
@@ -7461,8 +7345,11 @@ function FeatureDetailPage({
         <div className="flex min-h-0 flex-1 flex-col pt-3">
           <FeatureConversationPanel
             threadId={activeSessionThreadIdForView}
-            readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话" : null}
-            onHarnessSessionCreated={handleContextReminderSessionCreated}
+            readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话"
+              : projectArchived ? "项目已归档，仅可查看历史会话"
+                : searchAccessPending ? "正在确认项目状态，请稍候。" : null}
+            searchAccessPending={searchAccessPending}
+            onHarnessSessionCreated={searchAccessPending ? undefined : handleContextReminderSessionCreated}
           />
         </div>
       ) : projectDeleted ? (
@@ -7565,15 +7452,26 @@ function FeatureDetailPage({
                       {detail.run.title}
                     </h2>
                     <StatusPill status={featureOverallStatus} />
-                    {managedRunStatus && (
-                      <StatusPill
-                        status={managedRunStatus}
-                        onClick={
-                          managedRun?.status === "running" && managedRunSessionThreadId
-                            ? () => handleHookSessionSelect(managedRunSessionThreadId)
-                            : undefined
-                        }
+                    {managedSchedule.schedule || managedSchedule.error ? (
+                      <ManagedRunScheduleBadge
+                        key={`${detailKey}:${managedSchedule.schedule?.scheduleId ?? ""}`}
+                        schedule={managedSchedule.schedule}
+                        error={managedSchedule.error}
+                        onRetry={managedSchedule.reload}
+                        disabled={projectDeleted}
                       />
+                    ) : (
+                      !managedSchedule.loading &&
+                      managedRunStatus && (
+                        <StatusPill
+                          status={managedRunStatus}
+                          onClick={
+                            managedRun?.status === "running" && managedRunSessionThreadId
+                              ? () => handleHookSessionSelect(managedRunSessionThreadId)
+                              : undefined
+                          }
+                        />
+                      )
                     )}
                     {unbound && (
                       <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
@@ -7585,6 +7483,16 @@ function FeatureDetailPage({
                         Mock
                       </span>
                     )}
+                    <div className="ml-auto">
+                      <FeatureBotLinkButton
+                        key={detailKey}
+                        mode="detail"
+                        projectId={detail.project.projectId}
+                        slug={detail.run.slug}
+                        title={detail.run.title}
+                        disabled={projectInteractionDisabled || detail.run.featureStatus === "archived"}
+                      />
+                    </div>
                   </div>
                   <p className="mt-1.5 max-w-3xl text-xs leading-5 text-muted-foreground">
                     {detail.run.source?.label ? `${detail.run.source.label}` : ""}
@@ -7628,8 +7536,8 @@ function FeatureDetailPage({
                     暂无阶段数据。
                   </section>
                 )}
-                <ManagedRunTimeline
-                  key={detail.run.managedRun?.runId ?? "no-managed-run"}
+                <ManagedRunHistory
+                  key={`${detail.project.projectId}:${detail.run.slug}`}
                   run={detail.run.managedRun}
                   projectId={detail.project.projectId}
                   featureId={detail.run.managedRun?.featureId ?? detail.run.slug}
@@ -7655,43 +7563,6 @@ function FeatureDetailPage({
                   }
                   onOpenThread={handleHookSessionSelect}
                 />
-                <section className={cn(harnessSurfaceClassName, "p-3")}>
-                  <div className={harnessKickerClassName}>Current stage</div>
-                  <div className="mt-2.5 flex min-w-0 items-start gap-2.5">
-                    <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border border-status-info/20 bg-status-info/10">
-                      {selectedNode ? (
-                        statusIcon(selectedNode.status, shouldAnimateStageNode(selectedNode))
-                      ) : (
-                        <Circle className="size-4 text-muted-foreground" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-semibold">
-                        {selectedNode?.label ?? "暂无阶段"}
-                      </div>
-                      <div className="mt-1 text-[11px] text-muted-foreground">
-                        {selectedNode?.status.label ?? "等待阶段数据"}
-                      </div>
-                    </div>
-                    {selectedNode && <StatusPill status={selectedNode.status} />}
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
-                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
-                      产物(已完成/预期)
-                      <strong className="mt-0.5 block text-sm text-foreground">
-                        {completedArtifactCount}/{selectedNode?.artifacts?.length ?? 0}
-                      </strong>
-                    </div>
-                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
-                      事件
-                      <strong className="mt-0.5 block text-sm text-foreground">
-                        {selectedNodeHooks.length}
-                      </strong>
-                    </div>
-                  </div>
-                </section>
-
-                <FeatureDeployUnitsPanel deployUnits={detail.run.selectedDeployUnits} />
                 <FeatureWorkspaceChangesPanel
                   sessions={detail.sessions}
                   threadsById={threadsById}
@@ -7728,130 +7599,44 @@ function FeatureDetailPage({
           </div>
         </div>
       )}
-      <Dialog
-        open={managedRunDialogOpen}
-        onOpenChange={(open) => {
-          if (!updatingManagedRun) setManagedRunDialogOpen(open)
-        }}
-      >
-        <DialogContent
-          className={harnessDialogContentClassName}
-          onPointerDownOutside={preventHarnessDialogOutsideClose}
-        >
-          <DialogHeader>
-            <DialogTitle>开启托管运行</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-2 py-2">
-            <div className="flex items-center gap-1.5 text-sm font-medium">
-              <span>会话工作区</span>
-              <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      aria-label="托管模式会话工作区提示"
-                      className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      <Info className="size-3.5" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="z-[70] max-w-72">
-                    该路径将作为本次托管模式自动创建会话时使用的会话工作区
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </div>
-            <Input
-              value={managedRunWorkspacePath}
-              readOnly
-              title={managedRunWorkspacePath}
-              placeholder="请选择文件夹"
-              aria-label="会话工作区"
-              disabled={pickingManagedRunWorkspace || updatingManagedRun}
-              className="min-w-0 cursor-pointer text-foreground"
-              onClick={() => void handlePickManagedRunWorkspace()}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault()
-                  void handlePickManagedRunWorkspace()
-                }
-              }}
-            />
-            <label className="mt-2 grid gap-2 text-sm font-medium">
-              启动会话的初始用户消息
-              <textarea
-                value={managedRunUserMessage}
-                onChange={(event) => setManagedRunUserMessage(event.target.value)}
-                placeholder="留空则使用当前步骤的默认用户消息"
-                rows={4}
-                disabled={updatingManagedRun}
-                className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-normal shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-              />
-            </label>
-            <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
-              <div>
-                <div className="flex items-center gap-1.5 text-sm font-medium">
-                  <span>通过招乎管理托管运行</span>
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-label="查看通过招乎管理托管运行的说明"
-                        >
-                          <Info className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
-                        托管模式需要人工介入的决策可经由招乎审批
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {featureImUnavailableReason
-                    ? featureImUnavailableReason
-                    : "确认后同步更新“通过招乎管理特性”开关"}
-                </div>
-              </div>
-              <Switch
-                aria-label="通过招乎管理托管运行"
-                checked={managedRunImEnabled}
-                disabled={
-                  updatingManagedRun || (!managedRunImEnabled && !featureImManagementAvailable)
-                }
-                onCheckedChange={setManagedRunImEnabled}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setManagedRunDialogOpen(false)}
-              disabled={updatingManagedRun}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void handleConfirmManagedRun()}
-              disabled={
-                !managedRunWorkspacePath.trim() || updatingManagedRun || pickingManagedRunWorkspace
-              }
-            >
-              {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
-              确认并开启托管
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {managedRunDialogOpen && detail && (
+        <ManagedRunStartDialog
+          key={detailKey}
+          sessions={managedRunSessionOptions}
+          previousThreadId={detail.run.managedRun?.currentSession?.threadId}
+          defaultWorkspacePath={detail.run.resolvedSessionWorkspacePath ?? ""}
+          defaultUserMessage={getHarnessRunNextAction(detail)?.userMessage ?? ""}
+          featureImManagementAvailable={featureImManagementAvailable}
+          featureImUnavailableReason={featureImUnavailableReason}
+          updatingManagedRun={updatingManagedRun}
+          onClose={() => setManagedRunDialogOpen(false)}
+          onConfirm={({
+            workspacePath,
+            initialUserMessage,
+            existingThreadId,
+            imEnabled,
+            scheduledAt,
+            modelSelection
+          }) =>
+            handleManagedRunChange(
+              true,
+              workspacePath,
+              imEnabled,
+              initialUserMessage,
+              existingThreadId,
+              scheduledAt,
+              modelSelection
+            )
+          }
+        />
+      )}
     </div>
   )
 }
 
 function ProjectFeatureSidebar({
   groups,
+  managedScheduleRefreshRevision,
   collapsedKeys,
   pinnedProjectIds,
   pinnedFeatureKeys,
@@ -7863,6 +7648,7 @@ function ProjectFeatureSidebar({
   selectedProjectId,
   selectedFeature,
   selectedProjectSession,
+  readOnlyProjectId,
   isViewingSession,
   unreadIds,
   exportingThreadId,
@@ -7870,7 +7656,8 @@ function ProjectFeatureSidebar({
   editingThreadId,
   editingTitle,
   scrollTopRef,
-  scrollIntentRef,
+  preserveScrollRef,
+  searchAnchorRef,
   onToggleCollapse,
   onToggleProjectPin,
   onToggleFeaturePin,
@@ -7890,6 +7677,7 @@ function ProjectFeatureSidebar({
   onEditingTitleChange
 }: {
   groups: ProjectSessionProjectGroup[]
+  managedScheduleRefreshRevision: number
   collapsedKeys: Set<string>
   pinnedProjectIds: Set<string>
   pinnedFeatureKeys: Set<string>
@@ -7901,6 +7689,7 @@ function ProjectFeatureSidebar({
   selectedProjectId: string | null
   selectedFeature: SelectedFeature | null
   selectedProjectSession: SelectedProjectSession | null
+  readOnlyProjectId: string | null
   isViewingSession: boolean
   unreadIds: Set<string>
   exportingThreadId: string | null
@@ -7908,7 +7697,8 @@ function ProjectFeatureSidebar({
   editingThreadId: string | null
   editingTitle: string
   scrollTopRef: MutableRefObject<number>
-  scrollIntentRef: MutableRefObject<ProjectSidebarScrollIntent>
+  preserveScrollRef: MutableRefObject<boolean>
+  searchAnchorRef: MutableRefObject<string | null>
   onToggleCollapse: (key: string) => void
   onToggleProjectPin: (projectId: string) => void
   onToggleFeaturePin: (featureKey: string) => void
@@ -7936,6 +7726,7 @@ function ProjectFeatureSidebar({
         loadMoreThreads: state.loadMoreThreads
       }))
     )
+  const managedScheduleIndex = useManagedRunScheduleIndex(managedScheduleRefreshRevision)
   const highlightThreadId = isViewingSession ? currentThreadId : null
   const scrollAreaRef = useRef<HTMLDivElement | null>(null)
   const pendingScrollRestoreRef = useRef<number | null>(null)
@@ -7976,49 +7767,24 @@ function ProjectFeatureSidebar({
     if (!viewport) return
     scrollTopRef.current = viewport.scrollTop
     pendingScrollRestoreRef.current = viewport.scrollTop > 0 ? viewport.scrollTop : null
-    scrollIntentRef.current = "preserve"
+    preserveScrollRef.current = true
     preserveScrollUntilRef.current = window.performance.now() + 2000
-  }, [getSidebarViewport, scrollIntentRef, scrollTopRef])
+  }, [getSidebarViewport, preserveScrollRef, scrollTopRef])
 
   useLayoutEffect(() => {
     const viewport = getSidebarViewport()
     if (!viewport) return
 
-    const scrollIntent = scrollIntentRef.current
-    if (scrollIntent === "top") {
-      const targetProjectId = isViewingSession
-        ? null
-        : (selectedFeature?.projectId ?? selectedProjectId)
-      const targetProject = groups.find((group) => group.project.projectId === targetProjectId)
-      const targetSlug = selectedFeature?.slug
-      const targetFeature = targetProject?.featureGroups.find((group) => group.slug === targetSlug)
-      if (
-        targetProject &&
-        (collapsedKeys.has(targetProject.key) ||
-          (targetFeature && collapsedKeys.has(targetFeature.key)))
-      ) {
-        return
+    const searchThreadId = searchAnchorRef.current
+    if (searchThreadId) {
+      if (highlightThreadId === searchThreadId && revealSidebarThread(viewport, searchThreadId)) {
+        scrollTopRef.current = viewport.scrollTop
+        preserveScrollRef.current = false
+        preserveScrollUntilRef.current = 0
+        pendingScrollRestoreRef.current = null
+        searchAnchorRef.current = null
       }
-      const targetKey = targetFeature?.key ?? targetProject?.key
-      const target = Array.from(
-        viewport.querySelectorAll<HTMLElement>("[data-sidebar-group-key]")
-      ).find((element) => element.dataset.sidebarGroupKey === targetKey)
-      if (target) {
-        const viewportRect = viewport.getBoundingClientRect()
-        const targetRect = target.getBoundingClientRect()
-        if (targetRect.top < viewportRect.top) {
-          viewport.scrollTop += targetRect.top - viewportRect.top
-        } else if (targetRect.bottom > viewportRect.bottom) {
-          viewport.scrollTop += targetRect.bottom - viewportRect.bottom
-        }
-      } else if (!targetProjectId) {
-        viewport.scrollTop = 0
-      }
-      scrollTopRef.current = viewport.scrollTop
-      preserveScrollUntilRef.current = 0
-      pendingScrollRestoreRef.current = null
-      if (target || !targetProjectId) scrollIntentRef.current = null
-    } else if (scrollIntent === "preserve") {
+    } else if (preserveScrollRef.current) {
       const targetScrollTop = pendingScrollRestoreRef.current ?? scrollTopRef.current
       if (targetScrollTop > 0) {
         const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
@@ -8050,8 +7816,10 @@ function ProjectFeatureSidebar({
     collapsedKeys,
     getSidebarViewport,
     groups,
+    highlightThreadId,
     isViewingSession,
-    scrollIntentRef,
+    preserveScrollRef,
+    searchAnchorRef,
     scrollTopRef,
     selectedFeature?.activeSessionThreadId,
     selectedFeature?.projectId,
@@ -8063,7 +7831,8 @@ function ProjectFeatureSidebar({
   const renderThreadItem = (
     thread: Thread,
     hoverTitle: string,
-    onSelect: () => void
+    onSelect: () => void,
+    options: { isManagedRunning?: boolean; readOnly?: boolean } = {}
   ): React.JSX.Element => {
     const threadState = allThreadStates[thread.thread_id]
     const isLoading =
@@ -8084,8 +7853,10 @@ function ProjectFeatureSidebar({
         isExporting={exportingThreadId === thread.thread_id}
         isForking={forkingThreadId === thread.thread_id}
         isSelected={highlightThreadId === thread.thread_id}
-        isEditing={editingThreadId === thread.thread_id}
+        isEditing={!options.readOnly && editingThreadId === thread.thread_id}
         isUnread={unreadIds.has(thread.thread_id)}
+        isManagedRunning={options.isManagedRunning}
+        readOnly={options.readOnly}
         hasPendingUserInput={hasPendingUserInput}
         editingTitle={editingTitle}
         hoverTitle={hoverTitle}
@@ -8093,7 +7864,9 @@ function ProjectFeatureSidebar({
           captureSidebarScrollTop()
           onSelect()
         }}
-        onRunFinished={() => onRunFinished(thread.thread_id)}
+        onRunFinished={() => {
+          if (!options.readOnly) onRunFinished(thread.thread_id)
+        }}
         onDelete={() => onDeleteSession(thread)}
         onExport={() => void onExportSession(thread)}
         onFork={() => onForkSession(thread)}
@@ -8135,9 +7908,10 @@ function ProjectFeatureSidebar({
   const renderSessionVisibilityControls = (
     key: string,
     visibleSessionCount: number,
-    sessionCount: number
+    sessionCount: number,
+    hiddenCount: number
   ): React.JSX.Element | null => {
-    const canExpandSessions = visibleSessionCount < sessionCount
+    const canExpandSessions = hiddenCount > 0
     const canCollapseSessions = visibleSessionCount > FEATURE_SESSION_INITIAL_VISIBLE_COUNT
 
     if (!canExpandSessions && !canCollapseSessions) return null
@@ -8202,6 +7976,7 @@ function ProjectFeatureSidebar({
               )
             const projectArchived = group.project.lifecycle.status === "archived"
             const projectDeleted = group.deleted === true
+            const readOnly = group.project.projectId === readOnlyProjectId
             const projectPinned = !projectDeleted && pinnedProjectIds.has(group.project.projectId)
             const groupSessionCount =
               group.projectSessions.length +
@@ -8314,6 +8089,7 @@ function ProjectFeatureSidebar({
                         variant="ghost"
                         size="icon-sm"
                         className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
+                        disabled={readOnly}
                         title={
                           hasRunningGroupSession
                             ? "删除项目会话（自动跳过运行中的任务）"
@@ -8347,33 +8123,42 @@ function ProjectFeatureSidebar({
                         projectSessionsKey,
                         group.projectSessions.length
                       )
-                      const visibleProjectSessions = group.projectSessions.slice(
-                        0,
-                        visibleProjectSessionCount
+                      const visibleProjectSessions = selectBoundedSidebarWindow(
+                        group.projectSessions, visibleProjectSessionCount,
+                        selectedProjectSession?.projectId === group.project.projectId
+                          ? group.projectSessions.findIndex((session) => session.threadId === highlightThreadId)
+                          : -1
                       )
 
                       return (
                         <>
-                          {visibleProjectSessions.map((session) => {
+                          {visibleProjectSessions.items.map((session) => {
                             const thread = threadsById.get(session.threadId)
                             if (!thread) return null
-                            return renderThreadItem(thread, `所属项目：${group.project.name}`, () =>
-                              onSelectProjectSession(
-                                group.project.projectId,
-                                thread.thread_id,
-                                projectDeleted
-                              )
+                            return renderThreadItem(
+                              thread, getThreadTitle(thread),
+                              () => onSelectProjectSession(
+                                group.project.projectId, thread.thread_id, projectDeleted
+                              ),
+                              { readOnly }
                             )
                           })}
                           {renderSessionVisibilityControls(
                             projectSessionsKey,
                             visibleProjectSessionCount,
-                            group.projectSessions.length
+                            group.projectSessions.length,
+                            visibleProjectSessions.hiddenCount
                           )}
                         </>
                       )
                     })()}
                     {group.featureGroups.map((featureGroup) => {
+                      const managedScheduleAt =
+                        !projectDeleted && !featureGroup.deleted
+                          ? managedScheduleIndex.get(
+                              JSON.stringify([group.project.projectId, featureGroup.slug])
+                            )
+                          : undefined
                       const featureCollapsed = collapsedKeys.has(featureGroup.key)
                       const featurePinned =
                         !projectDeleted && pinnedFeatureKeys.has(featureGroup.key)
@@ -8397,7 +8182,12 @@ function ProjectFeatureSidebar({
                         featureGroup.key,
                         featureGroup.sessions.length
                       )
-                      const visibleSessions = featureGroup.sessions.slice(0, visibleSessionCount)
+                      const visibleSessions = selectBoundedSidebarWindow(
+                        featureGroup.sessions, visibleSessionCount,
+                        featureSelected && !featureCollapsed
+                          ? featureGroup.sessions.findIndex((session) => session.threadId === highlightThreadId)
+                          : -1
+                      )
 
                       return (
                         <div key={featureGroup.key} className="space-y-1">
@@ -8436,6 +8226,15 @@ function ProjectFeatureSidebar({
                             >
                               {featureGroup.title}
                             </span>
+                            {managedScheduleAt && (
+                              <span
+                                className="inline-flex shrink-0 text-status-nominal"
+                                title={`已预约托管：${managedScheduleAt}`}
+                                aria-label={`已预约托管：${managedScheduleAt}`}
+                              >
+                                <ManagedRunIcon />
+                              </span>
+                            )}
                             {hasUnreadFeatureSession && (
                               <span className="size-2 rounded-full bg-status-info shrink-0" />
                             )}
@@ -8470,7 +8269,7 @@ function ProjectFeatureSidebar({
                                       size="icon-sm"
                                       className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
                                       title="新增会话"
-                                      disabled={creatingSession}
+                                      disabled={creatingSession || readOnly}
                                       onClick={(event) => {
                                         event.stopPropagation()
                                         void onCreateSession(group.project, featureGroup.slug)
@@ -8488,6 +8287,7 @@ function ProjectFeatureSidebar({
                                   variant="ghost"
                                   size="icon-sm"
                                   className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
+                                  disabled={readOnly}
                                   title={
                                     hasRunningFeatureSession
                                       ? "删除特性组会话（自动跳过运行中的任务）"
@@ -8522,25 +8322,30 @@ function ProjectFeatureSidebar({
                                 </div>
                               ) : (
                                 <>
-                                  {visibleSessions.map((session) => {
+                                  {visibleSessions.items.map((session) => {
                                     const thread = threadsById.get(session.threadId)
                                     if (!thread) return null
                                     return renderThreadItem(
                                       thread,
-                                      `所属项目：${group.project.name} / ${featureGroup.title}`,
+                                      getThreadTitle(thread),
                                       () =>
                                         onSelectSession(
                                           group.project.projectId,
                                           session.slug,
                                           thread.thread_id,
                                           projectDeleted
-                                        )
+                                        ),
+                                      {
+                                        isManagedRunning: featureGroup.managedRunThreadId === thread.thread_id,
+                                        readOnly
+                                      }
                                     )
                                   })}
                                   {renderSessionVisibilityControls(
                                     featureGroup.key,
                                     visibleSessionCount,
-                                    featureGroup.sessions.length
+                                    featureGroup.sessions.length,
+                                    visibleSessions.hiddenCount
                                   )}
                                 </>
                               )}
@@ -8587,6 +8392,16 @@ interface HarnessBoardViewProps {
   onActiveSessionThreadChange?: (threadId: string | null) => void
 }
 
+/** All Board route changes share search ownership, including settings and direct links. */
+function useHarnessRouteState<T>(initial: T) {
+  const [state, setState] = useState(initial)
+  const setRoute = useCallback((next: SetStateAction<T>) => {
+    cancelThreadSearchForExternalRoute()
+    setState(next)
+  }, [])
+  return [state, setRoute, setState] as const
+}
+
 export function HarnessBoardView({
   onActiveSessionThreadChange
 }: HarnessBoardViewProps = {}): React.JSX.Element {
@@ -8606,21 +8421,19 @@ export function HarnessBoardView({
   const [sidebarProjectsById, setSidebarProjectsById] = useState<
     Record<string, HarnessProjectListItem>
   >({})
+  const [searchArchivedProjectId, setSearchArchivedProjectId] = useState<string | null>(null)
   const [resolvedSidebarProjectIds, setResolvedSidebarProjectIds] = useState<Set<string>>(new Set())
   const [enterpriseProjectDetailsByCode, setEnterpriseProjectDetailsByCode] = useState<
     Record<string, EnterpriseProjectDetailCacheEntry>
   >({})
   const [projectReviewState, setProjectReviewState] = useState<ProjectReviewState>({ kind: "idle" })
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
+  const [selectedProjectId, setSelectedProjectId, reconcileSelectedProjectId] = useHarnessRouteState<string | null>(null)
+  const [selectedFeature, setSelectedFeature] = useHarnessRouteState<SelectedFeature | null>(null)
   const [selectedProjectSession, setSelectedProjectSession] =
-    useState<SelectedProjectSession | null>(null)
-  const [isViewingSession, setIsViewingSession] = useState(false)
+    useHarnessRouteState<SelectedProjectSession | null>(null)
+  const [isViewingSession, setIsViewingSession] = useHarnessRouteState(false)
   const [runDetail, setRunDetail] = useState<HarnessRunDetailViewModel | null>(null)
-  const [adapterRegistry, setAdapterRegistry] = useState<HarnessAdapterRegistryItem[]>(
-    () => initialCatalogSnapshot?.registry ?? []
-  )
   const [projectDialogAdapterRegistry, setProjectDialogAdapterRegistry] = useState<
     ProjectModeAdapterItem[]
   >([])
@@ -8630,8 +8443,7 @@ export function HarnessBoardView({
   const [projectPageCursor, setProjectPageCursor] = useState(0)
   const [projectPageHistory, setProjectPageHistory] = useState<number[]>([0])
   const [projectNextCursor, setProjectNextCursor] = useState<number | null>(null)
-  const [registryNextCursor, setRegistryNextCursor] = useState<number | null>(null)
-  const [loadingMoreRegistry, setLoadingMoreRegistry] = useState(false)
+  const [, setRegistryNextCursor] = useState<number | null>(null)
   const [catalogSummary, setCatalogSummary] = useState<HarnessBoardCatalogPageResult["summary"]>({
     totalProjects: initialCatalogSnapshot?.projects.length ?? 0,
     matchedProjects: initialCatalogSnapshot?.projects.length ?? 0,
@@ -8647,17 +8459,10 @@ export function HarnessBoardView({
   const [loadingRun, setLoadingRun] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
+  const [form, setForm] = useState<ProjectCreateForm>(() => createEmptyProjectForm())
   const [formError, setFormError] = useState<string | null>(null)
-  const [requirementProjectChoice, setRequirementProjectChoice] =
-    useState<RequirementDevelopmentIntent | null>(null)
-  const [requirementProjectChoiceOpen, setRequirementProjectChoiceOpen] = useState(false)
-  const [requirementSelectableProjects, setRequirementSelectableProjects] = useState<
-    HarnessProjectListItem[] | null
-  >(null)
-  const [requirementCreatedProjectId, setRequirementCreatedProjectId] = useState<string | null>(
-    null
-  )
+  const [workspaceValidating, setWorkspaceValidating] = useState(false)
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [editingProject, setEditingProject] = useState<HarnessProjectListItem | null>(null)
   const [editForm, setEditForm] = useState<HarnessProjectMetadataUpdateInput>(() =>
     createEmptyProjectMetadataForm()
@@ -8717,25 +8522,28 @@ export function HarnessBoardView({
   const [featureLocalAgentmdDeployUnitMappings, setFeatureLocalAgentmdDeployUnitMappings] =
     useState<string[]>([])
   const [selectedDeployUnitIds, setSelectedDeployUnitIds] = useState<Set<string>>(new Set())
-  const [projectModeTab, setProjectModeTab] = useState("projects")
-  const [syncingProjectConstraintAdapterIds, setSyncingProjectConstraintAdapterIds] = useState<
-    Set<string>
-  >(new Set())
-  const [syncedProjectConstraintPaths, setSyncedProjectConstraintPaths] = useState<
-    Record<string, string>
-  >({})
-  const [expandedKnowledgePreviewAdapterIds, setExpandedKnowledgePreviewAdapterIds] = useState<
-    Set<string>
-  >(new Set())
-  const [loadingKnowledgePreviewAdapterIds, setLoadingKnowledgePreviewAdapterIds] = useState<
-    Set<string>
-  >(new Set())
-  const [knowledgePreviewsByAdapterId, setKnowledgePreviewsByAdapterId] = useState<
-    Record<string, HarnessKnowledgePreviewResult>
-  >({})
-  const [selectedKnowledgePreviewPaths, setSelectedKnowledgePreviewPaths] = useState<
-    Record<string, string | null>
-  >({})
+  const [projectModeTab, setProjectModeTab] = useHarnessRouteState("projects")
+  const {
+    result: knowledgeBaseResult,
+    loading: knowledgeBaseLoading,
+    load: loadKnowledgeBases
+  } = useKnowledgeBases(
+    projectModeTab === "constraint-sync" ||
+      dialogOpen ||
+      editingProject !== null ||
+      selectedProjectId !== null,
+    cleanIpcError
+  )
+  const [syncingKnowledgeBaseIds, setSyncingKnowledgeBaseIds] = useState<Set<string>>(new Set())
+  const {
+    expandedIds: expandedKnowledgePreviewAdapterIds,
+    loadingIds: loadingKnowledgePreviewAdapterIds,
+    previews: knowledgePreviewsByAdapterId,
+    selectedPaths: selectedKnowledgePreviewPaths,
+    setSelectedPaths: setSelectedKnowledgePreviewPaths,
+    toggle: handleToggleKnowledgeBasePreview,
+    forget: forgetKnowledgePreview
+  } = useKnowledgePreviews(projectModeTab === "constraint-sync", knowledgeBaseResult, cleanIpcError)
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [updatingFeatureDeployUnits, setUpdatingFeatureDeployUnits] = useState(false)
   const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
@@ -8778,7 +8586,9 @@ export function HarnessBoardView({
   const { cleanupThread } = useThreadContext()
   const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
-  const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
+  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState(() =>
+    readStoredStringSet(COLLAPSED_HARNESS_GROUPS_STORAGE_KEY)
+  )
   const [pinnedProjectIds, setPinnedProjectIds] = useState<Set<string>>(() =>
     readStoredStringSet(PINNED_HARNESS_PROJECTS_STORAGE_KEY)
   )
@@ -8828,7 +8638,8 @@ export function HarnessBoardView({
   const currentThreadIdRef = useRef(currentThreadId)
   const isViewingSessionRef = useRef(isViewingSession)
   const projectSidebarScrollTopRef = useRef(0)
-  const projectSidebarScrollIntentRef = useRef<ProjectSidebarScrollIntent>(null)
+  const preserveProjectSidebarScrollRef = useRef(false)
+  const projectSidebarSearchAnchorRef = useRef<string | null>(null)
   const projectDetailsRefreshInFlightRef = useRef(false)
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
@@ -8872,6 +8683,23 @@ export function HarnessBoardView({
   deployUnitMappingsRef.current = deployUnitMappings
   leanTokenConfigRef.current = leanTokenConfig
   deletionThreadStatesRef.current = allThreadStates
+
+  const searchNavigation = useThreadSearch((state) => state.navigation)
+  const isOfflineHistoryOpen = useCallback(() =>
+    Boolean(
+      useThreadSearch.getState().navigation?.searchReadOnly ||
+      selectedFeatureRef.current?.historyOnly ||
+      selectedProjectSessionRef.current?.historyOnly ||
+      selectedFeatureRef.current?.searchAccessId !== undefined ||
+      selectedProjectSessionRef.current?.searchAccessId !== undefined
+    ), [])
+  const searchAccessId = selectedFeature?.searchAccessId ?? selectedProjectSession?.searchAccessId
+  const searchAccessPending = searchAccessId !== undefined && searchNavigation?.id === searchAccessId
+  const historyOnly = selectedFeature?.historyOnly || selectedProjectSession?.historyOnly ||
+    (searchAccessId !== undefined && !searchAccessPending)
+  const readOnlySearchSession = historyOnly || searchAccessPending
+  const historyProjectId = readOnlySearchSession
+    ? (selectedFeature?.projectId ?? selectedProjectSession?.projectId ?? null) : null
 
   const flushEnterpriseProjectDetailQueue = useCallback(() => {
     enterpriseProjectDetailTimerRef.current = null
@@ -9183,6 +9011,10 @@ export function HarnessBoardView({
 
   const handleProjectModeTabChange = useCallback(
     (nextTab: string): void => {
+      if (nextTab !== projectModeTab) {
+        cancelThreadSearchNavigation()
+        projectSidebarSearchAnchorRef.current = null
+      }
       if (projectModeTab === "settings" && nextTab !== "settings") {
         const payload = buildDeployUnitMappingSavePayload(deployUnitMappings)
         if (
@@ -9213,106 +9045,29 @@ export function HarnessBoardView({
     ]
   )
 
-  const loadKnowledgePreview = useCallback(
-    async (adapter: HarnessAdapterRegistryItem): Promise<void> => {
-      if (loadingKnowledgePreviewAdapterIds.has(adapter.id)) return
-
-      setLoadingKnowledgePreviewAdapterIds((current) => new Set(current).add(adapter.id))
+  const handleSyncKnowledgeBase = useCallback(
+    async (idKey: string): Promise<void> => {
+      if (syncingKnowledgeBaseIds.has(idKey)) return
+      setSyncingKnowledgeBaseIds((current) => new Set(current).add(idKey))
       try {
-        const preview = await window.api.harnessBoard.getKnowledgePreview(adapter.id)
-        if (!boardMountedRef.current) return
-        setKnowledgePreviewsByAdapterId((current) => ({
-          ...current,
-          [adapter.id]: preview
-        }))
-      } catch (error) {
-        const message = cleanIpcError(error)
-        if (boardMountedRef.current && !/superseded|cancelled|aborted/i.test(message)) {
-          toast.error(message)
-        }
-      } finally {
-        if (boardMountedRef.current) {
-          setLoadingKnowledgePreviewAdapterIds((current) => {
-            const next = new Set(current)
-            next.delete(adapter.id)
-            return next
-          })
-        }
-      }
-    },
-    [loadingKnowledgePreviewAdapterIds]
-  )
-
-  const handleToggleKnowledgePreview = useCallback(
-    (adapter: HarnessAdapterRegistryItem): void => {
-      const expanded = expandedKnowledgePreviewAdapterIds.has(adapter.id)
-      setExpandedKnowledgePreviewAdapterIds((current) => {
-        const next = new Set(current)
-        if (expanded) {
-          next.delete(adapter.id)
-        } else {
-          next.add(adapter.id)
-        }
-        return next
-      })
-
-      if (!expanded && !knowledgePreviewsByAdapterId[adapter.id]) {
-        void loadKnowledgePreview(adapter)
-      }
-    },
-    [expandedKnowledgePreviewAdapterIds, knowledgePreviewsByAdapterId, loadKnowledgePreview]
-  )
-
-  const handleSelectKnowledgePreviewPath = useCallback(
-    (adapter: HarnessAdapterRegistryItem, path: string | null): void => {
-      setSelectedKnowledgePreviewPaths((current) => ({
-        ...current,
-        [adapter.id]: path
-      }))
-    },
-    []
-  )
-
-  const syncProjectConstraints = useCallback(
-    async (adapter: HarnessAdapterRegistryItem): Promise<boolean> => {
-      if (!adapter.pullKnowledgeAvailable) return false
-      if (syncingProjectConstraintAdapterIds.has(adapter.id)) return false
-
-      setSyncingProjectConstraintAdapterIds((current) => new Set(current).add(adapter.id))
-      try {
-        const result = await window.api.harnessBoard.syncProjectConstraints(adapter.id)
-        const syncedPath = result.path
-        if (syncedPath) {
-          setSyncedProjectConstraintPaths((current) => ({
-            ...current,
-            [adapter.id]: syncedPath
-          }))
-        }
-        toast.success(result.message || `已更新「${adapter.name}」项目约束`)
-        return true
+        const result = await window.api.harnessBoard.syncKnowledgeBase(idKey)
+        if (result.status === "failed") toast.error(result.message)
+        else if (result.status === "paused" || result.status === "partial")
+          toast.warning(result.message)
+        else toast.success(result.message)
       } catch (error) {
         toast.error(cleanIpcError(error))
-        return false
+        return
       } finally {
-        setSyncingProjectConstraintAdapterIds((current) => {
+        setSyncingKnowledgeBaseIds((current) => {
           const next = new Set(current)
-          next.delete(adapter.id)
+          next.delete(idKey)
           return next
         })
+        await loadKnowledgeBases()
       }
     },
-    [syncingProjectConstraintAdapterIds]
-  )
-
-  const handleSyncProjectConstraints = useCallback(
-    async (adapter: HarnessAdapterRegistryItem): Promise<void> => {
-      const synced = await syncProjectConstraints(adapter)
-      if (!synced) return
-
-      setExpandedKnowledgePreviewAdapterIds((current) => new Set(current).add(adapter.id))
-      await loadKnowledgePreview(adapter)
-    },
-    [loadKnowledgePreview, syncProjectConstraints]
+    [loadKnowledgeBases, syncingKnowledgeBaseIds]
   )
 
   const refreshFeaturePublicConstraints = useCallback(
@@ -9329,37 +9084,6 @@ export function HarnessBoardView({
     },
     []
   )
-
-  const findAdapterForProject = useCallback(
-    (project: HarnessProjectListItem): HarnessAdapterRegistryItem | null => {
-      return (
-        adapterRegistry.find(
-          (adapter) =>
-            adapter.id === project.harnessAdapter.id || adapter.name === project.harnessAdapter.name
-        ) ?? null
-      )
-    },
-    [adapterRegistry]
-  )
-
-  const handleSyncFeaturePublicConstraints = useCallback(async (): Promise<void> => {
-    const project = featureDialogProject
-    if (!project) return
-    const adapter = findAdapterForProject(project)
-    if (!adapter?.pullKnowledgeAvailable) {
-      toast.error("当前插件不支持同步公共约束")
-      return
-    }
-    const synced = await syncProjectConstraints(adapter)
-    if (synced) {
-      await refreshFeaturePublicConstraints(project.projectId, featureWorkflowRequestIdRef.current)
-    }
-  }, [
-    featureDialogProject,
-    findAdapterForProject,
-    refreshFeaturePublicConstraints,
-    syncProjectConstraints
-  ])
 
   const loadProjectDetail = useCallback(
     async (
@@ -9417,65 +9141,52 @@ export function HarnessBoardView({
   }, [])
 
   const openProjectDialogAdapterSession = useCallback((): void => {
-    const sessionId = projectDialogAdapterSessionIdRef.current + 1
-    projectDialogAdapterSessionIdRef.current = sessionId
+    const sessionId = ++projectDialogAdapterSessionIdRef.current
     projectDialogOpenRef.current = true
     projectDialogMarketSnapshotRef.current = null
-    setProjectDialogAdapterRegistry(
-      applyMarketAdapterDisplayData(
-        adapterRegistry.filter((adapter) => adapter.boardCompatibility.status !== "missing-plugin"),
-        [],
-        []
-      )
-    )
-
-    const registryPromise = window.api.harnessBoard.registry()
-    const marketPluginsPromise = loadHarnessMarketPlugins()
-    const installedPluginsPromise = loadHarnessInstalledPlugins()
+    setProjectDialogAdapterRegistry([])
 
     void (async () => {
       try {
-        const registry = await registryPromise
-        if (
-          !projectDialogOpenRef.current ||
-          projectDialogAdapterSessionIdRef.current !== sessionId
-        ) {
-          return
-        }
-        setProjectDialogAdapterRegistry(applyMarketAdapterDisplayData(registry, [], []))
-
-        const [marketPlugins, installedPlugins] = await Promise.all([
-          marketPluginsPromise,
-          installedPluginsPromise
+        const isCurrentSession = (): boolean =>
+          projectDialogOpenRef.current && projectDialogAdapterSessionIdRef.current === sessionId
+        const marketData = Promise.all([
+          loadHarnessMarketPlugins(),
+          window.api.models.getUserInfo().catch(() => null)
         ])
-        const uploaderProfiles = await loadHarnessMarketPluginUploaderProfiles(marketPlugins)
-        if (
-          !projectDialogOpenRef.current ||
-          projectDialogAdapterSessionIdRef.current !== sessionId
-        ) {
-          return
-        }
+        const [registry, installedPlugins] = await Promise.all([
+          window.api.harnessBoard.registry(),
+          loadHarnessInstalledPlugins()
+        ])
+        if (!isCurrentSession()) return
 
-        projectDialogMarketSnapshotRef.current = { marketPlugins, uploaderProfiles }
-        setMarketPluginItems(marketPlugins)
-        setAdapterRegistry((current) => {
-          const enhanced = applyMarketAdapterDisplayData(
-            current,
-            takeHarnessMarketPluginWindow(marketPlugins),
-            [],
-            uploaderProfiles
-          )
-          cacheHarnessBoardRegistry(enhanced)
-          return enhanced
-        })
+        const localRegistry = registry.filter(
+          (adapter) => findInstalledPluginForAdapter(installedPlugins, adapter)?.origin === "local"
+        )
         setProjectDialogAdapterRegistry(
-          applyMarketAdapterDisplayData(registry, marketPlugins, installedPlugins, uploaderProfiles)
+          applyMarketAdapterDisplayData(localRegistry, [], installedPlugins)
+        )
+
+        const [marketPlugins, user] = await marketData
+        if (!isCurrentSession()) return
+        const candidates = getMarketViewerIdCandidates(user)
+        const visibleMarketPlugins = marketPlugins.filter((item) =>
+          canCurrentUserViewMarketItem(item, user?.sapId, candidates, user?.pathName?.trim())
+        )
+        const uploaderProfiles = await loadHarnessMarketPluginUploaderProfiles(visibleMarketPlugins)
+        if (!isCurrentSession()) return
+
+        const snapshot = { marketPlugins, visibleMarketPlugins, uploaderProfiles }
+        projectDialogMarketSnapshotRef.current = snapshot
+        setMarketPluginItems(marketPlugins)
+        setProjectDialogAdapterRegistry(
+          getProjectDialogAdapters(registry, installedPlugins, snapshot)
         )
       } catch (error) {
         console.warn("[HarnessBoard] Failed to load project dialog plugin options:", error)
       }
     })()
-  }, [adapterRegistry])
+  }, [])
 
   const drainProjectDetailQueueRef = useRef<() => void>(() => undefined)
   const scheduleProjectDetailDrain = useCallback((delayMs: number): void => {
@@ -9490,7 +9201,7 @@ export function HarnessBoardView({
   }, [])
 
   const drainProjectDetailQueue = useCallback(async (): Promise<void> => {
-    if (detailBatchInFlightRef.current) return
+    if (detailBatchInFlightRef.current || isOfflineHistoryOpen()) return
     const generation = detailLoadGenerationRef.current
     const projectIds = takeHarnessProjectDetailBatch(
       detailPriorityQueueRef.current,
@@ -9540,7 +9251,7 @@ export function HarnessBoardView({
         }
       }
     }
-  }, [scheduleProjectDetailDrain])
+  }, [isOfflineHistoryOpen, scheduleProjectDetailDrain])
   drainProjectDetailQueueRef.current = () => void drainProjectDetailQueue()
 
   const queueProjectDetails = useCallback(
@@ -9549,6 +9260,7 @@ export function HarnessBoardView({
       priority: "visible" | "background",
       options: { revalidate?: boolean } = {}
     ): void => {
+      if (isOfflineHistoryOpen()) return
       const queue =
         priority === "visible" ? detailPriorityQueueRef.current : detailBackgroundQueueRef.current
       for (const projectId of projectIds) {
@@ -9565,7 +9277,7 @@ export function HarnessBoardView({
       }
       scheduleProjectDetailDrain(priority === "visible" ? 0 : PROJECT_DETAIL_BACKGROUND_DELAY_MS)
     },
-    [scheduleProjectDetailDrain]
+    [isOfflineHistoryOpen, scheduleProjectDetailDrain]
   )
 
   const handleProjectCardVisible = useCallback(
@@ -9606,7 +9318,6 @@ export function HarnessBoardView({
         const items = page.projects
         const registry = page.registry
         setProjects(items)
-        setAdapterRegistry(registry)
         setProjectNextCursor(page.projectNextCursor)
         setRegistryNextCursor(page.registryNextCursor)
         setCatalogSummary(page.summary)
@@ -9623,11 +9334,15 @@ export function HarnessBoardView({
         // 60s refresher revalidates only details that have actually been loaded.
         // An eager background drain turns "switch to project mode" into sustained
         // adapter spawning/JSON parsing proportional to the complete catalog.
-        setSelectedProjectId((current) =>
+        reconcileSelectedProjectId((current) =>
           current &&
           (items.some((item) => item.projectId === current) ||
-            (selectedFeatureRef.current?.deleted &&
-              selectedFeatureRef.current.projectId === current))
+            (selectedFeatureRef.current?.projectId === current &&
+              (selectedFeatureRef.current.deleted || selectedFeatureRef.current.historyOnly ||
+                selectedFeatureRef.current.searchSessionThreadId)) ||
+            (selectedProjectSessionRef.current?.projectId === current &&
+              (selectedProjectSessionRef.current.searchOwned ||
+                selectedProjectSessionRef.current.historyOnly)))
             ? current
             : null
         )
@@ -9666,29 +9381,6 @@ export function HarnessBoardView({
     }
   }, [])
 
-  const loadMoreRegistry = useCallback(async (): Promise<void> => {
-    if (registryNextCursor === null || loadingMoreRegistry) return
-    setLoadingMoreRegistry(true)
-    try {
-      const page = await window.api.harnessBoard.catalogPage({
-        requestScope: "board-registry",
-        includeProjects: false,
-        registryCursor: registryNextCursor,
-        registryLimit: 64
-      })
-      setAdapterRegistry((current) => {
-        const byId = new Map(current.map((adapter) => [adapter.id, adapter]))
-        for (const adapter of page.registry) byId.set(adapter.id, adapter)
-        return Array.from(byId.values())
-      })
-      setRegistryNextCursor(page.registryNextCursor)
-    } catch (error) {
-      setLoadError(cleanIpcError(error))
-    } finally {
-      setLoadingMoreRegistry(false)
-    }
-  }, [loadingMoreRegistry, registryNextCursor])
-
   useEffect(() => {
     boardMountedRef.current = true
     return () => {
@@ -9726,9 +9418,14 @@ export function HarnessBoardView({
       const pluginName = normalizeAdapterMarketName(adapter.name)
       if (!pluginName || updatingPluginNames.has(pluginName)) return
 
-      const marketPlugins =
-        projectDialogMarketSnapshotRef.current?.marketPlugins ?? marketPluginItems
-      const marketPlugin = findMarketPluginForAdapter(marketPlugins, undefined, adapter)
+      const snapshot = projectDialogMarketSnapshotRef.current
+      if (!snapshot) return
+      const sessionId = projectDialogAdapterSessionIdRef.current
+      const marketPlugin = findMarketPluginForAdapter(
+        snapshot.visibleMarketPlugins,
+        undefined,
+        adapter
+      )
       if (!marketPlugin) {
         toast.error("未找到市场插件信息")
         return
@@ -9745,24 +9442,16 @@ export function HarnessBoardView({
         )
         if (response.success) {
           try {
-            const sessionId = projectDialogAdapterSessionIdRef.current
             const [registry, installedPlugins] = await Promise.all([
               window.api.harnessBoard.registry(),
               loadHarnessInstalledPlugins()
             ])
-            const snapshot = projectDialogMarketSnapshotRef.current
             if (
-              snapshot &&
               projectDialogOpenRef.current &&
               projectDialogAdapterSessionIdRef.current === sessionId
             ) {
               setProjectDialogAdapterRegistry(
-                applyMarketAdapterDisplayData(
-                  registry,
-                  snapshot.marketPlugins,
-                  installedPlugins,
-                  snapshot.uploaderProfiles
-                )
+                getProjectDialogAdapters(registry, installedPlugins, snapshot)
               )
             }
           } catch (refreshError) {
@@ -9786,11 +9475,11 @@ export function HarnessBoardView({
         })
       }
     },
-    [bumpPluginVersion, marketPluginItems, updatingPluginNames]
+    [bumpPluginVersion, updatingPluginNames]
   )
 
   const refreshProjectDetailsInBackground = useCallback(async () => {
-    if (selectedProjectIdRef.current || selectedFeatureRef.current) return
+    if (selectedProjectIdRef.current || selectedFeatureRef.current || isOfflineHistoryOpen()) return
     if (projectDetailsRefreshInFlightRef.current) return
 
     const loadedProjectIds = projectsRef.current
@@ -9820,7 +9509,7 @@ export function HarnessBoardView({
     } finally {
       projectDetailsRefreshInFlightRef.current = false
     }
-  }, [])
+  }, [isOfflineHistoryOpen])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -9832,7 +9521,7 @@ export function HarnessBoardView({
 
   const refreshSelectedProjectDetailInBackground = useCallback(async () => {
     const projectId = selectedProjectIdRef.current
-    if (!projectId || selectedFeatureRef.current) return
+    if (!projectId || selectedFeatureRef.current || isOfflineHistoryOpen()) return
     if (selectedProjectRefreshInFlightRef.current) return
 
     selectedProjectRefreshInFlightRef.current = true
@@ -9845,7 +9534,7 @@ export function HarnessBoardView({
     } finally {
       selectedProjectRefreshInFlightRef.current = false
     }
-  }, [loadProjectDetail])
+  }, [isOfflineHistoryOpen, loadProjectDetail])
 
   const patchCachedProjectRuns = useCallback(
     (projectId: string, patchRun: (run: HarnessFeatureSummary) => HarnessFeatureSummary): void => {
@@ -9872,13 +9561,13 @@ export function HarnessBoardView({
   )
 
   useEffect(() => {
-    if (!selectedProjectId || selectedFeature) return
+    if (!selectedProjectId || selectedFeature || historyProjectId) return
     const timer = window.setInterval(() => {
       void refreshSelectedProjectDetailInBackground()
     }, PROJECT_STATUS_POLL_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
-  }, [refreshSelectedProjectDetailInBackground, selectedFeature, selectedProjectId])
+  }, [historyProjectId, refreshSelectedProjectDetailInBackground, selectedFeature, selectedProjectId])
 
   const selectedFeatureProjectDetail = selectedFeature
     ? detailsByProjectId[selectedFeature.projectId]
@@ -9898,7 +9587,8 @@ export function HarnessBoardView({
       setRunDetail(null)
       return
     }
-    if (selectedFeature.deleted) {
+    if (selectedFeature.deleted || selectedFeature.historyOnly ||
+        selectedFeature.searchAccessId !== undefined) {
       skipRunDetailLoadForSessionRef.current = null
       setRunDetail(null)
       setLoadingRun(false)
@@ -9964,6 +9654,7 @@ export function HarnessBoardView({
 
   useEffect(() => {
     return window.api.harnessBoard.onWatchRefsChanged((event) => {
+      if (isOfflineHistoryOpen()) return
       const currentFeature = selectedFeatureRef.current
       const projectMatch = event.scopeKey.match(/^project:(.+)$/)
       if (projectMatch) {
@@ -9993,16 +9684,23 @@ export function HarnessBoardView({
           })
       }
     })
-  }, [loadProjectDetail])
+  }, [isOfflineHistoryOpen, loadProjectDetail])
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunChanged((event) => {
-      if (event.run.status === "running") {
-        patchCachedProjectRuns(event.projectId, (run) => {
-          if (run.slug !== event.featureId || run.managedRunStatus === event.run.status) return run
-          return { ...run, managedRunStatus: event.run.status }
-        })
-      } else {
+      const managedRunThreadId =
+        event.run.status === "running" ? event.run.currentSession?.threadId : undefined
+      patchCachedProjectRuns(event.projectId, (run) => {
+        if (
+          run.slug !== event.featureId ||
+          (run.managedRunStatus === event.run.status &&
+            run.managedRunThreadId === managedRunThreadId)
+        ) {
+          return run
+        }
+        return { ...run, managedRunStatus: event.run.status, managedRunThreadId }
+      })
+      if (event.run.status !== "running" && !isOfflineHistoryOpen()) {
         void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
       }
 
@@ -10010,6 +9708,7 @@ export function HarnessBoardView({
       if (
         !currentFeature ||
         currentFeature.deleted ||
+        currentFeature.historyOnly ||
         currentFeature.projectId !== event.projectId ||
         currentFeature.slug !== event.featureId
       ) {
@@ -10032,7 +9731,8 @@ export function HarnessBoardView({
         }
       })
     })
-  }, [loadProjectDetail, patchCachedProjectRuns])
+  }, [isOfflineHistoryOpen, loadProjectDetail, patchCachedProjectRuns])
+
 
   const handleFeatureImManagementSaved = useCallback(
     (projectId: string, featureId: string, enabled: boolean): void => {
@@ -10048,9 +9748,12 @@ export function HarnessBoardView({
     []
   )
 
+  const [managedScheduleRefreshRevision, setManagedScheduleRefreshRevision] = useState(0)
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {
-      if (!selectedFeature || selectedFeature.deleted) return
+      setManagedScheduleRefreshRevision((revision) => revision + 1)
+      if (!selectedFeature || selectedFeature.deleted || selectedFeature.historyOnly ||
+          selectedFeature.searchAccessId !== undefined) return
       setLoadingRun(true)
       setLoadError(null)
       try {
@@ -10130,11 +9833,13 @@ export function HarnessBoardView({
   const resetCreateForm = useCallback(() => {
     setForm(createEmptyProjectForm())
     setFormError(null)
+    setWorkspaceError(null)
   }, [])
 
   const openCreateDialog = useCallback(() => {
     setForm(createEmptyProjectForm())
     setFormError(null)
+    setWorkspaceError(null)
     openProjectDialogAdapterSession()
     setDialogOpen(true)
   }, [openProjectDialogAdapterSession])
@@ -10145,11 +9850,7 @@ export function HarnessBoardView({
         openCreateDialog()
         return
       }
-      if (!creating) {
-        if (requirementProjectChoice) {
-          clearRequirementDevelopmentIntent()
-          setRequirementProjectChoice(null)
-        }
+      if (!creating && !workspaceValidating) {
         setDialogOpen(false)
         closeProjectDialogAdapterSession()
         resetCreateForm()
@@ -10158,23 +9859,41 @@ export function HarnessBoardView({
     [
       closeProjectDialogAdapterSession,
       creating,
+      workspaceValidating,
       openCreateDialog,
-      requirementProjectChoice,
       resetCreateForm
     ]
   )
 
   const handlePickWorkspace = async (): Promise<void> => {
-    const workspacePath = await window.api.workspace.select()
-    if (workspacePath) {
-      setForm((current) => ({ ...current, workspacePath }))
+    if (creating || workspaceValidating) return
+    setWorkspaceValidating(true)
+    try {
+      const selected = await window.api.harnessBoard.selectProjectDirectory()
+      if (selected) {
+        const { workspacePath, projectDir, validationError } = selected
+        setForm((current) => ({ ...current, workspacePath, projectDir }))
+        setWorkspaceError(validationError)
+        setFormError(null)
+      }
+    } catch (error) {
+      setWorkspaceError(cleanIpcError(error))
+    } finally {
+      setWorkspaceValidating(false)
     }
   }
 
-  const handleSubmit = async (): Promise<void> => {
-    if (creating || createProjectVerification.pending) return
+  const handleUseDefaultWorkspace = (): void => {
+    setForm((current) => ({ ...current, workspacePath: "", projectDir: "" }))
+    setWorkspaceError(null)
     setFormError(null)
-    if (metadataRequiredMissing(form)) {
+  }
+
+  const handleSubmit = async (): Promise<void> => {
+    if (creating || createProjectVerification.pending || workspaceValidating || workspaceError)
+      return
+    setFormError(null)
+    if (metadataRequiredMissing(form, false)) {
       setFormError("所有字段均为必填")
       return
     }
@@ -10184,17 +9903,18 @@ export function HarnessBoardView({
       return
     }
     const selectedAdapter = findSelectedAdapter(projectDialogAdapterRegistry, form.adapterId)
-    const compatibilityMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
+    if (!selectedAdapter || selectedAdapter.boardCompatibility.status === "missing-plugin") {
+      setFormError("请选择已安装且可用的插件")
+      return
+    }
+    const compatibilityMessage = boardCompatibilityMessage(selectedAdapter.boardCompatibility)
     if (compatibilityMessage) {
       setFormError(compatibilityMessage)
       return
     }
     setCreating(true)
     try {
-      const created = await window.api.harnessBoard.createProject(form)
-      if (requirementProjectChoice) {
-        setRequirementCreatedProjectId(created.projectId)
-      }
+      await window.api.harnessBoard.createProject(form)
       setDialogOpen(false)
       closeProjectDialogAdapterSession()
       resetCreateForm()
@@ -10226,6 +9946,26 @@ export function HarnessBoardView({
     [closeProjectDialogAdapterSession, savingEdit]
   )
 
+  const handleOpenSystemConstraints = useCallback((): void => {
+    if (creating || workspaceValidating || savingEdit) return
+    if (dialogOpen) handleCreateDialogOpenChange(false)
+    if (editingProject) handleEditDialogOpenChange(false)
+    setSelectedProjectSession(null)
+    setSelectedFeature(null)
+    setSelectedProjectId(null)
+    setIsViewingSession(false)
+    handleProjectModeTabChange("constraint-sync")
+  }, [
+    creating,
+    workspaceValidating,
+    savingEdit,
+    dialogOpen,
+    editingProject,
+    handleCreateDialogOpenChange,
+    handleEditDialogOpenChange,
+    handleProjectModeTabChange
+  ])
+
   const requestArchiveProject = useCallback(
     (project: HarnessProjectListItem): void => {
       if (archivingProjectId || confirmingProjectAction || project.lifecycle.status === "archived")
@@ -10254,6 +9994,14 @@ export function HarnessBoardView({
     if (nameError) {
       setEditError(nameError)
       return
+    }
+
+    if (editForm.adapterId !== editingProject.harnessAdapter.id) {
+      const selectedAdapter = findSelectedAdapter(projectDialogAdapterRegistry, editForm.adapterId)
+      if (!selectedAdapter?.boardCompatibility.compatible) {
+        setEditError("请选择已安装且可用的插件")
+        return
+      }
     }
 
     setSavingEdit(true)
@@ -10401,33 +10149,9 @@ export function HarnessBoardView({
     [refreshFeaturePublicConstraints]
   )
 
-  useEffect(() => {
-    if (!requirementCreatedProjectId) return
-    let cancelled = false
-    void window.api.harnessBoard
-      .listProjects()
-      .then((items) => {
-        if (cancelled) return
-        const project = items.find((item) => item.projectId === requirementCreatedProjectId)
-        if (!project) throw new Error("新建项目未出现在项目列表中")
-        setRequirementCreatedProjectId(null)
-        openFeatureCreateDialog(project)
-      })
-      .catch((error) => {
-        if (!cancelled) toast.error(cleanIpcError(error))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [openFeatureCreateDialog, requirementCreatedProjectId])
-
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
       if (!open && !creatingFeatureProjectId && !updatingFeatureDeployUnits) {
-        if (requirementProjectChoice) {
-          clearRequirementDevelopmentIntent()
-          setRequirementProjectChoice(null)
-        }
         featureWorkflowRequestIdRef.current += 1
         setFeatureWorkspace({ source: "directory", path: "" })
         setFeatureMappingDrafts({})
@@ -10554,7 +10278,7 @@ export function HarnessBoardView({
     [featureMappings, featureWorkspace, handleSelectFeaturePath]
   )
 
-  const handleSubmitFeature = useCallback(async (): Promise<void> => {
+  const handleSubmitFeature = useCallback(async (target: BotFeatureTarget | null): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
     const feature = sanitizeHarnessNameInput(featureName).trim()
     if (!feature) {
@@ -10623,33 +10347,28 @@ export function HarnessBoardView({
         ...workflowInput
       })
 
-      let requirementThreadId: string | null = null
-      if (requirementProjectChoice) {
-        requirementThreadId = await completeRequirementDevelopment({
-          intent: requirementProjectChoice,
-          projectId: result.projectId,
-          featureSlug: result.slug,
-          createThread
-        })
-        setRequirementProjectChoice(null)
+      if (target) {
+        try {
+          await linkFeatureToBot(result.projectId, result.slug, target)
+          toast.success("特性已创建并关联到 " + target.label)
+        } catch (error) {
+          toast.error("特性已创建，关联失败：" + cleanIpcError(error), {
+            description: "可在特性详情中重新关联。"
+          })
+        }
       }
 
       setFeatureDialogProject(null)
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
       await loadProjectDetail(result.projectId)
-      projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
         projectId: result.projectId,
-        slug: result.slug,
-        ...(requirementThreadId ? { activeSessionThreadId: requirementThreadId } : {})
+        slug: result.slug
       })
-      setIsViewingSession(Boolean(requirementThreadId))
-      if (requirementThreadId) {
-        await selectThread(requirementThreadId, { preserveView: true })
-      }
+      setIsViewingSession(false)
     } catch (error) {
       setFeatureError(cleanIpcError(error))
     } finally {
@@ -10666,10 +10385,7 @@ export function HarnessBoardView({
     featureMappings,
     featureWorkspace,
     deployUnitMappingsDirty,
-    loadProjectDetail,
-    selectThread,
-    createThread,
-    requirementProjectChoice
+    loadProjectDetail
   ])
 
   const threadsById = useMemo(
@@ -10917,9 +10633,17 @@ export function HarnessBoardView({
       isViewingSession &&
       selectedFeatureProjectDetail?.runs.some((run) => run.slug === selectedFeature.slug)
     )
-  const selectedProject = selectedProjectId
-    ? (projects.find((project) => project.projectId === selectedProjectId) ?? null)
-    : null
+  const directoryProject = projects.find((project) => project.projectId === selectedProjectId)
+  const sidebarProject = selectedProjectId ? sidebarProjectsById[selectedProjectId] : undefined
+  const selectedProject = useMemo(() => {
+    const project = directoryProject ?? sidebarProject ?? null
+    // Keep the newest normal projection, with archive as independent, terminal evidence.
+    if (project?.lifecycle.status === "active" &&
+        (project.projectId === searchArchivedProjectId || sidebarProject?.lifecycle.status === "archived")) {
+      return { ...project, lifecycle: { ...project.lifecycle, status: "archived" as const } }
+    }
+    return project
+  }, [directoryProject, sidebarProject, searchArchivedProjectId])
   const openFeatureDeployUnitEditDialog = useCallback((): void => {
     if (!selectedProject || !runDetailWithSessions || selectedFeature?.deleted) return
 
@@ -11027,12 +10751,12 @@ export function HarnessBoardView({
   ])
   const featureDialogSubmitting =
     featureDialogMode === "edit" ? updatingFeatureDeployUnits : creatingFeatureProjectId !== null
-  const handleSubmitFeatureDialog = useCallback((): void => {
+  const handleSubmitFeatureDialog = useCallback((target: BotFeatureTarget | null): void => {
     if (featureDialogMode === "edit") {
       void handleSubmitFeatureDeployUnits()
       return
     }
-    void handleSubmitFeature()
+    void handleSubmitFeature(target)
   }, [featureDialogMode, handleSubmitFeature, handleSubmitFeatureDeployUnits])
   const selectedProjectSessionThread = selectedProjectSession
     ? (threadsById.get(selectedProjectSession.threadId) ?? null)
@@ -11048,7 +10772,7 @@ export function HarnessBoardView({
   const selectedProjectDetail = selectedProjectId
     ? detailsByProjectId[selectedProjectId]
     : undefined
-  const selectedProjectCode = selectedProject
+  const selectedProjectCode = selectedProject && !historyProjectId
     ? normalizeEnterpriseProjectCode(selectedProject.projectCode)
     : ""
   const selectedProjectArchived = selectedProject?.lifecycle.status === "archived"
@@ -11157,7 +10881,8 @@ export function HarnessBoardView({
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
-      projectSidebarScrollIntentRef.current = "top"
+      cancelThreadSearchNavigation()
+      projectSidebarSearchAnchorRef.current = null
       setSelectedProjectSession(null)
       setSelectedFeature(null)
       setSelectedProjectId(projectId)
@@ -11182,37 +10907,6 @@ export function HarnessBoardView({
         const response = await installMarketPluginUpdate(updateInfo.item)
         if (response.success) {
           bumpPluginVersion()
-          try {
-            const refreshedRegistry = (
-              await window.api.harnessBoard.catalogPage({
-                requestScope: "board-registry",
-                includeProjects: false,
-                registryLimit: 64,
-                query: project.harnessAdapter.name
-              })
-            ).registry
-            const adapterNameCandidates = new Set(
-              [
-                project.harnessAdapter.name,
-                updateInfo.itemName,
-                updateInfo.item.name,
-                updateInfo.item.id,
-                updateInfo.item.chinese_name
-              ]
-                .map((value) => normalizeAdapterMarketName(value))
-                .filter(Boolean)
-            )
-            const updatedAdapter = refreshedRegistry.find(
-              (adapter) =>
-                adapterNameCandidates.has(normalizeAdapterMarketName(adapter.name)) ||
-                adapterNameCandidates.has(normalizeAdapterMarketName(adapter.id))
-            )
-            if (updatedAdapter?.pullKnowledgeAvailable) {
-              await syncProjectConstraints(updatedAdapter)
-            }
-          } catch (syncError) {
-            toast.error(`插件已更新，但自动拉取公共系统约束失败：${cleanIpcError(syncError)}`)
-          }
           toast.success(
             `已为您更新并安装「${updateInfo.itemName}」到插件，请新开一个会话试试效果。`
           )
@@ -11229,56 +10923,169 @@ export function HarnessBoardView({
         })
       }
     },
-    [bumpPluginVersion, syncProjectConstraints, updatingPluginNames]
+    [bumpPluginVersion, updatingPluginNames]
   )
 
   const openFeatureDetail = useCallback(
-    (projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean): void => {
-      if (!activeSessionThreadId) {
-        projectSidebarScrollIntentRef.current = "top"
+    (
+      projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean,
+      searchSessionThreadId?: string, historyOnly?: true, searchAccessId?: number
+    ): void => {
+      if (!searchSessionThreadId) {
+        cancelThreadSearchNavigation()
+        projectSidebarSearchAnchorRef.current = null
       }
       setSelectedProjectSession(null)
       setSelectedProjectId(projectId)
-      setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted })
+      setSelectedFeature({
+        projectId, slug, activeSessionThreadId, deleted, searchSessionThreadId, historyOnly, searchAccessId
+      })
       setIsViewingSession(!!activeSessionThreadId)
-      if (!deleted && !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+      if (!deleted && !historyOnly && searchAccessId === undefined &&
+          !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
         void loadProjectDetail(projectId)
       }
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
+
+  const botDestination = useAppStore((state) => state.botFeatureDestination)
+  useEffect(() => {
+    if (!botDestination || useAppStore.getState().botFeatureDestination !== botDestination) return
+    useAppStore.setState({ botFeatureDestination: undefined })
+    openFeatureDetail(botDestination.projectId, botDestination.slug, botDestination.threadId)
+    if (botDestination.threadId) {
+      markRead(botDestination.threadId)
+      void selectThread(botDestination.threadId, { preserveView: true })
+    }
+  }, [botDestination, openFeatureDetail, selectThread, markRead])
 
   const openProjectSession = useCallback(
-    (projectId: string, threadId: string, deleted?: boolean): void => {
+    (
+      projectId: string, threadId: string, deleted?: boolean,
+      searchOwned = false, historyOnly?: true, searchAccessId?: number
+    ): void => {
+      if (!searchOwned) {
+        cancelThreadSearchNavigation()
+        projectSidebarSearchAnchorRef.current = null
+      }
       setSelectedProjectId(projectId)
       setSelectedFeature(null)
-      setSelectedProjectSession({ projectId, threadId, deleted })
+      setSelectedProjectSession({ projectId, threadId, deleted, searchOwned, historyOnly, searchAccessId })
       setIsViewingSession(true)
-      if (!deleted && !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+      if (!deleted && !historyOnly && searchAccessId === undefined &&
+          !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
         void loadProjectDetail(projectId)
       }
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
 
-  // 将需求入口产生的导航意图接入项目模式现有的会话打开和项目创建流程。
-  useRequirementDevelopmentOnboarding({
-    openSession: (threadId, context) => {
-      if (context.featureSlug) {
-        openFeatureDetail(context.projectId, context.featureSlug, threadId)
-      } else {
-        openProjectSession(context.projectId, threadId)
+  const searchProjectId = selectedFeature?.projectId ?? selectedProjectSession?.projectId ?? selectedProjectId
+  const searchProjectThreadId = isViewingSession
+    ? (selectedFeature?.activeSessionThreadId ?? selectedProjectSession?.threadId ?? null) : null
+  useLayoutEffect(() => {
+    useThreadSearch.setState({
+      projectId: searchProjectId,
+      projectSessionThreadId: searchProjectThreadId,
+      readOnlyProjectThreadId: readOnlySearchSession ? searchProjectThreadId : null,
+      projectRoute: isViewingSession && selectedFeature
+        ? { kind: "featureSession", projectId: selectedFeature.projectId, slug: selectedFeature.slug }
+        : isViewingSession && selectedProjectSession
+          ? { kind: "projectSession", projectId: selectedProjectSession.projectId } : null
+    })
+  }, [
+    searchProjectId, searchProjectThreadId, isViewingSession,
+    readOnlySearchSession, selectedFeature, selectedProjectSession
+  ])
+  useLayoutEffect(() => () => {
+    useThreadSearch.setState({
+      projectId: null, projectRoute: null,
+      projectSessionThreadId: null, readOnlyProjectThreadId: null
+    })
+  }, [])
+  const confirmingSearchNavigationId = useRef<number | null>(null)
+  useLayoutEffect(() => {
+    if (!searchNavigation || searchNavigation.stage !== "board" ||
+        searchNavigation.route.kind === "ordinary" || !searchNavigation.project) return
+    const { id, project, route, result, navigationTicketId, searchReadOnly } = searchNavigation
+    if (confirmingSearchNavigationId.current === id) return
+    confirmingSearchNavigationId.current = id
+    void window.api.threads.searchConfirmRoute({
+      ...result, navigationTicketId
+    }).then((confirmed) => {
+      if (useThreadSearch.getState().navigation !== searchNavigation) return
+      if (!confirmed) {
+        finishThreadSearchNavigation(id, "会话或项目已变化，请重新搜索")
+        return
       }
-      void selectThread(threadId, { preserveView: true })
-    },
-    openProjectChoice: (intent, projects) => {
-      setRequirementSelectableProjects(projects)
-      setRequirementProjectChoice(intent)
-      setRequirementProjectChoiceOpen(true)
-    }
-  })
+      withOwnedThreadSearchTransition(id, () => {
+        const accessId = !searchReadOnly && result.navigation === "exact" ? id : undefined
+        if (searchReadOnly || accessId !== undefined) onActiveSessionThreadChange?.(null)
+        projectSidebarSearchAnchorRef.current = result.threadId
+        setCollapsedGroupKeys((current) => {
+          const next = new Set(current)
+          const projectExpanded = next.delete(`project:${route.projectId}`)
+          const featureExpanded = route.kind === "featureSession" &&
+            next.delete(`feature:${route.projectId}:${route.slug}`)
+          return projectExpanded || featureExpanded ? next : current
+        })
+        if (project.lifecycle.status === "archived") setSearchArchivedProjectId(project.projectId)
+        setSidebarProjectsById((current) => ({ ...current, [project.projectId]: project }))
+        if (route.kind === "featureSession") {
+          openFeatureDetail(
+            route.projectId, route.slug, result.threadId, false, result.threadId, searchReadOnly, accessId
+          )
+        } else {
+          openProjectSession(route.projectId, result.threadId, false, true, searchReadOnly, accessId)
+        }
+        searchNavigation.onProjectReady?.()
+        const onProjectAccessResolved = accessId === undefined ? undefined : (available: boolean) => {
+          withOwnedThreadSearchTransition(id, () => {
+            const current = useThreadSearch.getState().navigation
+            if (current?.id !== id || current.stage !== "chat" ||
+                current.result.threadId !== result.threadId) return
+            if (route.kind === "featureSession") {
+              const selected = selectedFeatureRef.current
+              if (selected?.searchAccessId !== id || selected.activeSessionThreadId !== result.threadId ||
+                  selected.projectId !== route.projectId || selected.slug !== route.slug) return
+              setSelectedFeature({ ...selected, searchAccessId: undefined, historyOnly: available ? undefined : true })
+            } else {
+              const selected = selectedProjectSessionRef.current
+              if (selected?.searchAccessId !== id || selected.threadId !== result.threadId ||
+                  selected.projectId !== route.projectId) return
+              setSelectedProjectSession({
+                ...selected, searchAccessId: undefined, historyOnly: available ? undefined : true
+              })
+            }
+            if (available && !detailsByProjectIdRef.current[route.projectId] &&
+                !loadingDetailIdsRef.current.has(route.projectId)) void loadProjectDetail(route.projectId)
+          })
+        }
+        useThreadSearch.setState({
+          navigation: { ...searchNavigation, stage: "board-mounting", onProjectAccessResolved }
+        })
+      })
+    }).catch(() => finishThreadSearchNavigation(id, "暂时无法打开所属项目"))
+  }, [searchNavigation, loadProjectDetail, onActiveSessionThreadChange, openFeatureDetail, openProjectSession])
+  useLayoutEffect(() => {
+    if (searchNavigation?.stage !== "board-mounting" || !isViewingSession) return
+    const { route, result, id } = searchNavigation
+    const ready = route.kind === "featureSession"
+      ? selectedFeature?.projectId === route.projectId &&
+        selectedFeature.slug === route.slug && selectedFeature.activeSessionThreadId === result.threadId
+      : route.kind === "projectSession" && selectedProjectSession?.projectId === route.projectId &&
+        selectedProjectSession.threadId === result.threadId
+    if (!ready) return
+    withOwnedThreadSearchTransition(id, () => {
+      void selectThread(result.threadId, { preserveView: true })
+      useThreadSearch.setState({ navigation: { ...searchNavigation, stage: "chat" } })
+    })
+  }, [searchNavigation, isViewingSession, selectedFeature, selectedProjectSession, selectThread])
 
   const handleBackToProjectList = useCallback((): void => {
+    cancelThreadSearchNavigation()
+    projectSidebarSearchAnchorRef.current = null
     setSelectedProjectSession(null)
     setSelectedFeature(null)
     setSelectedProjectId(null)
@@ -11286,11 +11093,12 @@ export function HarnessBoardView({
   }, [])
 
   const handleBackToProject = useCallback((): void => {
+    cancelThreadSearchNavigation()
+    projectSidebarSearchAnchorRef.current = null
     const projectId =
       selectedProjectSessionRef.current?.projectId ??
       selectedFeatureRef.current?.projectId ??
       selectedProjectIdRef.current
-    projectSidebarScrollIntentRef.current = "top"
     setSelectedProjectSession(null)
     setSelectedFeature(null)
     setIsViewingSession(false)
@@ -11313,14 +11121,19 @@ export function HarnessBoardView({
   )
 
   const handleKnowledgeDialogSubmit = useCallback(
-    async (content: string): Promise<void> => {
+    async (content: string, targetId?: string): Promise<void> => {
       if (!knowledgeDialogProject || !knowledgeDialogConfig || creatingProjectSessionProjectId)
         return
       setCreatingProjectSessionProjectId(knowledgeDialogProject.projectId)
       try {
+        const workspace = await window.api.harnessBoard.prepareKnowledgeDeposition(
+          knowledgeDialogProject.projectId,
+          targetId
+        )
+        if (workspace.warning) toast.warning(workspace.warning)
         const thread = await createThread(
           {
-            workspacePath: knowledgeDialogConfig.knowledgePath ?? null,
+            workspacePath: workspace.path,
             disableAgentsPrompt: true,
             harnessProjectSession: {
               projectId: knowledgeDialogProject.projectId,
@@ -11389,6 +11202,10 @@ export function HarnessBoardView({
           slug,
           title: slug,
           sessions,
+          managedRunThreadId: deleted
+            ? undefined
+            : detailsByProjectId[project.projectId]?.runs.find((run) => run.slug === slug)
+                ?.managedRunThreadId,
           section,
           ...(deleted ? { deleted: true } : {})
         }))
@@ -11478,48 +11295,16 @@ export function HarnessBoardView({
     threadsById
   ])
 
-  // Detail navigation expands its target without folding unrelated projects.
-  // Session selection preserves the user's sidebar expansion state.
-  const autoCollapseFeature = selectedFeature && !isViewingSession ? selectedFeature : null
-  const autoCollapseProjectId = autoCollapseFeature
-    ? autoCollapseFeature.projectId
-    : selectedProjectId && !selectedFeature && !selectedProjectSession && !isViewingSession
-      ? selectedProjectId
-      : null
-
-  const expandedDetailKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!autoCollapseProjectId) {
-      expandedDetailKeyRef.current = null
-      return
-    }
-    const targetSlug = autoCollapseFeature?.slug
-    const detailKey = JSON.stringify([autoCollapseProjectId, targetSlug])
-    if (expandedDetailKeyRef.current === detailKey) return
-    const targetGroup = projectSidebarGroups.find(
-      (group) => group.project.projectId === autoCollapseProjectId
+    localStorage.setItem(
+      COLLAPSED_HARNESS_GROUPS_STORAGE_KEY,
+      JSON.stringify([...collapsedGroupKeys])
     )
-    if (!targetGroup) return
-    const targetFeature = targetGroup.featureGroups.find((group) => group.slug === targetSlug)
-    if (targetSlug && !targetFeature) return
-    expandedDetailKeyRef.current = detailKey
-
-    setCollapsedFeatureKeys((current) => {
-      const next = new Set(current)
-      const projectChanged = next.delete(targetGroup.key)
-      const featureChanged = targetFeature ? next.delete(targetFeature.key) : false
-      return projectChanged || featureChanged ? next : current
-    })
-  }, [
-    autoCollapseFeature?.projectId,
-    autoCollapseFeature?.slug,
-    autoCollapseProjectId,
-    projectSidebarGroups
-  ])
+  }, [collapsedGroupKeys])
 
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
-    projectSidebarGroups.every((group) => collapsedFeatureKeys.has(group.key))
+    projectSidebarGroups.every((group) => collapsedGroupKeys.has(group.key))
 
   const togglePinnedProject = useCallback((projectId: string): void => {
     setPinnedProjectIds((current) =>
@@ -11534,7 +11319,7 @@ export function HarnessBoardView({
   }, [])
 
   const toggleAllFeatureGroups = useCallback(() => {
-    setCollapsedFeatureKeys((current) => {
+    setCollapsedGroupKeys((current) => {
       const next = new Set(current)
       if (allFeatureGroupsCollapsed) {
         for (const group of projectSidebarGroups) {
@@ -11869,21 +11654,27 @@ export function HarnessBoardView({
 
   const handleSessionViewChange = useCallback((viewing: boolean): void => {
     if (!viewing) {
-      projectSidebarScrollIntentRef.current = "top"
+      cancelThreadSearchNavigation()
+      setSelectedFeature((current) => current ? { ...current, searchSessionThreadId: undefined } : current)
+      projectSidebarSearchAnchorRef.current = null
     }
     setIsViewingSession(viewing)
   }, [])
 
   const handleActiveSessionChange = useCallback((threadId: string): void => {
+    cancelThreadSearchNavigation()
+    projectSidebarSearchAnchorRef.current = null
     setSelectedFeature((current) => {
       if (!current) return current
       if (current.activeSessionThreadId === threadId) return current
-      return { ...current, activeSessionThreadId: threadId }
+      return { ...current, activeSessionThreadId: threadId, searchSessionThreadId: undefined }
     })
     setIsViewingSession(true)
   }, [])
 
   const handleActiveProjectSessionChange = useCallback((threadId: string): void => {
+    cancelThreadSearchNavigation()
+    projectSidebarSearchAnchorRef.current = null
     setSelectedProjectSession((current) => {
       if (!current || current.threadId === threadId) return current
       return { ...current, threadId }
@@ -11916,7 +11707,8 @@ export function HarnessBoardView({
           </div>
           <ProjectFeatureSidebar
             groups={projectSidebarGroups}
-            collapsedKeys={collapsedFeatureKeys}
+            managedScheduleRefreshRevision={managedScheduleRefreshRevision}
+            collapsedKeys={collapsedGroupKeys}
             pinnedProjectIds={pinnedProjectIds}
             pinnedFeatureKeys={pinnedFeatureKeys}
             allCollapsed={allFeatureGroupsCollapsed}
@@ -11927,6 +11719,7 @@ export function HarnessBoardView({
             selectedProjectId={selectedProjectId}
             selectedFeature={selectedFeature}
             selectedProjectSession={selectedProjectSession}
+            readOnlyProjectId={historyProjectId}
             isViewingSession={isViewingSession}
             unreadIds={unreadIds}
             exportingThreadId={exportingThreadId}
@@ -11934,9 +11727,10 @@ export function HarnessBoardView({
             editingThreadId={editingThreadId}
             editingTitle={editingTitle}
             scrollTopRef={projectSidebarScrollTopRef}
-            scrollIntentRef={projectSidebarScrollIntentRef}
+            preserveScrollRef={preserveProjectSidebarScrollRef}
+            searchAnchorRef={projectSidebarSearchAnchorRef}
             onToggleCollapse={(key) =>
-              setCollapsedFeatureKeys((current) => {
+              setCollapsedGroupKeys((current) => {
                 const next = new Set(current)
                 if (next.has(key)) next.delete(key)
                 else next.add(key)
@@ -11950,12 +11744,17 @@ export function HarnessBoardView({
               void handleCreateSidebarSession(project, slug)
             }}
             onSelectProjectSession={(projectId, threadId, deleted) => {
-              openProjectSession(projectId, threadId, deleted)
+              openProjectSession(
+                projectId, threadId, deleted, false, historyProjectId === projectId ? true : undefined
+              )
               markRead(threadId)
               void selectThread(threadId, { preserveView: true })
             }}
             onSelectSession={(projectId, slug, threadId, deleted) => {
-              openFeatureDetail(projectId, slug, threadId, deleted)
+              openFeatureDetail(
+                projectId, slug, threadId, deleted, undefined,
+                historyProjectId === projectId ? true : undefined
+              )
               markRead(threadId)
               void selectThread(threadId, { preserveView: true })
             }}
@@ -11992,65 +11791,49 @@ export function HarnessBoardView({
   const fallbackFeatureSummary = selectedFeatureProjectDetail?.runs.find(
     (run) => run.slug === selectedFeature?.slug
   )
-  const featureDialogAdapter = useMemo(
-    () => (featureDialogProject ? findAdapterForProject(featureDialogProject) : null),
-    [featureDialogProject, findAdapterForProject]
-  )
-  const featurePublicConstraintsSyncing = featureDialogAdapter
-    ? syncingProjectConstraintAdapterIds.has(featureDialogAdapter.id)
-    : false
-  const requirementProjectSelectionDialog = (
-    <RequirementProjectSelectionDialog
-      open={requirementProjectChoiceOpen}
-      projects={requirementSelectableProjects ?? []}
-      loading={requirementSelectableProjects === null}
-      onOpenChange={(open) => {
-        if (!open) {
-          setRequirementProjectChoiceOpen(false)
-          setRequirementProjectChoice(null)
-          clearRequirementDevelopmentIntent()
-        }
-      }}
-      onSelect={(project) => {
-        const compatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
-        if (compatibilityMessage) {
-          toast.warning(compatibilityMessage)
-          return
-        }
-        setRequirementProjectChoiceOpen(false)
-        setSelectedProjectSession(null)
-        setSelectedProjectId(null)
-        setIsViewingSession(false)
-        openFeatureCreateDialog(project)
-      }}
-      onCreate={() => {
-        setRequirementProjectChoiceOpen(false)
-        setSelectedProjectSession(null)
-        setSelectedFeature(null)
-        setSelectedProjectId(null)
-        setIsViewingSession(false)
-        openCreateDialog()
-        setForm(createEmptyProjectForm())
-      }}
-    />
-  )
-
   useEffect(() => {
+    if (historyProjectId) {
+      onActiveSessionThreadChange?.(null)
+      return
+    }
     if (selectedFeature) return
     onActiveSessionThreadChange?.(selectedProjectSession?.threadId ?? null)
-  }, [onActiveSessionThreadChange, selectedFeature, selectedProjectSession?.threadId])
+  }, [historyProjectId, onActiveSessionThreadChange, selectedFeature, selectedProjectSession?.threadId])
+
+  if (selectedFeature && historyOnly) {
+    const thread = threadsById.get(selectedFeature.activeSessionThreadId ?? "") ?? null
+    return (
+      <>
+        <ProjectSessionPage
+          project={selectedProject ?? makeDeletedProjectSidebarItem(
+            selectedFeature.projectId, readThreadHarnessProjectName(thread)
+          )}
+          thread={thread}
+          deleted={selectedFeature.deleted}
+          historyOnly
+          featureSlug={selectedFeature.slug}
+          onBackToList={handleBackToProjectList}
+          onBackToProject={handleBackToProject}
+        />
+        {sidebarPortal}
+      </>
+    )
+  }
 
   if (selectedFeature) {
     const selectedFeatureDeleted = selectedFeature.deleted === true
     const selectedFeatureThread = threadsById.get(selectedFeature.activeSessionThreadId ?? "")
     return (
       <>
-        {requirementProjectSelectionDialog}
         <FeatureDetailPage
-          detail={runDetailWithSessions}
+          detail={searchAccessPending ? null : runDetailWithSessions}
           loading={loadingRun}
           unbound={showingUnboundRunDetail}
           projectDeleted={selectedFeatureDeleted}
+          projectArchived={selectedProjectArchived}
+          searchAccessPending={searchAccessPending}
+          searchSessionThreadId={selectedFeature.searchSessionThreadId === selectedFeature.activeSessionThreadId
+            ? selectedFeature.searchSessionThreadId : undefined}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
           isViewingSession={isViewingSession}
           fallbackProjectName={
@@ -12063,10 +11846,11 @@ export function HarnessBoardView({
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
           onRefresh={refreshSelectedRunDetail}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onFeatureImManagementSaved={handleFeatureImManagementSaved}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
-          onActiveSessionThreadChange={onActiveSessionThreadChange}
+          onActiveSessionThreadChange={searchAccessPending ? undefined : onActiveSessionThreadChange}
         />
         <FeatureCreateDialog
           mode={featureDialogMode}
@@ -12078,8 +11862,6 @@ export function HarnessBoardView({
           selectedWorkflowNodeIds={selectedWorkflowNodeIds}
           agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
           localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
-          publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
-          syncingPublicConstraints={featurePublicConstraintsSyncing}
           rows={featureMappings}
           catalogUnits={deployUnitMappings}
           workspace={featureWorkspace}
@@ -12095,7 +11877,6 @@ export function HarnessBoardView({
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onDeployUnitToggle={handleDeployUnitToggle}
           onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
-          onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
           onSubmit={handleSubmitFeatureDialog}
         />
         {sidebarDeleteDialog}
@@ -12107,11 +11888,12 @@ export function HarnessBoardView({
   if (selectedProjectSession && selectedProjectSessionProject) {
     return (
       <>
-        {requirementProjectSelectionDialog}
         <ProjectSessionPage
           project={selectedProjectSessionProject}
           thread={selectedProjectSessionThread}
           deleted={selectedProjectSession.deleted}
+          historyOnly={historyOnly}
+          searchAccessPending={searchAccessPending}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onHarnessSessionCreated={handleActiveProjectSessionChange}
@@ -12137,6 +11919,25 @@ export function HarnessBoardView({
           creatingSystemConstraintUpdate={
             creatingProjectSessionProjectId === selectedProject.projectId
           }
+          knowledgeWriteAvailable={
+            knowledgeBaseResult
+              ? knowledgeBaseResult.knowledgeBases.some(
+                  (item) =>
+                    selectedProject.knowledgeBaseIds.includes(item.idKey) &&
+                    item.workspaces.some(
+                      (workspace) =>
+                        workspace.role === "write" && workspace.localValid && !workspace.syncing
+                    )
+                )
+              : undefined
+          }
+          knowledgeSyncing={
+            knowledgeBaseResult?.writeSyncingIds.some(
+              (id) =>
+                selectedProject.knowledgeBaseIds.length === 1 &&
+                selectedProject.knowledgeBaseIds.includes(id)
+            ) === true
+          }
           leanToken={leanTokenConfig.leanToken}
           leanTokenLoading={leanTokenLoading}
           onBackToList={handleBackToProjectList}
@@ -12144,7 +11945,11 @@ export function HarnessBoardView({
           onOpenSystemConstraintUpdate={(project, config) => {
             void handleOpenSystemConstraintUpdate(project, config)
           }}
-          onRefresh={(projectId) => void loadProjectDetail(projectId)}
+          onRefresh={(projectId) => {
+            setManagedScheduleRefreshRevision((revision) => revision + 1)
+            void loadProjectDetail(projectId)
+          }}
+          managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onEditProject={handleEditProject}
           onUpdatePlugin={(project, updateInfo) => {
             void handleUpdateProjectPlugin(project, updateInfo)
@@ -12162,8 +11967,6 @@ export function HarnessBoardView({
           selectedWorkflowNodeIds={selectedWorkflowNodeIds}
           agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
           localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
-          publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
-          syncingPublicConstraints={featurePublicConstraintsSyncing}
           rows={featureMappings}
           catalogUnits={deployUnitMappings}
           workspace={featureWorkspace}
@@ -12179,26 +11982,29 @@ export function HarnessBoardView({
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onDeployUnitToggle={handleDeployUnitToggle}
           onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
-          onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
           onSubmit={handleSubmitFeatureDialog}
         />
         <ProjectEditDialog
-          open={editingProject !== null}
+          project={editingProject}
           saving={savingEdit}
           form={editForm}
           registry={projectDialogAdapterRegistry}
+          knowledgeBases={knowledgeBaseResult}
           installingPluginNames={updatingPluginNames}
           error={editError}
           verification={editProjectVerification}
           onOpenChange={handleEditDialogOpenChange}
           onChange={setEditForm}
           onInstallPlugin={handleInstallMarketPlugin}
+          onOpenSystemConstraints={handleOpenSystemConstraints}
           onSubmit={() => void handleSubmitEdit()}
         />
         <KnowledgeDialog
           open={knowledgeDialogOpen}
           onOpenChange={setKnowledgeDialogOpen}
           onSubmit={handleKnowledgeDialogSubmit}
+          knowledgeBases={knowledgeBaseResult?.knowledgeBases ?? []}
+          knowledgeBaseIds={knowledgeDialogProject?.knowledgeBaseIds ?? []}
           projectNumber={knowledgeDialogProject?.projectCode ?? ""}
           leanToken={leanTokenConfig.leanToken}
         />
@@ -12465,28 +12271,32 @@ export function HarnessBoardView({
             </TabsContent>
 
             <TabsContent value="constraint-sync" className="mt-0">
-              <ProjectConstraintSyncPanel
-                registry={adapterRegistry}
-                hasMore={registryNextCursor !== null}
-                loadingMore={loadingMoreRegistry}
-                syncingAdapterIds={syncingProjectConstraintAdapterIds}
-                syncedPaths={syncedProjectConstraintPaths}
-                expandedAdapterIds={expandedKnowledgePreviewAdapterIds}
-                knowledgePreviews={knowledgePreviewsByAdapterId}
-                loadingKnowledgePreviewAdapterIds={loadingKnowledgePreviewAdapterIds}
-                selectedKnowledgePreviewPaths={selectedKnowledgePreviewPaths}
-                onSync={handleSyncProjectConstraints}
-                onToggleKnowledgePreview={handleToggleKnowledgePreview}
-                onRefreshKnowledgePreview={loadKnowledgePreview}
-                onSelectKnowledgePreviewPath={handleSelectKnowledgePreviewPath}
-                onLoadMore={() => void loadMoreRegistry()}
+              <KnowledgeBaseSyncPanel
+                result={knowledgeBaseResult}
+                loading={knowledgeBaseLoading}
+                syncingIds={syncingKnowledgeBaseIds}
+                expandedIds={expandedKnowledgePreviewAdapterIds}
+                previews={knowledgePreviewsByAdapterId}
+                loadingPreviewIds={loadingKnowledgePreviewAdapterIds}
+                selectedPreviewPaths={selectedKnowledgePreviewPaths}
+                onRefreshAll={() => loadKnowledgeBases(true)}
+                onSync={handleSyncKnowledgeBase}
+                onDeleted={async (idKey) => {
+                  forgetKnowledgePreview(idKey)
+                  await loadKnowledgeBases()
+                }}
+                formatError={cleanIpcError}
+                onTogglePreview={handleToggleKnowledgeBasePreview}
+                onSelectPreviewPath={(idKey, path) =>
+                  setSelectedKnowledgePreviewPaths((current) => ({ ...current, [idKey]: path }))
+                }
+                onOpenPath={(path) => void openPathInFileManager(path, "无法打开知识库目录")}
               />
             </TabsContent>
           </Tabs>
         </main>
       </ScrollArea>
 
-      {requirementProjectSelectionDialog}
       <FeatureCreateDialog
         mode={featureDialogMode}
         project={featureDialogProject}
@@ -12497,8 +12307,6 @@ export function HarnessBoardView({
         selectedWorkflowNodeIds={selectedWorkflowNodeIds}
         agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
         localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
-        publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
-        syncingPublicConstraints={featurePublicConstraintsSyncing}
         rows={featureMappings}
         catalogUnits={deployUnitMappings}
         workspace={featureWorkspace}
@@ -12514,34 +12322,40 @@ export function HarnessBoardView({
         onWorkflowNodeToggle={handleWorkflowNodeToggle}
         onDeployUnitToggle={handleDeployUnitToggle}
         onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
-        onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
         onSubmit={handleSubmitFeatureDialog}
       />
       <ProjectFormDialog
         open={dialogOpen}
         creating={creating}
+        workspaceValidating={workspaceValidating}
+        workspaceError={workspaceError}
         form={form}
         registry={projectDialogAdapterRegistry}
+        knowledgeBases={knowledgeBaseResult}
         installingPluginNames={updatingPluginNames}
         error={formError}
         verification={createProjectVerification}
         onOpenChange={handleCreateDialogOpenChange}
         onChange={setForm}
         onInstallPlugin={handleInstallMarketPlugin}
+        onOpenSystemConstraints={handleOpenSystemConstraints}
         onPickWorkspace={() => void handlePickWorkspace()}
+        onUseDefaultWorkspace={handleUseDefaultWorkspace}
         onSubmit={() => void handleSubmit()}
       />
       <ProjectEditDialog
-        open={editingProject !== null}
+        project={editingProject}
         saving={savingEdit}
         form={editForm}
         registry={projectDialogAdapterRegistry}
+        knowledgeBases={knowledgeBaseResult}
         installingPluginNames={updatingPluginNames}
         error={editError}
         verification={editProjectVerification}
         onOpenChange={handleEditDialogOpenChange}
         onChange={setEditForm}
         onInstallPlugin={handleInstallMarketPlugin}
+        onOpenSystemConstraints={handleOpenSystemConstraints}
         onSubmit={() => void handleSubmitEdit()}
       />
       <ProjectActionConfirmDialog
@@ -12558,6 +12372,8 @@ export function HarnessBoardView({
         open={knowledgeDialogOpen}
         onOpenChange={setKnowledgeDialogOpen}
         onSubmit={handleKnowledgeDialogSubmit}
+        knowledgeBases={knowledgeBaseResult?.knowledgeBases ?? []}
+        knowledgeBaseIds={knowledgeDialogProject?.knowledgeBaseIds ?? []}
         projectNumber={knowledgeDialogProject?.projectCode ?? ""}
         leanToken={leanTokenConfig.leanToken}
       />

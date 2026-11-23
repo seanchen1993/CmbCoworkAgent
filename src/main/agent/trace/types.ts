@@ -585,6 +585,8 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   appVersion?: string
   /** Which skills were actually used during this run, format: "name-version" e.g. "scheduler-assistant-v1.0.0" */
   usedSkills: string[]
+  /** Effective code Skill attribution at turn completion, including inherited Skills. Absent if unobserved. */
+  hasCodeAttributedSkill?: boolean
   /** Source refs for plugin-owned usedSkills, format: "plugin:<pluginId>/<skillIdentifier>". */
   skillSource?: string[]
   /** Optional skill-eval payload computed before upload. Existing trace fields remain unchanged. */
@@ -601,6 +603,9 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   harnessProjectId?: string
   /** Harness Board feature slug this conversation belongs to (paired with harnessProjectId). */
   harnessFeatureSlug?: string
+  /** Feature binding captured at turn start; multi-unit scope is not an allocation. */
+  harnessDeployUnitIds?: string[]
+  harnessSessionDeployUnitId?: string
   /**
    * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") that was
    * current when this turn ran, resolved per-turn from the feature's run state.

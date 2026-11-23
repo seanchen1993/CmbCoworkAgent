@@ -20,6 +20,7 @@ import type {
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
 import { readBoundedResponseBody } from "./bounded-response-reader"
+import { splitMainProduct } from "./enterprise-project-system"
 import {
   cancelHarnessCatalogScope,
   readHarnessLeanTokenInWorker
@@ -317,19 +318,6 @@ function isProjectReviewEmptyMockEnabled(): boolean {
     ?.trim()
     .toLowerCase()
   return value === "1" || value === "true" || value === "yes" || value === "on"
-}
-
-function splitMainProduct(mainProduct: string): Pick<
-  HarnessEnterpriseProjectSearchItem,
-  "systemId" | "systemName"
-> {
-  if (mainProduct.length < 7) {
-    return { systemId: "", systemName: "" }
-  }
-  return {
-    systemId: mainProduct.slice(0, 7),
-    systemName: mainProduct.slice(7).trim()
-  }
 }
 
 function normalizeEnterpriseProjectItem(value: unknown): HarnessEnterpriseProjectSearchItem | null {

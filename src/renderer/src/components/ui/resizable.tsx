@@ -58,7 +58,7 @@ export function ResizeHandle({
     window.addEventListener("blur", handleWindowBlur)
     return () => {
       window.removeEventListener("blur", handleWindowBlur)
-      clearDragState()
+      clearDragState(false)
     }
   }, [clearDragState])
 

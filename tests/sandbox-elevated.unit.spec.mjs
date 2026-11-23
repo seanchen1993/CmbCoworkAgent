@@ -16,6 +16,10 @@ const windowsSafeCommandsSource = readFileSync(
   "utf8"
 )
 const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
+const codexBinarySource = readFileSync(
+  new URL("../src/main/agent/codex-sandbox-binary.ts", import.meta.url),
+  "utf8"
+)
 const workflowEngineSource = readFileSync(
   new URL("../src/main/agent/workflow/engine.ts", import.meta.url),
   "utf8"
@@ -768,12 +772,12 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     orchestratorSection,
-    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
+    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax,\s*execution\s*\)/,
     "safe commands should also be eligible for Codex-style sandbox bypass prompts after sandbox failure"
   )
   assert.match(
     orchestratorSection,
-    /const yoloMode = this\.readYoloMode\(\)[\s\S]*if \(yoloMode\) \{[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
+    /const yoloMode = this\.readYoloMode\(\)[\s\S]*if \(yoloMode\) \{[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax,\s*execution\s*\)/,
     "YOLO mode should skip only the initial command approval; sandbox escape must still require the retry approval prompt"
   )
   assert.match(
@@ -798,7 +802,7 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     bypassSection,
-    /rawExecute\(command, "none", cwd\)/,
+    /\(execution\?\.rawExecute \?\? this\.rawExecute\)\(command, "none", cwd\)/,
     "approval should hand the command to rawExecute with mode=none (host token)"
   )
   assert.match(
@@ -928,13 +932,13 @@ test("isLikelySandboxDenied keyword check matches real failure outputs and rejec
 test("background execute() routes results through the orchestrator's bypass check", () => {
   const backgroundSection = sectionBetween(
     localSandboxSource,
-    "async executeBackground(command: string, cwd?: string)",
-    "  /**\r\n   * Retrieve a background task's"
+    "private async executeBackgroundAfterPreToolUse(",
+    "  private getOwnedBackgroundTask("
   )
 
   assert.match(
     backgroundSection,
-    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult,\s*outsideShellSyntax\s*\)/,
+    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult,\s*outsideShellSyntax,\s*\{\s*signal: taskAbortController\.signal,/,
     "executeBackground must hand the raw result to the orchestrator's bypass check before marking the task complete — otherwise backgrounded `npm run build` skips the approval prompt"
   )
   assert.match(
@@ -1076,8 +1080,8 @@ test("approval requests do not auto-timeout and are cleaned up on run abort", ()
   )
   assert.match(
     runtimeApprovalSection,
-    /options\.abortSignal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
-    "approval requests should subscribe to the run abort signal"
+    /requestApproval = async \(\s*req: ApprovalRequest,\s*signal = options\.abortSignal[\s\S]*signal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
+    "approval requests should subscribe to the invocation signal, which defaults to the run signal"
   )
   // On run abort: onAbort → rejectPending("abort") notifies the renderer on the
   // cancel channel, then resolveOnce removes the pending approval and resolves a
@@ -1255,8 +1259,12 @@ test("sandbox ACL grants only cover writable sandbox roots", () => {
 
 test("sandbox execute helpers do not create visible console windows", () => {
   const windowsSandboxSpawnSection = sectionBetween(
-    localSandboxSource,
-    "const proc = spawn(this.codexExePath, sandboxArgs, {",
+    sectionBetween(
+      localSandboxSource,
+      "private async executeInWindowsSandbox(",
+      "private executeOnce("
+    ),
+    "const spawnOptions = {",
     "console.log(`[LocalSandbox] spawned pid="
   )
   const executeOnceSection = sectionBetween(
@@ -1287,7 +1295,7 @@ test("sandbox execute helpers do not create visible console windows", () => {
 
   assert.match(
     windowsSandboxSpawnSection,
-    /windowsHide: true/,
+    /windowsHide: true[\s\S]*spawnWindowsHandoffProcess\([\s\S]*spawnOptions,[\s\S]*spawn\(this\.codexExePath, sandboxArgs, \{\s*\.\.\.spawnOptions,/,
     "codex windows sandbox wrapper should be spawned without a visible console window"
   )
   assert.match(
@@ -1346,7 +1354,7 @@ test("unsandboxed git network commands allow Git Credential Manager UI prompts",
   )
   assert.match(
     executeOnceSection,
-    /const allowInteractiveGitAuth =[\s\S]*isWindows && LocalSandbox\.isGitInteractiveAuthCommand\(command\)[\s\S]*const spawnEnv = allowInteractiveGitAuth[\s\S]*LocalSandbox\.buildInteractiveGitEnv\(this\.env\)/,
+    /const allowInteractiveGitAuth =[\s\S]*isWindows && LocalSandbox\.isGitInteractiveAuthCommand\(command\)[\s\S]*const spawnEnv = allowInteractiveGitAuth[\s\S]*LocalSandbox\.buildInteractiveGitEnv\(executionEnv\)/,
     "executeOnce should opt Git network commands into the interactive credential environment"
   )
   assert.match(
@@ -1454,7 +1462,7 @@ test("Windows sandbox keeps workspace root separate from command cwd", () => {
   )
   assert.match(
     executeWindowsSection,
-    /spawn\(this\.codexExePath, sandboxArgs, \{[\s\S]*cwd: sandboxWorkspaceRoot/,
+    /const spawnOptions = \{\s*cwd: sandboxWorkspaceRoot,[\s\S]*spawnWindowsHandoffProcess\([\s\S]*spawnOptions,[\s\S]*spawn\(this\.codexExePath, sandboxArgs, \{\s*\.\.\.spawnOptions,/,
     "codex sandbox process should still be launched from the real workspace root"
   )
 })
@@ -1546,8 +1554,8 @@ test("sandbox execute safety checks do not synchronously spawn helper processes"
 test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", () => {
   const runtimeResourceSection = sectionBetween(
     runtimeSource,
-    "async function ensureCodexExe(",
-    "  const enabledHooks = getEnabledHooks(workspacePath)"
+    "  let resourceBase: string",
+    "  const baseHooks = getEnabledHooks(workspacePath)"
   )
   const codeExecHelperSection = sectionBetween(
     codeExecRunnerSource,
@@ -1563,7 +1571,7 @@ test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", ()
     "agent runtime should not import sync fs helpers on sandbox startup path"
   )
   assert.doesNotMatch(
-    runtimeResourceSection,
+    runtimeResourceSection + codexBinarySource,
     forbiddenSyncFs,
     "sandbox runtime resource/codex.exe checks should use async fs APIs"
   )
@@ -1840,7 +1848,7 @@ test("workflow notification backlog drains: ack kicks the next pending run", () 
   )
   assert.match(
     workflowRunManagerSource,
-    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{ type: "workflow_notification"/,
+    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{\s*type: "workflow_notification"/,
     "the async kick re-broadcasts the next undelivered run's notification"
   )
   assert.match(
@@ -2066,21 +2074,16 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
   )
 })
 
-test("workflow script writeFile shares the run-level write lock with subagent tool writes (#2)", () => {
-  // Script writeFile() used its own fileWriteChain while subagent tool writes used
-  // the threadId tool-concurrency lock — two silos that could clobber the same file
-  // on a concurrent script+agent write. runtime injects the SAME lock
-  // (getToolConcurrencyLock(threadId).write); the engine's writeFile routes through
-  // it; run-manager threads it down.
+test("workflow script writes share admission and backend file locks with agents", () => {
   assert.match(
     runtimeSource,
-    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(threadId\)\.write\(fn\)/,
-    "runtime injects the threadId write lock as the workflow's runExclusiveFileWrite"
+    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(options\.toolConcurrencyQueueId \?\? threadId\)\.read\(fn, signal\)/,
+    "runtime shares file admission while excluding unknown tools"
   )
   assert.match(
     workflowEngineSource,
-    /context\.runExclusiveFileWrite/,
-    "engine writeFile routes through the injected run-level write lock"
+    /withFileOperation\(context\.workspacePath, resolved, "write", performWrite, signal\)/,
+    "engine uses the same per-file protection as sandbox writes"
   )
   assert.match(
     workflowRunManagerSource,
@@ -2433,7 +2436,7 @@ test("flush-failed snapshot gets a real write-back retry on read paths, not just
   )
 })
 
-test("workflow notification turn is recognized on a FULL prompt match, not just the prefix (#1)", () => {
+test("workflow notification requires a FULL prompt match or a trusted Bot checkpoint continuation (#1)", () => {
   // #1: a user can paste the short TRIGGER prefix (from a log / code sample); only the
   // FULL prompt is treated as internal plumbing, so a pasted prefix is neutralized as
   // ordinary text instead of being silently swallowed. The full-match compare now lives
@@ -2443,13 +2446,23 @@ test("workflow notification turn is recognized on a FULL prompt match, not just 
   // hand-rolled compare.
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt = isWorkflowNotificationTurnMessage\(message\)/,
-    "an internal workflow turn requires the shared full-match helper"
+    /matchesWorkflowNotificationPrompt =\s*isWorkflowNotificationTurnMessage\(message\)/,
+    "ordinary workflow notification recognition uses the shared full-match helper"
   )
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt &&\s+parsedThreadMetadata\.agentMode === "workflow"/,
-    "the full-match gate is combined with workflow agent mode"
+    /isWorkflowNotificationTurnMessage\(message\) \|\|\s*\(continueBotTaskCheckpointId !== undefined && workflowNotificationClaim !== undefined\)/,
+    "the additional recognition path requires both a validated Bot checkpoint and its workflow instance"
+  )
+  assert.match(
+    agentIpcSource,
+    /matchesWorkflowNotificationPrompt &&\s*\(parsedThreadMetadata\.agentMode === "workflow" \|\|\s*\(isWorkflowNotificationInvoke && hasBotWorkflowCapability\(metadata\)\)\)/,
+    "the full-match gate requires workflow mode or an authorized Bot receipt"
+  )
+  assert.match(
+    agentIpcSource,
+    /runExecutionContext\.source === "bot" &&\s*runExecutionContext\.workflowInternalNotification === true &&\s*hasBotWorkflowCapability\(initialInvokeMetadata\)/,
+    "ordinary user text cannot impersonate a Bot's workflow receipt"
   )
 })
 
@@ -2699,7 +2712,7 @@ test("workflow run IPC strips the (tens-of-MB) journal before sending a run to t
   // drop it before IPC. `script` is kept (the run dialog renders it).
   assert.match(
     workflowsIpcSource,
-    /function stripJournalForRenderer\(run: PersistedWorkflowRun \| null\)/,
+    /function stripJournalForRenderer\(\s*run: WorkflowRunForRenderer \| null\s*\)/,
     "workflows IPC exposes a journal-stripping projection"
   )
   assert.match(
@@ -2724,8 +2737,8 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId\s*\)/,
-    "notification turn uses the atomic async claim"
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner, \.\.\.workflowNotificationClaim \}\s*\)/,
+    "notification turn uses the atomic async claim with its original owner and optional validated instance"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
     "claimWorkflowNotification(pendingWorkflowRun.runId, runToken)"
@@ -2739,13 +2752,18 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
     notificationClaimHandoff
   )
   const notificationClaimBlockEnd = agentIpcSource.indexOf(
-    "} else if (hasWorkflowNotificationPrefix)",
+    "} else if (messageControlsEnabled && hasWorkflowNotificationPrefix)",
     notificationClaimHandoff
   )
   const notificationClaimTry = agentIpcSource.indexOf("try {", notificationClaimStart)
   const notificationClaimCatch = agentIpcSource.indexOf(
     "} catch (error) {",
     notificationClaimHandoff
+  )
+  assert.ok(notificationClaimStart >= 0, "notification claim start marker exists")
+  assert.ok(
+    notificationClaimBlockEnd > notificationClaimHandoff,
+    "notification claim block ends at the message-control guarded prefix branch"
   )
   assert.ok(
     notificationClaimStart >= 0 &&
@@ -2788,7 +2806,7 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   // can't double-report the same run.
   assert.match(
     workflowRunManagerSource,
-    /if \(run && this\.inFlightNotifications\.has\(run\.runId\)\) return null/,
+    /findUndeliveredTerminalRunAsync\(workspacePath, threadId, \(candidate\) => \{\s*if \(this\.inFlightNotifications\.has\(candidate\.runId\)\) return false/,
     "findPendingNotification excludes in-flight runs"
   )
   // The in-flight set is IN MEMORY: a restart clears it, which is exactly what
@@ -2958,14 +2976,16 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   )
 })
 
-test("workflow subagent cleanup cancels run_in_background tasks (no leak past the run)", () => {
-  // Coordinator workers cancel their background tasks on teardown; the workflow
-  // subagent cleanup must too, or a backgrounded process outlives the run and
-  // leaks CPU/memory/file writes after the workflow completes or is cancelled.
+test("workflow subagent cleanup waits for physical shell exit before releasing resources", () => {
   assert.match(
     runtimeSource,
-    /LocalSandbox\.cancelBackgroundTasksAndWait\(workflowThreadId\)/,
-    "workflow subagent cleanup cancels and waits for run_in_background process trees"
+    /await cleanupChildRuntimeResources\(workflowThreadId\)/,
+    "workflow subagent cleanup uses the child runtime shell fence"
+  )
+  assert.match(
+    runtimeSource,
+    /async function cleanupChildRuntimeResources\([\s\S]*?await LocalSandbox\.cancelBackgroundTasksAndWait\(threadId\)\s+return Promise\.allSettled\(\[\s*LocalSandbox\.revokeGrantedAclsForRun\(threadId\),\s*closeCheckpointer\(threadId\)/,
+    "child runtime waits for process trees before revoking ACLs and closing its checkpoint"
   )
   assert.doesNotMatch(
     runtimeSource,

@@ -1,12 +1,8 @@
 import type { Thread } from "@/types"
+import { isRemoteInboxMetadata } from "../../../shared/remote-inbox-workspace"
 
-export const REMOTE_INBOX_WORKSPACE_NAME = "远程收件箱"
+export { REMOTE_INBOX_WORKSPACE_NAME } from "../../../shared/remote-inbox-workspace"
 
 export function isRemoteInboxThread(thread: Thread | null | undefined): boolean {
-  const metadata = thread?.metadata
-  return (
-    metadata?.targetKind === "inbox" &&
-    metadata.imDeliveryContext !== null &&
-    typeof metadata.imDeliveryContext === "object"
-  )
+  return isRemoteInboxMetadata(thread?.metadata)
 }

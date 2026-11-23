@@ -1,3 +1,54 @@
+import { projectAgentProgress } from "./project-agent-progress"
+import { runProjectAnalysisAgent } from "../services/project-analysis-agent"
+import { registerProjectReportHandlers } from "./project-report"
+import { makeReportPeriodExample } from "../services/project-analysis/report-mock"
+import { getOpenworkDir } from "../storage"
+import { loadCompleteProjectList, projectListPageData } from "../services/project-analysis/page-data"
+import { resolveOperationsPeriod } from "../../shared/project-operations-period"
+import {
+  fetchProjectOperationsPeriod,
+  parseProjectOperationsPeriodInput
+} from "./project-operations-period"
+import type { ProjectOperationsPeriodInput } from "../../shared/project-operations-period"
+import type { ProjectAnalysisAgentInput } from "../../shared/project-analysis-agent"
+import { PROJECT_ANALYSIS_AGENT_ENABLED } from "../../shared/project-analysis-agent"
+import {
+  completeRunAnalysisStages,
+  partitionRunAnalysisStageAggs,
+  type StagePartition
+} from "./project-run-analysis-stages"
+import type {
+  RunAnalysisData,
+  RunAnalysisOptions,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
+  RunAnalysisRange,
+  RunAnalysisSessionRequest
+} from "../../shared/project-run-analysis"
+import {
+  fetchRunAnalysis,
+  fetchRunAnalysisStages,
+  fetchRunAnalysisPluginStages,
+  groupRunAnalysisExportTargets,
+  fetchRunAnalysisSessions,
+  emptyRunAnalysisMetrics,
+  fetchRunAnalysisThread,
+  runAnalysisAttributionFilters
+} from "./project-run-analysis"
+import {
+  makeMockRunAnalysis,
+  makeMockRunAnalysisStages,
+  makeMockRunAnalysisPluginStages,
+  mockRunAnalysisSessionIndexes,
+  mockStageNames
+} from "./project-run-analysis-mock"
+import {
+  excludesTestProjects,
+  excludeTestProjectsFromQuery,
+  withProjectModeTestExclusion,
+  projectModeTestScopeCacheKey,
+  testProjectLookupScope
+} from "./project-mode-test-projects"
 import {
   buildAwardSkillMatchFilter,
   groupAwardSkillCandidates,
@@ -21,7 +72,10 @@ import {
   type ProjectMetricSortKey
 } from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
-import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
+import {
+  FILTERED_TOOL_EXCLUDES,
+  queryWithToolUsageMappingFallback
+} from "./dashboard-tool-usage-query"
 import { fetchUserProfileDirectory } from "./dashboard-user-profile-query"
 import {
   projectModeMetricTimeFilters,
@@ -29,6 +83,15 @@ import {
 } from "./project-mode-query-scope"
 import { ProjectModePageCache } from "./project-mode-page-cache"
 import { fetchProjectModeCommitIds } from "./project-mode-commit-ids"
+import {
+  featureExecutionAggs,
+  featureExecutionKey,
+  readFeatureExecution,
+  readLastExecution,
+  calculateProjectElapsedMs,
+  fetchCompleteFeatureExecution,
+  type FeatureExecutionMetrics
+} from "./project-mode-execution-metrics"
 import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
 import { describeDashboardEsQuery } from "../services/dashboard-es-query-diagnostics"
 import { loadTraceExportDetails } from "./dashboard-trace-export"
@@ -91,6 +154,16 @@ import {
 } from "./dashboard-code-stats"
 import { emptyOrgValueClauses, isMissingOrgValue, readOrgText } from "./dashboard-org-fields"
 import {
+  addBotActiveUserActivityCounts,
+  buildBotActiveUserActivityQuery,
+  buildBotActiveUsersQuery,
+  buildBotMetricsQuery,
+  makeMockBotActiveUsers,
+  makeMockBotOverview,
+  parseBotActiveUsers,
+  parseBotMetrics
+} from "./dashboard-bot-metrics"
+import {
   computeKnowledgeCommitRate,
   formatKnowledgeApiTime,
   getKnowledgeCommitRateUrl,
@@ -102,17 +175,23 @@ import {
 import type { DashboardKnowledgeCommitRate } from "../../shared/dashboard-knowledge-commit-rate"
 import { fetchKnowledgeActiveList } from "./dashboard-knowledge-active-details"
 import {
+  demoKnowledgeActiveCount,
+  demoKnowledgeOrgs,
+  demoKnowledgePeople
+} from "./dashboard-knowledge-demo"
+import { fetchKnowledgeUserDetailList } from "./dashboard-knowledge-user-details"
+import {
   fetchKnowledgeFileReaders,
   normalizeKnowledgeReadFileRef,
   resolveKnowledgeReaderFields,
   type KnowledgeReaderFields
 } from "./dashboard-knowledge-readers"
 import {
-  buildKnowledgeProjectQueries,
+  fetchKnowledgeProjectAggregates,
   emptyKnowledgeAccumulation,
   fetchKnowledgeAccumulation,
+  fetchKnowledgeOrgDistribution,
   parseKnowledgeDistribution,
-  parseKnowledgeProjectStats,
   resolveKnowledgeOverviewScope
 } from "./dashboard-knowledge-overview"
 import type {
@@ -120,9 +199,11 @@ import type {
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
   KnowledgeProjectStats,
+  KnowledgeOrgItem,
   KnowledgeReadDetails,
   KnowledgeReadFileRef,
-  KnowledgeRecentConstraintFiles
+  KnowledgeRecentConstraintFiles,
+  KnowledgeUserDetails
 } from "../../shared/dashboard-knowledge-overview"
 import {
   fetchRecentConstraintFileDetails,
@@ -178,15 +259,6 @@ import {
 import { fetchEfficiencyCompute } from "./dashboard-efficiency-full"
 import type { EfficiencyPluginFilter } from "../../shared/dashboard-efficiency-compute"
 import {
-  executeDashboardEsQuery,
-  type DashboardEsIndexAlias,
-  type DashboardEsQueryInput
-} from "../services/dashboard-es-query"
-import {
-  runDashboardAnalysisAgent,
-  type DashboardAnalysisAgentInput
-} from "../services/dashboard-analysis-agent"
-import {
   DASHBOARD_ES_FALLBACK_BYTE_LIMIT,
   DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
   DASHBOARD_ES_RESPONSE_TOO_LARGE,
@@ -209,6 +281,7 @@ import {
 import {
   DashboardRequestCancelledError,
   DashboardRequestCoordinator,
+  dashboardRequestContext,
   getDashboardRequestSignal,
   isDashboardRequestCancelled
 } from "../services/dashboard-request-coordinator"
@@ -365,6 +438,7 @@ async function esQuery(
     operation?: "search" | "field_caps"
   }
 ): Promise<unknown> {
+  if (options?.operation !== "field_caps") body = excludeTestProjectsFromQuery(index, body)
   const nodes = getEsNodes()
   if (nodes.length === 0) throw new Error("ES_NODES not configured")
 
@@ -402,11 +476,15 @@ async function esQuery(
   } catch (error) {
     if (isDashboardEsRequestCancelled(error) || isDashboardRequestCancelled(error)) throw error
     if (!isDashboardEsWorkerUnavailable(error)) {
-      throw makeEsUnavailableError(nodes, error instanceof Error ? error : new Error(String(error)), {
-        index,
-        operation: options?.operation ?? "search",
-        ...describeDashboardEsQuery(body)
-      })
+      throw makeEsUnavailableError(
+        nodes,
+        error instanceof Error ? error : new Error(String(error)),
+        {
+          index,
+          operation: options?.operation ?? "search",
+          ...describeDashboardEsQuery(body)
+        }
+      )
     }
 
     // Packaging failures should not make a small dashboard query unusable. This
@@ -1175,6 +1253,7 @@ type TraceViewMode = "thread" | "trace"
 type TraceTriggerScope = "active" | "all"
 
 interface TracePageOptions {
+  projectMode?: boolean
   page?: number
   pageSize?: number
   limit?: number
@@ -1361,12 +1440,24 @@ function isDashboardProjectModeAllowed(): boolean {
   return access.loggedIn
 }
 
+function requireDashboardProjectAnalysisAgentAccess(): void {
+  if (!PROJECT_ANALYSIS_AGENT_ENABLED) throw new Error("项目分析 Agent 暂未开放")
+  requireDashboardProjectModeAccess()
+}
+
 function isDashboardProjectModeAdmin(
   access: DashboardAccessContext = getDashboardAccessContext()
 ): boolean {
   if (import.meta.env.DEV) return true
   if (!access.loggedIn || !access.ystId) return false
   return getDashboardAllowedIds().has(access.ystId)
+}
+
+function getDashboardOrgFilterDefaults(): string[] {
+  const access = requireDashboardAccess()
+  if (isDashboardProjectModeAdmin(access)) return []
+  const room = access.upperOrgLv1.trim()
+  return room ? [room] : []
 }
 
 function requireDashboardProjectModeAccess(): DashboardAccessContext {
@@ -1414,24 +1505,12 @@ function isDashboardSkillEvalAllowed(
   return getDashboardSkillEvalAllowedIds().has(access.ystId)
 }
 
-function isDashboardAnalysisAgentAllowed(): boolean {
-  return isTraceEvolverReviewAdmin()
-}
-
 function isTraceEvolverReviewAdmin(
   access: DashboardAccessContext = getDashboardAccessContext()
 ): boolean {
   if (import.meta.env.DEV) return true
   if (!access.loggedIn || !access.ystId) return false
   return getTraceEvolverReviewAdminIds().has(access.ystId)
-}
-
-function requireDashboardAnalysisAgentAccess(): void {
-  const access = getDashboardAccessContext()
-  if (!access.loggedIn) throw new Error("请先登录后再使用运营指标分析 Agent")
-  if (!access.ystId || !getTraceEvolverReviewAdminIds().has(access.ystId)) {
-    throw new Error("无运营指标分析 Agent 使用权限")
-  }
 }
 
 // 「生成但未提交分析」（漏斗首层下钻）的访问门槛：
@@ -1538,47 +1617,6 @@ function projectMetricAllowedRoomNames(access: DashboardAccessContext): string[]
   if (isDashboardProjectModeAdmin(access)) return null
   const roomName = access.upperOrgLv1.trim()
   return roomName ? [roomName] : []
-}
-
-function getDashboardEsIndexByAlias(): Record<DashboardEsIndexAlias, string> {
-  return {
-    event: getEsIndex("event"),
-    trace: getEsIndex("trace")
-  }
-}
-
-function dashboardEsField(indexAlias: DashboardEsIndexAlias, field: string): string {
-  return indexAlias === "event" ? `properties.${field}` : field
-}
-
-function buildDashboardEsQueryFilters(
-  input: DashboardEsQueryInput,
-  access: DashboardAccessContext
-): Record<string, unknown>[] {
-  const filters: Record<string, unknown>[] = []
-  const projectId = input.context?.projectId?.trim() ?? ""
-  const featureSlug = input.context?.featureSlug?.trim() ?? ""
-  const projectScoped = input.context?.scope === "project" || Boolean(projectId || featureSlug)
-  appendOptionalFilter(
-    filters,
-    projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
-  )
-  appendOptionalFilter(
-    filters,
-    buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(input.context?.upperOrgLv1))
-  )
-
-  if (projectScoped) {
-    requireDashboardProjectModeAccess()
-    const projectField = dashboardEsField(input.indexAlias, "harnessProjectId")
-    const featureField = dashboardEsField(input.indexAlias, "harnessFeatureSlug")
-    filters.push(
-      projectId ? { term: { [projectField]: projectId } } : { exists: { field: projectField } }
-    )
-    if (featureSlug) filters.push({ term: { [featureField]: featureSlug } })
-  }
-
-  return filters
 }
 
 function appendOptionalFilter(
@@ -3277,6 +3315,46 @@ async function fetchOverview(
     },
     DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS.overview
   )
+}
+
+async function fetchBotOverview(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) {
+  const filters = botOverviewFilters(range, granularity, opts)
+  return parseBotMetrics(
+    await esQuery(getEsIndex("event"), buildBotMetricsQuery(filters), {
+      outputByteLimit: 256 * 1024
+    })
+  )
+}
+
+async function fetchBotActiveUsers(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: OrgFilterOptions,
+  cursor?: string
+) {
+  const filters = botOverviewFilters(range, granularity, opts)
+  const index = getEsIndex("event")
+  const options = { outputByteLimit: 64 * 1024 }
+  const raw = await esQuery(index, buildBotActiveUsersQuery(filters, cursor), options)
+  const page = parseBotActiveUsers(raw, cursor)
+  if (!page.items.length) return { items: [], nextCursor: null }
+  const sapIds = page.items.map((user) => user.sapId)
+  const activity = await esQuery(index, buildBotActiveUserActivityQuery(filters, sapIds), options)
+  return addBotActiveUserActivityCounts(page, activity)
+}
+
+function botOverviewFilters(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) {
+  const access = requireDashboardAccess()
+  const duration = Date.parse(range?.to) - Date.parse(range?.from)
+  if (
+    !Number.isFinite(duration) || duration < 0 || duration > 366 * 86400000 ||
+    !["day", "week", "month", "custom"].includes(granularity)
+  )
+    throw new Error("请选择有效的统计时间范围（最多 366 天）")
+  const filters = [timeRangeFilter("eventTime", range)]
+  appendOptionalFilter(filters, buildTraceAccessFilter(access))
+  appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1)))
+  return filters
 }
 
 async function fetchModelStats(
@@ -6397,8 +6475,8 @@ function assembleAdvancedFeatureCards(
           (m.imSendFailed > 0 ? `(异常 ${m.imSendFailed})` : ""),
         items: [
           { label: "收到", count: imInbound, tone: "neutral" },
-          { label: "已完成", count: m.imCompleted, tone: "good" },
-          { label: "回复", count: m.imReplied, tone: "neutral" },
+          { label: "处理完成", count: m.imCompleted, tone: "good" },
+          { label: "回复条数", count: m.imReplied, tone: "neutral" },
           { label: "主动推送", count: m.imPushed, tone: "good" },
           { label: "审批/提问", count: m.imCards, tone: "neutral" },
           // Covers both a send that failed outright and one the gateway never
@@ -8962,7 +9040,10 @@ function makeMockFeatureOperationalStats(
  * 总耗时最高只是因为轮次最多，而评审阶段单轮最慢。mock 要是把两个排名造成一致的，
  * 本地就看不出为什么需要同时展示这两列。
  */
-function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAnalysis {
+function makeMockProjectModeStageAnalysis(
+  projectId: string,
+  featureSlug?: string
+): ProjectModeStageAnalysis {
   const stage = (
     nodeName: string,
     conversationCount: number,
@@ -8988,13 +9069,16 @@ function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAn
     }
   })
 
+  const scale = featureSlug
+    ? 2 + ([...featureSlug].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 3)
+    : 1
   const stages = [
-    stage("dev-编码实现", 142, 21_400, 68_000),
+    stage("dev-编码实现", Math.ceil(142 / scale), 21_400, 68_000),
     // 轮次少但单轮最慢：总耗时排第三，平均耗时排第一。
-    stage("review-代码评审", 18, 47_900, 132_000),
-    stage("plan-方案设计", 46, 24_800, 71_000),
-    stage("test-测试验证", 37, 15_200, 44_000),
-    stage(STAGE_BUCKET_LABELS.unattributed, 12, 9_800, 26_000)
+    stage("review-代码评审", Math.ceil(18 / scale), 47_900, 132_000),
+    stage("plan-方案设计", Math.ceil(46 / scale), 24_800, 71_000),
+    stage("test-测试验证", Math.ceil(37 / scale), 15_200, 44_000),
+    stage(STAGE_BUCKET_LABELS.unattributed, Math.ceil(12 / scale), 9_800, 26_000)
   ].sort((a, b) => b.metrics.totalDurationMs - a.metrics.totalDurationMs)
 
   const total = stages.reduce((acc, item) => {
@@ -9417,7 +9501,22 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       project.codeStats,
       project.features.length
     )
+    const lastExecution = new Date(range.to).getTime()
+    project.lastExecutedAt =
+      project.conversationCount > 0 ? new Date(lastExecution).toISOString() : null
+    project.elapsedMs = calculateProjectElapsedMs(
+      project.lifecycleCreatedAt,
+      project.conversationCount > 0 ? new Date(lastExecution + 60_000).toISOString() : null
+    )
     project.features.forEach((feature, idx) => {
+      feature.totalDurationMs =
+        project.conversationCount > 0
+          ? makeMockProjectModeStageAnalysis(project.projectId, feature.slug).total.totalDurationMs
+          : null
+      feature.lastExecutedAt =
+        project.conversationCount > 0
+          ? new Date(lastExecution - idx * 3600_000).toISOString()
+          : null
       feature.codeStats = featureStats[idx]
       const operational = makeMockFeatureOperationalStats(project.projectId, feature.slug)
       feature.systemConstraintReads = operational.systemConstraintReads
@@ -9563,6 +9662,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
             projectCount: 1,
             featureCount: 3,
             conversationCount: 128,
+            userCount: 18,
+            allVersionsUserCount: 24,
             codeStats: makeDashboardCodeStats({
               generatedLines: 5200,
               deletedLines: 800,
@@ -9581,6 +9682,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
             projectCount: 1,
             featureCount: 2,
             conversationCount: 47,
+            userCount: 10,
+            allVersionsUserCount: 24,
             codeStats: makeDashboardCodeStats({
               generatedLines: 1800,
               deletedLines: 200,
@@ -9599,6 +9702,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
             projectCount: 1,
             featureCount: 1,
             conversationCount: 0,
+            userCount: 0,
+            allVersionsUserCount: 0,
             codeStats: null
           }
         ] as Array<Omit<ProjectModeAdapterView, "stageBuckets">>
@@ -11359,31 +11464,9 @@ function makeMockProjectModeProjectCommits(
  */
 const ES_MAX_RESULT_WINDOW = 10000
 
-/** Built-in file/system/meta tools excluded from the "已过滤" tool ranking. */
-const FILTERED_TOOL_EXCLUDES = [
-  // Claude Code 内置文件 / 系统工具
-  "execute",
-  "read_file",
-  "write_file",
-  "glob",
-  "grep",
-  "list_directory",
-  "task",
-  "task_output",
-  "ls",
-  "edit_file",
-  // 工具搜索 / 元工具
-  "search_tool",
-  "inspect_tool",
-  "invoke_deferred_tool",
-  // 内置代码执行辅助
-  "code_exec",
-  "save_code_exec_tool",
-  // 内置任务管理
-  "write_todos"
-]
-
 interface ProjectModeFeatureView {
+  totalDurationMs?: number | null
+  lastExecutedAt?: string | null
   slug: string
   title: string
   location?: string
@@ -11449,6 +11532,9 @@ interface ProjectModeAnalytics {
 }
 
 interface ProjectModeProjectView {
+  /** Latest main-Agent end minus project creation, across project lifetime. */
+  elapsedMs?: number | null
+  lastExecutedAt?: string | null
   projectId: string
   name: string
   description?: string
@@ -11515,6 +11601,7 @@ type ProjectModeProjectSortKey =
   | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
+  | "elapsedMs"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -11661,6 +11748,10 @@ interface ProjectModeAdapterView {
   projectCount: number
   featureCount: number
   conversationCount: number
+  /** 当前版本的主 Agent 主动对话用户，按非空 sapId 去重。 */
+  userCount: number
+  /** 插件名下跨版本去重的人数，不能累加各版本的 userCount。 */
+  allVersionsUserCount: number
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
 }
@@ -11732,8 +11823,8 @@ function normalizeProjectModeProjectStatus(value?: string | null): ProjectModePr
 }
 
 /**
- * Resolve the requested sort. `featureCount` is always honoured; the lifetime
- * metric sorts are dropped (→ default createdAt-desc) on the archived tab, so
+ * Resolve the requested sort. Elapsed time and attention sorts apply to both tabs;
+ * conversation-count and generated-line sorts are dropped (→ default createdAt-desc) on the archived tab, so
  * callers can blindly forward the user's choice without leaking the active-only rule.
  */
 function normalizeProjectModeProjectSort(
@@ -11743,6 +11834,7 @@ function normalizeProjectModeProjectSort(
   const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
   const key = options?.sortBy
   if (isProjectAttentionSortKey(key)) return { sortBy: key, sortOrder }
+  if (key === "elapsedMs") return { sortBy: key, sortOrder }
   if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
   if (key === "createdAt") return { sortBy: "createdAt", sortOrder }
   if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
@@ -11955,6 +12047,7 @@ function projectModeProjectSortValue(
       buckets.vibecoding.codeStats?.adoptedLines ?? 0
     )
   }
+  if (sortBy === "elapsedMs") return project.elapsedMs ?? null
   if (sortBy === "conversationCount") return project.conversationCount
   if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
   if (sortBy === "createdAt") {
@@ -12714,7 +12807,6 @@ async function fetchProjectModeFilteredProjectIds(
   return { ids, truncated }
 }
 
-
 /** Build project views for an explicit id set (one collapsed hit per project). */
 async function fetchProjectModeProjectViewsByIds(
   projectIds: string[],
@@ -12738,7 +12830,6 @@ async function fetchProjectModeProjectViewsByIds(
   }
   return map
 }
-
 
 /**
  * Upper bound on IDs forwarded to legacy overview and code-adoption queries.
@@ -12810,6 +12901,13 @@ async function fetchProjectModeUsage(
   adapters: Map<string, ProjectModeAdapterView>
 }> {
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const adapterConversationAggs = mainAgentConversationAggs({
+    ...stageBucketTraceAggs(),
+    identified_users: {
+      filter: buildNonEmptySapIdFilter(),
+      aggs: { user_count: { cardinality: { field: "sapId" } } }
+    }
+  })
   const body = {
     size: 0,
     query: {
@@ -12853,10 +12951,10 @@ async function fetchProjectModeUsage(
         terms: { field: "harnessAdapterName", size: 200 },
         aggs: {
           by_version: {
-            terms: { field: "harnessAdapterVersion", size: 50 },
-            aggs: mainAgentConversationAggs(stageBucketTraceAggs())
+            terms: { field: "harnessAdapterVersion", size: 50, missing: "" },
+            aggs: adapterConversationAggs
           },
-          ...mainAgentConversationAggs(stageBucketTraceAggs())
+          ...adapterConversationAggs
         }
       }
     }
@@ -12879,16 +12977,21 @@ async function fetchProjectModeUsage(
       const b = asRecord(bucket)
       const name = asString(b.key)
       if (!name) continue
+      const mainAgent = readMainAgentConversations(b)
+      const allVersionsUserCount = asNumber(
+        asRecord(asRecord(mainAgent.identified_users).user_count).value
+      )
       const rawVersions = asRecord(b.by_version).buckets
       const versions = Array.isArray(rawVersions) ? rawVersions : []
       if (versions.length === 0) {
-        const mainAgent = readMainAgentConversations(b)
         adapters.set(adapterKey(name), {
           name,
           version: undefined,
           projectCount: 0,
           featureCount: 0,
           conversationCount: asNumber(mainAgent.doc_count),
+          userCount: allVersionsUserCount,
+          allVersionsUserCount,
           codeStats: null,
           stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
@@ -12904,6 +13007,8 @@ async function fetchProjectModeUsage(
           projectCount: 0,
           featureCount: 0,
           conversationCount: asNumber(mainAgent.doc_count),
+          userCount: asNumber(asRecord(asRecord(mainAgent.identified_users).user_count).value),
+          allVersionsUserCount,
           codeStats: null,
           stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
@@ -13018,9 +13123,13 @@ async function fetchProjectModePageUsage(
   projectIds: string[],
   range: TimeRange | null,
   opts: OrgFilterOptions | undefined,
-  access: DashboardAccessContext
+  access: DashboardAccessContext,
+  expectedFeatures?: Map<string, string[]>
 ): Promise<{
   perProject: Map<string, number>
+  lastExecutionByProject: Map<string, string | null>
+  lastExecutionEndByProject: Map<string, string | null>
+  executionByFeature: Map<string, FeatureExecutionMetrics>
   perProjectSuspectedTechnicalDetail: Map<string, number>
   perProjectDevStage: Map<string, number>
   perProjectDevAssociatedFeatures: Map<string, number>
@@ -13030,6 +13139,10 @@ async function fetchProjectModePageUsage(
 }> {
   const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   const perProject = new Map<string, number>()
+  const lastExecutionByProject = new Map<string, string | null>()
+  const lastExecutionEndByProject = new Map<string, string | null>()
+  const executionByFeature = new Map<string, FeatureExecutionMetrics>()
+  const incompleteExecutionProjects: string[] = []
   const perProjectSuspectedTechnicalDetail = new Map<string, number>()
   const perProjectDevStage = new Map<string, number>()
   const perProjectDevAssociatedFeatures = new Map<string, number>()
@@ -13040,6 +13153,9 @@ async function fetchProjectModePageUsage(
   if (projectIds.length === 0) {
     return {
       perProject,
+      lastExecutionByProject,
+      lastExecutionEndByProject,
+      executionByFeature,
       perProjectSuspectedTechnicalDetail,
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
@@ -13073,6 +13189,8 @@ async function fetchProjectModePageUsage(
           // 三桶尤其明显：一次用户轮次派出 10 个 Task 子代理就会被记成 11 次对话，
           // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
           ...buildProjectModeConversationAndCostAggs({
+            last_execution: { max: { field: "startedAt" } },
+            last_execution_end: { max: { field: "endedAt" } },
             ...stageBucketTraceAggs(),
             ...(includeSuspectedTechnicalDetail
               ? {
@@ -13085,9 +13203,11 @@ async function fetchProjectModePageUsage(
             by_feature: {
               terms: {
                 field: "harnessFeatureSlug",
-                size: featureLimit
+                size: featureLimit,
+                show_term_doc_count_error: true
               },
               aggs: {
+                ...featureExecutionAggs(),
                 by_node: {
                   terms: { field: "harnessNodeName", size: 10 }
                 }
@@ -13112,6 +13232,24 @@ async function fetchProjectModePageUsage(
     const mainAgentConversations = readMainAgentConversations(b)
     const featureAgg = asRecord(mainAgentConversations.by_feature)
     const featureBuckets = Array.isArray(featureAgg.buckets) ? featureAgg.buckets : []
+    lastExecutionByProject.set(key, readLastExecution(mainAgentConversations))
+    lastExecutionEndByProject.set(
+      key,
+      readLastExecution(mainAgentConversations, "last_execution_end")
+    )
+    if (
+      asNumber(featureAgg.sum_other_doc_count) > 0 ||
+      asNumber(featureAgg.doc_count_error_upper_bound) !== 0
+    ) {
+      incompleteExecutionProjects.push(key)
+    } else {
+      for (const item of featureBuckets) {
+        const bucket = asRecord(item)
+        const slug = asString(bucket.key)
+        if (slug)
+          executionByFeature.set(featureExecutionKey(key, slug), readFeatureExecution(bucket))
+      }
+    }
     if (
       asNumber(featureAgg.sum_other_doc_count) > 0 ||
       asNumber(asRecord(mainAgentConversations.by_node).sum_other_doc_count) > 0 ||
@@ -13159,8 +13297,24 @@ async function fetchProjectModePageUsage(
     }
   }
 
+  if (incompleteExecutionProjects.length) {
+    const complete = await fetchCompleteFeatureExecution(
+      incompleteExecutionProjects,
+      [
+        ...projectModeTraceFilters(range, orgFilterClause),
+        projectModeMainAgentConversationFilter()
+      ],
+      (query) => esQuery(getEsIndex("trace"), query),
+      expectedFeatures
+    )
+    for (const [key, metric] of complete) executionByFeature.set(key, metric)
+  }
+
   return {
     perProject,
+    lastExecutionByProject,
+    lastExecutionEndByProject,
+    executionByFeature,
     perProjectSuspectedTechnicalDetail,
     perProjectDevStage,
     perProjectDevAssociatedFeatures,
@@ -13674,23 +13828,27 @@ async function enrichProjectModeProjectViews(
   access: DashboardAccessContext
 ): Promise<ProjectModeProjectView[]> {
   const projectIds = projects.map((project) => project.projectId)
+  const expectedFeatures = new Map(
+    projects.map((project) => [
+      project.projectId,
+      project.features.map((feature) => feature.slug).filter(Boolean)
+    ])
+  )
   const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   // Key code stats on the page's project ids (not just those with conversations)
   // so a project ranked high by 原始生成行数 still shows its adoption columns.
   const [usage, code] = await Promise.all([
-    fetchProjectModePageUsage(projectIds, range, opts, access),
-    fetchProjectModeProjectMetrics(projectIds, range, opts, access, {
-      expected: new Map(
-        projects.map((project) => [
-          project.projectId,
-          project.features.map((feature) => feature.slug)
-        ])
-      )
-    })
+    fetchProjectModePageUsage(projectIds, range, opts, access, expectedFeatures),
+    fetchProjectModeProjectMetrics(projectIds, range, opts, access, { expected: expectedFeatures })
   ])
   return projects.map((project) => ({
     ...project,
     conversationCount: usage.perProject.get(project.projectId) ?? 0,
+    lastExecutedAt: usage.lastExecutionByProject.get(project.projectId) ?? null,
+    elapsedMs: calculateProjectElapsedMs(
+      project.lifecycleCreatedAt,
+      usage.lastExecutionEndByProject.get(project.projectId)
+    ),
     ...(includeSuspectedTechnicalDetail
       ? {
           suspectedTechnicalDetailConversationCount:
@@ -13719,9 +13877,14 @@ async function enrichProjectModeProjectViews(
     features: project.features.map((feature) => {
       const key = projectFeatureKey(project.projectId, feature.slug)
       const operational = code.operationalByFeature.get(key)
+      const execution = usage.executionByFeature.get(
+        featureExecutionKey(project.projectId, feature.slug)
+      )
       return {
         ...feature,
         codeStats: code.byFeature.get(key) ?? null,
+        totalDurationMs: execution?.totalDurationMs ?? null,
+        lastExecutedAt: execution?.lastExecutedAt ?? null,
         systemConstraintReads: operational?.systemConstraintReads ?? null,
         hookExecutions: operational?.hookExecutions ?? null
       }
@@ -13731,6 +13894,233 @@ async function enrichProjectModeProjectViews(
 
 const projectAttentionRankingCache = new ProjectAttentionRankingCache()
 const projectModePageCache = new ProjectModePageCache<ProjectModeProjectPageData>()
+const runAnalysisCache = new ProjectModePageCache<RunAnalysisData>()
+
+function makeMockRunAnalysisTrace(
+  request: RunAnalysisSessionRequest,
+  index: number
+): DashboardTraceDetail {
+  const scope = `run-analysis-demo:${request.projectId}:${request.featureSlug}`
+  const traceId = `${scope}:${index}`
+  const trace = makeMockTraceWithConversation({
+    traceId,
+    threadId: `${scope}:thread-${index < 3 ? "new" : index % 6}`,
+    startedAt: new Date(Date.now() - (index + 1) * 600000),
+    durationMs: 60000,
+    skill: "示例研发技能",
+    userIndex: 0,
+    userMessage: index < 12 ? "开发示例：直接完善登录校验" : "开发示例：使用继承的研发技能完善接口",
+    assistantSummary: "这是运行分析开发示例的完整会话，用于验证诊断下钻。",
+    toolCalls: [
+      { name: "read_file", args: { path: "src/demo.ts" }, result: "示例代码内容", durationMs: 50 }
+    ]
+  })
+  trace.usedSkills = index < 12 ? [] : ["示例研发技能"]
+  trace.harnessProjectId = request.projectId
+  trace.harnessFeatureSlug = request.featureSlug ?? undefined
+  const stages = mockStageNames(request.projectId)
+  trace.harnessNodeName = stages[index % stages.length]
+  trace.harnessNodeStatus = index % 5 === 0 ? "已完成" : "进行中"
+  return makeMockDashboardTraceDetail(trace, index % 6)
+}
+function makeMockRunAnalysisSessions(request: RunAnalysisSessionRequest) {
+  const indexes = mockRunAnalysisSessionIndexes(request)
+  const rows = indexes
+    .map((index) => makeMockRunAnalysisTrace(request, index))
+    .map((trace) => ({
+      traceId: trace.traceId,
+      threadId: trace.threadId ?? null,
+      startedAt: trace.startedAt,
+      endedAt: trace.endedAt ?? null,
+      durationMs: trace.durationMs,
+      nodeName: trace.harnessNodeName ?? null,
+      userName: trace.userName ?? null,
+      usedSkills: trace.usedSkills
+    }))
+  return { rows, total: rows.length, after: null }
+}
+
+async function fetchProjectRunAnalysisStageDetails(request: RunAnalysisSessionRequest) {
+  const filters = await runAnalysisDetailFilters(request)
+  const range = { from: "1970-01-01T00:00:00.000Z", to: new Date().toISOString() }
+  // Only the selected feature is expanded. Starting-stage counts stay separate from visited-stage duration/cost.
+  const startingStages = fetchRunAnalysisStages(esQuery, getEsIndex("trace"), filters, range)
+  const [rows, analysis] = await Promise.all([
+    startingStages,
+    fetchProjectModeStageAnalysis(
+      request.projectId,
+      null,
+      {
+        ...request,
+        featureSlug: request.featureSlug,
+        completeStages: true
+      },
+      startingStages
+    )
+  ])
+  if (analysis.durationAttribution?.truncated || analysis.costAttribution?.truncated)
+    throw new Error("阶段统计未完整返回，请重试；若仍失败请联系维护人员核查阶段标签")
+  const byNode = new Map(rows.map((row) => [row.nodeName ?? UNATTRIBUTED_NODE_NAME, row]))
+  for (const stage of analysis.stages) {
+    const row = byNode.get(stage.nodeName)
+    if (row)
+      Object.assign(row, {
+        attributedDurationMs:
+          row.totalDurationMs !== null || (analysis.durationAttribution?.splitTurnCount ?? 0) > 0
+            ? stage.metrics.totalDurationMs
+            : null,
+        attributedToolCalls:
+          row.toolReportedTraceCount > 0 || (analysis.costAttribution?.callStartTraceCount ?? 0) > 0
+            ? stage.metrics.runCost.toolCalls
+            : null,
+        attributedModelCalls:
+          row.modelReportedTraceCount > 0 ||
+          (analysis.costAttribution?.callStartTraceCount ?? 0) > 0
+            ? stage.metrics.runCost.modelCalls
+            : null
+      })
+    // New stageDuration can contain a visited stage without a turn that started there.
+    else
+      rows.push({
+        ...emptyRunAnalysisMetrics(),
+        traceCount: 0,
+        conversationCount: 0,
+        noSkillConversationCount: 0,
+        nodeName: stage.nodeName,
+        firstExecutedAt: null,
+        lastExecutedAt: null,
+        lastEndedAt: null,
+        executionSpanMs: null,
+        totalDurationMs: null,
+        toolCalls: null,
+        modelCalls: null,
+        attributedDurationMs: stage.metrics.totalDurationMs,
+        attributedToolCalls: stage.metrics.runCost.toolCalls,
+        attributedModelCalls: stage.metrics.runCost.modelCalls
+      })
+  }
+  return { rows, dataAsOf: new Date().toISOString() }
+}
+
+function runAnalysisSnapshotFilters(
+  range: RunAnalysisRange,
+  options: RunAnalysisOptions,
+  access: DashboardAccessContext
+): Record<string, unknown>[] {
+  const org = buildProjectModeOrgFilter(options, access)
+  return [
+    ...projectModeSnapshotFilters(
+      org,
+      options.fromLeanOnly === true,
+      options.membership === "created",
+      range
+    ),
+    ...(options.membership === "active" || !options.membership
+      ? [{ bool: { must_not: [{ term: { "properties.lifecycleStatus": "archived" } }] } }]
+      : []),
+    ...(options.adapterName ? [{ term: { "properties.adapterName": options.adapterName } }] : []),
+    ...(options.adapterVersion
+      ? [{ term: { "properties.adapterVersion": options.adapterVersion } }]
+      : [])
+  ]
+}
+
+async function fetchProjectRunAnalysis(
+  range: RunAnalysisRange,
+  options: RunAnalysisOptions = {}
+): Promise<RunAnalysisData> {
+  const access = requireDashboardProjectModeAccess()
+  if (
+    !Number.isFinite(Date.parse(range?.from)) ||
+    !Number.isFinite(Date.parse(range?.to)) ||
+    Date.parse(range.from) > Date.parse(range.to)
+  )
+    throw new Error("运行分析时间范围无效")
+  const membership: RunAnalysisData["membership"] =
+    options.membership === "created" ||
+    options.membership === "executed" ||
+    options.membership === "all"
+      ? options.membership
+      : "active"
+  const org = buildProjectModeOrgFilter(options, access)
+  const code = buildProjectModeCodeAggs(null, null, org ? [org] : [])
+  // Commit counts are not needed; avoid approximate cross-feature commit aggregation.
+  const codeAggs = structuredClone(code.perBucketAggs)
+  delete asRecord(asRecord(codeAggs.code_adopt_measured).aggs).commit_count
+  delete asRecord(asRecord(codeAggs.code_adopt_pushed).aggs).pushed_commit_count
+  const scope = {
+    eventIndex: getEsIndex("event"),
+    traceIndex: getEsIndex("trace"),
+    snapshotFilters: runAnalysisSnapshotFilters(range, { ...options, membership }, access),
+    traceFilters: projectModeTraceFilters(null, org),
+    codeFilters: [
+      {
+        bool: {
+          should: [
+            { bool: { filter: code.codeGenFilters } },
+            { bool: { filter: code.codeAdoptFilters } }
+          ],
+          minimum_should_match: 1
+        }
+      }
+    ],
+    codeAggs,
+    range,
+    membership
+  }
+  const key = JSON.stringify([scope, projectModeTestScopeCacheKey()])
+  const cached = runAnalysisCache.get(key)
+  if (cached && !options.refresh) return cached
+  const generation = runAnalysisCache.generation
+  const data = await fetchRunAnalysis(scope, esQuery)
+  runAnalysisCache.set(key, data, generation)
+  return data
+}
+
+async function runAnalysisProjectFilters(
+  request: RunAnalysisSessionRequest
+): Promise<Record<string, unknown>[]> {
+  const access = requireDashboardProjectModeAccess()
+  if (!request.projectId?.trim()) throw new Error("projectId is required")
+  if (
+    request.featureSlug !== null &&
+    (typeof request.featureSlug !== "string" || !request.featureSlug.trim())
+  )
+    throw new Error("特性筛选无效")
+  if (
+    request.nodeName !== undefined &&
+    request.nodeName !== null &&
+    (typeof request.nodeName !== "string" || !request.nodeName.trim())
+  )
+    throw new Error("阶段筛选无效")
+  const org = buildProjectModeOrgFilter(request, access)
+  // Details must satisfy the same current permission/room/Lean/plugin scope as the inventory.
+  const snapshotFilters = runAnalysisSnapshotFilters(
+    { from: "1970-01-01T00:00:00.000Z", to: new Date().toISOString() },
+    { ...request, membership: "executed" },
+    access
+  )
+  const raw = asRecord(
+    await esQuery(getEsIndex("event"), {
+      size: 0,
+      track_total_hits: true,
+      query: {
+        bool: {
+          filter: [...snapshotFilters, { term: { "properties.projectId": request.projectId } }]
+        }
+      }
+    })
+  )
+  assertProjectModeResultComplete(raw)
+  const total = getTotalHits(raw, NaN)
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error("项目范围校验结果不完整，请重试")
+  if (total === 0) throw new Error("当前可访问及筛选范围内未找到该项目，请刷新项目列表后重试")
+  return [...projectModeTraceFilters(null, org), { term: { harnessProjectId: request.projectId } }]
+}
+
+async function runAnalysisDetailFilters(request: RunAnalysisSessionRequest) {
+  return [...(await runAnalysisProjectFilters(request)), ...runAnalysisAttributionFilters(request)]
+}
 
 async function fetchProjectModeMetricSortedPage(
   range: TimeRange,
@@ -13760,7 +14150,7 @@ async function fetchProjectModeMetricSortedPage(
     eventIndex: getEsIndex("event"),
     traceIndex: getEsIndex("trace")
   }
-  const cacheKey = JSON.stringify([scope, sortBy])
+  const cacheKey = JSON.stringify([scope, sortBy, projectModeTestScopeCacheKey()])
   let metrics = projectAttentionRankingCache.get(cacheKey)
   if (!metrics) {
     const generation = projectAttentionRankingCache.generation
@@ -13802,7 +14192,8 @@ async function fetchProjectModeProjectPage(
 ): Promise<ProjectModeProjectPageData> {
   const status = normalizeProjectModeProjectStatus(options?.status)
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
-  const metricSort = sortBy === "conversationCount" || sortBy === "generatedLines"
+  const metricSort =
+    sortBy === "conversationCount" || sortBy === "generatedLines" || sortBy === "elapsedMs"
 
   const visibility = isDashboardSuspectedTechnicalDetailAllowed(access)
   if (sortBy === "suspectedTechnicalDetailConversationCount" && !visibility) {
@@ -13816,6 +14207,7 @@ async function fetchProjectModeProjectPage(
     access.sapId,
     access.ystId,
     visibility,
+    projectModeTestScopeCacheKey(),
     filters,
     options?.page ?? 1,
     options?.pageSize ?? 10,
@@ -13840,7 +14232,12 @@ async function fetchProjectModeProjectPage(
     sortBy,
     sortOrder,
     showSuspectedTechnicalDetailMetric: visibility,
-    projects: await enrichProjectModeProjectViews(sliced.projects, null, options, access)
+    projects: (await enrichProjectModeProjectViews(sliced.projects, null, options, access)).map(
+      (project) =>
+        sortBy === "elapsedMs"
+          ? { ...project, elapsedMs: project.attentionMetric ?? null }
+          : project
+    )
   }
   projectModePageCache.set(cacheKey, result, generation)
   return result
@@ -13893,7 +14290,7 @@ const projectModeCommitIdCache = new ProjectModePageCache<string[]>()
 
 async function projectModeCommitIds(filters: Record<string, unknown>[]): Promise<string[]> {
   const index = getEsIndex("event")
-  const key = JSON.stringify([getEsNodes(), index, filters])
+  const key = JSON.stringify([getEsNodes(), index, filters, projectModeTestScopeCacheKey()])
   const cached = projectModeCommitIdCache.get(key)
   if (cached) return cached
   const generation = projectModeCommitIdCache.generation
@@ -14133,6 +14530,7 @@ async function fetchProjectMode(
   if (opts?.refreshProjects) {
     projectAttentionRankingCache.clear()
     projectModePageCache.clear()
+    runAnalysisCache.clear()
     projectModeCommitIdCache.clear()
   }
 
@@ -14194,6 +14592,8 @@ async function fetchProjectMode(
         projectCount: snapAdapter.projectCount,
         featureCount: snapAdapter.featureCount,
         conversationCount: 0,
+        userCount: 0,
+        allVersionsUserCount: 0,
         codeStats: null,
         stageBuckets: emptyStageBuckets()
       })
@@ -14276,22 +14676,25 @@ async function fetchProjectModeCodeStatsBySource(
 }
 
 async function fetchKnowledgeOverviewProjects(
-  range: TimeRange,
+  range: TimeRange | null,
   opts: OrgFilterOptions | undefined
 ): Promise<KnowledgeProjectStats> {
   const access = requireDashboardProjectModeAccess()
   const orgFilter = buildProjectModeOrgFilter(opts, access)
-  const queries = buildKnowledgeProjectQueries(projectModeSnapshotFilters(orgFilter), [
-    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
-    timeRangeFilter("eventTime", range),
-    { exists: { field: "properties.harnessProjectId" } },
-    { range: { "properties.successfulReadCount": { gt: 0 } } },
-    ...(orgFilter ? [orgFilter] : [])
-  ])
-  const [snapshot, reads] = await Promise.all(
-    queries.map((body) => esQuery(getEsIndex("event"), body))
+  const createdOnly = opts?.createdInRangeOnly === true
+  if (createdOnly && !range) throw new Error("本期新建项目统计需要时间范围")
+  return fetchKnowledgeProjectAggregates(
+    (body) => esQuery(getEsIndex("event"), body),
+    projectModeSnapshotFilters(orgFilter, false, createdOnly, range),
+    [
+      { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+      ...(createdOnly && range ? [timeRangeFilter("eventTime", range)] : []),
+      { exists: { field: "properties.harnessProjectId" } },
+      { range: { "properties.successfulReadCount": { gt: 0 } } },
+      ...(orgFilter ? [orgFilter] : [])
+    ],
+    createdOnly
   )
-  return parseKnowledgeProjectStats(snapshot, reads)
 }
 
 const recentConstraintFieldCache = new Map<
@@ -14405,6 +14808,14 @@ async function fetchKnowledgeRecentConstraintFiles(
   return { fileCount, complete }
 }
 
+function getDemoKnowledgeRoomIds(): Map<string, string> {
+  const mapping = getKnowledgeRoomOrgIds()
+  for (const room of makeMockOrgOptions()) {
+    if (room !== DASHBOARD_UNCLASSIFIED_ORG && !mapping.has(room)) mapping.set(room, `demo-${room}`)
+  }
+  return mapping
+}
+
 function resolveKnowledgeRequestScope(opts: OrgFilterOptions | undefined) {
   const access = import.meta.env.DEV
     ? getDashboardAccessContext()
@@ -14416,7 +14827,7 @@ function resolveKnowledgeRequestScope(opts: OrgFilterOptions | undefined) {
       ownRoom: access.upperOrgLv1,
       unclassifiedRoom: DASHBOARD_UNCLASSIFIED_ORG
     },
-    getKnowledgeRoomOrgIds
+    import.meta.env.DEV ? getDemoKnowledgeRoomIds : getKnowledgeRoomOrgIds
   )
 }
 
@@ -14426,7 +14837,7 @@ async function fetchKnowledgeActiveDetails(
   const scope = resolveKnowledgeRequestScope(opts)
   if (scope.unavailableReason) return { items: [], unavailableReason: scope.unavailableReason }
   if (import.meta.env.DEV) {
-    const count = Math.round(25 * (scope.orgIds ? Math.min(1, scope.orgIds.length / 3) : 1))
+    const count = demoKnowledgeActiveCount(scope.orgIds)
     return {
       items: Array.from({ length: count }, (_, i) => ({
         filePath: `LF3918/03_Backend_Services/services/demo/local_rules_${i + 1}.md`,
@@ -14447,6 +14858,56 @@ async function fetchKnowledgeActiveDetails(
   return { items: await fetchKnowledgeActiveList(url, scope.orgIds, getDashboardRequestSignal()) }
 }
 
+async function fetchKnowledgeUserDetails(
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeUserDetails> {
+  const scope = resolveKnowledgeRequestScope(opts)
+  if (scope.unavailableReason) return { items: [], unavailableReason: scope.unavailableReason }
+  return fetchKnowledgePeopleForScope(scope.orgIds)
+}
+
+async function fetchKnowledgePeopleForScope(orgIds: string[] | null): Promise<KnowledgeUserDetails> {
+  if (import.meta.env.DEV) {
+    return { items: demoKnowledgePeople(getDemoKnowledgeRoomIds(), orgIds) }
+  }
+  const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
+  return {
+    items: await fetchKnowledgeUserDetailList(url, orgIds, getDashboardRequestSignal())
+  }
+}
+
+function requireKnowledgeDrilldownRoom(roomId: string, opts: OrgFilterOptions | undefined): void {
+  const scope = resolveKnowledgeRequestScope(opts)
+  if (
+    typeof roomId !== "string" ||
+    !roomId.trim() ||
+    scope.unavailableReason ||
+    (scope.orgIds && !scope.orgIds.includes(roomId))
+  ) {
+    throw new Error("当前范围内无法查看该室的明细")
+  }
+}
+
+async function fetchKnowledgeOrgGroups(
+  roomId: string,
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeOrgItem[]> {
+  requireKnowledgeDrilldownRoom(roomId, opts)
+  if (import.meta.env.DEV) {
+    return demoKnowledgeOrgs(demoKnowledgePeople(getDemoKnowledgeRoomIds(), [roomId]), true)
+  }
+  const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
+  return fetchKnowledgeOrgDistribution(url, [roomId], getDashboardRequestSignal())
+}
+
+async function fetchKnowledgeRoomPeople(
+  roomId: string,
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeUserDetails> {
+  requireKnowledgeDrilldownRoom(roomId, opts)
+  return fetchKnowledgePeopleForScope([roomId])
+}
+
 async function fetchKnowledgeOverviewAccumulation(
   opts: OrgFilterOptions | undefined
 ): Promise<KnowledgeAccumulationData> {
@@ -14455,40 +14916,31 @@ async function fetchKnowledgeOverviewAccumulation(
     return { ...emptyKnowledgeAccumulation(), unavailableReason: scope.unavailableReason }
   }
   if (import.meta.env.DEV) {
-    const scale = scope.orgIds ? Math.min(1, scope.orgIds.length / 3) : 1
-    const distribution = (rows: Array<[string | null, number]>) =>
-      parseKnowledgeDistribution(
-        rows.map(([name, value]) => ({ name, value: Math.round(value * scale) }))
-      )
+    const people = demoKnowledgePeople(getDemoKnowledgeRoomIds(), scope.orgIds)
+    const systems = ["LF39.18", "LF39.05", "LF39.03", "LB47.02", "LA64.06", null]
     return {
       totals: {
-        totalNum: Math.round(806 * scale),
-        abandonedNum: 0,
-        activeNum: Math.round(25 * scale)
+        totalNum: people.reduce((sum, row) => sum + row.totalNum, 0),
+        abandonedNum: people.reduce((sum, row) => sum + row.abandonedNum, 0),
+        activeNum: demoKnowledgeActiveCount(scope.orgIds)
       },
-      users: distribution(
-        [
-          114, 110, 97, 91, 70, 52, 38, 26, 22, 22, 18, 18, 18, 17, 16, 13, 9, 8, 7, 7, 6, 6, 5, 5,
-          3, 2, 2, 2, 1, 1
-        ].map((value, index) => ["用户" + (index + 1), value])
+      users: parseKnowledgeDistribution(
+        people.map((row) => ({ name: row.userName, value: row.totalNum }))
       ),
-      orgs: distribution([
-        [null, 805],
-        ["零售基础客群经营开发室(成都)", 1]
-      ]),
-      systems: distribution([
-        [null, 287],
-        ["LF39.18", 182],
-        ["LF39.05", 151],
-        ["LF39.03", 132],
-        ["LB47.02", 32],
-        ["LA64.06", 22]
-      ]),
+      orgs: demoKnowledgeOrgs(people, !!scope.orgRoom),
+      orgRoom: scope.orgRoom,
+      systems: parseKnowledgeDistribution(
+        people.map((row, index) => ({
+          name: systems[index % systems.length],
+          value: row.totalNum
+        }))
+      ),
       errors: {}
     }
   }
   const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
-  return fetchKnowledgeAccumulation(url, scope.orgIds, getDashboardRequestSignal())
+  const data = await fetchKnowledgeAccumulation(url, scope.orgIds, getDashboardRequestSignal())
+  return { ...data, orgRoom: scope.orgRoom }
 }
 
 /** 技能修改采纳率。只看时间范围和室，不受「来源」「仅精益项目」「仅本期新建」影响。 */
@@ -14851,7 +15303,8 @@ async function fetchProjectModeOperationalDetails(
 async function fetchProjectModeStageAnalysis(
   projectId: string,
   range: TimeRange | null,
-  opts?: OrgFilterOptions
+  opts?: OrgFilterOptions & { featureSlug?: string | null; completeStages?: boolean },
+  beforeStagePartitions?: Promise<unknown>
 ): Promise<ProjectModeStageAnalysis> {
   const access = requireDashboardProjectModeAccess()
   const normalizedProjectId = typeof projectId === "string" ? projectId.trim() : ""
@@ -14859,40 +15312,81 @@ async function fetchProjectModeStageAnalysis(
     return { projectId: "", total: emptyProjectModeStageMetrics(), stages: [] }
   }
 
+  if (opts?.featureSlug != null && typeof opts.featureSlug !== "string")
+    throw new Error("特性筛选无效")
+  const featureSlug = opts?.featureSlug?.trim()
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const body = {
     size: 0,
+    track_total_hits: false,
     query: {
       bool: {
         filter: [
           ...projectModeMetricTimeFilters("startedAt", range),
           { term: { harnessProjectId: normalizedProjectId } },
+          ...(opts?.featureSlug === null
+            ? [{ bool: { must_not: [{ exists: { field: "harnessFeatureSlug" } }] } }]
+            : featureSlug
+              ? [{ term: { harnessFeatureSlug: featureSlug } }]
+              : []),
           ...(orgFilterClause ? [orgFilterClause] : [])
         ]
       }
     },
     aggs: buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
   }
-  const execute = async (usage: boolean, duration: boolean): Promise<EsSearchResponse> => {
+  let stageUsageSupported = true
+  let stageDurationSupported = true
+  const execute = async (
+    usage: boolean,
+    duration: boolean,
+    partition?: StagePartition
+  ): Promise<EsSearchResponse> => {
+    usage = usage && stageUsageSupported
+    duration = duration && stageDurationSupported
     try {
       return (await esQuery(getEsIndex("trace"), {
         ...body,
-        aggs: buildProjectModeStageAnalysisAggs(
-          UNATTRIBUTED_NODE_NAME,
-          PROJECT_MODE_FEATURE_SLUG_LIMIT,
-          usage,
-          duration
-        )
+        aggs: partition
+          ? partitionRunAnalysisStageAggs(
+              buildProjectModeStageAnalysisAggs(
+                UNATTRIBUTED_NODE_NAME,
+                PROJECT_MODE_FEATURE_SLUG_LIMIT,
+                usage,
+                duration
+              ),
+              partition
+            )
+          : buildProjectModeStageAnalysisAggs(
+              UNATTRIBUTED_NODE_NAME,
+              PROJECT_MODE_FEATURE_SLUG_LIMIT,
+              usage,
+              duration
+            )
       })) as EsSearchResponse
     } catch (error) {
-      if (duration && isNestedMappingError(error, "stageDuration")) return execute(usage, false)
-      if (usage && isNestedMappingError(error, "stageUsage")) return execute(false, duration)
+      if (duration && isNestedMappingError(error, "stageDuration")) {
+        stageDurationSupported = false
+        return execute(usage, false, partition)
+      }
+      if (usage && isNestedMappingError(error, "stageUsage")) {
+        stageUsageSupported = false
+        return execute(false, duration, partition)
+      }
       throw error
     }
   }
   const raw = await execute(true, true)
   assertProjectModeResultComplete(raw)
-  return parseProjectModeStageAnalysis(normalizedProjectId, asRecord(raw.aggregations))
+  const initial = parseProjectModeStageAnalysis(normalizedProjectId, asRecord(raw.aggregations))
+  if (!opts?.completeStages) return initial
+  // The initial scalar inventory shares this diagnosis's two-request concurrency budget.
+  await beforeStagePartitions
+  return completeRunAnalysisStages(initial, async (partition) => {
+    const page = await execute(true, true, partition)
+    assertProjectModeResultComplete(page)
+    return parseProjectModeStageAnalysis(normalizedProjectId, asRecord(page.aggregations))
+  })
 }
 
 /**
@@ -15420,6 +15914,53 @@ type DashboardRequestHandler<TArgs extends unknown[], TResult> = (
   ...args: TArgs
 ) => TResult | Promise<TResult>
 
+async function runDashboardHandlerInProjectScope<T>(
+  channel: string,
+  args: readonly unknown[],
+  operation: () => Promise<T>
+): Promise<T | { success: false; error: string }> {
+  try {
+    if (
+      channel === "dashboard:projectModeAnalysisAgent" ||
+      channel.startsWith("dashboard:projectReport")
+    ) {
+      requireDashboardProjectAnalysisAgentAccess()
+    }
+    if (import.meta.env.DEV || !excludesTestProjects(channel, args)) return operation()
+    const access = requireDashboardProjectModeAccess()
+    const scope = testProjectLookupScope(channel, args)
+    const accessFilter = buildProjectModeOrgFilter(scope, access)
+    return await withProjectModeTestExclusion(
+      {
+        eventIndex: getEsIndex("event"),
+        traceIndex: getEsIndex("trace"),
+        accessFilters: [
+          ...(accessFilter ? [accessFilter] : []),
+          ...(scope.projectId ? [{ term: { "properties.projectId": scope.projectId } }] : [])
+        ],
+        query: esQuery
+      },
+      operation
+    )
+  } catch (error) {
+    if (isDashboardRequestCancelled(error) || isDashboardEsRequestCancelled(error)) throw error
+    logDashboardRequestError(channel, error)
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function registerScopedDashboardHandler<TArgs extends unknown[], TResult>(
+  target: typeof ipcMain,
+  channel: string,
+  handler: DashboardRequestHandler<TArgs, TResult>
+): void {
+  target.handle(channel, (event, ...rawArgs) =>
+    runDashboardHandlerInProjectScope(channel, rawArgs, () =>
+      Promise.resolve(handler(event, ...(rawArgs as TArgs)))
+    )
+  )
+}
+
 function registerLatestDashboardHandler<TArgs extends unknown[], TResult>(
   target: typeof ipcMain,
   channel: string,
@@ -15431,7 +15972,9 @@ function registerLatestDashboardHandler<TArgs extends unknown[], TResult>(
     const family = resolveFamily(...args)
     try {
       return await dashboardRequestCoordinator.run(event.sender, family, () =>
-        Promise.resolve(handler(event, ...args))
+        runDashboardHandlerInProjectScope(channel, args, () =>
+          Promise.resolve(handler(event, ...args))
+        )
       )
     } catch (error) {
       if (isDashboardRequestCancelled(error) || isDashboardEsRequestCancelled(error)) {
@@ -15488,7 +16031,127 @@ function logDashboardRequestError(label: string, error: unknown): void {
   console.error(`[Dashboard] ${label} error:`, error)
 }
 
+async function inReportRoomScope<T>(
+  room: string,
+  signal: AbortSignal,
+  operation: () => Promise<T>
+): Promise<T> {
+  return dashboardRequestContext.run({ signal }, async () => {
+    const access = requireDashboardProjectModeAccess()
+    if (!isDashboardProjectModeAdmin(access) && room !== access.upperOrgLv1.trim())
+      throw new Error("无该室数据查看权限")
+    if (import.meta.env.DEV) return operation()
+    const org = buildProjectModeOrgFilter({ upperOrgLv1: room }, access)
+    return withProjectModeTestExclusion(
+      {
+        eventIndex: getEsIndex("event"),
+        traceIndex: getEsIndex("trace"),
+        accessFilters: org ? [org] : [],
+        query: esQuery
+      },
+      operation
+    )
+  })
+}
+
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
+  registerProjectReportHandlers({
+    register: (channel, handler, latest) => {
+      if (latest) registerLatestDashboardHandler(_ipcMain, channel, handler)
+      else registerScopedDashboardHandler(_ipcMain, channel, handler)
+    },
+    access: () => {
+      const access = requireDashboardProjectModeAccess()
+      return {
+        ownerId: access.sapId ? `sap:${access.sapId}` : access.ystId ? `yst:${access.ystId}` : "",
+        ownRoom: access.upperOrgLv1.trim(),
+        canChooseRoom: isDashboardProjectModeAdmin(access)
+      }
+    },
+    appDirectory: getOpenworkDir,
+    signal: getDashboardRequestSignal,
+    exampleData: import.meta.env.DEV,
+    loadPages: (scope, signal) =>
+      inReportRoomScope(scope.upperOrgLv1, signal, async () => {
+        const period = resolveOperationsPeriod(scope.period)
+        const range = {
+          from: period.from,
+          to: new Date(Date.parse(period.toExclusive) - 1).toISOString()
+        }
+        const options = {
+          upperOrgLv1: scope.upperOrgLv1,
+          createdInRangeOnly: false,
+          fromLeanOnly: false
+        }
+        const [projects, analysis] = await Promise.all([
+          import.meta.env.DEV
+            ? Promise.resolve(makeMockProjectModeExportData(range, options).projects)
+            : loadCompleteProjectList(
+                (page) => fetchProjectModeProjectPage(range, { ...options, ...page }),
+                signal
+              ),
+          import.meta.env.DEV
+            ? Promise.resolve(makeMockRunAnalysis(range, { ...options, membership: "active" }))
+            : fetchProjectRunAnalysis(range, { ...options, membership: "active" })
+        ])
+        return projectListPageData(projects, analysis)
+      }),
+    loadStages: (room, projectId, featureSlug, signal) =>
+      inReportRoomScope(room, signal, () =>
+        import.meta.env.DEV
+          ? Promise.resolve({
+              rows: makeMockRunAnalysisStages(projectId),
+              dataAsOf: new Date().toISOString()
+            })
+          : fetchProjectRunAnalysisStageDetails({ upperOrgLv1: room, projectId, featureSlug })
+      ),
+    loadSessions: (room, request, signal) =>
+      inReportRoomScope(room, signal, async () => {
+        const scoped = { ...request, upperOrgLv1: room }
+        return import.meta.env.DEV
+          ? makeMockRunAnalysisSessions(scoped)
+          : fetchRunAnalysisSessions(
+              esQuery,
+              getEsIndex("trace"),
+              await runAnalysisDetailFilters(scoped),
+              scoped
+            )
+      }),
+    loadRooms: () =>
+      import.meta.env.DEV
+        ? Promise.resolve(
+            makeMockOrgOptions().filter((room) => room !== DASHBOARD_UNCLASSIFIED_ORG)
+          )
+        : fetchOrgOptions({
+            from: new Date(Date.now() - 90 * 86400000).toISOString(),
+            to: new Date().toISOString()
+          }),
+    loadPeriod: (scope, signal) =>
+      dashboardRequestContext.run({ signal }, async () => {
+        if (import.meta.env.DEV) return makeReportPeriodExample(scope)
+        const access = requireDashboardProjectModeAccess()
+        if (!isDashboardProjectModeAdmin(access) && access.upperOrgLv1.trim() !== scope.upperOrgLv1)
+          throw new Error("无该室报告生成权限")
+        const org = buildProjectModeOrgFilter(scope, access)
+        const queryScope = {
+          eventIndex: getEsIndex("event"),
+          traceIndex: getEsIndex("trace"),
+          accessFilters: org ? [org] : []
+        }
+        return withProjectModeTestExclusion({ ...queryScope, query: esQuery }, () =>
+          fetchProjectOperationsPeriod(scope, { ...queryScope, signal }, esQuery)
+        )
+      }),
+    loadAccumulation: (room, signal) =>
+      dashboardRequestContext.run({ signal }, () =>
+        fetchKnowledgeOverviewAccumulation({ upperOrgLv1: room })
+      ),
+    loadActive: (room, signal) =>
+      dashboardRequestContext.run({ signal }, () =>
+        fetchKnowledgeActiveDetails({ upperOrgLv1: room })
+      )
+  })
+
   _ipcMain.handle("dashboard:cancelRequests", (event, families?: unknown) => {
     const sanitizedFamilies = Array.isArray(families)
       ? families
@@ -15510,9 +16173,9 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return isDashboardProjectModeAllowed()
   })
 
-  _ipcMain.handle("dashboard:isAnalysisAgentAllowed", async () => {
-    return isDashboardAnalysisAgentAllowed()
-  })
+  _ipcMain.handle("dashboard:isProjectAnalysisAllowed", () => isDashboardProjectModeAllowed())
+
+  _ipcMain.handle("dashboard:orgFilterDefaults", () => getDashboardOrgFilterDefaults())
 
   _ipcMain.handle("dashboard:isTraceEvolverReviewAdmin", async () => {
     return isTraceEvolverReviewAdmin()
@@ -15528,57 +16191,6 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle("dashboard:isSkillEvalAllowed", async () => {
     return isDashboardSkillEvalAllowed()
-  })
-
-  registerLatestDashboardHandler(
-    _ipcMain,
-    "dashboard:esQuery",
-    async (_, input: DashboardEsQueryInput) => {
-      try {
-        const access = requireDashboardAccess()
-        const result = await executeDashboardEsQuery(input, {
-          nodes: getEsNodes(),
-          auth: getEsAuth(),
-          indexByAlias: getDashboardEsIndexByAlias(),
-          injectedFilters: buildDashboardEsQueryFilters(input, access),
-          access: {
-            sapId: access.sapId,
-            ystId: access.ystId,
-            unrestricted: access.unrestricted
-          },
-          signal: getDashboardRequestSignal()
-        })
-        return { success: true, data: result }
-      } catch (e) {
-        logDashboardRequestError("esQuery", e)
-        return { success: false, error: e instanceof Error ? e.message : String(e) }
-      }
-    }
-  )
-
-  _ipcMain.handle("dashboard:analysisAgent", async (_, input: DashboardAnalysisAgentInput) => {
-    try {
-      requireDashboardAnalysisAgentAccess()
-      const access = requireDashboardAccess()
-      const result = await runDashboardAnalysisAgent(input, {
-        executeQuery: (queryInput) =>
-          executeDashboardEsQuery(queryInput, {
-            nodes: getEsNodes(),
-            auth: getEsAuth(),
-            indexByAlias: getDashboardEsIndexByAlias(),
-            injectedFilters: buildDashboardEsQueryFilters(queryInput, access),
-            access: {
-              sapId: access.sapId,
-              ystId: access.ystId,
-              unrestricted: access.unrestricted
-            }
-          })
-      })
-      return { success: true, data: result }
-    } catch (e) {
-      console.error("[Dashboard] analysisAgent error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
   })
 
   registerLatestDashboardHandler(
@@ -15771,6 +16383,45 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   registerLatestDashboardHandler(
     _ipcMain,
+    "dashboard:knowledgeOrgGroups",
+    async (_, roomId: string, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeOrgGroups(roomId, opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeOrgGroups", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeRoomPeople",
+    async (_, roomId: string, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeRoomPeople(roomId, opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeRoomPeople", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeUserDetails",
+    async (_, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeUserDetails(opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeUserDetails", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:knowledgeActiveDetails",
     async (_, opts: OrgFilterOptions | undefined) => {
       try {
@@ -15837,14 +16488,14 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:knowledgeProjectStats",
-    async (_, range: TimeRange, opts: OrgFilterOptions | undefined) => {
+    async (_, range: TimeRange | null, opts: OrgFilterOptions | undefined) => {
       try {
         const data = import.meta.env.DEV
           ? {
-              projectCount: 1284,
-              loadedProjectCount: 856,
-              readProjectCount: 642,
-              successfulReadCount: 12400
+              projectCount: opts?.createdInRangeOnly ? 120 : 1284,
+              loadedProjectCount: opts?.createdInRangeOnly ? 80 : 856,
+              readProjectCount: opts?.createdInRangeOnly ? 60 : 642,
+              successfulReadCount: opts?.createdInRangeOnly ? 450 : 12400
             }
           : await fetchKnowledgeOverviewProjects(range, opts)
         return { success: true, data }
@@ -15873,6 +16524,250 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   registerLatestDashboardHandler(
     _ipcMain,
+    "dashboard:projectModePeriodMetrics",
+    async (_, raw: ProjectOperationsPeriodInput) => {
+      try {
+        const input = parseProjectOperationsPeriodInput(raw)
+        const access = requireDashboardProjectModeAccess()
+        if (!isDashboardProjectModeAdmin(access) && access.upperOrgLv1.trim() !== input.upperOrgLv1)
+          throw new Error("无该室周期统计查看权限")
+        const org = buildProjectModeOrgFilter(input, access)
+        const data = await fetchProjectOperationsPeriod(
+          input,
+          {
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            accessFilters: org ? [org] : [],
+            signal: getDashboardRequestSignal()
+          },
+          esQuery
+        )
+        return { success: true, data }
+      } catch (error) {
+        if (getDashboardRequestSignal()?.aborted) return { success: false, cancelled: true }
+        logDashboardRequestError("projectModePeriodMetrics", error)
+        return { success: false, error: error instanceof Error ? error.message : "周期统计失败" }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeAnalysisAgent",
+    async (event, input: ProjectAnalysisAgentInput, runId?: unknown) => {
+      try {
+        requireDashboardProjectModeAccess()
+        const data = await runProjectAnalysisAgent(input, {
+          onEvent: projectAgentProgress(event, runId, getDashboardRequestSignal()),
+          signal: getDashboardRequestSignal(),
+          exampleData: import.meta.env.DEV,
+          loadProjects: (input, ids, signal) =>
+            dashboardRequestContext.run({ signal }, async () => {
+              if (import.meta.env.DEV) {
+                const mock = makeMockRunAnalysis(input.range, input.options)
+                return ids.map((id) => {
+                  const rows = mock.rows.filter((row) => row.projectId === id)
+                  return {
+                    projectId: id,
+                    name: rows[0]?.projectName ?? id,
+                    lifecycleStatus: "active",
+                    creatorUserName: rows[0]?.creator,
+                    featureCount: rows.length,
+                    conversationCount: rows.reduce((sum, row) => sum + row.conversationCount, 0),
+                    features: rows.map((row) => ({
+                      slug: row.featureSlug,
+                      title: row.featureTitle,
+                      codeStats: row.codeStats
+                    }))
+                  }
+                })
+              }
+              const access = requireDashboardProjectModeAccess()
+              const org = buildProjectModeOrgFilter(input.options, access)
+              const result: ProjectModeProjectView[] = []
+              for (let offset = 0; offset < ids.length; offset += 100) {
+                signal.throwIfAborted()
+                const views = await fetchProjectModeProjectViewsByIds(
+                  ids.slice(offset, offset + 100),
+                  projectModeSnapshotFilters(org)
+                )
+                result.push(
+                  ...(await enrichProjectModeProjectViews(
+                    [...views.values()],
+                    null,
+                    input.options,
+                    access
+                  ))
+                )
+              }
+              return result
+            }),
+          loadData: (input, signal) =>
+            dashboardRequestContext.run({ signal }, () =>
+              import.meta.env.DEV
+                ? Promise.resolve(makeMockRunAnalysis(input.range, input.options))
+                : fetchProjectRunAnalysis(input.range, input.options)
+            ),
+          loadStages: (request, signal) =>
+            dashboardRequestContext.run({ signal }, () =>
+              import.meta.env.DEV
+                ? Promise.resolve({
+                    rows: makeMockRunAnalysisStages(request.projectId),
+                    dataAsOf: new Date().toISOString()
+                  })
+                : fetchProjectRunAnalysisStageDetails(request)
+            ),
+          loadSessions: (request, signal) =>
+            dashboardRequestContext.run({ signal }, async () =>
+              import.meta.env.DEV
+                ? makeMockRunAnalysisSessions(request)
+                : fetchRunAnalysisSessions(
+                    esQuery,
+                    getEsIndex("trace"),
+                    await runAnalysisDetailFilters(request),
+                    request
+                  )
+            )
+        })
+        return { success: true, data }
+      } catch (error) {
+        if (getDashboardRequestSignal()?.aborted) return { success: false, cancelled: true }
+        logDashboardRequestError("projectModeAnalysisAgent", error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "项目分析失败，请重试"
+        }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeRunAnalysis",
+    async (_, range: RunAnalysisRange, options?: RunAnalysisOptions) => {
+      try {
+        if (import.meta.env.DEV) return { success: true, data: makeMockRunAnalysis(range, options) }
+        return { success: true, data: await fetchProjectRunAnalysis(range, options) }
+      } catch (e) {
+        logDashboardRequestError("projectModeRunAnalysis", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeRunAnalysisExportStages",
+    async (
+      _,
+      range: RunAnalysisRange,
+      options: RunAnalysisOptions,
+      request: RunAnalysisStageExportRequest
+    ) => {
+      try {
+        const inventory = import.meta.env.DEV
+          ? makeMockRunAnalysis(range, options)
+          : await fetchProjectRunAnalysis(range, { ...options, refresh: false })
+        const groups = groupRunAnalysisExportTargets(inventory.rows, request.targets)
+        const plugins: RunAnalysisPluginStages[] = []
+        const filters = import.meta.env.DEV
+          ? []
+          : projectModeTraceFilters(
+              null,
+              buildProjectModeOrgFilter(options, requireDashboardProjectModeAccess())
+            )
+        for (const [adapterName, features] of groups) {
+          const stages = import.meta.env.DEV
+            ? makeMockRunAnalysisPluginStages(features)
+            : await fetchRunAnalysisPluginStages(esQuery, getEsIndex("trace"), filters, features, request.asOf)
+          plugins.push({ adapterName, stages })
+        }
+        return { success: true, data: plugins }
+      } catch (e) {
+        logDashboardRequestError("projectModeRunAnalysisExportStages", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeRunAnalysisStages",
+    async (_, request: RunAnalysisSessionRequest) => {
+      try {
+        if (import.meta.env.DEV)
+          return {
+            success: true,
+            data: { rows: makeMockRunAnalysisStages(request.projectId), dataAsOf: new Date().toISOString() }
+          }
+        return { success: true, data: await fetchProjectRunAnalysisStageDetails(request) }
+      } catch (e) {
+        logDashboardRequestError("projectModeRunAnalysisStages", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeRunAnalysisSessions",
+    async (_, request: RunAnalysisSessionRequest) => {
+      try {
+        if (import.meta.env.DEV)
+          return { success: true, data: makeMockRunAnalysisSessions(request) }
+        return {
+          success: true,
+          data: await fetchRunAnalysisSessions(
+            esQuery,
+            getEsIndex("trace"),
+            await runAnalysisDetailFilters(request),
+            request
+          )
+        }
+      } catch (e) {
+        logDashboardRequestError("projectModeRunAnalysisSessions", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeRunAnalysisThread",
+    async (_, request: RunAnalysisSessionRequest & { traceId: string }) => {
+      try {
+        if (!request.traceId?.trim()) throw new Error("Trace ID is required")
+        if (import.meta.env.DEV) {
+          const rows = Array.from({ length: 30 }, (_, index) =>
+            makeMockRunAnalysisTrace(request, index)
+          )
+          const selected = mockRunAnalysisSessionIndexes(request)
+            .map((i) => rows[i])
+            .find((row) => row.traceId === request.traceId)
+          if (!selected) throw new Error("未找到所选轮次")
+          return {
+            success: true,
+            data: rows.filter((row) => row.threadId === selected.threadId).reverse()
+          }
+        }
+        return {
+          success: true,
+          data: await fetchRunAnalysisThread({
+            query: esQuery,
+            index: getEsIndex("trace"),
+            projectFilters: await runAnalysisProjectFilters(request),
+            request,
+            sourceIncludes: dashboardTraceSourceIncludes(),
+            normalize: (hit) => normalizeTraceDetail(hit as EsSearchHit),
+            isResponseTooLarge: isDashboardEsResponseTooLarge
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectModeRunAnalysisThread", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeProjects",
     async (_, range: TimeRange, options?: ProjectModeProjectPageOptions) => {
       if (import.meta.env.DEV)
@@ -15887,7 +16782,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeExportData",
     async (_, range: TimeRange, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) {
@@ -16018,7 +16914,13 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectModeFeatureNodes",
-    async (_, projectId: string, featureSlug: string, range: TimeRange | null, opts?: OrgFilterOptions) => {
+    async (
+      _,
+      projectId: string,
+      featureSlug: string,
+      range: TimeRange | null,
+      opts?: OrgFilterOptions
+    ) => {
       if (import.meta.env.DEV)
         return { success: true, data: makeMockProjectModeFeatureNodes(projectId, featureSlug) }
       try {
@@ -16039,9 +16941,17 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectModeStageAnalysis",
-    async (_, projectId: string, range: TimeRange | null, opts?: OrgFilterOptions) => {
+    async (
+      _,
+      projectId: string,
+      range: TimeRange | null,
+      opts?: OrgFilterOptions & { featureSlug?: string }
+    ) => {
       if (import.meta.env.DEV) {
-        return { success: true, data: makeMockProjectModeStageAnalysis(projectId ?? "") }
+        return {
+          success: true,
+          data: makeMockProjectModeStageAnalysis(projectId ?? "", opts?.featureSlug)
+        }
       }
       try {
         requireDashboardProjectModeAccess()
@@ -16100,7 +17010,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     (adapterName) => `dashboard:pluginAggregate:${adapterName.slice(0, 256)}`
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeFeatureCommits",
     async (
       _,
@@ -16131,7 +17042,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeProjectCommits",
     async (
       _,
@@ -16155,6 +17067,46 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
       } catch (e) {
         console.error("[Dashboard] projectModeProjectCommits error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:botOverview",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
+      try {
+        if (import.meta.env.DEV)
+          return { success: true, data: makeMockBotOverview(range, getMockOrgScale(opts)) }
+        return { success: true, data: await fetchBotOverview(range, granularity, opts) }
+      } catch (e) {
+        logDashboardRequestError("botOverview", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:botActiveUsers",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions, cursor?: string) => {
+      try {
+        if (import.meta.env.DEV) {
+          const organizations = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+          const names = (organizations.length ? organizations : makeMockOrgOptions()).map(
+            (organization) =>
+              isUnclassifiedOrgToken(organization) ? DASHBOARD_UNCLASSIFIED_LABEL : organization
+          )
+          return {
+            success: true,
+            data: makeMockBotActiveUsers(range, getMockOrgScale(opts), cursor, names)
+          }
+        }
+        return { success: true, data: await fetchBotActiveUsers(range, granularity, opts, cursor) }
+      } catch (e) {
+        if (isDashboardRequestCancelled(e) || isDashboardEsRequestCancelled(e)) throw e
+        logDashboardRequestError("botActiveUsers", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -16222,7 +17174,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:userDetail",
     async (_, sapId: string, range: TimeRange, options?: UserDetailOptions) => {
       const normalizedSapId = sapId?.trim?.() ?? ""
@@ -16238,7 +17191,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:uncommittedRanking",
     async (_, range: TimeRange, options?: UncommittedScopeOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockUncommittedRanking(options) }
@@ -16251,7 +17205,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:uncommittedDetail",
     async (_, sapId: string, range: TimeRange, options?: UncommittedScopeOptions) => {
       const normalizedSapId = sapId?.trim?.() ?? ""
@@ -16513,7 +17468,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:threadTraces",
     async (_, threadId: string, options?: ThreadTracesOptions) => {
       if (import.meta.env.DEV) {
@@ -16565,7 +17521,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:skillDetail",
     async (_, skill: string, range: TimeRange, options?: number | TracePageOptions) => {
       if (import.meta.env.DEV)
@@ -16592,7 +17549,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerScopedDashboardHandler(
+    _ipcMain,
     "dashboard:nonGitAdoptionReports",
     async (_, range: TimeRange, options?: NonGitAdoptionReportsOptions) => {
       if (import.meta.env.DEV)
@@ -16618,102 +17576,113 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
-  _ipcMain.handle("dashboard:exportSkillTraces", async (event, rawPayload: unknown) => {
-    try {
-      const payload = normalizeTraceExportPayload(rawPayload)
-      if (!payload.skill) return { success: false, error: "skill is required" }
-      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+  registerScopedDashboardHandler(
+    _ipcMain,
+    "dashboard:exportSkillTraces",
+    async (event, rawPayload: unknown) => {
+      try {
+        const payload = normalizeTraceExportPayload(rawPayload)
+        if (!payload.skill) return { success: false, error: "skill is required" }
+        if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
 
-      const exportedAt = new Date().toISOString()
-      const date = exportedAt.slice(0, 10)
-      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
-      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
-        title: "导出 Skill 会话历史",
-        defaultPath: `${safeExportFileName(payload.skill)}-traces-page-${payload.page}-${date}.zip`,
-        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
-      })
+        const exportedAt = new Date().toISOString()
+        const date = exportedAt.slice(0, 10)
+        const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: "导出 Skill 会话历史",
+          defaultPath: `${safeExportFileName(payload.skill)}-traces-page-${payload.page}-${date}.zip`,
+          filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+        })
 
-      if (result.canceled || !result.filePath) {
-        return { success: false, canceled: true }
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true }
+        }
+
+        payload.traces = await fetchTraceExportDetails(payload)
+        const zip = new AdmZip()
+        zip.addFile(
+          "traces.md",
+          Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8")
+        )
+        zip.addFile(
+          "traces.json",
+          Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
+        )
+        await zip.writeZipPromise(result.filePath)
+
+        return { success: true, filePath: result.filePath }
+      } catch (e) {
+        console.error("[Dashboard] exportSkillTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-
-      payload.traces = await fetchTraceExportDetails(payload)
-      const zip = new AdmZip()
-      zip.addFile("traces.md", Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8"))
-      zip.addFile(
-        "traces.json",
-        Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
-      )
-      await zip.writeZipPromise(result.filePath)
-
-      return { success: true, filePath: result.filePath }
-    } catch (e) {
-      console.error("[Dashboard] exportSkillTraces error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  })
+  )
 
-  _ipcMain.handle("dashboard:exportUserTraces", async (event, rawPayload: unknown) => {
-    try {
-      const payload = normalizeUserTraceExportPayload(rawPayload)
-      if (!payload.sapId) return { success: false, error: "sapId is required" }
-      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+  registerScopedDashboardHandler(
+    _ipcMain,
+    "dashboard:exportUserTraces",
+    async (event, rawPayload: unknown) => {
+      try {
+        const payload = normalizeUserTraceExportPayload(rawPayload)
+        if (!payload.sapId) return { success: false, error: "sapId is required" }
+        if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
 
-      const exportedAt = new Date().toISOString()
-      const date = exportedAt.slice(0, 10)
-      const viewLabel = payload.viewMode === "thread" ? "threads" : "traces"
-      const displayName = payload.userName || payload.sapId
-      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
-      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
-        title: `导出用户 ${payload.viewMode === "thread" ? "Thread" : "Trace"} 历史`,
-        defaultPath: `${safeExportFileName(`${displayName}-${payload.sapId}`)}-${viewLabel}-page-${payload.page}-${date}.zip`,
-        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
-      })
+        const exportedAt = new Date().toISOString()
+        const date = exportedAt.slice(0, 10)
+        const viewLabel = payload.viewMode === "thread" ? "threads" : "traces"
+        const displayName = payload.userName || payload.sapId
+        const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: `导出用户 ${payload.viewMode === "thread" ? "Thread" : "Trace"} 历史`,
+          defaultPath: `${safeExportFileName(`${displayName}-${payload.sapId}`)}-${viewLabel}-page-${payload.page}-${date}.zip`,
+          filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+        })
 
-      if (result.canceled || !result.filePath) {
-        return { success: false, canceled: true }
+        if (result.canceled || !result.filePath) {
+          return { success: false, canceled: true }
+        }
+
+        payload.traces = await fetchTraceExportDetails(
+          payload,
+          payload.projectMode
+            ? { scope: "project", range: payload.range, triggerScope: payload.triggerScope }
+            : undefined
+        )
+        const zip = new AdmZip()
+        zip.addFile(
+          `${viewLabel}.md`,
+          Buffer.from(formatUserTraceExportMarkdown(payload, exportedAt), "utf-8")
+        )
+        const commonPayload = {
+          version: 1,
+          exportedAt,
+          exportType: payload.viewMode,
+          user: {
+            sapId: payload.sapId,
+            ...(payload.ystId ? { ystId: payload.ystId } : {}),
+            userName: payload.userName
+          },
+          range: payload.range,
+          page: payload.page,
+          pageSize: payload.pageSize,
+          totalItems: payload.totalItems,
+          triggerScope: payload.triggerScope,
+          projectMode: payload.projectMode
+        }
+        const data =
+          payload.viewMode === "thread"
+            ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
+            : { ...commonPayload, traces: payload.traces }
+        zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
+        await zip.writeZipPromise(result.filePath)
+
+        return { success: true, filePath: result.filePath }
+      } catch (e) {
+        console.error("[Dashboard] exportUserTraces error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-
-      payload.traces = await fetchTraceExportDetails(
-        payload,
-        payload.projectMode
-          ? { scope: "project", range: payload.range, triggerScope: payload.triggerScope }
-          : undefined
-      )
-      const zip = new AdmZip()
-      zip.addFile(
-        `${viewLabel}.md`,
-        Buffer.from(formatUserTraceExportMarkdown(payload, exportedAt), "utf-8")
-      )
-      const commonPayload = {
-        version: 1,
-        exportedAt,
-        exportType: payload.viewMode,
-        user: {
-          sapId: payload.sapId,
-          ...(payload.ystId ? { ystId: payload.ystId } : {}),
-          userName: payload.userName
-        },
-        range: payload.range,
-        page: payload.page,
-        pageSize: payload.pageSize,
-        totalItems: payload.totalItems,
-        triggerScope: payload.triggerScope,
-        projectMode: payload.projectMode
-      }
-      const data =
-        payload.viewMode === "thread"
-          ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
-          : { ...commonPayload, traces: payload.traces }
-      zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
-      await zip.writeZipPromise(result.filePath)
-
-      return { success: true, filePath: result.filePath }
-    } catch (e) {
-      console.error("[Dashboard] exportUserTraces error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
-  })
+  )
 
   _ipcMain.handle(
     "dashboard:exportExcel",

@@ -10,6 +10,7 @@ import {
 } from "fs"
 import { tmpdir } from "os"
 import { basename, dirname, join } from "path"
+import { AIMessage } from "@langchain/core/messages"
 import { runWorkflowEngine } from "../src/main/agent/workflow/engine.ts"
 import { createWorkflowTool } from "../src/main/agent/workflow/tool.ts"
 import { workflowRunManager } from "../src/main/agent/workflow/run-manager.ts"
@@ -93,8 +94,10 @@ import {
   boundedCloneSnapshotValue,
   serializeWorkflowAgentSnapshotMessages,
   WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP,
+  WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES,
   WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP
 } from "../src/main/agent/workflow/agent-snapshot.ts"
+import { WORKFLOW_PRECEDING_PROMPT_INDEX_KEY } from "../src/shared/workflow-agent-snapshot.ts"
 
 const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
 let TEST_WORKFLOW_DATA_ROOT = ""
@@ -4866,6 +4869,60 @@ async function testWorkflowAgentIdentityStableAcrossRetry(): Promise<void> {
   )
 }
 
+async function testWorkflowRetryBoundarySurvivesSnapshotRollover(): Promise<void> {
+  let checkpointMessages: unknown[] = []
+  let frameCount = 0
+  let previousPromptIndex: unknown
+  const deps: WorkflowSubagentDeps = {
+    parentThreadId: "parent",
+    cleanupThread: async () => {},
+    isRetryableApiError: () => false,
+    createRuntime: async ({ additionalTools }) => ({
+      stream: async (input) =>
+        (async function* (): AsyncIterable<unknown> {
+          const { messages } = input as { messages: unknown[] }
+          checkpointMessages = [...checkpointMessages, ...messages]
+          if (frameCount === 0) {
+            checkpointMessages.push(new AIMessage({ content: "Initial reply" }))
+          } else {
+            const structuredOutput = additionalTools?.find(
+              (tool) => tool.name === "structured_output"
+            )
+            await structuredOutput?.invoke({ status: "done" })
+            checkpointMessages.push(
+              ...Array.from(
+                { length: WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES },
+                (_, index) => new AIMessage({ content: `Retry reply ${index}` })
+              )
+            )
+          }
+          yield ["values", { messages: checkpointMessages }]
+        })()
+    })
+  }
+  const result = await runWorkflowSubagent(deps, {
+    prompt: "Return a structured result",
+    schema: { type: "object", properties: { status: { type: "string" } }, required: ["status"] },
+    agentIndex: 0,
+    label: "retry-snapshot",
+    runId: "wf_retry_snapshot",
+    signal: new AbortController().signal,
+    onValues: (snapshot) => {
+      frameCount += 1
+      const bounded = serializeWorkflowAgentSnapshotMessages(snapshot) as Array<{
+        kwargs: { additional_kwargs: Record<string, unknown> }
+      }>
+      previousPromptIndex = bounded[0].kwargs.additional_kwargs[WORKFLOW_PRECEDING_PROMPT_INDEX_KEY]
+    }
+  })
+  assert(
+    result.text === `Retry reply ${WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES - 1}`,
+    "the settled result uses the retry snapshot"
+  )
+  assert(frameCount === 2, "the display tap receives the initial and settled retry frames")
+  assert(previousPromptIndex === 2, "the bounded settled frame carries its omitted retry prompt")
+}
+
 async function testWorktreeSubagentPromptAndBoundaryPropagation(): Promise<void> {
   const runtimeCalls: Array<{
     extraSystemPrompt: string
@@ -5191,6 +5248,7 @@ async function main(): Promise<void> {
     await testResumeReloadsWorktreesAfterApproval(workspace)
     await testResumeUsesFlushFailedSnapshotJournal(workspace)
     await testReturnedManagedScriptPathCanBeEditedAndRelaunched(workspace)
+    await testCancelledForegroundCannotLaunchWorkflow(workspace)
     await testWorkspaceIntegrationLeaseGuards(workspace)
     await testSandboxEscapeBlocked(workspace)
     await testParallelInternalResume(workspace)
@@ -5248,6 +5306,7 @@ async function main(): Promise<void> {
     await testGlobCapStreamEarlyStop()
     await testModelFallbackOnlyOnUnavailable()
     await testWorkflowAgentIdentityStableAcrossRetry()
+    await testWorkflowRetryBoundarySurvivesSnapshotRollover()
     await testWorktreeSubagentPromptAndBoundaryPropagation()
     testNotificationTurnPromptInSync()
     testRendererNotificationFullMatch()
@@ -5257,7 +5316,7 @@ async function main(): Promise<void> {
     await testSiblingChildWorkflowsCanRunInParallel(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (96 tests)")
+    console.log("PASS workflow-engine (97 tests)")
   } finally {
     if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
     else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
@@ -5268,6 +5327,59 @@ async function main(): Promise<void> {
     rmSync(isolatedHome, { recursive: true, force: true })
     rmSync(workspace, { recursive: true, force: true })
     rmSync(TEST_WORKFLOW_DATA_ROOT, { recursive: true, force: true })
+  }
+}
+
+async function testCancelledForegroundCannotLaunchWorkflow(workspace: string): Promise<void> {
+  const originalLaunch = workflowRunManager.launch
+  const originalPrepare = workflowRunManager.prepareLaunch
+  try {
+    for (const stage of ["entry", "approved", "prepared"] as const) {
+      const controller = new AbortController()
+      const reason = new Error("Foreground fixture cancelled")
+      let approvals = 0, launches = 0
+      workflowRunManager.prepareLaunch = async (...args) => {
+        await originalPrepare.apply(workflowRunManager, args)
+        if (stage === "prepared") controller.abort(reason)
+      }
+      workflowRunManager.launch = () => {
+        launches++
+        throw new Error("A cancelled foreground must not launch detached work")
+      }
+      if (stage === "entry") controller.abort(reason)
+      const workflowTool = createWorkflowTool({
+        threadId: `cancel-launch-${stage}`,
+        workspacePath: workspace,
+        abortSignal: controller.signal,
+        readYoloMode: () => false,
+        approvalStore: new ApprovalStore(),
+        requestApproval: async () => {
+          approvals++
+          if (stage === "approved") controller.abort(reason)
+          return { type: "approve", tool_call_id: "cancel-launch-fixture" }
+        },
+        subagentDeps: {
+          createRuntime: async () => { throw new Error("Must not execute") },
+          cleanupThread: async () => {},
+          isRetryableApiError: () => false
+        }
+      })
+      let cancelled = false
+      try {
+        await workflowTool.invoke({
+          script: "export const meta = { name: 'cancel-launch', description: 'Cancellation fixture' }; return 1;"
+        })
+      } catch (error) {
+        if (error !== reason) throw error
+        cancelled = error === reason
+      }
+      assert(cancelled, `foreground cancellation must survive ${stage} preparation`)
+      assert(launches === 0, `no process or model may be started after ${stage} cancellation`)
+      assert(approvals === (stage === "entry" ? 0 : 1), "keep the normal launch approval gate")
+    }
+  } finally {
+    workflowRunManager.launch = originalLaunch
+    workflowRunManager.prepareLaunch = originalPrepare
   }
 }
 

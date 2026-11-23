@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../../shared/model-catalog"
+import { getModelClientOptions } from "../../models/connection"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { ChatOpenAI } from "@langchain/openai"
 import {
@@ -540,7 +542,7 @@ export function resolveEvaluatorConfig(modelId?: string): CustomModelConfig | nu
 }
 
 function findEvaluatorConfig(modelRef: string): CustomModelConfig | null {
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const match = /^(builtin|custom):(.*)$/.exec(modelRef)
   if (match) {
     const source = match[1]
@@ -588,7 +590,7 @@ export async function evaluateGoalWithModel(
   const model = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config),
     maxTokens: Math.min(config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, 1200),
     ...samplingFields(config.model, {
       temperature: Math.min(config.temperature ?? DEFAULT_TEMPERATURE, 0.1)

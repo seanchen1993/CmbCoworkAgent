@@ -1,0 +1,563 @@
+import type {
+  KnowledgeBaseListItem,
+  KnowledgeBaseListResult,
+  KnowledgeBaseState,
+  KnowledgeBaseStateItem,
+  KnowledgeBaseSyncResult,
+  KnowledgeDepositionWorkspace,
+  KnowledgeWorkspaceRole,
+  KnowledgeWorkspaceState,
+  KnowledgeWorkspaceSyncResult
+} from "../../shared/knowledge-base-types"
+import { resolve } from "node:path"
+import { rm } from "node:fs/promises"
+import { stripVTControlCharacters } from "node:util"
+import { formatKnowledgeSyncError } from "./knowledge-sync-error"
+import { formatGmt8Timestamp } from "../../shared/gmt8-time"
+import { getLocalThreadRunLeases } from "../agent/thread-run-lease"
+import { getThreadCore } from "../db"
+import { getUserInfo } from "../storage"
+import {
+  KNOWLEDGE_WORKSPACE_ROLES,
+  isValidKnowledgeDirectory,
+  knowledgeDirectory,
+  mergeCloudKnowledgeState,
+  parseCloudKnowledgeItems,
+  readKnowledgeState,
+  writeKnowledgeState
+} from "./knowledge-base-state"
+import {
+  KnowledgeRepositoryLocalChangesError,
+  knowledgeWorkspaceHasChanges,
+  syncKnowledgeRepository,
+  validateKnowledgeRepositorySource
+} from "./knowledge-repository"
+
+const BACKGROUND_REFRESH_DELAY_MS = 30 * 60 * 1_000
+const MIN_REFRESH_INTERVAL_MS = 225 * 60 * 1_000
+const REFRESH_INTERVAL_JITTER_MS = 30 * 60 * 1_000
+const QUERY_PATH = "/devclaw/knowledge-config/query"
+const QUERY_TIMEOUT_MS = 5_000
+
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+let backgroundRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let refreshing = false
+let syncingId: string | null = null
+let syncingRole: KnowledgeWorkspaceRole | null = null
+let deletingId: string | null = null
+let queryError: string | null = null
+const previewRevisions = new Map<string, number>()
+
+function pathKey(path: string): string {
+  const normalized = resolve(path)
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function isKnowledgeDirectoryInUse(path: string): boolean {
+  for (const lease of getLocalThreadRunLeases()) {
+    const thread = getThreadCore(lease.threadId)
+    if (!thread?.metadata) continue
+    let metadata: unknown
+    try {
+      metadata = JSON.parse(thread.metadata)
+    } catch {
+      continue
+    }
+    if (
+      isRecord(metadata) &&
+      isRecord(metadata.harnessProjectSession) &&
+      metadata.harnessProjectSession.kind === "system-constraints-update" &&
+      typeof metadata.workspacePath === "string" &&
+      pathKey(metadata.workspacePath) === pathKey(path)
+    )
+      return true
+  }
+  return false
+}
+
+function isKnowledgeDirectoryBusy(path: string): boolean {
+  return (
+    (syncingId !== null &&
+      syncingRole === "write" &&
+      pathKey(path) === pathKey(knowledgeDirectory(syncingId, "write"))) ||
+    (deletingId !== null && pathKey(path) === pathKey(knowledgeDirectory(deletingId, "write")))
+  )
+}
+
+export function isKnowledgeDepositionBlocked(
+  metadata: Record<string, unknown>,
+  workspacePath: unknown = metadata.workspacePath
+): boolean {
+  return (
+    isRecord(metadata.harnessProjectSession) &&
+    metadata.harnessProjectSession.kind === "system-constraints-update" &&
+    typeof workspacePath === "string" &&
+    isKnowledgeDirectoryBusy(workspacePath)
+  )
+}
+
+function apiBaseUrl(): string {
+  const value = (import.meta.env.VITE_ENTERPRISE_PROJECT_QUERY_URL as string | undefined)?.trim()
+  if (!value) throw new Error("VITE_ENTERPRISE_PROJECT_QUERY_URL 未配置，无法查询知识库配置")
+  return new URL(value).origin
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+}
+
+function errorMessage(
+  error: unknown,
+  item?: Pick<KnowledgeBaseStateItem, "repoUrl" | "sshUrl">
+): string {
+  let message =
+    error instanceof AggregateError
+      ? errorMessage(error.errors[0], item)
+      : error instanceof Error
+        ? error.message
+        : String(error)
+  for (const source of [item?.repoUrl, item?.sshUrl]) {
+    if (source) message = message.split(source).join("<knowledge-repository>")
+  }
+  message = message.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1<credentials>@")
+  return stripVTControlCharacters(message).slice(0, 4_096)
+}
+
+async function queryCloudKnowledgeBases(): Promise<ReturnType<typeof parseCloudKnowledgeItems>> {
+  const startedAt = Date.now()
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), QUERY_TIMEOUT_MS)
+  try {
+    let body: unknown
+    if (import.meta.env.DEV) {
+      body = {
+        code: 200,
+        data: {
+          items: [
+            {
+              idKey: "test-agents-main",
+              name: "测试知识库",
+              description: "外网调试",
+              repoUrl: "https://github.com/seikou00/testAgents.git",
+              sshUrl: null,
+              gitRef: "main"
+            },
+            {
+              idKey: "hello-world-master",
+              name: "Hello World 测试知识库",
+              description: "外网多知识库调试",
+              repoUrl: "https://github.com/octocat/Hello-World.git",
+              sshUrl: null,
+              gitRef: "master"
+            },
+            {
+              idKey: "test-agents-main-2",
+              name: "测试知识库 2",
+              description: "外网多知识库注入调试",
+              repoUrl: "https://github.com/seikou00/testAgents.git",
+              sshUrl: null,
+              gitRef: "main"
+            }
+          ]
+        }
+      }
+    } else {
+      const user = getUserInfo()
+      const url = `${apiBaseUrl()}${QUERY_PATH}`
+      console.log("[knowledge_manage] 开始查询知识库配置", { url })
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          sapId: user?.sapId ?? "",
+          pathName: user?.pathName ?? "",
+          originPathId: user?.originPathId ?? ""
+        }),
+        signal: controller.signal
+      })
+      console.log("[knowledge_manage] 收到知识库配置响应", {
+        status: response.status,
+        elapsedMs: Date.now() - startedAt
+      })
+      if (response.status !== 200) throw new Error(`知识库配置查询失败：HTTP ${response.status}`)
+      body = (await response.json()) as unknown
+    }
+    clearTimeout(timeout)
+    if (!isRecord(body) || body.code !== 200 || !isRecord(body.data)) {
+      const message =
+        isRecord(body) && typeof body.message === "string" ? body.message : "响应格式无效"
+      throw new Error(`知识库配置查询失败：${message}`)
+    }
+    const items = parseCloudKnowledgeItems(body.data.items)
+    console.log("[knowledge_manage] 知识库配置读取完成", {
+      count: items.length,
+      elapsedMs: Date.now() - startedAt
+    })
+    return items
+  } catch (error) {
+    if (controller.signal.aborted)
+      throw new DOMException("知识库配置查询超时（5 秒）", "TimeoutError")
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function validateCloudKnowledgeBases(items: ReturnType<typeof parseCloudKnowledgeItems>) {
+  const validItems: typeof items = []
+  const failedIds = new Set<string>()
+  const errors: string[] = []
+  for (const item of items) {
+    const startedAt = Date.now()
+    console.log(`[knowledge_manage] ${item.idKey} 开始 Git 分支配置检查`)
+    try {
+      await validateKnowledgeRepositorySource({
+        idKey: item.idKey,
+        role: "read",
+        url: item.repoUrl,
+        ref: item.gitRef,
+        sshUrl: item.sshUrl ?? undefined
+      })
+      validItems.push(item)
+      console.log(`[knowledge_manage] ${item.idKey} Git 分支配置检查完成`, {
+        elapsedMs: Date.now() - startedAt
+      })
+    } catch (error) {
+      failedIds.add(item.idKey)
+      const message = `${item.idKey} Git 分支配置检查失败：${errorMessage(error, item)}`
+      errors.push(message)
+      console.warn(`[knowledge_manage] ${message}，跳过本次更新并保留已有本地配置`, {
+        elapsedMs: Date.now() - startedAt
+      })
+    }
+  }
+  return { validItems, failedIds, errors }
+}
+
+async function updateWorkspace(idKey: string, workspace: KnowledgeWorkspaceState): Promise<void> {
+  const state = await readKnowledgeState()
+  if (!state) return
+  const item = state.knowledgeBases.find((entry) => entry.idKey === idKey)
+  if (!item) return
+  item.workspaces = item.workspaces.map((entry) =>
+    entry.role === workspace.role ? workspace : entry
+  )
+  await writeKnowledgeState(state)
+}
+
+async function syncWorkspace(
+  item: KnowledgeBaseStateItem,
+  role: KnowledgeWorkspaceRole
+): Promise<KnowledgeWorkspaceSyncResult> {
+  const path = knowledgeDirectory(item.idKey, role)
+  if (role === "write" && isKnowledgeDirectoryInUse(path)) {
+    return { role, status: "paused", message: "沉淀会话运行中，暂停更新" }
+  }
+  syncingRole = role
+  try {
+    const result = await syncKnowledgeRepository({
+      idKey: item.idKey,
+      role,
+      url: item.repoUrl,
+      sshUrl: item.sshUrl ?? undefined,
+      ref: item.gitRef
+    })
+    await updateWorkspace(item.idKey, { role, status: "success", lastError: null })
+    return {
+      role,
+      status: result.updated ? "downloaded" : "up_to_date",
+      message: result.updated ? "更新成功" : "已是最新"
+    }
+  } catch (error) {
+    const blocked = error instanceof KnowledgeRepositoryLocalChangesError
+    const message = blocked ? error.message : formatKnowledgeSyncError(error)
+    if (!blocked) {
+      console.warn(
+        `[knowledge_manage] ${item.idKey}/${role} 同步失败：${errorMessage(error, item)}`
+      )
+    }
+    await updateWorkspace(item.idKey, {
+      role,
+      status: blocked ? "blocked" : "failed",
+      lastError: message
+    })
+    return { role, status: blocked ? "paused" : "failed", message }
+  } finally {
+    if (role === "read") {
+      previewRevisions.set(item.idKey, (previewRevisions.get(item.idKey) ?? 0) + 1)
+    }
+    syncingRole = null
+  }
+}
+
+async function syncStateItem(item: KnowledgeBaseStateItem): Promise<KnowledgeBaseSyncResult> {
+  const workspaces: KnowledgeWorkspaceSyncResult[] = []
+  for (const role of KNOWLEDGE_WORKSPACE_ROLES) workspaces.push(await syncWorkspace(item, role))
+  const succeeded = workspaces.filter(
+    (entry) => entry.status === "downloaded" || entry.status === "up_to_date"
+  )
+  if (succeeded.length === 2) {
+    const state = await readKnowledgeState()
+    const current = state?.knowledgeBases.find((entry) => entry.idKey === item.idKey)
+    if (state && current) {
+      current.lastSuccessfulSyncAt = formatGmt8Timestamp()
+      await writeKnowledgeState(state)
+    }
+  }
+  const allLatest = workspaces.every((entry) => entry.status === "up_to_date")
+  const status =
+    succeeded.length === 2
+      ? allLatest
+        ? "up_to_date"
+        : "downloaded"
+      : succeeded.length > 0
+        ? "partial"
+        : workspaces.some((entry) => entry.status === "failed")
+          ? "failed"
+          : "paused"
+  const message =
+    succeeded.length === 2
+      ? allLatest
+        ? "知识库已是最新"
+        : "知识库更新成功"
+      : workspaces.every(
+            (entry) =>
+              entry.status === workspaces[0].status && entry.message === workspaces[0].message
+          )
+        ? `读取内容、沉淀工作区${status === "failed" ? "更新失败" : "暂停更新"}：${workspaces[0].message}`
+        : workspaces
+            .map(
+              (entry) =>
+                `${entry.role === "read" ? "读取内容" : "沉淀工作区"}${entry.status === "failed" ? "更新失败：" : entry.status === "paused" ? "暂停更新：" : ""}${entry.message}`
+            )
+            .join("；")
+  return { idKey: item.idKey, status, message, workspaces }
+}
+
+async function listFromState(state: KnowledgeBaseState | null): Promise<KnowledgeBaseListResult> {
+  const knowledgeBases = await Promise.all(
+    (state?.knowledgeBases ?? []).map(async (item): Promise<KnowledgeBaseListItem> => {
+      const workspaces = await Promise.all(
+        item.workspaces.map(async (entry) => ({
+          ...entry,
+          localPath: knowledgeDirectory(item.idKey, entry.role),
+          localValid: await isValidKnowledgeDirectory(item.idKey, entry.role),
+          inUse:
+            entry.role === "write" &&
+            isKnowledgeDirectoryInUse(knowledgeDirectory(item.idKey, entry.role)),
+          syncing: syncingId === item.idKey && syncingRole === entry.role
+        }))
+      )
+      const read = workspaces.find((entry) => entry.role === "read")!
+      return {
+        ...item,
+        workspaces,
+        previewRevision: previewRevisions.get(item.idKey) ?? 0,
+        localPath: read.localPath,
+        localValid: read.localValid
+      }
+    })
+  )
+  return {
+    ready: state !== null,
+    knowledgeBases,
+    refreshing,
+    syncingIds: syncingId ? [syncingId] : [],
+    writeSyncingIds: syncingId && syncingRole === "write" ? [syncingId] : [],
+    deletingId,
+    queryError
+  }
+}
+
+export async function listKnowledgeBases(): Promise<KnowledgeBaseListResult> {
+  return listFromState(await readKnowledgeState())
+}
+
+export async function refreshKnowledgeBases(): Promise<KnowledgeBaseListResult> {
+  if (refreshing || syncingId || deletingId) return listKnowledgeBases()
+  refreshing = true
+  try {
+    let state = await readKnowledgeState()
+    let skippedIds = new Set<string>()
+    try {
+      const items = await queryCloudKnowledgeBases()
+      const { validItems, failedIds, errors } = await validateCloudKnowledgeBases(items)
+      skippedIds = failedIds
+      const previousById = new Map(state?.knowledgeBases.map((item) => [item.idKey, item]))
+      state = mergeCloudKnowledgeState(state, validItems)
+      state.knowledgeBases = state.knowledgeBases.map((item) =>
+        failedIds.has(item.idKey) ? previousById.get(item.idKey)! : item
+      )
+      await writeKnowledgeState(state)
+      queryError = errors.length ? errors.join("；") : null
+    } catch (error) {
+      queryError = errorMessage(error)
+      console.warn(`[knowledge_manage] ${queryError}，保留本地配置`)
+    }
+    for (const item of state?.knowledgeBases ?? []) {
+      if (item.visibility !== "visible" || skippedIds.has(item.idKey)) continue
+      syncingId = item.idKey
+      try {
+        await syncStateItem(item)
+      } finally {
+        syncingId = null
+      }
+    }
+  } finally {
+    refreshing = false
+  }
+  return listKnowledgeBases()
+}
+
+export async function syncKnowledgeBase(idKey: string): Promise<KnowledgeBaseSyncResult> {
+  const normalizedId = typeof idKey === "string" ? idKey.trim() : ""
+  if (!normalizedId) throw new Error("知识库 idKey 不能为空")
+  if (deletingId) throw new Error("正在删除知识库，请稍后重试")
+  if (refreshing || syncingId) throw new Error("知识库同步正在进行，请稍后重试")
+  syncingId = normalizedId
+  try {
+    const state = await readKnowledgeState()
+    const item = state?.knowledgeBases.find((entry) => entry.idKey === normalizedId)
+    if (!item) throw new Error("知识库配置不存在")
+    if (item.visibility !== "visible") throw new Error("该知识库当前不可见，不能同步")
+    return await syncStateItem(item)
+  } finally {
+    syncingId = null
+  }
+}
+
+export async function deleteKnowledgeBase(idKey: string): Promise<void> {
+  const readPath = knowledgeDirectory(idKey, "read")
+  const writePath = knowledgeDirectory(idKey, "write")
+  if (refreshing || syncingId) throw new Error("知识库同步或刷新正在进行，请稍后删除")
+  if (deletingId) throw new Error("正在删除知识库，请稍后重试")
+  deletingId = idKey
+  try {
+    const state = await readKnowledgeState()
+    if (!state?.knowledgeBases.some((item) => item.idKey === idKey)) {
+      throw new Error("知识库配置不存在")
+    }
+    if (isKnowledgeDirectoryInUse(writePath)) {
+      throw new Error("该知识库正在用于系统约束沉淀，请停止任务后再删除")
+    }
+    await rm(readPath, { recursive: true, force: true })
+    await rm(writePath, { recursive: true, force: true })
+    state.knowledgeBases = state.knowledgeBases.filter((item) => item.idKey !== idKey)
+    await writeKnowledgeState(state)
+    previewRevisions.delete(idKey)
+  } finally {
+    deletingId = null
+  }
+}
+
+export async function resolveProjectKnowledgeBases(
+  ids: readonly string[]
+): Promise<Array<{ id: string; name: string; path: string }>> {
+  if (ids.length === 0) return []
+  const state = await readKnowledgeState()
+  const result: Array<{ id: string; name: string; path: string }> = []
+  for (const id of new Set(ids.map((id) => id.trim()).filter(Boolean))) {
+    const item = state?.knowledgeBases.find((entry) => entry.idKey === id)
+    if (
+      item?.workspaces.find((entry) => entry.role === "read")?.status === "success" &&
+      (await isValidKnowledgeDirectory(id, "read"))
+    ) {
+      result.push({ id: item.idKey, name: item.name, path: knowledgeDirectory(id, "read") })
+    }
+  }
+  return result
+}
+
+export async function resolveKnowledgeDepositionPath(
+  ids: readonly string[],
+  targetId?: string
+): Promise<string> {
+  if (ids.length === 0) throw new Error("请先在项目设置中配置知识库")
+  if (!targetId && ids.length > 1) throw new Error("请选择要沉淀的知识库")
+  const id = targetId ?? ids[0]
+  if (!ids.includes(id)) throw new Error("所选知识库未绑定到当前项目")
+  const item = (await readKnowledgeState())?.knowledgeBases.find((entry) => entry.idKey === id)
+  if (!item || !(await isValidKnowledgeDirectory(id, "write"))) {
+    throw new Error("知识沉淀工作区不可用，请前往公共系统约束 Tab 下载或处理")
+  }
+  const path = knowledgeDirectory(id, "write")
+  if (isKnowledgeDirectoryBusy(path)) throw new Error("知识库正在同步或删除，请稍后再发起沉淀会话")
+  return path
+}
+
+export async function prepareKnowledgeDeposition(
+  ids: readonly string[],
+  targetId?: string
+): Promise<KnowledgeDepositionWorkspace> {
+  const path = await resolveKnowledgeDepositionPath(ids, targetId)
+  const dirty = await knowledgeWorkspaceHasChanges(path)
+  return {
+    path,
+    ...(dirty ? { warning: "知识沉淀工作区存在未提交的变更，本次会话将继续使用该工作区" } : {})
+  }
+}
+
+export async function assertSelectableKnowledgeBaseIds(
+  ids: unknown,
+  preservedIds: readonly string[] = []
+): Promise<string[]> {
+  if (ids === undefined) return []
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))
+    throw new Error("知识库选择必须是编号数组")
+  const normalized = [...new Set(ids.map((id) => id.trim()).filter(Boolean))]
+  if (normalized.length === 0 || normalized.every((id) => preservedIds.includes(id)))
+    return normalized
+  const state = await readKnowledgeState()
+  for (const id of normalized) {
+    if (preservedIds.includes(id)) continue
+    const selected = state?.knowledgeBases.find((item) => item.idKey === id)
+    if (
+      !selected ||
+      selected.visibility !== "visible" ||
+      selected.workspaces.find((entry) => entry.role === "read")?.status !== "success" ||
+      !(await isValidKnowledgeDirectory(id, "read"))
+    ) {
+      throw new Error("所选知识库当前不可用，请刷新知识库列表后重试")
+    }
+  }
+  return normalized
+}
+
+function runBackgroundRefresh(): void {
+  if (backgroundRefreshTimer) clearTimeout(backgroundRefreshTimer)
+  backgroundRefreshTimer = null
+  void refreshKnowledgeBases().catch((error) =>
+    console.warn(`[knowledge_manage] 配置刷新失败：${errorMessage(error)}`)
+  )
+}
+
+export function refreshKnowledgeBasesInBackground(): void {
+  if (backgroundRefreshTimer) return
+  backgroundRefreshTimer = setTimeout(
+    runBackgroundRefresh,
+    Math.random() * BACKGROUND_REFRESH_DELAY_MS
+  )
+  backgroundRefreshTimer.unref?.()
+}
+
+function schedulePeriodicRefresh(): void {
+  const delay = MIN_REFRESH_INTERVAL_MS + Math.random() * REFRESH_INTERVAL_JITTER_MS
+  refreshTimer = setTimeout(() => {
+    runBackgroundRefresh()
+    schedulePeriodicRefresh()
+  }, delay)
+  refreshTimer.unref?.()
+}
+
+export function startKnowledgeBaseManager(): void {
+  if (refreshTimer) return
+  refreshKnowledgeBasesInBackground()
+  schedulePeriodicRefresh()
+}
+
+export function stopKnowledgeBaseManager(): void {
+  if (refreshTimer) clearTimeout(refreshTimer)
+  if (backgroundRefreshTimer) clearTimeout(backgroundRefreshTimer)
+  refreshTimer = null
+  backgroundRefreshTimer = null
+}

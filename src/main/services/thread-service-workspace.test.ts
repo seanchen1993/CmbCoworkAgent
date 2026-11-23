@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const mocks = vi.hoisted(() => ({
   resolve: vi.fn(),
   stage: vi.fn(),
+  context: vi.fn(),
   create: vi.fn((threadId: string, metadata: Record<string, unknown>) => ({
     thread_id: threadId,
     metadata: JSON.stringify(metadata),
@@ -24,7 +25,7 @@ vi.mock("../ipc/recent-workspace", () => ({ resolveRecentWorkspacePath: async ()
 vi.mock("../harness-board/service", () => ({
   requireHarnessFeatureWorkspace: mocks.resolve,
   resolveHarnessFeatureCurrentStage: mocks.stage,
-  buildHarnessFeatureAgentContext: async () => null,
+  buildHarnessFeatureAgentContext: mocks.context,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: {}
 }))
 import { createThreadService } from "./thread-service"
@@ -33,8 +34,26 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.resolve.mockResolvedValue("/feature")
   mocks.stage.mockResolvedValue({ name: "Dev-代码实现", status: "进行中" })
+  mocks.context.mockResolvedValue(null)
 })
 describe("new thread workspace policy", () => {
+  it("preserves explicit multi mode while ordinary creation follows the plugin mode", async () => {
+    mocks.context.mockResolvedValue({ agentConfig: { agentMode: "workflow" } })
+    const metadata = { harnessFeature: { projectId: "p", slug: "f" } }
+    await createThreadService({ ...metadata, agentMode: "normal", subagentsEnabled: true })
+    expect(mocks.create).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ agentMode: "normal", subagentsEnabled: true }),
+      { newDurableTranscript: true }
+    )
+    await createThreadService(metadata)
+    expect(mocks.create).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ agentMode: "workflow" }),
+      { newDurableTranscript: true }
+    )
+  })
+
   it("uses current feature configuration rather than a stale renderer path", async () => {
     await createThreadService({
       workspacePath: "/old",
@@ -45,7 +64,8 @@ describe("new thread workspace policy", () => {
       expect.objectContaining({
         workspacePath: "/feature",
         harnessFeature: expect.objectContaining({ launchStageName: "Dev-代码实现" })
-      })
+      }),
+      { newDurableTranscript: true }
     )
   })
   it("rejects missing feature configuration before inserting any thread", async () => {
@@ -73,7 +93,8 @@ describe("new thread workspace policy", () => {
     expect(mocks.resolve).not.toHaveBeenCalled()
     expect(mocks.create).toHaveBeenCalledWith(
       expect.any(String),
-      expect.objectContaining({ workspacePath: "/confirmed" })
+      expect.objectContaining({ workspacePath: "/confirmed" }),
+      { newDurableTranscript: true }
     )
   })
   it("leaves ordinary non-feature session defaults intact", async () => {
@@ -81,7 +102,8 @@ describe("new thread workspace policy", () => {
     expect(mocks.resolve).not.toHaveBeenCalled()
     expect(mocks.create).toHaveBeenCalledWith(
       expect.any(String),
-      expect.objectContaining({ workspacePath: "/recent" })
+      expect.objectContaining({ workspacePath: "/recent" }),
+      { newDurableTranscript: true }
     )
   })
 })

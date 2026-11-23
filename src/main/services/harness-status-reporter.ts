@@ -34,6 +34,8 @@ import type {
   HarnessProjectDetailViewModel,
   HarnessProjectListItem
 } from "../../shared/harness-board-types"
+import { formatHarnessStageName } from "../../shared/harness-stage-bucket"
+import { parseHookTimestamp } from "../../shared/hook-time"
 import { buildEvent } from "./event-reporter"
 
 /** Poll cadence: report project status every 20 minutes. */
@@ -128,6 +130,11 @@ function projectDocId(projectId: string): string {
 // Snapshot building
 // ─────────────────────────────────────────────────────────
 
+/** Local metadata uses Beijing wall time or ISO. ES date ranges use UTC ISO. */
+function serializeLifecycleTime(value: string | undefined): string | undefined {
+  return value ? parseHookTimestamp(value)?.toISOString() : undefined
+}
+
 /** Shape of a feature entry within the snapshot's `properties.features`. */
 function toFeatureSnapshot(feature: HarnessFeatureSummary): Record<string, unknown> {
   return {
@@ -156,7 +163,8 @@ async function buildProjectDoc(
   // carries id/name but not version, so resolve it separately). Best-effort.
   let adapterVersion: string | undefined
   try {
-    adapterVersion = (await getHarnessProjectAdapterSnapshot(project.projectId))?.version || undefined
+    adapterVersion =
+      (await getHarnessProjectAdapterSnapshot(project.projectId))?.version || undefined
   } catch {
     adapterVersion = undefined
   }
@@ -173,6 +181,9 @@ async function buildProjectDoc(
     // by the current flag — re-upserted every poll, so a false→true flip reflects
     // without backfilling the append-only trace/event docs.
     projectFromLean: project.projectFromLean === true,
+    // Current metadata, not an append-only Trace flag: flips apply to all project history.
+    // Legacy projects without this setting remain normal projects.
+    isTestProject: project.isTestProject === true,
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,
@@ -187,9 +198,9 @@ async function buildProjectDoc(
     creatorUpperOrgLv1: project.creator?.upperOrgLv1,
     lifecycleStatus: project.lifecycle?.status,
     // 项目创建时间（项目本地元数据 createAt）；用于运营项目列表按新建时间排序。
-    lifecycleCreatedAt: project.lifecycle?.createAt,
+    lifecycleCreatedAt: serializeLifecycleTime(project.lifecycle?.createAt),
     // 生命周期最近变更时间（元数据编辑 / 归档时写入）；用于「已归档」列表按归档时间倒序。
-    lifecycleUpdatedAt: project.lifecycle?.updateAt,
+    lifecycleUpdatedAt: serializeLifecycleTime(project.lifecycle?.updateAt),
     compatible: project.boardCompatibility?.compatible,
     compatibilityStatus: project.boardCompatibility?.status,
     // Monotonic runtime fact: once a feature session has successfully loaded
@@ -200,6 +211,13 @@ async function buildProjectDoc(
     // 不影响它；「托管运行次数」是另一条路，按时间范围聚合 harness.managed_run.started。
     managedRunEverStarted: Boolean(project.managedRunFirstStartedAt),
     managedRunFirstStartedAt: project.managedRunFirstStartedAt,
+    ...(detail?.workflow?.nodes.length
+      ? {
+          workflowStageNames: detail.workflow.nodes
+            .map((node) => formatHarnessStageName(node.label, node.group))
+            .filter(Boolean)
+        }
+      : {}),
     featureCount: features.length,
     features,
     ...(detail?.error ? { error: detail.error } : {})
@@ -210,10 +228,25 @@ async function buildProjectDoc(
 }
 
 // ─────────────────────────────────────────────────────────
-// ES upsert (PUT _doc/{id} overwrites the whole document)
+// ES upsert (replace App-owned data, preserve the manual classification)
 // ─────────────────────────────────────────────────────────
 
-async function upsertProjectDoc(docId: string, doc: Record<string, unknown>): Promise<void> {
+// The relay uses the same atomic replacement. Never copy a flag from a prior GET.
+const replaceProjectSnapshotScript = `def manual = ctx._source.properties?.manuallyMarkedTestProject;
+ctx._source.clear();
+ctx._source.putAll(params.snapshot);
+if (manual != null) {
+  if (ctx._source.properties == null) { ctx._source.properties = [:]; }
+  ctx._source.properties.manuallyMarkedTestProject = manual;
+} else if (ctx._source.properties != null) {
+  ctx._source.properties.remove('manuallyMarkedTestProject');
+}`
+
+async function upsertProjectDoc(
+  docId: string,
+  doc: Record<string, unknown>,
+  partial = false
+): Promise<void> {
   const nodes = getEsNodes()
   if (nodes.length === 0) return
 
@@ -224,14 +257,23 @@ async function upsertProjectDoc(docId: string, doc: Record<string, unknown>): Pr
       "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
   }
 
+  const body = JSON.stringify(
+    partial
+      ? { doc }
+      : {
+          script: { source: replaceProjectSnapshotScript, params: { snapshot: doc } },
+          scripted_upsert: true,
+          upsert: {}
+        }
+  )
   let lastError: Error | null = null
   for (const node of nodes) {
-    const url = `${node}/${getEventIndex()}/_doc/${encodeURIComponent(docId)}`
+    const url = `${node}/${getEventIndex()}/_update/${encodeURIComponent(docId)}?retry_on_conflict=3`
     try {
       const resp = await fetch(url, {
-        method: "PUT",
+        method: "POST",
         headers,
-        body: JSON.stringify(doc),
+        body,
         signal: AbortSignal.timeout(WRITE_TIMEOUT_MS)
       })
       if (!resp.ok) {
@@ -248,13 +290,15 @@ async function upsertProjectDoc(docId: string, doc: Record<string, unknown>): Pr
 }
 
 /**
- * Read the feature count of the project's existing snapshot in ES.
+ * Read only the existing feature count and test-project classification in ES.
  *
- * Returns the count when it can be determined (a missing document / 404 counts
- * as 0), or `null` when ES could not be reached at all. The caller treats
+ * A missing document / 404 has count 0; `null` means ES could not be reached.
+ * The caller treats
  * `null` as "can't confirm" and errs on the side of preserving existing data.
  */
-async function fetchExistingFeatureCount(docId: string): Promise<number | null> {
+async function fetchExistingSnapshotState(
+  docId: string
+): Promise<{ featureCount: number; isTestProject?: boolean } | null> {
   const nodes = getEsNodes()
   if (nodes.length === 0) return null
 
@@ -266,22 +310,28 @@ async function fetchExistingFeatureCount(docId: string): Promise<number | null> 
   }
 
   for (const node of nodes) {
-    const url = `${node}/${getEventIndex()}/_doc/${encodeURIComponent(docId)}?_source=properties.featureCount,properties.features`
+    const url = `${node}/${getEventIndex()}/_doc/${encodeURIComponent(docId)}?_source=properties.featureCount,properties.features.slug,properties.isTestProject`
     try {
       const resp = await fetch(url, {
         method: "GET",
         headers,
         signal: AbortSignal.timeout(WRITE_TIMEOUT_MS)
       })
-      if (resp.status === 404) return 0
+      if (resp.status === 404) return { featureCount: 0 }
       if (!resp.ok) throw new Error(`ES ${resp.status}`)
       const json = (await resp.json()) as {
-        _source?: { properties?: { featureCount?: unknown; features?: unknown } }
+        _source?: {
+          properties?: { featureCount?: unknown; features?: unknown; isTestProject?: boolean }
+        }
       }
       const props = json._source?.properties
-      if (typeof props?.featureCount === "number") return props.featureCount
-      if (Array.isArray(props?.features)) return props.features.length
-      return 0
+      const featureCount =
+        typeof props?.featureCount === "number"
+          ? props.featureCount
+          : Array.isArray(props?.features)
+            ? props.features.length
+            : 0
+      return { featureCount, isTestProject: props?.isTestProject }
     } catch (e) {
       console.warn(
         `[HarnessStatusReporter] ES read failed on ${node} for ${docId}:`,
@@ -329,7 +379,7 @@ async function reportOneProject(
   const props = (doc as { properties?: { featureCount?: unknown } }).properties
   const newFeatureCount = typeof props?.featureCount === "number" ? props.featureCount : 0
 
-  // The snapshot is a full-document overwrite built from a *local* probe of the
+  // The App-owned snapshot data comes from a *local* probe of the
   // workspace. If the workspace was manually altered (or the inspect failed),
   // the probe can come back with 0 features even though the project still
   // exists and previously reported features. Don't let that empty result
@@ -345,11 +395,20 @@ async function reportOneProject(
 
   // Direct-ES fallback: perform the preservation guard client-side.
   if (newFeatureCount === 0) {
-    const existing = await fetchExistingFeatureCount(docId)
-    if (existing === null || existing > 0) {
+    const existing = await fetchExistingSnapshotState(docId)
+    if (existing === null || existing.featureCount > 0) {
+      // Preserve features on an unsuccessful inspect, but allow the classification to change.
+      // A partial update cannot replace the existing feature array; no doc_as_upsert.
+      if (existing && existing.isTestProject !== (project.isTestProject === true)) {
+        await upsertProjectDoc(
+          docId,
+          { properties: { isTestProject: project.isTestProject === true } },
+          true
+        )
+      }
       console.warn(
         `[HarnessStatusReporter] Skipped ${project.projectId}: probe returned 0 features ` +
-          `but existing snapshot has ${existing ?? "unknown"} — preserving previous data`
+          `but existing snapshot has ${existing?.featureCount ?? "unknown"} — preserving previous data`
       )
       return "skipped"
     }
