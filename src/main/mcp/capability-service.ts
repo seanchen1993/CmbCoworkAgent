@@ -65,7 +65,9 @@ function toPluginSources(): CapabilitySource[] {
   return sources
 }
 
-function normalizeFallbackPolicy(policy: PluginMcpServerConfig["fallback"]): McpFallbackPolicy | undefined {
+function normalizeFallbackPolicy(
+  policy: PluginMcpServerConfig["fallback"]
+): McpFallbackPolicy | undefined {
   if (!policy?.enabled || policy.safeToRetry !== true) return undefined
   return {
     enabled: true,
@@ -164,9 +166,7 @@ function buildFingerprint(sources: CapabilitySource[]): string {
 function shouldRetryMcpInvocationError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return (
-    message.includes("terminated") ||
-    message.includes("disconnected") ||
-    message.includes("ECONN")
+    message.includes("terminated") || message.includes("disconnected") || message.includes("ECONN")
   )
 }
 
@@ -191,15 +191,22 @@ async function listServerTools(
   providerKey: string
 ): Promise<Array<Record<string, unknown>>> {
   const serverClient = await client.getClient(providerKey)
-  if (!serverClient) return []
+  if (!serverClient) {
+    console.warn(`[MCP] No connected client is available for provider "${providerKey}"`)
+    return []
+  }
 
   const tools: Array<Record<string, unknown>> = []
   let cursor: string | undefined
 
   do {
-    const response = await (serverClient as {
-      listTools(input?: { cursor?: string }): Promise<{ tools?: Array<Record<string, unknown>>; nextCursor?: string }>
-    }).listTools(cursor ? { cursor } : undefined)
+    const response = await (
+      serverClient as {
+        listTools(input?: {
+          cursor?: string
+        }): Promise<{ tools?: Array<Record<string, unknown>>; nextCursor?: string }>
+      }
+    ).listTools(cursor ? { cursor } : undefined)
 
     tools.push(...(response.tools ?? []))
     cursor = response.nextCursor
@@ -251,11 +258,11 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     }
 
     const raw = await invokeToolWithRetry(
-      (serverClient as {
-        callTool(
-          request: { name: string; arguments: Record<string, unknown> }
-        ): Promise<unknown>
-      }).callTool.bind(serverClient),
+      (
+        serverClient as {
+          callTool(request: { name: string; arguments: Record<string, unknown> }): Promise<unknown>
+        }
+      ).callTool.bind(serverClient),
       {
         name: tool.toolName,
         arguments: args
@@ -338,6 +345,11 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     const sources = this.readSources()
     const fingerprint = buildFingerprint(sources)
 
+    console.log(
+      "[MCP] capability sources",
+      sources.map((source) => source.providerDisplayName)
+    )
+
     if (sources.length === 0) {
       await this.invalidate("no_sources")
       return
@@ -351,7 +363,9 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
     const client = new MultiServerMCPClient({
       throwOnLoadError: false,
-      onConnectionError: "ignore",
+      onConnectionError: ({ serverName, error }) => {
+        console.error(`[MCP] failed to connect "${serverName}":`, error)
+      },
       useStandardContentBlocks: true,
       mcpServers
     })
@@ -362,6 +376,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
       for (const source of sources) {
         const serverTools = await listServerTools(client, source.providerKey)
+        console.log(`[MCP] "${source.providerDisplayName}" returned ${serverTools.length} tools`)
         for (const rawTool of serverTools) {
           const toolName = typeof rawTool.name === "string" ? rawTool.name : ""
           if (!toolName) continue
@@ -417,6 +432,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
       console.log(`[MCP] capability service ready with ${tools.length} tools`)
     } catch (error) {
+      console.error("[MCP] capability rebuild failed:", error)
       try {
         await client.close()
       } catch {

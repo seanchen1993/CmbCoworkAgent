@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
-import { extractScriptRecordingVariables } from "../../../../shared/browser-script-recording"
+import {
+  extractScriptRecordingDeviceViewport,
+  extractScriptRecordingVariables
+} from "../../../../shared/browser-script-recording"
 import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../shared/browser-types"
 import type {
   BrowserRecordingSource,
@@ -232,7 +235,8 @@ export async function listBrowserScriptLibraryEntries(
         const script = await readFile(getScriptPath(entry.fileName), "utf8")
         return {
           ...entry,
-          hasVariables: extractScriptRecordingVariables(script).length > 0
+          hasVariables: extractScriptRecordingVariables(script).length > 0,
+          deviceViewport: extractScriptRecordingDeviceViewport(script)
         }
       } catch {
         return entry

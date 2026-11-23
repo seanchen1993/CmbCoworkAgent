@@ -1431,11 +1431,33 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   }, [installedPlugins])
 
   // 新增：更新安装功能
-  const handleUpdateInstall = async (item: MarketItem) => {
-    if (item.installDisabledReason) {
-      toast.info(item.installDisabledReason)
-      return
+  const confirmAndDeleteExistingLocalSkill = async (itemName: string): Promise<boolean> => {
+    if (!window.api?.skills?.list || !window.api?.skills?.delete) return true
+    try {
+      const skillsMetadata = await window.api.skills.list()
+      const existingSkill = skillsMetadata.find(
+        (skill) =>
+          skill.source === "user" &&
+          normalizeSkillName(skill.name) === normalizeSkillName(itemName)
+      )
+      if (!existingSkill) return true
+      if (!window.confirm(`本地已存在技能「${existingSkill.name}」，安装后将覆盖本地版本，是否继续？`)) {
+        return false
+      }
+      const deleteResult = await window.api.skills.delete(existingSkill.path)
+      if (!deleteResult.success) {
+        toast.error(deleteResult.error || "删除本地技能失败")
+        return false
+      }
+      return true
+    } catch (error) {
+      console.error("Failed to replace existing local skill:", error)
+      toast.error(error instanceof Error ? error.message : "覆盖本地技能失败")
+      return false
     }
+  }
+
+  const handleUpdateInstall = async (item: MarketItem) => {
     const itemKey = item.id || item.name
 
     // 添加到更新中集合
@@ -1467,19 +1489,8 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       }
 
       // 根据类型处理已有的安装项目
-      if (activeTab === "skill" && window.api?.skills?.delete) {
-        try {
-          // 查找已安装的skill路径
-          const skillsMetadata = await window.api.skills.list()
-          const existingSkill = skillsMetadata.find((skill) => skill.name === itemName)
-
-          if (existingSkill) {
-            console.log(`Deleting existing skill: ${existingSkill.path}`)
-            await window.api.skills.delete(existingSkill.path)
-          }
-        } catch (deleteError) {
-          console.warn("Failed to delete existing skill, continuing with install:", deleteError)
-        }
+      if (activeTab === "skill") {
+        if (!(await confirmAndDeleteExistingLocalSkill(itemName))) return
       } else if (activeTab === "mcp" && window.api?.mcp?.delete) {
         try {
           // 查找已安装的mcp路径
@@ -2142,10 +2153,6 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   }
 
   const handleUninstall = async (item: MarketItem) => {
-    if (item.installDisabledReason) {
-      toast.info(item.installDisabledReason)
-      return
-    }
     const itemName = item.name || item.id || ""
     if (!itemName) return
 
@@ -2245,10 +2252,6 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   }
 
   const handleDownload = async (item: MarketItem, downloadToLocal = false) => {
-    if (!downloadToLocal && item.installDisabledReason) {
-      toast.info(item.installDisabledReason)
-      return
-    }
     const itemKey = item.id || item.name
 
     // Add to downloading set
@@ -2259,6 +2262,14 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
 
       if (!itemName) {
         console.error("Item name is required for download")
+        return
+      }
+
+      if (
+        !downloadToLocal &&
+        (activeTab === "skill" || activeTab === "orgSkill") &&
+        !(await confirmAndDeleteExistingLocalSkill(itemName))
+      ) {
         return
       }
 
@@ -2984,7 +2995,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
                                 isUpdating={updatingItems.has(item.id || item.name)}
                                 installedVersion={item.installedVersion}
                                 updateAvailable={item.updateAvailable}
-                                installDisabledReason={item.installDisabledReason}
+                                installDisabledReason={undefined}
                                 showProjectModeTag={activeTab === "plugin"}
                                 marketTypeLabel={getMarketTypeLabel(activeTab)}
                                 skillCallCount={

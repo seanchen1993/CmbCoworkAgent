@@ -10,6 +10,7 @@ vi.mock("../../../src/main/storage", () => storageMocks)
 
 import {
   autoRegisterPlaywrightMcpConnector,
+  resolveBundledPlaywrightMcpCliPath,
   syncPlaywrightMcpConnectorForBrowserCdpConfig
 } from "../../../src/main/browser/cdp/browser-playwright-mcp-connector"
 import {
@@ -18,6 +19,13 @@ import {
   configureBrowserCdpEndpoint,
   getCurrentBrowserCdpPort
 } from "../../../src/main/browser/cdp/browser-cdp"
+
+function bundledMcpArgs(port: number | null): string[] {
+  return [
+    resolveBundledPlaywrightMcpCliPath(),
+    ...(port === null ? [] : [`--cdp-endpoint=http://127.0.0.1:${port}`])
+  ]
+}
 
 describe("browser CDP configuration", () => {
   beforeEach(() => {
@@ -87,14 +95,9 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       id: "connector-1",
       name: "In-app-browser",
       kind: "stdio",
-      command: "npx",
-      args: [
-        "-y",
-        "--prefer-offline",
-        "@playwright/mcp@0.0.82",
-        "--cdp-endpoint=http://127.0.0.1:9222"
-      ],
-      env: undefined,
+      command: process.execPath,
+      args: bundledMcpArgs(9222),
+      env: { ELECTRON_RUN_AS_NODE: "1" },
       enabled: true,
       lazyLoad: false
     })
@@ -126,14 +129,9 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       id: "connector-1",
       name: "In-app-browser",
       kind: "stdio",
-      command: "npx",
-      args: [
-        "-y",
-        "--prefer-offline",
-        "@playwright/mcp@0.0.82",
-        "--cdp-endpoint=http://127.0.0.1:9222"
-      ],
-      env: undefined,
+      command: process.execPath,
+      args: bundledMcpArgs(9222),
+      env: { ELECTRON_RUN_AS_NODE: "1" },
       enabled: true,
       lazyLoad: false
     })
@@ -165,14 +163,9 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       id: "connector-1",
       name: "In-app-browser",
       kind: "stdio",
-      command: "npx",
-      args: [
-        "-y",
-        "--prefer-offline",
-        "@playwright/mcp@0.0.82",
-        "--cdp-endpoint=http://127.0.0.1:55001"
-      ],
-      env: undefined,
+      command: process.execPath,
+      args: bundledMcpArgs(55001),
+      env: { ELECTRON_RUN_AS_NODE: "1" },
       enabled: false,
       lazyLoad: false
     })
@@ -219,14 +212,9 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       id: "connector-1",
       name: "In-app-browser",
       kind: "stdio",
-      command: "npx",
-      args: [
-        "-y",
-        "--prefer-offline",
-        "@playwright/mcp@0.0.82",
-        `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
-      ],
-      env: undefined,
+      command: process.execPath,
+      args: bundledMcpArgs(runtimePort),
+      env: { ELECTRON_RUN_AS_NODE: "1" },
       enabled: true,
       lazyLoad: false
     })
@@ -266,14 +254,9 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       id: "connector-1",
       name: "In-app-browser",
       kind: "stdio",
-      command: "npx",
-      args: [
-        "-y",
-        "--prefer-offline",
-        "@playwright/mcp@0.0.82",
-        `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
-      ],
-      env: undefined,
+      command: process.execPath,
+      args: bundledMcpArgs(runtimePort),
+      env: { ELECTRON_RUN_AS_NODE: "1" },
       enabled: true,
       lazyLoad: false
     })
@@ -313,14 +296,9 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       id: "connector-1",
       name: "In-app-browser",
       kind: "stdio",
-      command: "npx",
-      args: [
-        "-y",
-        "--prefer-offline",
-        "@playwright/mcp@0.0.82",
-        `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
-      ],
-      env: undefined,
+      command: process.execPath,
+      args: bundledMcpArgs(runtimePort),
+      env: { ELECTRON_RUN_AS_NODE: "1" },
       enabled: false,
       lazyLoad: false
     })

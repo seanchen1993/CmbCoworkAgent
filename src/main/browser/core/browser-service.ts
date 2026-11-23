@@ -1,7 +1,6 @@
 import {
   app,
   BrowserWindow,
-  session as electronSession,
   shell,
   WebContentsView,
   type CookiesSetDetails,
@@ -33,11 +32,14 @@ import type {
   BrowserConsoleLevel,
   BrowserDownloadRecord,
   BrowserDownloadsChangedPayload,
+  BrowserDeviceSize,
+  BrowserDeviceViewport,
   BrowserNavigateOptions,
   BrowserProfileImportSkipReason,
   BrowserProfileImportSkippedWebsite,
   BrowserScreenshotResult,
-  BrowserState
+  BrowserState,
+  BrowserViewportUpdate
 } from "../../../shared/browser-types"
 import type {
   BrowserSessionCookie,
@@ -46,16 +48,30 @@ import type {
 } from "./browser-session-data"
 import { getBuiltinBrowserSession } from "./browser-profile-session"
 
-import { readWpsDocumentText } from "./wps-document"
-
 const MAX_BROWSER_CONSOLE_ENTRIES = 200
 const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
 const MIN_BROWSER_ZOOM_FACTOR = 0.25
 const MAX_BROWSER_ZOOM_FACTOR = 5
-const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 const MAX_EXTRACTED_IFRAME_LINKS = 100
+// Opening and laying out BrowserPanel can take noticeably longer on Windows,
+// especially on the first replay while Electron is creating the target. Keep
+// this handshake long enough for the renderer's stabilized viewport syncs.
+const VIEWPORT_SYNC_TIMEOUT_MS = 10_000
 const configuredDownloadSessions = new WeakSet<Session>()
+
+/**
+ * Device preview scale is a renderer layout detail, not part of the recorded
+ * viewport. Width and height are the replay contract; the renderer computes the
+ * scale from the space available in the current panel.
+ */
+export function deviceViewportMatchesRequested(
+  current: BrowserDeviceViewport | null | undefined,
+  requested: BrowserDeviceSize | null | undefined
+): boolean {
+  if (!current || !requested) return current === requested
+  return current.width === requested.width && current.height === requested.height
+}
 
 function safeDownloadFileName(fileName: string): string {
   const leafName = basename(win32.basename(fileName.trim()))
@@ -148,6 +164,20 @@ function buildIframeExtractionScript(options: {
   })()`
 }
 
+const READ_WPS_DOCUMENT_TEXT_SCRIPT = `(async () => {
+  const wpsOpenApi = window.WPSOpenApi
+  if (!wpsOpenApi?.Application?.ActiveDocument) {
+    throw new Error("WPS OpenAPI is unavailable in office-iframe")
+  }
+  const activeDocument = await wpsOpenApi.Application.ActiveDocument
+  const documentRange = await activeDocument.GetDocumentRange()
+  const text = await documentRange.Text
+  if (typeof text !== "string") {
+    throw new Error("WPS document range Text did not resolve to a string")
+  }
+  return text
+})()`
+
 interface BrowserIframeInformation {
   index: number
   url: string
@@ -169,6 +199,11 @@ interface BrowserSession {
   workspacePath: string | null
   consoleEntries: BrowserConsoleEntry[]
   nextConsoleEntryId: number
+  viewportRevision: number
+  viewportId: string | null
+  userZoomFactor: number
+  deviceScaleFactor: number
+  deviceViewport: BrowserDeviceViewport | null
   error?: string
 }
 
@@ -192,6 +227,14 @@ function normalizeZoomFactor(value: number): number {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isAbortedNavigationError(error: unknown): boolean {
+  if (typeof error === "object" && error !== null) {
+    const candidate = error as { code?: unknown; errno?: unknown }
+    if (candidate.code === "ERR_ABORTED" || candidate.errno === -3) return true
+  }
+  return /\bERR_ABORTED\b/u.test(formatError(error))
 }
 
 function sameSiteForElectron(
@@ -439,10 +482,11 @@ export class BrowserService {
   }
 
   readProfileCookies() {
-    return electronSession.fromPartition(BROWSER_PROFILE_PARTITION).cookies.get({})
+    return getBuiltinBrowserSession().cookies.get({})
   }
 
   private activeSession: BrowserSession | null = null
+  private pendingDeviceViewport: BrowserDeviceSize | undefined
   private readonly downloadRecords: BrowserDownloadRecord[] = []
   private hasUnreadCompletedDownload = false
 
@@ -549,6 +593,13 @@ export class BrowserService {
 
     const existingSession = this.activeSession
     const session = this.ensureActiveSession(sessionId, options.workspacePath)
+    if (options.viewportId && options.viewportId !== session.viewportId) {
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Viewport owner changed from ${session.viewportId ?? "none"} to ${options.viewportId}; revision reset from ${session.viewportRevision}.`
+      )
+      session.viewportId = options.viewportId
+      session.viewportRevision = 0
+    }
     if (!session.isAttached) {
       window.contentView.addChildView(session.view)
       session.isAttached = true
@@ -640,19 +691,46 @@ export class BrowserService {
   async readWpsDocumentText(): Promise<{ text: string }> {
     const session = this.requireSession()
     await session.targetReady
-    const { text } = await readWpsDocumentText(session.view.webContents)
-    return { text }
+    const mainFrame = session.view.webContents.mainFrame
+    const iframeFrames = mainFrame.framesInSubtree.filter((frame) => frame !== mainFrame)
+    const prioritizedFrames = [
+      ...iframeFrames.filter((frame) => frame.name === "office-iframe"),
+      ...iframeFrames.filter((frame) => frame.name !== "office-iframe")
+    ]
+    if (prioritizedFrames.length === 0) throw new Error("当前页面未找到 WPS office-iframe")
+
+    let firstError: string | undefined
+    for (const frame of prioritizedFrames) {
+      try {
+        const text = (await frame.executeJavaScript(READ_WPS_DOCUMENT_TEXT_SCRIPT)) as unknown
+        if (typeof text !== "string") throw new Error("WPS 文档正文不是文本")
+        return { text }
+      } catch (error) {
+        firstError ??= formatError(error)
+      }
+    }
+    throw new Error(`读取 WPS 文档全文失败：${firstError ?? "WPS OpenAPI 不可用"}`)
   }
 
   detach(): BrowserState {
     const sessionId = BROWSER_SESSION_ID
+    // detach is the explicit "back to home" transition. A replay can be
+    // cancelled before the renderer acknowledges its requested device viewport;
+    // do not let that stale request reopen the device toolbar after home is
+    // attached again.
+    if (this.pendingDeviceViewport) {
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Clearing pending device viewport on home detach: ${JSON.stringify(this.pendingDeviceViewport)}.`
+      )
+    }
+    this.pendingDeviceViewport = undefined
     if (!this.activeSession) return this.getState()
     this.disposeActiveSession()
     this.emitState(sessionId)
     return this.getState()
   }
 
-  setBounds(bounds: BrowserBounds, visible = true): BrowserState {
+  setBounds(bounds: BrowserBounds, visible = true, emitState = true): BrowserState {
     const sessionId = BROWSER_SESSION_ID
     const session = this.getActiveSession()
     if (!session) {
@@ -687,7 +765,7 @@ export class BrowserService {
     if (nextVisible && (boundsChanged || visibilityChanged)) {
       this.invalidateSession(session)
     }
-    this.emitState(sessionId)
+    if (emitState) this.emitState(sessionId)
     return this.getState()
   }
 
@@ -701,10 +779,93 @@ export class BrowserService {
       return this.getState()
     }
 
-    const nextZoomFactor = normalizeZoomFactor(zoomFactor)
-    session.view.webContents.setZoomFactor(nextZoomFactor)
+    session.userZoomFactor = normalizeZoomFactor(zoomFactor)
+    this.applyEffectiveZoom(session)
     this.emitState(sessionId)
     return this.getState()
+  }
+
+  private setDeviceMetrics(metrics: BrowserDeviceViewport | null): void {
+    const session = this.getActiveSession()
+    if (!session || session.view.webContents.isDestroyed()) return
+    session.deviceScaleFactor =
+      metrics && Number.isFinite(metrics.scale) ? Math.min(1, Math.max(0.1, metrics.scale)) : 1
+    this.applyEffectiveZoom(session)
+  }
+
+  async setViewport(update: BrowserViewportUpdate): Promise<BrowserState> {
+    const session = this.getActiveSession()
+    if (!session || !Number.isSafeInteger(update.revision)) {
+      if (this.pendingDeviceViewport) {
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Rejected viewport sync while device preview is pending: session=${session ? "active" : "missing"}, revision=${String(update.revision)}.`
+        )
+      }
+      return this.getState()
+    }
+    // A hidden/unmounted BrowserPanel can still have an IPC update in flight. Do not
+    // let it overwrite the bounds of the panel that replaced it.
+    if (update.viewportId !== session.viewportId) {
+      if (this.pendingDeviceViewport) {
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Rejected viewport sync from non-owner panel: incoming=${update.viewportId}, owner=${session.viewportId ?? "none"}, revision=${update.revision}, pending=${JSON.stringify(this.pendingDeviceViewport)}.`
+        )
+      }
+      return this.getState()
+    }
+    if (update.revision <= session.viewportRevision) {
+      if (this.pendingDeviceViewport) {
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Rejected stale viewport sync: incomingRevision=${update.revision}, currentRevision=${session.viewportRevision}, viewportId=${update.viewportId}.`
+        )
+      }
+      return this.getState()
+    }
+    session.viewportRevision = update.revision
+    this.setBounds(update.bounds, update.visible, false)
+    const metricsChanged =
+      session.deviceViewport?.width !== update.metrics?.width ||
+      session.deviceViewport?.height !== update.metrics?.height ||
+      session.deviceViewport?.scale !== update.metrics?.scale
+    if (metricsChanged) {
+      this.setDeviceMetrics(update.metrics)
+      session.deviceViewport = update.metrics
+        ? {
+            width: update.metrics.width,
+            height: update.metrics.height,
+            scale: update.metrics.scale
+          }
+        : null
+    }
+    if (deviceViewportMatchesRequested(session.deviceViewport, this.pendingDeviceViewport)) {
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Device viewport synchronized: current=${JSON.stringify(session.deviceViewport)}, requested=${JSON.stringify(this.pendingDeviceViewport)}, viewportId=${session.viewportId ?? "none"}, revision=${session.viewportRevision}.`
+      )
+      this.pendingDeviceViewport = undefined
+    }
+    this.emitState(session.id)
+    return this.getState()
+  }
+
+  async waitForDeviceViewport(
+    viewport?: BrowserDeviceSize,
+    isCancelled: () => boolean = () => false
+  ): Promise<void> {
+    if (!viewport) return
+    const deadline = Date.now() + VIEWPORT_SYNC_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      if (isCancelled()) return
+      const current = this.getActiveSession()?.deviceViewport
+      if (deviceViewportMatchesRequested(current, viewport)) {
+        return
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25))
+    }
+    const session = this.getActiveSession()
+    console.error(
+      `${BROWSER_SERVICE_LOG_PREFIX} Device viewport synchronization timed out: requested=${JSON.stringify(viewport)}, current=${JSON.stringify(session?.deviceViewport ?? null)}, pending=${JSON.stringify(this.pendingDeviceViewport ?? null)}, viewportId=${session?.viewportId ?? "none"}, revision=${session?.viewportRevision ?? "none"}.`
+    )
+    throw new Error("设备预览设置未在回放开始前完成同步")
   }
 
   async navigate(inputUrl: string, options: BrowserNavigateOptions = {}): Promise<BrowserState> {
@@ -734,9 +895,16 @@ export class BrowserService {
 
     try {
       session.error = undefined
-      markNextScriptNavigationExplicit(url)
+      // Record the user-issued navigation before awaiting Chromium. loadURL may
+      // reject with ERR_ABORTED for redirects or a superseding navigation even
+      // though this is still a real, replayable user action.
+      recordScriptNavigation(url, "explicit")
       await session.view.webContents.loadURL(url)
     } catch (error) {
+      // A following navigate call or an HTTP redirect can cancel the previous
+      // load. Electron rejects loadURL with ERR_ABORTED even though the next
+      // navigation is healthy, so do not flash that transient cancellation.
+      if (isAbortedNavigationError(error)) return this.getState()
       const message = formatError(error)
       session.error = message
       console.error(`${BROWSER_SERVICE_LOG_PREFIX} Navigation failed for ${sessionId}: ${message}.`)
@@ -834,8 +1002,10 @@ export class BrowserService {
     const synced = await Promise.allSettled(
       [...this.profileImportListeners].map((listener) => listener())
     )
-    if (synced.some((result) => result.status === "rejected"))
+    if (synced.some((result) => result.status === "rejected")) {
       console.warn("[BrowserProfile] Bot login sync failed; manual browser login remains available")
+    }
+
     const skippedLocalStorage = data.localStorage.length
     if (this.activeSession && !this.activeSession.view.webContents.isDestroyed()) {
       const currentUrl = this.activeSession.view.webContents.getURL()
@@ -854,13 +1024,27 @@ export class BrowserService {
     }
   }
 
-  requestPanel(threadId?: string, panelWidth?: number, restoreDefaultPanelWidth = false): void {
+  requestPanel(
+    threadId?: string,
+    panelWidth?: number,
+    restoreDefaultPanelWidth = false,
+    deviceViewport?: BrowserDeviceSize
+  ): void {
+    this.pendingDeviceViewport = deviceViewport ? { ...deviceViewport } : undefined
+    if (deviceViewport) {
+      const session = this.getActiveSession()
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Requested replay device viewport ${JSON.stringify(deviceViewport)}; current=${JSON.stringify(session?.deviceViewport ?? null)}, viewportId=${session?.viewportId ?? "none"}, revision=${session?.viewportRevision ?? "none"}.`
+      )
+    }
     const window = this.getUsableWindow()
     window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, {
       threadId,
       panelWidth,
+      deviceViewport,
       restoreDefaultPanelWidth
     })
+    if (this.activeSession) this.emitState()
   }
 
   getState(): BrowserState {
@@ -877,7 +1061,8 @@ export class BrowserService {
         zoomFactor: 1,
         visible: false,
         created: false,
-        consoleEntries: []
+        consoleEntries: [],
+        pendingDeviceViewport: this.pendingDeviceViewport
       }
     }
 
@@ -890,10 +1075,11 @@ export class BrowserService {
       isLoading: isDestroyed ? false : webContents.isLoading(),
       canGoBack: isDestroyed ? false : webContents.canGoBack(),
       canGoForward: isDestroyed ? false : webContents.canGoForward(),
-      zoomFactor: isDestroyed ? 1 : webContents.getZoomFactor(),
+      zoomFactor: session.userZoomFactor,
       visible: session.view.getVisible(),
       created: true,
       consoleEntries: session.consoleEntries.slice(),
+      pendingDeviceViewport: this.pendingDeviceViewport,
       error: session.error
     }
   }
@@ -944,7 +1130,12 @@ export class BrowserService {
       targetReady: Promise.resolve(),
       workspacePath: workspacePath ?? null,
       consoleEntries: [],
-      nextConsoleEntryId: 1
+      nextConsoleEntryId: 1,
+      viewportRevision: 0,
+      viewportId: null,
+      userZoomFactor: 1,
+      deviceScaleFactor: 1,
+      deviceViewport: null
     }
 
     this.activeSession = session
@@ -1025,6 +1216,10 @@ export class BrowserService {
     })
     webContents.on("did-navigate", (_event, url) => {
       session.error = undefined
+      // Chromium stores page zoom per origin. Every cross-origin navigation can
+      // therefore replace the active device-preview zoom with that origin's saved
+      // value, so restore the session's effective zoom for scaled and unscaled views.
+      this.applyEffectiveZoom(session)
       const permissionError = getUrlPermissionError(url, session.workspacePath)
       if (permissionError) {
         session.error = permissionError
@@ -1104,6 +1299,14 @@ export class BrowserService {
 
   private getActiveSession(): BrowserSession | null {
     return this.activeSession
+  }
+
+  private applyEffectiveZoom(session: BrowserSession): void {
+    const webContents = session.view.webContents
+    if (webContents.isDestroyed()) return
+    const nextZoomFactor = session.userZoomFactor * session.deviceScaleFactor
+    if (Math.abs(webContents.getZoomFactor() - nextZoomFactor) < 0.001) return
+    webContents.setZoomFactor(nextZoomFactor)
   }
 
   private invalidateSession(session: BrowserSession): void {

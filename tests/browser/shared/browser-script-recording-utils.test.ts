@@ -2,13 +2,64 @@ import { describe, expect, it } from "vitest"
 import {
   applyScriptRecordingVariableValues,
   buildScriptExecutableScript,
+  extractScriptRecordingDeviceViewport,
+  extractScriptRecordingPanelWidth,
   extractScriptRecordingVariables,
   generateScriptRecording,
   parseScriptRecordingScript,
-  stabilizeDynamicElementUiOverlayLocators
+  stabilizeDynamicElementUiOverlayLocators,
+  withScriptRecordingDeviceViewport,
+  withScriptRecordingPanelWidth
 } from "../../../src/shared/browser-script-recording"
 
 describe("browser script recording", () => {
+  it("stores and reads the Browser panel width in generated scripts", () => {
+    const script = generateScriptRecording([], { source: "script", panelWidth: 864.4 })
+
+    expect(script).toContain("// cmb-browser-panel-width: 864")
+    expect(extractScriptRecordingPanelWidth(script)).toBe(864)
+  })
+
+  it("stores and reads only the recorded device viewport size", () => {
+    const script = generateScriptRecording([], {
+      source: "script",
+      panelWidth: 864,
+      deviceViewport: { width: 1920, height: 1080, scale: 0.625 }
+    })
+
+    expect(script).toContain("// cmb-browser-device-viewport: 1920x1080")
+    expect(script).not.toContain("cmb-browser-panel-width")
+    expect(extractScriptRecordingDeviceViewport(script)).toEqual({
+      width: 1920,
+      height: 1080
+    })
+    expect(
+      extractScriptRecordingDeviceViewport("// cmb-browser-device-viewport: 1920x1080@0.625")
+    ).toBeUndefined()
+  })
+
+  it("treats historical scripts without panel width metadata as unspecified", () => {
+    expect(
+      extractScriptRecordingPanelWidth('test("old recording", async () => {});')
+    ).toBeUndefined()
+  })
+
+  it("updates the recorded width after the Browser panel is dragged", () => {
+    const initial = generateScriptRecording([], { source: "script", panelWidth: 720 })
+    const updated = withScriptRecordingPanelWidth(initial, 936)
+
+    expect(extractScriptRecordingPanelWidth(updated)).toBe(936)
+    expect(updated.match(/cmb-browser-panel-width/g)).toHaveLength(1)
+  })
+
+  it("removes panel width metadata when device viewport metadata is added", () => {
+    const initial = generateScriptRecording([], { source: "script", panelWidth: 720 })
+    const updated = withScriptRecordingDeviceViewport(initial, { width: 390, height: 844 })
+
+    expect(updated).toContain("// cmb-browser-device-viewport: 390x844")
+    expect(updated).not.toContain("cmb-browser-panel-width")
+  })
+
   it("preserves a contentFrame locator when its text target becomes a variable", () => {
     const script = `import { test } from "@playwright/test";
 

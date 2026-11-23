@@ -2,7 +2,9 @@ import { webFrameMain } from "electron"
 import type { WebFrameMain } from "electron"
 import type {
   BrowserRecordedAction,
+  BrowserDeviceViewport,
   BrowserRecordingSession,
+  BrowserRecordingEnvironment,
   BrowserLocatorMetadata,
   BrowserNavigationSource,
   ScriptRecordingStartOptions,
@@ -11,6 +13,7 @@ import type {
 import {
   generateScriptRecording,
   parseScriptRecordingScript,
+  withScriptRecordingDeviceViewport,
   withScriptRecordingPanelWidth
 } from "../../../../shared/browser-script-recording"
 import {
@@ -29,6 +32,27 @@ let nextActionNumber = 0
 let pendingExplicitNavigation: { expiresAt: number; url?: string } | null = null
 
 const EXPLICIT_NAVIGATION_TTL_MS = 10_000
+
+function normalizeDeviceViewport(
+  viewport?: BrowserDeviceViewport
+): BrowserDeviceViewport | undefined {
+  if (
+    !viewport ||
+    !Number.isFinite(viewport.width) ||
+    viewport.width <= 0 ||
+    !Number.isFinite(viewport.height) ||
+    viewport.height <= 0 ||
+    !Number.isFinite(viewport.scale) ||
+    viewport.scale <= 0
+  ) {
+    return undefined
+  }
+  return {
+    width: Math.round(viewport.width),
+    height: Math.round(viewport.height),
+    scale: viewport.scale
+  }
+}
 
 interface ScriptRecorderEventBase {
   type: string
@@ -553,6 +577,7 @@ function toView(session: BrowserRecordingSession | null): BrowserRecordingSessio
         : generateScriptRecording(session.actions, {
             source: "script",
             panelWidth: session.panelWidth,
+            deviceViewport: session.deviceViewport,
             variableActionIds: session.variableActionIds,
             variableActionNames: session.variableActionNames
           })
@@ -775,6 +800,7 @@ export function startScriptRecording(
       options.panelWidth > 0
         ? Math.round(options.panelWidth)
         : undefined,
+    deviceViewport: normalizeDeviceViewport(options.deviceViewport),
     actions: seededRecording.actions,
     variableActionIds: seededRecording.variableActionIds,
     variableActionNames: seededRecording.variableActionNames,
@@ -850,10 +876,22 @@ export function resumeScriptRecording(): BrowserRecordingSession {
   return toView(activeSession)
 }
 
-export function stopScriptRecording(panelWidth?: number): BrowserRecordingSession {
+export function stopScriptRecording(
+  environment?: BrowserRecordingEnvironment
+): BrowserRecordingSession {
   if (!activeSession) return toView(lastSession)
 
-  updateActiveSessionPanelWidth(panelWidth)
+  updateActiveSessionPanelWidth(environment?.panelWidth)
+  const deviceViewport = normalizeDeviceViewport(environment?.deviceViewport)
+  if (deviceViewport) {
+    activeSession.deviceViewport = deviceViewport
+    if (activeSession.scriptPrefix) {
+      activeSession.scriptPrefix = withScriptRecordingDeviceViewport(
+        activeSession.scriptPrefix,
+        deviceViewport
+      )
+    }
+  }
   activeSession.status = "completed"
   activeSession.stoppedAt = now()
   pendingExplicitNavigation = null

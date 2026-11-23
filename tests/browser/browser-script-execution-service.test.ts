@@ -32,6 +32,7 @@ describe("browser script execution service", () => {
     cdpMocks.getCurrentBrowserCdpPort.mockReturnValue(38127)
     registryMocks.getGlobalBrowserService.mockReturnValue({
       requestPanel: vi.fn(),
+      waitForDeviceViewport: vi.fn(async () => undefined),
       prepareTarget: vi.fn(async () => ({
         sessionId: "app-browser",
         url: "https://example.com",
@@ -74,6 +75,8 @@ describe("browser script execution service", () => {
 
     await executeRecordingScriptInBuiltinBrowser({
       script: `import { test } from "@playwright/test";
+// cmb-browser-panel-width: 864
+// cmb-browser-device-viewport: 390x844
 
 const baseUrl = "https://example.com";
 
@@ -88,6 +91,9 @@ test("recorded script flow", async ({ page }) => {
     })
 
     expect(registryMocks.getGlobalBrowserService).toHaveBeenCalledOnce()
+    expect(
+      registryMocks.getGlobalBrowserService.mock.results[0]?.value.requestPanel
+    ).toHaveBeenCalledWith("thread-1", undefined, true, { width: 390, height: 844 })
     expect(cdpMocks.getCurrentBrowserCdpPort).toHaveBeenCalledOnce()
     expect(playwrightMocks.connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:38127")
     expect(goto).toHaveBeenCalledWith("https://example.com")

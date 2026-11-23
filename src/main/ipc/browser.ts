@@ -9,6 +9,7 @@ import {
   type BrowserDownloadsChangedPayload,
   type BrowserNavigateOptions,
   type BrowserRecordingDraftUpdateInput,
+  type BrowserRecordingEnvironment,
   type BrowserRecordingSession,
   type BrowserScriptExecutionInput,
   type BrowserScriptLibraryDeleteInput,
@@ -16,6 +17,7 @@ import {
   type BrowserScriptLibraryReadInput,
   type BrowserScriptLibrarySaveInput,
   type BrowserScriptLibraryUpdateInput,
+  type BrowserViewportUpdate,
   type ScriptRecordingStartOptions
 } from "../../shared/browser-types"
 import {
@@ -98,12 +100,20 @@ function registerBrowserControlIpc({ browserService, ipcMain }: BrowserIpcContex
     return browserService.attach(options)
   })
 
-  ipcMain.handle("browser:detach", () => {
+  ipcMain.handle("browser:detach", async () => {
+    // detach is the Browser workspace reset boundary. Make playback shutdown
+    // authoritative in the main process so no renderer caller can accidentally
+    // leave a script driving a disposed/recreated BrowserView.
+    await cancelRecordingScriptExecutionInBuiltinBrowser()
     return browserService.detach()
   })
 
   ipcMain.handle("browser:setBounds", (_event, bounds: BrowserBounds, visible?: boolean) => {
     return browserService.setBounds(bounds, visible)
+  })
+
+  ipcMain.handle("browser:setViewport", (_event, update: BrowserViewportUpdate) => {
+    return browserService.setViewport(update)
   })
 
   ipcMain.handle("browser:setZoomFactor", (_event, zoomFactor: number) => {
@@ -170,7 +180,8 @@ function registerBrowserScriptRecordingIpc({ browserService, ipcMain }: BrowserI
 
   ipcMain.handle(
     "browser:stopScriptRecording",
-    (_event, panelWidth?: number): BrowserRecordingSession => stopScriptRecording(panelWidth)
+    (_event, environment?: BrowserRecordingEnvironment): BrowserRecordingSession =>
+      stopScriptRecording(environment)
   )
 
   ipcMain.handle("browser:getScriptRecording", (): BrowserRecordingSession => getScriptRecording())

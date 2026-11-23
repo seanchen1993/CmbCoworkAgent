@@ -5,6 +5,31 @@ export interface BrowserBounds {
   height: number
 }
 
+export interface BrowserDeviceViewport {
+  width: number
+  height: number
+  scale: number
+}
+
+export interface BrowserDeviceSize {
+  width: number
+  height: number
+}
+
+export interface BrowserRecordingEnvironment {
+  panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
+}
+
+export interface BrowserViewportUpdate {
+  /** Identifies the mounted panel that owns this viewport update. */
+  viewportId: string
+  revision: number
+  bounds: BrowserBounds
+  visible: boolean
+  metrics: BrowserDeviceViewport | null
+}
+
 export type BrowserConsoleLevel = "info" | "warn" | "error" | "debug" | "log"
 
 export interface BrowserConsoleEntry {
@@ -27,6 +52,7 @@ export interface BrowserState {
   visible: boolean
   created: boolean
   consoleEntries: BrowserConsoleEntry[]
+  pendingDeviceViewport?: BrowserDeviceSize
   error?: string
 }
 
@@ -88,6 +114,7 @@ interface BrowserRecordedActionBase {
 export interface BrowserPanelRequest {
   threadId?: string
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
   restoreDefaultPanelWidth?: boolean
 }
 
@@ -98,6 +125,8 @@ export interface BrowserNavigateOptions {
 export interface BrowserAttachOptions extends BrowserNavigateOptions {
   initialUrl?: string | null
   visible?: boolean
+  /** Replaces the previous mounted panel as the owner of viewport updates. */
+  viewportId?: string
 }
 
 export interface BrowserScreenshotResult {
@@ -171,6 +200,7 @@ export interface ScriptRecordingStartOptions {
   libraryDisplayName?: string | null
   /** Browser panel width in CSS pixels at recording time. */
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
 }
 
 export interface BrowserRecordingSession {
@@ -185,6 +215,7 @@ export interface BrowserRecordingSession {
   libraryFileName?: string
   libraryDisplayName?: string
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
   variableActionIds?: string[]
   variableActionNames?: Record<string, string>
   actions: BrowserRecordedAction[]
@@ -197,6 +228,7 @@ export interface BrowserScriptLibraryEntry {
   displayName: string
   fileName: string
   hasVariables?: boolean
+  deviceViewport?: BrowserDeviceSize
   isEdited?: boolean
   recordingSource: BrowserRecordingSource
   threadId: string

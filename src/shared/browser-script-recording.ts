@@ -1,5 +1,7 @@
 import type {
   BrowserRecordedAction,
+  BrowserDeviceSize,
+  BrowserDeviceViewport,
   BrowserLocatorMetadata,
   BrowserRecordingSource
 } from "./browser-types"
@@ -51,13 +53,26 @@ export interface ScriptRecordingOptions {
   variableActionNames?: Record<string, string>
   source?: BrowserRecordingSource
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
 }
 
 const BROWSER_PANEL_WIDTH_METADATA_PATTERN = /^\s*\/\/\s*cmb-browser-panel-width:\s*(\d+)\s*$/imu
+const BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN =
+  /^\s*\/\/\s*cmb-browser-device-viewport:\s*(\d+)x(\d+)\s*$/imu
 
 export function extractScriptRecordingPanelWidth(script: string): number | undefined {
   const value = Number(BROWSER_PANEL_WIDTH_METADATA_PATTERN.exec(script)?.[1])
   return Number.isFinite(value) && value > 0 ? Math.round(value) : undefined
+}
+
+export function extractScriptRecordingDeviceViewport(
+  script: string
+): BrowserDeviceSize | undefined {
+  const match = BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN.exec(script)
+  const [width, height] = match?.slice(1).map(Number) ?? []
+  return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+    ? { width: Math.round(width), height: Math.round(height) }
+    : undefined
 }
 
 export function withScriptRecordingPanelWidth(script: string, panelWidth: number): string {
@@ -69,6 +84,21 @@ export function withScriptRecordingPanelWidth(script: string, panelWidth: number
   return importEnd >= 0
     ? `${script.slice(0, importEnd + 1)}${metadata}\n${script.slice(importEnd + 1)}`
     : `${metadata}\n${script}`
+}
+
+export function withScriptRecordingDeviceViewport(
+  script: string,
+  viewport: BrowserDeviceSize
+): string {
+  const metadata = `// cmb-browser-device-viewport: ${Math.round(viewport.width)}x${Math.round(viewport.height)}`
+  const scriptWithoutPanelWidth = script.replace(BROWSER_PANEL_WIDTH_METADATA_PATTERN, "")
+  if (BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN.test(scriptWithoutPanelWidth)) {
+    return scriptWithoutPanelWidth.replace(BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN, metadata)
+  }
+  const importEnd = scriptWithoutPanelWidth.indexOf("\n")
+  return importEnd >= 0
+    ? `${scriptWithoutPanelWidth.slice(0, importEnd + 1)}${metadata}\n${scriptWithoutPanelWidth.slice(importEnd + 1)}`
+    : `${metadata}\n${scriptWithoutPanelWidth}`
 }
 
 interface VariableDescriptor {
@@ -1482,13 +1512,17 @@ export function generateScriptRecording(
   const testName = source === "script" ? "recorded script flow" : "legacy recorded flow"
 
   const panelWidthMetadata =
+    !options.deviceViewport &&
     typeof options.panelWidth === "number" &&
     Number.isFinite(options.panelWidth) &&
     options.panelWidth > 0
       ? `\n// cmb-browser-panel-width: ${Math.round(options.panelWidth)}`
       : ""
+  const deviceViewportMetadata = options.deviceViewport
+    ? `\n// cmb-browser-device-viewport: ${Math.round(options.deviceViewport.width)}x${Math.round(options.deviceViewport.height)}`
+    : ""
 
-  return `import { test } from "@playwright/test";${panelWidthMetadata}
+  return `import { test } from "@playwright/test";${panelWidthMetadata}${deviceViewportMetadata}
 
 ${variableDeclarations ? `${variableDeclarations}\n` : ""}
 

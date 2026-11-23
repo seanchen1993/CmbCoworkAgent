@@ -1,8 +1,10 @@
 import { randomInt } from "node:crypto"
 import { getBrowserCdpConfig } from "../../storage"
 import type { BrowserCdpConfig } from "../../../shared/browser-types"
+import { BUILTIN_BROWSER_LOG_PREFIX } from "../../../shared/browser-types"
 
 const REMOTE_DEBUGGING_PORT_SWITCH = "remote-debugging-port"
+const BROWSER_CDP_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[CDP]`
 export const BROWSER_CDP_PORT_MIN = 49_152
 export const BROWSER_CDP_PORT_MAX = 65_535
 let activeBrowserCdpPort: number | null | undefined
@@ -21,11 +23,13 @@ export function configureBrowserCdpEndpoint(
 ): number | null {
   if (config?.enabled === false) {
     activeBrowserCdpPort = null
+    console.info(`${BROWSER_CDP_LOG_PREFIX} disabled by config`)
     return null
   }
   const port = activeBrowserCdpPort ?? generateBrowserCdpPort()
   activeBrowserCdpPort = port
   commandLine.appendSwitch(REMOTE_DEBUGGING_PORT_SWITCH, String(port))
+  console.info(`${BROWSER_CDP_LOG_PREFIX} enabled on port ${port}`)
   return port
 }
 

@@ -1164,9 +1164,11 @@ test("recorded script flow", async ({ page }) => {
       'document.addEventListener("mousemove", rememberHoveredActionSelector, true)'
     )
     const actionSelectorFallback = script.indexOf("function selectorForRecorderAction")
-    const actionSelectorUsage = script.indexOf("normalizeRecordedSelector(selectorForRecorderAction(action))")
+    const actionSelectorUsage = script.indexOf(
+      "normalizeRecordedSelector(selectorForRecorderAction(action))"
+    )
 
-    expect(script).toContain("let lastHoveredActionSelector = \"\"")
+    expect(script).toContain('let lastHoveredActionSelector = ""')
     expect(script).toContain("function rememberHoveredActionSelector(event)")
     expect(script).toContain("injectedScript.generateSelector(target")
     expect(script).toContain("isTransientActionSelector(selector)")
@@ -1462,6 +1464,23 @@ test("recorded script flow", async ({ page }) => {
       kind: "navigate",
       url: "https://example.com/dashboard"
     })
+  })
+
+  it("keeps a user-issued navigation when no successful load event follows", () => {
+    startScriptRecording({ threadId: "thread-1" })
+
+    // BrowserService records this before awaiting loadURL because Chromium can
+    // reject a redirected or superseded request with ERR_ABORTED.
+    recordScriptNavigation("https://example.com/requested", "explicit")
+
+    const session = stopScriptRecording()
+    expect(session.actions).toEqual([
+      expect.objectContaining({
+        kind: "navigate",
+        url: "https://example.com/requested"
+      })
+    ])
+    expect(session.script).toContain("await page.goto('https://example.com/requested');")
   })
 
   it("records implicit navigation after an untargeted explicit navigation mark", () => {

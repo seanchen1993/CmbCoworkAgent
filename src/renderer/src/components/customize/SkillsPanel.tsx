@@ -354,10 +354,11 @@ function buildNestedNameConflictConfirmMessage(
 
 function UploadSkillDialog(props: {
   open: boolean
+  skills: SkillMetadata[]
   onOpenChange: (open: boolean) => void
   onSuccess: (uploadedSkillDirName?: string) => void
 }): React.JSX.Element {
-  const { open, onOpenChange, onSuccess } = props
+  const { open, skills, onOpenChange, onSuccess } = props
   const [dragOver, setDragOver] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -378,6 +379,31 @@ function UploadSkillDialog(props: {
       try {
         const buffer = await file.arrayBuffer()
         let res = await window.api.skills.upload(buffer, file.name)
+        const duplicateName = !res.success
+          ? res.error?.match(/^技能名称「(.+)」已存在$/)?.[1]
+          : undefined
+        const existingLocalSkill = duplicateName
+          ? skills.find(
+              (skill) =>
+                skill.source === "user" &&
+                normalizeSkillName(skill.name) === normalizeSkillName(duplicateName)
+            )
+          : undefined
+        if (existingLocalSkill) {
+          const shouldOverwrite = window.confirm(
+            `本地已存在技能「${existingLocalSkill.name}」，是否覆盖？`
+          )
+          if (!shouldOverwrite) {
+            setError("已取消上传")
+            return
+          }
+          const deleteResult = await window.api.skills.delete(existingLocalSkill.path)
+          if (!deleteResult.success) {
+            setError(deleteResult.error || "删除原技能失败")
+            return
+          }
+          res = await window.api.skills.upload(buffer, file.name)
+        }
         if (!res.success && res.nestedNameConflicts?.length) {
           const shouldContinue = window.confirm(
             buildNestedNameConflictConfirmMessage(res.nestedNameConflicts)
@@ -402,7 +428,7 @@ function UploadSkillDialog(props: {
         setUploading(false)
       }
     },
-    [onOpenChange, onSuccess]
+    [onOpenChange, onSuccess, skills]
   )
 
   const onDrop = useCallback(
@@ -2424,6 +2450,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       <UploadSkillDialog
         open={uploadDialogOpen}
+        skills={skills}
         onOpenChange={setUploadDialogOpen}
         onSuccess={() => {
           setSkillFilesMap({})
