@@ -105,6 +105,11 @@ assert(
   "managed launches must preserve one-run execution semantics through the shared invoke path"
 )
 assert(
+  invoke.includes('runExecutionContext.source === "bot"') &&
+    !invoke.includes('managedExecution = runExecutionContext.source === "bot"'),
+  "trusted Bot runs must use managed foreground commands without becoming ManagedRun launches"
+)
+assert(
   invoke.includes("onWorkflowLaunched") &&
     resume.includes("onWorkflowLaunched: onResumeWorkflowLaunched") &&
     interrupt.includes("onWorkflowLaunched: onInterruptWorkflowLaunched"),

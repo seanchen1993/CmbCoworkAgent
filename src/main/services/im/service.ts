@@ -69,8 +69,8 @@ export class ImUnifiedBotService {
           command: { name: "switch_target", argument: `@${input.code}` }
         })
     })
-    this.replyClient = new ImReplyClient(gateway, undefined, undefined, () =>
-      this.sessionSwitchCards.schedule()
+    this.replyClient = new ImReplyClient(gateway, undefined, undefined, key =>
+      this.sessionSwitchCards.schedule(key)
     )
     this.unregisterSessionSwitchCards = imCardReceiptRouter.registerSessionSwitchCards(
       this.sessionSwitchCards
@@ -175,7 +175,7 @@ export class ImUnifiedBotService {
           text: `已按你的明确指令重试事件 ${code}。原事件结果未知，文件或外部副作用可能重复，请核对。`
         })
       )
-      await this.replyClient.sendPending()
+      await this.replyClient.sendPending(event.conversationKey)
       if (result.event.state === "queued") {
         void this.turnQueue.notify(event.conversationKey).catch((error) => {
           console.error("[IM] Retry queue failed:", error)
@@ -254,10 +254,10 @@ export class ImUnifiedBotService {
   }
 
   async resumeQueued(): Promise<void> {
-    await this.replyClient.sendPending()
-    await Promise.all(
-      imEventStore.listQueuedConversationKeys().map((key) => this.turnQueue.notify(key))
-    )
+    await Promise.all([
+      this.replyClient.sendPending(),
+      ...imEventStore.listQueuedConversationKeys().map((key) => this.turnQueue.notify(key))
+    ])
   }
 
   async handleLeaseRevoked(eventId: string, reasonCode = "LEASE_REVOKED"): Promise<void> {
@@ -292,7 +292,8 @@ export class ImUnifiedBotService {
     if (this.outboxRetryTimer) return
     this.outboxRetryTimer = setInterval(() => {
       if (!this.gateway.isAuthenticated()) return
-      void this.replyClient.sendPending().catch(() => undefined)
+      void this.replyClient.wakePending().catch(error => console.warn("[IM] Reply scan deferred:", error))
+      this.sessionSwitchCards.schedule()
     }, 1_000)
     this.outboxRetryTimer.unref?.()
   }

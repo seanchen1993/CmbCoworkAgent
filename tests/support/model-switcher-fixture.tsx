@@ -3,41 +3,51 @@ import { flushSync } from "react-dom"
 import { AppErrorBoundary } from "../../src/renderer/src/components/app/AppErrorBoundary"
 import { ModelSwitcher } from "../../src/renderer/src/components/chat/ModelSwitcher"
 import { CustomModelDialog } from "../../src/renderer/src/components/chat/CustomModelDialog"
-import { IDLE_MODEL_NOTICE } from "../../src/shared/model-catalog"
-import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../src/shared/idle-model-service-window"
+import {
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
+  IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
+  IDLE_MODEL_UAT_NOTICE
+} from "../../src/shared/model-catalog"
 import * as store from "./model-switcher-store"
 
 const root = createRoot(document.getElementById("root")!)
 let idleAvailable = true
+let useUat = false
 const modelChangeListeners = new Set<() => void>()
+const settingsWrites = { names: [] as string[], defaults: [] as string[], maxTokens: [] as number[] }
 const idle = {
   id: "idle-ultra",
   ref: "builtin:idle-ultra" as const,
   source: "builtin" as const,
   origin: "local" as const,
-  name: "闲时模型 Ultra",
-  model: "ultra",
+  name: "码豆模型PRO",
+  model: "pro",
   baseUrl: "http://idle.example.test/pattern/llm/v1",
   hasApiKey: true,
   maxTokens: 128_000,
   maxOutputTokens: 8192,
   temperature: 0.1,
   topP: 0.95,
-  topK: 40,
-  notice: IDLE_MODEL_NOTICE,
-  lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"] as const
+  topK: 40
 }
 const fixture = {
-  idleCatalog(available = true, selectable = true) {
+  idleCatalog(available = true) {
     idleAvailable = available
     store.setModels([
       ...store.localModels,
-      { ...idle, id: idle.ref, provider: "builtin", available, selectable,
-        unavailableReason: available ? undefined : IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }
+      {
+        ...idle,
+        id: idle.ref,
+        provider: "builtin",
+        available,
+        selectable: available,
+        unavailableReason: available ? undefined : IDLE_MODEL_SAP_REQUIRED_MESSAGE
+      }
     ])
     for (const listener of modelChangeListeners) listener()
   },
-  showIdleSettings() {
+  showIdleSettings(uat = false) {
+    useUat = uat
     flushSync(() => root.render(null))
     root.render(<CustomModelDialog open selectedModelId={idle.ref} onOpenChange={() => {}} />)
   },
@@ -56,6 +66,7 @@ const fixture = {
     )
   },
   read: store.readSelection,
+  readSettingsWrites: () => settingsWrites,
   routingWrites: store.readRoutingWrites,
   metadata: store.setMetadata,
   catalog: (ready: boolean, empty = false) => store.setModels(empty ? [] : store.localModels, ready)
@@ -70,10 +81,24 @@ Object.assign(window, {
         modelChangeListeners.add(listener)
         return () => { modelChangeListeners.delete(listener) }
       },
-      getBuiltinConfigs: async () => [{ ...idle,
-        unavailableReason: idleAvailable ? undefined : IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }],
+      getBuiltinConfigs: async () => [
+        {
+          ...idle,
+          maxTokens: useUat ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS : idle.maxTokens,
+          lockedFields: ["baseUrl", "model", "apiKey", ...(useUat ? [] : ["maxTokens"])],
+          notice: useUat ? IDLE_MODEL_UAT_NOTICE : undefined,
+          unavailableReason: idleAvailable ? undefined : IDLE_MODEL_SAP_REQUIRED_MESSAGE
+        }
+      ],
       getCustomConfigs: async () => [],
       getDefault: async () => idle.ref,
+      updateBuiltinConfig: async (_id: string, config: { name: string; maxTokens: number }) => {
+        settingsWrites.names.push(config.name)
+        settingsWrites.maxTokens.push(config.maxTokens)
+      },
+      setDefault: async (id: string) => {
+        settingsWrites.defaults.push(id)
+      },
       getTokenLimits: async () => ({
         defaultMaxTokens: 128_000,
         minMaxTokens: 32_000,

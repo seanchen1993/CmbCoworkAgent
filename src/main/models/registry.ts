@@ -1,16 +1,11 @@
-import { BrowserWindow, powerMonitor } from "electron"
-import {
-  assertIdleModelServiceHours,
-  getIdleModelServiceWindow,
-  isIdleModelOutsideServiceHours,
-  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
-} from "../../shared/idle-model-service-window"
+import { BrowserWindow } from "electron"
 import type { RemoteModelCatalog, RemoteModelCatalogItem } from "../../shared/model-catalog"
 import {
   IDLE_MODEL_ID,
+  IDLE_MODEL_NAME,
   IDLE_MODEL_MODE,
   IDLE_MODEL_MAX_TOKENS,
-  IDLE_MODEL_NOTICE,
+  IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
   IDLE_MODEL_UAT_NOTICE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   isModelAvailable,
@@ -87,24 +82,6 @@ let remoteDefinitions: BuiltinModelDefinition[] | null = null
 let catalogLoaded = false
 let catalogRequest: Promise<void> | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
-let serviceWindowTimer: ReturnType<typeof setTimeout> | null = null
-let lastServiceWindowOpen: boolean | undefined
-
-function refreshServiceWindow(): void {
-  if (serviceWindowTimer) clearTimeout(serviceWindowTimer)
-  const now = Date.now()
-  const window = getIdleModelServiceWindow(now)
-  if (lastServiceWindowOpen !== undefined && lastServiceWindowOpen !== window.available) {
-    notifyModelChanges()
-  }
-  lastServiceWindowOpen = window.available
-  // Also recover from clock changes; request admission never depends on this timer.
-  serviceWindowTimer = setTimeout(
-    refreshServiceWindow,
-    Math.max(1, Math.min(window.nextChangeAt - now, 60_000))
-  )
-  serviceWindowTimer.unref?.()
-}
 
 function notifyModelChanges(): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -300,10 +277,13 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
     ...normalizeDefinition(
       {
         id: IDLE_MODEL_ID,
-        name: "闲时模型 Ultra",
+        name: IDLE_MODEL_NAME,
         baseUrl,
         model: IDLE_MODEL_MODE,
-        maxTokens: IDLE_MODEL_MAX_TOKENS,
+        maxTokens:
+          environment.idleModelEnvironment === "uat"
+            ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS
+            : IDLE_MODEL_MAX_TOKENS,
         apiKey: environment.apiKey,
         tier: "premium"
       },
@@ -311,9 +291,9 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
     ),
     transport: "idle-gateway",
     idleModelEnvironment: environment.idleModelEnvironment,
-    notice: environment.idleModelEnvironment === "uat" ? IDLE_MODEL_UAT_NOTICE : IDLE_MODEL_NOTICE
+    notice: environment.idleModelEnvironment === "uat" ? IDLE_MODEL_UAT_NOTICE : undefined
   }
-  return [...definitions.filter((item) => item.id !== IDLE_MODEL_ID), idleModel]
+  return [idleModel, ...definitions.filter((item) => item.id !== IDLE_MODEL_ID)]
 }
 
 function normalizeOverride(
@@ -379,7 +359,9 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
     try {
       const stored = overrides[base.id]
       override = normalizeOverride(
-        isIdle && stored ? { ...stored, maxTokens: IDLE_MODEL_MAX_TOKENS } : stored,
+        base.idleModelEnvironment === "production" && stored
+          ? { ...stored, maxTokens: IDLE_MODEL_MAX_TOKENS }
+          : stored,
         base
       )
     } catch (error) {
@@ -394,9 +376,7 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
           getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
       ...(isIdle && !isValidSapId(getUserInfo()?.sapId)
         ? { unavailableReason: IDLE_MODEL_SAP_REQUIRED_MESSAGE }
-        : isIdleModelOutsideServiceHours(base)
-          ? { unavailableReason: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE }
-          : {}),
+        : {}),
       ref: `builtin:${base.id}`,
       source: "builtin",
       origin: base.origin
@@ -413,7 +393,7 @@ export function getBuiltinModelPublicConfigs(): BuiltinModelPublicConfig[] {
       "baseUrl",
       "model",
       "apiKey",
-      ...(config.transport === "idle-gateway" ? ["maxTokens" as const] : [])
+      ...(config.idleModelEnvironment === "production" ? ["maxTokens" as const] : [])
     ]
   }))
 }
@@ -451,6 +431,8 @@ function resolveModelConfigFromList(
     configs.find((config) => config.source === "custom" && config.id === raw) ??
     configs.find((config) => config.source === "custom" && config.model === raw) ??
     configs.find((config) => config.id === raw || config.model === raw) ??
+    // Older callers could select the built-in by its previous wire model name.
+    (raw === "ultra" ? configs.find((config) => config.transport === "idle-gateway") : null) ??
     null
   )
 }
@@ -503,7 +485,6 @@ export function getAvailableModelConfigOrDefault(
   value?: string | null
 ): ResolvedModelConfig | null {
   const requested = getModelConfigByRef(value)
-  assertIdleModelServiceHours(requested)
   if (isModelAvailable(requested)) return requested
   const selectedDefault = getDefaultModelConfig()
   if (isModelAvailable(selectedDefault)) return selectedDefault
@@ -519,11 +500,11 @@ export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverri
   const base = getBaseDefinitions().find((item) => item.id === id)
   if (!base) throw new Error("未找到内置模型")
   if (
-    base.transport === "idle-gateway" &&
+    base.idleModelEnvironment === "production" &&
     input.maxTokens !== undefined &&
     input.maxTokens !== IDLE_MODEL_MAX_TOKENS
   ) {
-    throw new Error("闲时模型的上下文窗口固定为 128k，不能修改")
+    throw new Error(`${IDLE_MODEL_NAME}在生产环境的上下文窗口固定为 128k，不能修改`)
   }
   const normalized = normalizeOverride(input, base)
   const diff: BuiltinModelOverride = {}
@@ -545,18 +526,30 @@ export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverri
       ;(diff as Record<string, unknown>)[key] = normalized[key]
     }
   }
-  if (Object.keys(diff).length === 0) {
-    resetStoredBuiltinModelOverride(id)
+  persistBuiltinModelOverride(base, diff)
+}
+
+function persistBuiltinModelOverride(
+  base: BuiltinModelDefinition,
+  override: BuiltinModelOverride
+): void {
+  if (base.idleModelEnvironment === "production") {
+    // Keep the UAT context override when saving or resetting production settings.
+    const uatMaxTokens = getBuiltinModelOverrides()[base.id]?.maxTokens
+    if (uatMaxTokens !== undefined) override.maxTokens = uatMaxTokens
+  }
+  if (Object.keys(override).length === 0) {
+    resetStoredBuiltinModelOverride(base.id)
   } else {
-    setStoredBuiltinModelOverride(id, diff)
+    setStoredBuiltinModelOverride(base.id, override)
   }
   notifyModelChanges()
 }
 
 export function resetBuiltinModelOverride(id: string): void {
-  if (!getBaseDefinitions().some((item) => item.id === id)) throw new Error("未找到内置模型")
-  resetStoredBuiltinModelOverride(id)
-  notifyModelChanges()
+  const base = getBaseDefinitions().find((item) => item.id === id)
+  if (!base) throw new Error("未找到内置模型")
+  persistBuiltinModelOverride(base, {})
 }
 
 function catalogSignature(): string {
@@ -609,18 +602,10 @@ export function startBuiltinModelCatalogRefresh(): Promise<void> {
   const initialRefresh = refreshBuiltinModelCatalog()
   if (refreshTimer) return initialRefresh
   refreshTimer = setInterval(() => void refreshBuiltinModelCatalog(true), MODEL_CATALOG_REFRESH_MS)
-  refreshServiceWindow()
-  powerMonitor.on("resume", refreshServiceWindow)
   return initialRefresh
 }
 
 export function stopBuiltinModelCatalogRefresh(): void {
   if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = null
-  if (serviceWindowTimer) clearTimeout(serviceWindowTimer)
-  serviceWindowTimer = null
-  if (lastServiceWindowOpen !== undefined) {
-    powerMonitor.removeListener("resume", refreshServiceWindow)
-  }
-  lastServiceWindowOpen = undefined
 }

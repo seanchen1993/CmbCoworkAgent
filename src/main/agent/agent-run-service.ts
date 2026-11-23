@@ -1,10 +1,32 @@
+import type { BotSkillDispatch } from "./bot-skill-dispatch"
 import type { BrowserWindow } from "electron"
+import { AsyncLocalStorage } from "node:async_hooks"
+import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
 import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { AgentInvokeParams } from "../types"
-import type { RuntimeInteractionWaitHooks } from "./runtime"
+import type { CreateAgentRuntimeOptions, RuntimeInteractionWaitHooks } from "./runtime"
 import type { RemoteTurnPolicy, StandardTurnSource } from "./standard-thread-turn"
 import type { LocalThreadRunOwner } from "./thread-run-lease"
+import type { CurrentRunQueuedMessage } from "./current-run-message-queue"
+
+/** Model-facing request text from trusted Bot preparation. The visible transcript is separate. */
+export const BOT_PREPARED_USER_REQUEST_KEY = "cmb_bot_prepared_user_request"
+
+export interface AgentRunSteerRequest {
+  threadId: string
+  owner: LocalThreadRunOwner
+  runId: string
+  message: CurrentRunQueuedMessage
+  /** Trusted Bot receipt only; no change to ordinary steering when absent. */
+  onUserPromptPrepared?: (body: string) => void
+}
+
+export interface AgentRunSteerResult {
+  queued: boolean
+  reason?: string
+  message?: string
+}
 
 export type AgentRunRequest = AgentInvokeParams
 
@@ -27,6 +49,20 @@ export interface AgentRunDelivery {
   isAvailable(): boolean
   /** Close a managed renderer stream after runtime cleanup, including aborts and early returns. */
   finish?: (threadId: string) => void
+}
+
+const runDeliveryStorage = new AsyncLocalStorage<{
+  threadId: string
+  channel: string
+  delivery: AgentRunDelivery
+}>()
+
+/** Runtime boundary events must follow the run's stream, including background Bot runs. */
+export function sendCurrentAgentRunStreamEvent(threadId: string, payload: unknown): boolean {
+  const current = runDeliveryStorage.getStore()
+  if (!current || current.threadId !== threadId) return false
+  current.delivery.send(current.channel, payload)
+  return true
 }
 
 export interface AgentRunHandle {
@@ -68,6 +104,8 @@ export interface AgentRunTerminal {
   code: string
   message?: string
   error?: unknown
+  /** The coordinator notification input was saved; never retry that queue item. */
+  coordinatorNotificationDelivered?: boolean
 }
 
 export interface AgentGoalControlRequest {
@@ -88,6 +126,8 @@ export interface AgentGoalControlResult {
  */
 export interface AgentRunExecutionContext {
   source: StandardTurnSource
+  /** Opt-in per-run model pin from a trusted caller; omitted callers keep global routing. */
+  modelRoutingMode?: "pinned"
   localRunLease?: {
     owner: LocalThreadRunOwner
     runId: string
@@ -128,14 +168,64 @@ export interface AgentRunExecutionContext {
     metadata: Record<string, unknown>
   }) => string | null
   allowForeignOwnerGoalControl?: boolean
+  /** Host-confirmed / selection, routed before activation on the main Bot only. */
+  botSkillDispatch?: BotSkillDispatch
   trustedExplicitSkill?: SkillUseBlockMetadata
   allowTrustedTransportSkillMarker?: boolean
   remotePolicy?: RemoteTurnPolicy
   interactionWaitHooks?: RuntimeInteractionWaitHooks
+  /** Trusted background callers may wait for the renderer to reopen for user input. */
+  allowDeferredUserInputRenderer?: boolean
+  /** Trusted host opt-in; never read from renderer input or inherited by leaf agents. */
+  workflowEnabled?: boolean
+  backgroundCommandLifecycle?: CreateAgentRuntimeOptions["backgroundCommandLifecycle"]
+  /** Preserve a managed task's owner when a private message detaches only its foreground wait. */
+  foregroundCommandLifecycle?: CreateAgentRuntimeOptions["foregroundCommandLifecycle"]
+  /** Only a host-owned durable workflow receipt may invoke the internal summary turn. */
+  workflowInternalNotification?: boolean
+  /** Identity of the original workflow result owned by a durable local Bot receipt. */
+  botWorkflowNotification?: { runId: string; startedAt: string }
+  /** Bot-host receipt only; cannot be supplied through a renderer request. */
+  commandInternalNotification?: boolean
+  /** First conversation cue issued only by the Bot host; never a renderer-authored message. */
+  botIntroduction?: boolean
   extraSystemPrompt?: string
+  botCommunication?: CreateAgentRuntimeOptions["botCommunication"]
+  /** Local Bot event context, appended to the new message rather than the system prefix. */
+  botTurnContext?: import("./bot-turn-context").BotTurnContext
+  /** Trusted host adapters can add identity-bound tools; never populated from renderer input. */
+  additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
+  foregroundWorkBudget?: CreateAgentRuntimeOptions["foregroundWorkBudget"]
+  /** Trusted Bot delivery check; renderer input cannot supply this callback. */
+  checkFinalDelivery?: CreateAgentRuntimeOptions["checkFinalDelivery"]
+  /** Bot main-private-chat only; not a renderer setting or a leaf-agent option. */
+  openingReplyReminder?: CreateAgentRuntimeOptions["openingReplyReminder"]
+  onBotDispatchFeedback?: CreateAgentRuntimeOptions["onBotDispatchFeedback"]
+  toolConcurrencyQueueId?: string
+  userInputWithoutToolLock?: CreateAgentRuntimeOptions["userInputWithoutToolLock"]
+  botBrowserToolsOwnFileLock?: CreateAgentRuntimeOptions["botBrowserToolsOwnFileLock"]
+  capabilityService?: CreateAgentRuntimeOptions["capabilityService"]
   onGoalNotice?: (notice: AgentRunGoalNotice) => void
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>
+  /** Trusted Bot-only veto for tray/pet completion notices, evaluated after final delivery. */
+  shouldRaiseCompletionAttention?: () => boolean
   onRunCancelled?: () => void
+  /** The original user-prompt/steer pipeline is ready; trusted inboxes can offer saved messages. */
+  onSteeringReady?: (yieldForegroundCommands?: (stillPending: () => boolean) => number) => void
+  /** Bot-only receipt for verified user text and system context after the original input check. */
+  onUserPromptPrepared?: (body: string, receipt?: { internalGoalInput: true }) => {
+    memoryUserText?: string
+    extraSystemPrompt?: string
+  } | undefined
+  /** Trusted Bot history only. Missing ids stay unchanged; null excludes an unaccepted input. */
+  persistedUserInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>
+  /** Trusted Bot inbox only: the exact active main-model round can be superseded.
+   * Undefined ends that opportunity; tools, compaction and leaf models do not expose it. */
+  onModelRequestState?: (interrupt: (() => boolean) | undefined) => void
+  /** Trusted local Bot only. Resume its exact yielded model checkpoint without adding a message. */
+  resumeCheckpointId?: string
+  /** Trusted local Bot continuation. Keep newer completed conversation history instead of restoring its old branch. */
+  continueBotTaskCheckpointId?: string
   /**
    * Fires exactly once per run, before its completion promise settles.
    *
@@ -175,6 +265,23 @@ let agentRunImplementation: AgentRunImplementation | null = null
 let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 let activeAgentRunCanceller: ActiveAgentRunCanceller = () => false
+let agentRunSteerer: (
+  request: AgentRunSteerRequest
+) => Promise<AgentRunSteerResult> = async () => ({
+  queued: false,
+  reason: "run_not_ready"
+})
+
+export function registerAgentRunSteerer(
+  steer: (request: AgentRunSteerRequest) => Promise<AgentRunSteerResult>
+): void {
+  agentRunSteerer = steer
+}
+
+/** Main-process callers must supply the exact lease they own; never accepts a renderer owner. */
+export function steerAgentRun(request: AgentRunSteerRequest): Promise<AgentRunSteerResult> {
+  return agentRunSteerer(request)
+}
 
 export function registerAgentRunImplementation(implementation: AgentRunImplementation): void {
   agentRunImplementation = implementation
@@ -237,9 +344,19 @@ export async function startAgentRun(
   if (!delivery.isAvailable()) {
     throw new Error("Agent run delivery is unavailable")
   }
-  const completion = agentRunImplementation(request, delivery, context).finally(() => {
-    delivery.finish?.(request.threadId)
-  })
+  const ambientChannel = `agent:stream:${request.threadId}${request.coordinatorInternalNotification ? ":coordinator-internal" : ""}`
+  const completion = runDeliveryStorage
+    .run(
+      {
+        threadId: request.threadId,
+        channel: resolveAgentStreamRequestChannel(ambientChannel, request.streamRequestId),
+        delivery
+      },
+      () => agentRunImplementation!(request, delivery, context)
+    )
+    .finally(() => {
+      delivery.finish?.(request.threadId)
+    })
   return {
     threadId: request.threadId,
     completion

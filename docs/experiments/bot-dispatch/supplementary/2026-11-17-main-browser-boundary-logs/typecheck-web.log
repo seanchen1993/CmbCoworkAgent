@@ -1,0 +1,4 @@
+
+> cmbdevclaw@1.5.6 typecheck:web
+> tsc --noEmit -p tsconfig.web.json --composite false
+

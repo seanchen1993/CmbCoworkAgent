@@ -276,7 +276,8 @@ export class ToolOrchestrator {
     sandboxMode: string,
     shellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix",
     outsideShellSyntax: CommandShellSyntax = shellSyntax,
-    execution?: OrchestratedExecuteOptions
+    execution?: OrchestratedExecuteOptions,
+    canRetry: () => boolean = () => true
   ): Promise<ExecuteResponse> {
     {
       const rawExecute = execution?.rawExecute ?? this.rawExecute
@@ -420,6 +421,7 @@ export class ToolOrchestrator {
       // commands, but still require explicit approval before escaping the sandbox.
       if (yoloMode) {
         const result = await rawExecute(command, sandboxMode, cwd)
+        if (!canRetry()) return result
         return this.maybeRetryOutsideSandbox(
           command,
           cwd,
@@ -434,6 +436,7 @@ export class ToolOrchestrator {
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
         const result = await rawExecute(command, sandboxMode, cwd)
+        if (!canRetry()) return result
         return this.maybeRetryOutsideSandbox(
           command,
           cwd,
@@ -493,6 +496,7 @@ export class ToolOrchestrator {
       // looks sandbox-induced.
       try {
         const result = await rawExecute(command, sandboxMode, cwd)
+        if (!canRetry()) return result
         return await this.maybeRetryOutsideSandbox(
           command,
           cwd,
@@ -503,7 +507,7 @@ export class ToolOrchestrator {
         )
       } catch (err) {
         // 7. Sandbox denial → block and inform user
-        if (sandboxMode !== "none" && this.isSandboxDenialError(err)) {
+        if (canRetry() && sandboxMode !== "none" && this.isSandboxDenialError(err)) {
           return this.handleSandboxRetry(
             command,
             cwd,

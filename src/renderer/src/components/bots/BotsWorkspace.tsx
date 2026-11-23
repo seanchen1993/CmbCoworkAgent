@@ -1,0 +1,3106 @@
+import { BotEditor } from "./BotEditor"
+import { BotConversation } from "./BotConversation"
+import { BotExecutionDetailsToggle } from "./BotExecutionDetailsToggle"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { botErrorMessage } from "@/lib/bot-error-message"
+import { botCreateShortcut } from "@/lib/bot-create-shortcut"
+import { BotGroupAvatar } from "./BotGroupAvatar"
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react"
+import {
+  Archive,
+  Brain,
+  CircleAlert,
+  ChevronRight,
+  History,
+  Loader2,
+  MessageCircle,
+  MoreHorizontal,
+  PanelRight,
+  Pin,
+  PinOff,
+  Plus,
+  Search,
+  Settings2,
+  Trash2,
+  UsersRound,
+  X
+} from "lucide-react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
+import { Tabs, TabsContent } from "@/components/ui/tabs"
+import { useAppStore } from "@/lib/store"
+import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
+import { useThreadContext, useThreadStateSummaries } from "@/lib/thread-context"
+import {
+  privateBotTasksByBot,
+  botTaskPreview,
+  botConversationState,
+  botFileRefreshKey
+} from "@/lib/bot-task-view"
+import {
+  botPinnedConversationIds,
+  botPinDropTarget,
+  botSidebarDropPatch,
+  orderBotConversations,
+  filterImConversations,
+  removeImConversationFromView,
+  type BotSidebarDrag,
+  type BotSidebarDrop
+} from "@/lib/bot-sidebar-view"
+import { groupDraftKey, sendGroupDraft, useBotGroupDrafts } from "@/lib/bot-group-drafts"
+import {
+  restoreBotConversationDraft,
+  saveBotConversationDraft,
+  pruneBotConversationDrafts
+} from "@/lib/bot-conversation-draft"
+import { validateNewChatFiles } from "@/lib/bot-new-chat-files"
+import {
+  botChatRecipientKey,
+  materializeBotChatRecipients,
+  type BotChatRecipient
+} from "@/lib/bot-chat-recipients"
+import { BotDraftSender, queueBotChatDraft } from "@/lib/bot-draft-sender"
+import { BotStorefrontIcon } from "./BotStorefrontIcon"
+import { botGroupBrowserScope, BOT_REQUEST_RECEIPT_LIMIT } from "../../../../shared/bots/contracts"
+import type {
+  BotClient,
+  BotDefinition,
+  BotTask,
+  BotGroup,
+  CreateBotInput
+} from "../../../../shared/bots/contracts"
+import type { BotWorkApproval } from "../../../../shared/bots/work"
+import { BotAvatar } from "./BotAvatar"
+import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
+import { botActiveTaskCreatedAt } from "@/lib/bot-avatar-mood"
+import { BotAvatarEditor } from "./BotAppearancePicker"
+import { BotDeleteDialog } from "./BotDeleteDialog"
+import { BotMemoryNavigation, BotMemoryPanel } from "./BotMemoryPanel"
+import { BotSchedulePanel } from "./BotSchedulePanel"
+import { BotGroupEditor } from "./BotGroupEditor"
+import { BotNameInput } from "./BotNameInput"
+import { BotGroupMembers } from "./BotGroupMembers"
+import { BotGroupConversation } from "./BotGroupConversation"
+import { BotDetailCard, BotDetailRow, BotDetailsPane, BotDetailTabs } from "./BotDetailsPane"
+import { BotNewChat } from "./BotNewChat"
+import { BotSectionEditor } from "./BotSectionEditor"
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem
+} from "@/components/ui/context-menu"
+import { BotRowMenu } from "./BotRowMenu"
+import { BotConversationList } from "./BotConversationList"
+import { BotProfileLabel } from "./BotProfileLabel"
+import { BotBrowserPanel } from "./BotBrowserPanel"
+import { BotFilesPanel } from "./BotFilesPanel"
+import { useBots } from "./use-bots"
+import { useBotReadState } from "./use-bot-read-state"
+import { localBotClient } from "./client"
+import { botWorkClient } from "@/lib/bot-work-client"
+import { openBotWorkThreadChat, resolveBotWorkThreadForNavigation } from "@/lib/bot/work-thread-summary"
+import { useBotWorks } from "./use-bot-works"
+import { BotWorkPanel } from "./BotWorkPanel"
+import { BotWorkHeader } from "./BotWorkHeader"
+import { BotTaskBrowser } from "./BotTaskBrowser"
+import { BotWorkAttention } from "./BotWorkAttention"
+import {
+  BOT_WORK_DELETION_PENDING_MESSAGE,
+  BotWorkPreview,
+  isWorkDeletionPending
+} from "./BotWorkPreview"
+import { BotImChannelDialog } from "./BotImChannelDialog"
+import { BotImConversation, BotImConversationDetails } from "./BotImConversation"
+import { BotImConversationRows, SidebarTime } from "./BotImConversationRows"
+import { useHeldSidebarUnread, useStableSidebarOrder } from "./use-bot-sidebar-order"
+import { botChatAccent } from "@/lib/bot-chat-accent"
+import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
+import { BotPanelDivider } from "./BotPanelDivider"
+import {
+  useBotViewStore,
+  botMainConversationSelection,
+  DEFAULT_BOT_VIEW,
+  clampBotPanelWidth,
+  createBotNewChatDraft
+} from "./view-store"
+import "./bots.css"
+
+const PENDING_NEW_CHAT_RECIPIENT =
+  "这位 Bot 正在创建，请等待原创建结果后再重试。文字和附件仍可编辑。"
+const STATE_LABELS: Record<BotTask["state"], string> = {
+  queued: "等待执行",
+  running: "正在处理",
+  waiting_user: "等待你确认",
+  completed: "已完成",
+  failed: "执行失败",
+  cancelled: "已停止",
+  interrupted: "已中断",
+  superseded: "已由新消息接续",
+  outcome_unknown: "需要核对结果"
+}
+
+type BotWorkPreviewReturn = {
+  trigger: HTMLButtonElement | null
+  scroll?: { container: HTMLElement; top: number }
+}
+
+export function restoreBotWorkPreviewPosition(
+  previous: BotWorkPreviewReturn | null,
+  fallback: HTMLButtonElement | null
+): void {
+  const scroll = previous?.scroll
+  if (scroll?.container.isConnected) scroll.container.scrollTop = scroll.top
+  const trigger = previous?.trigger
+  const target = trigger?.isConnected ? trigger : fallback
+  target?.focus({ preventScroll: true })
+  if (!target || !scroll?.container.isConnected || !scroll.container.contains(target)) return
+  const row = target.getBoundingClientRect()
+  const viewport = scroll.container.getBoundingClientRect()
+  if (row.top < viewport.top || row.bottom > viewport.bottom)
+    target.scrollIntoView({ block: "nearest" })
+}
+
+function GroupDetails({
+  group, bots, client, groupLabels, tasks, tab, onTabChange, onSettings, onOpenMember
+}: {
+  group: BotGroup
+  bots: BotDefinition[]
+  client: BotClient
+  groupLabels: ReadonlyMap<string, string>
+  tasks: BotTask[]
+  tab: typeof DEFAULT_BOT_VIEW.groupDetailTab
+  onTabChange(tab: typeof DEFAULT_BOT_VIEW.groupDetailTab): void
+  onSettings(): void
+  onOpenMember(bot: BotDefinition): void
+}) {
+  const [memoryOpen, setMemoryOpen] = useState(false)
+  const [memberId, setMemberId] = useState(group.memberIds[0])
+  const memoryTrigger = useRef<HTMLButtonElement>(null)
+  const members = bots.filter(bot => group.memberIds.includes(bot.id) && !bot.deleting)
+  const member = members.find(bot => bot.id === memberId) ?? members[0]
+  const returnToDetails = () => {
+    setMemoryOpen(false)
+    requestAnimationFrame(() => memoryTrigger.current?.focus())
+  }
+  return (
+    <Tabs value={tab} onValueChange={next => {
+      setMemoryOpen(false)
+      onTabChange(next as typeof tab)
+    }}>
+      <BotDetailTabs label="群聊详情导航" tabs={["details", "files", "members", "computer"]}
+        onDetails={memoryOpen ? returnToDetails : undefined} />
+      <TabsContent value="details" className="mt-0">
+        {memoryOpen && member ? (
+          <>
+            <BotMemoryNavigation onBack={returnToDetails} />
+            {members.length > 1 && (
+              <Select value={member.id} onValueChange={setMemberId}>
+                <SelectTrigger aria-label="查看成员记忆" className="mb-3 w-full rounded-xl shadow-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
+                  {members.map(bot => <SelectItem key={bot.id} value={bot.id}>{bot.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+            <BotMemoryPanel key={member.id} bot={member} client={client} peers={[]}
+              groupId={group.id} groupLabels={groupLabels} />
+          </>
+        ) : (
+          <BotDetailCard label="群聊设置">
+            <BotDetailRow label="群聊设置" icon={<Settings2 size={16} aria-hidden="true" />}
+              description={`${group.memberIds.length} 位 Bot 成员`} onClick={onSettings} />
+            {member && <BotDetailRow ref={memoryTrigger} label="管理记忆" icon={<Brain size={16} aria-hidden="true" />}
+              description="成员共享记忆与本群记忆" onClick={() => setMemoryOpen(true)} />}
+          </BotDetailCard>
+        )}
+      </TabsContent>
+      <TabsContent value="files" className="mt-0">
+        <GroupFiles group={group} bots={bots} client={client} tasks={tasks} />
+      </TabsContent>
+      <TabsContent value="members" className="mt-0">
+        <BotGroupMembers group={group} bots={bots} client={client} onOpen={onOpenMember} />
+      </TabsContent>
+      <TabsContent value="computer" className="mt-0">
+        <GroupBrowser group={group} bots={bots} client={client} />
+      </TabsContent>
+    </Tabs>
+  )
+}
+
+function GroupBrowser({
+  group,
+  bots,
+  client
+}: {
+  group: BotGroup
+  bots: BotDefinition[]
+  client: BotClient
+}) {
+  const [memberId, setMemberId] = useState(group.memberIds[0])
+  const members = group.memberIds
+    .map((id) => bots.find((bot) => bot.id === id))
+    .filter((bot): bot is BotDefinition => Boolean(bot && !bot.deleting))
+  const member = members.find((bot) => bot.id === memberId) ?? members[0]
+  const scope = member && botGroupBrowserScope(group.id, member.id)
+  return (
+    <BotDetailCard title="工作浏览器" className="bot-computer-card">
+      {member && scope ? (
+        <>
+          <div className="bot-computer-source">
+            {members.length === 1 ? <p>{member.name}</p> : (
+              <Select value={member.id} onValueChange={setMemberId}>
+                <SelectTrigger aria-label="查看成员浏览器" className="w-full rounded-lg shadow-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
+                  {members.map(bot => <SelectItem key={bot.id} value={bot.id}>{bot.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+          <BotBrowserPanel key={scope} botId={scope} client={client} />
+        </>
+      ) : <p className="bot-detail-empty">添加群成员后即可查看工作页面。</p>}
+    </BotDetailCard>
+  )
+}
+
+function GroupFiles({
+  group,
+  bots,
+  client,
+  tasks
+}: {
+  group: BotGroup
+  bots: BotDefinition[]
+  client: BotClient
+  tasks: BotTask[]
+}) {
+  const member =
+    bots.find((bot) => group.memberIds.includes(bot.id) && !bot.deleting && !bot.archived) ??
+    bots.find((bot) => group.memberIds.includes(bot.id) && !bot.deleting)
+  return (
+    <BotFilesPanel
+      key={`${group.id}:${member?.id ?? ""}`}
+      bot={member}
+      group={group}
+      peers={bots}
+      client={client}
+      refreshKey={botFileRefreshKey(tasks)}
+    />
+  )
+}
+
+export function BotsWorkspace({ client = localBotClient() }: { client?: BotClient }) {
+  return <BotWorkspaceForHost key={client.hostId} client={client} />
+}
+
+function BotWorkspaceForHost({ client }: { client: BotClient }) {
+  const { snapshot, error, retry } = useBots(client)
+  const [profileName, setProfileName] = useState("")
+  const [approvalReturn, setApprovalReturn] = useState<{ sourceBotId: string; targetThreadId: string } | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let generation = 0
+    const refresh = () => {
+      const current = ++generation
+      void window.api.models
+        .getUserInfo()
+        .then((user) => {
+          if (!disposed && current === generation)
+            setProfileName(
+              user?.sapId && typeof user.userName === "string" ? user.userName.trim() : ""
+            )
+        })
+        .catch(() => {
+          if (!disposed && current === generation) setProfileName("")
+        })
+    }
+    const unsubscribe = window.electron.onNotifyMsg(refresh)
+    refresh()
+    return () => {
+      disposed = true
+      unsubscribe()
+    }
+  }, [])
+  const words = profileName.split(/\s+/u)
+  const userInitials = (
+    words.length > 1
+      ? words.slice(0, 2).map((word) => Array.from(word)[0])
+      : Array.from(profileName).slice(0, 2)
+  )
+    .join("")
+    .toUpperCase()
+  useEffect(() => {
+    if (snapshot) {
+      useBotGroupDrafts.getState().prune(
+        client.hostId,
+        snapshot.groups.map((group) => group.id)
+      )
+      try {
+        pruneBotConversationDrafts(
+          client.hostId,
+          snapshot.bots.map((bot) => bot.id)
+        )
+      } catch {
+        // A future authoritative snapshot retries cleanup; editing remains available.
+      }
+    }
+  }, [client.hostId, snapshot?.groups, snapshot?.bots])
+  const view = useBotViewStore((state) => state.hosts[client.hostId] ?? DEFAULT_BOT_VIEW)
+  const updateView = useCallback((patch: Partial<typeof view>) =>
+    useBotViewStore.getState().update(client.hostId, patch), [client.hostId])
+  const setImHistoryCollapsed = useCallback(
+    (imHistoryCollapsed: boolean) =>
+      useBotViewStore.getState().update(client.hostId, { imHistoryCollapsed }),
+    [client.hostId]
+  )
+  const { groupId, showArchived, detailOpen, detailTab } = view
+  // Old service routes are view preferences, never local Bot identities.
+  const legacySelection =
+    view.selectedId === "service-expert-conversation" ||
+    view.selectedId?.startsWith("service-expert-conversation:")
+  const selectedId = legacySelection ? null : view.selectedId
+  const setSelectedId = (selectedId: string | null) => updateView({ selectedId })
+  const setGroupId = (groupId: string | null) => updateView({ groupId })
+  const setShowArchived = (showArchived: boolean) => updateView({ showArchived })
+  const detailTriggerRef = useRef<HTMLButtonElement>(null)
+  const setDetailOpen = (detailOpen: boolean) => {
+    if (detailOpen !== view.detailOpen) workPreviewNavigation.current = { preview: null }
+    if (!detailOpen && document.activeElement?.closest(".bot-details")) {
+      detailTriggerRef.current?.focus({ preventScroll: true })
+    }
+    updateView({ detailOpen })
+  }
+  const setDetailTab = (detailTab: typeof view.detailTab) => {
+    if (detailTab !== view.detailTab) workPreviewNavigation.current = { preview: null }
+    updateView({ detailTab })
+  }
+  const memoryTriggerRef = useRef<HTMLButtonElement>(null)
+  const [query, setQuery] = useState("")
+  const [showHidden, setShowHidden] = useState(false)
+  const [suppressedRead, setSuppressedRead] = useState<string | null>(null)
+  const [sidebarScrolling, setSidebarScrolling] = useState(false)
+  const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false)
+  const [deletingIm, setDeletingIm] = useState<{
+    hostId: string
+    id: string
+    title: string
+    trigger: HTMLElement | null
+  } | null>(null)
+  const sectionFocus = useRef(false)
+  const [sectionEditor, setSectionEditor] = useState<{
+    id?: string
+    botId?: string
+    name?: string
+  } | null>(null)
+  const [sidebarDrag, setSidebarDrag] = useState<{
+    hostId: string
+    item: BotSidebarDrag
+  } | null>(null)
+  const sidebarDragging = sidebarDrag?.item
+  const [sidebarDrop, setSidebarDrop] = useState<BotSidebarDrop | null>(null)
+  const clearSidebarDrag = () => {
+    setSidebarDrag(null)
+    setSidebarDrop(null)
+  }
+  useEffect(() => {
+    clearSidebarDrag()
+  }, [client.hostId])
+  const hiddenIds = view.hiddenBotIds ?? []
+  const hiddenGroupIds = view.hiddenGroupIds ?? []
+  const pinnedGroupIds = view.pinnedGroupIds ?? []
+  const sections = view.sections ?? []
+  const [searchOpen, setSearchOpen] = useState(false)
+  const groupActionQuery = query.trim().toLocaleLowerCase()
+  const showCreateGroupAction =
+    searchOpen &&
+    !showArchived &&
+    Boolean(groupActionQuery) &&
+    ["创建群聊", "新建群聊", "new group chat", "group", "chat", "room", "bots", "people"].some(
+      (keyword) => keyword.includes(groupActionQuery)
+    )
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const [newChat, setNewChat] = useState(false)
+  const [initialNewChatDraft] = useState(
+    () => useBotViewStore.getState().newChatDrafts[client.hostId] ?? createBotNewChatDraft()
+  )
+  const newChatState = useBotViewStore(
+    (state) => state.newChatDrafts[client.hostId] ?? initialNewChatDraft
+  )
+  const updateNewChatDraft = (patch: Partial<typeof newChatState>) => {
+    const state = useBotViewStore.getState()
+    state.updateNewChat(client.hostId, {
+      ...(state.newChatDrafts[client.hostId] ?? initialNewChatDraft),
+      ...patch
+    })
+  }
+  const newChatRecipients = newChatState.recipients
+  const setNewChatRecipients = (
+    value: BotChatRecipient[] | ((previous: BotChatRecipient[]) => BotChatRecipient[])
+  ) => {
+    const current = useBotViewStore.getState().newChatDrafts[client.hostId] ?? initialNewChatDraft
+    updateNewChatDraft({
+      recipients: typeof value === "function" ? value(current.recipients) : value
+    })
+  }
+  const newChatDraft = newChatState.text
+  const newChatDraftRef = useRef(newChatDraft)
+  const newChatFiles = newChatState.files
+  const newChatFilesRef = useRef(newChatFiles)
+  const newChatTransfer = initialNewChatDraft.transfer
+  const editNewChatFiles = (files: File[]) => {
+    try {
+      validateNewChatFiles(files)
+      newChatFilesRef.current = files
+      updateNewChatDraft({ files })
+      newChatTransfer.current.keep(files)
+      setNewChatError(null)
+    } catch (cause) {
+      setNewChatError(botErrorMessage(cause))
+    }
+  }
+  const editNewChatDraft = (value: string) => {
+    newChatDraftRef.current = value
+    updateNewChatDraft({ text: value })
+  }
+  const newChatBusy = newChatState.busy
+  const setNewChatBusy = (busy: boolean) => updateNewChatDraft({ busy })
+  const [newChatError, setNewChatError] = useState<string | null>(null)
+  const newChatAttempt = initialNewChatDraft.attempt
+  const creatingChat = initialNewChatDraft.creating
+  const createdChatGroup = initialNewChatDraft.group
+  const createdChatRecipients = initialNewChatDraft.createdRecipients
+  const pendingChatRecipients = initialNewChatDraft.pendingRecipients
+  const privateChatRecipient = initialNewChatDraft.privateRecipient
+  const newChatCreateIntent = useRef<{
+    intent: "draft" | "send"
+    recipientKey: string
+  } | null>(null)
+  const threadContext = useThreadContext()
+  useEffect(
+    () => () => {
+      newChatAttempt.current++
+      const state = useBotViewStore.getState()
+      const draft = state.newChatDrafts[client.hostId]
+      if (
+        draft &&
+        !draft.busy &&
+        !draft.text &&
+        !draft.files.length &&
+        !draft.recipients.length &&
+        !draft.pendingRecipients.current.size &&
+        !draft.createdRecipients.current.size
+      )
+        state.updateNewChat(client.hostId, undefined)
+    },
+    []
+  )
+  const closeNewChat = () => {
+    newChatAttempt.current++
+    setNewChat(false)
+  }
+  const [groupEditor, setGroupEditor] = useState<BotGroup | "new" | null>(null)
+  const groupEditorTrigger = useRef<HTMLElement | null>(null)
+  const openGroupEditor = (group: BotGroup | "new", trigger?: HTMLElement | null) => {
+    groupEditorTrigger.current =
+      trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setGroupEditor(group)
+  }
+  const selectedGroup = snapshot?.groups.find((group) => group.id === groupId) ?? null
+  const memoryGroupLabels = useMemo(
+    () =>
+      new Map([
+        ...(snapshot?.groups ?? []).map((group) => [group.id, group.name] as const),
+        ...(snapshot?.imConversations ?? []).map(
+          (group) =>
+            [group.id, `${group.title}${group.state === "revoked" ? "（已解绑）" : ""}`] as const
+        )
+      ]),
+    [snapshot?.groups, snapshot?.imConversations]
+  )
+  const selectedIm = !selectedGroup
+    ? snapshot?.imConversations?.find(
+        (group) => group.id === view.imConversationId && group.botId === selectedId
+      )
+    : undefined
+  const openImConversation = (id: string) => {
+    const group = snapshot?.imConversations?.find((item) => item.id === id)
+    if (!group) return
+    closeNewChat()
+    updateView(botMainConversationSelection(view, group.botId, id))
+  }
+  const openPrivateMain = (botId: string) => {
+    closeNewChat()
+    updateView(botMainConversationSelection(useBotViewStore.getState().hosts[client.hostId], botId))
+  }
+  const [deleting, setDeleting] = useState<BotDefinition | null>(null)
+  const [deletingGroup, setDeletingGroup] = useState<BotGroup | null>(null)
+  const [renamingGroup, setRenamingGroup] = useState<BotGroup | null>(null)
+  const [renaming, setRenaming] = useState<BotDefinition | null>(null)
+  const [editor, setEditor] = useState<BotDefinition | "new" | null>(null)
+  const [newBotName, setNewBotName] = useState("")
+  const [imBot, setImBot] = useState<BotDefinition | null>(null)
+  const [imBindingId, setImBindingId] = useState<string | null>(null)
+  const editorTrigger = useRef<HTMLElement | null>(null)
+  const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
+  const newConversationTrigger = useRef<HTMLButtonElement | null>(null)
+  const openNewChat = useCallback(() => {
+    if (creatingChat.current) return
+    newChatAttempt.current++
+    setNewChat(true)
+    setNewChatError(null)
+  }, [])
+  useEffect(() => {
+    const create = (event: KeyboardEvent) => {
+      const action = botCreateShortcut(event)
+      if (!action) return
+      const state = useAppStore.getState()
+      const trigger = newConversationTrigger.current
+      if (
+        state.mainView !== "bots" ||
+        state.showCustomizeView ||
+        !trigger?.isConnected ||
+        trigger.disabled ||
+        trigger.closest("[inert]") ||
+        document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')
+      )
+        return
+      event.preventDefault()
+      if (action === "bot") trigger.click()
+      else if (!document.querySelector(".bot-new-chat")) openNewChat()
+    }
+    document.addEventListener("keydown", create)
+    return () => document.removeEventListener("keydown", create)
+  }, [openNewChat])
+  const newMenuTransfersFocus = useRef(false)
+  const createNewChatRecipient = async (input: CreateBotInput, key: string) => {
+    const pending = pendingChatRecipients.current
+    const completed = createdChatRecipients.current
+    if (pending.has(key)) throw new Error(PENDING_NEW_CHAT_RECIPIENT)
+    const operation = client.create(input)
+    pending.set(key, operation)
+    // Retain this preparation even for an empty source while the editor is unmounted.
+    updateNewChatDraft({})
+    try {
+      const bot = await operation
+      if (bot.hostId !== client.hostId) throw new Error("创建结果不属于当前主机，请核对后重试。")
+      completed.set(key, bot)
+      return bot
+    } finally {
+      if (pending.get(key) === operation) pending.delete(key)
+    }
+  }
+  const openBotEditor = (bot: BotDefinition, trigger?: HTMLElement | null) => {
+    newChatAttempt.current++
+    newChatCreateIntent.current = null
+    editorTrigger.current =
+      trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setEditor(bot)
+  }
+  const openNewBot = (
+    name = "",
+    trigger?: HTMLElement | null,
+    intent: "draft" | "send" | null = null
+  ) => {
+    newChatAttempt.current++
+    editorTrigger.current =
+      trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setNewBotName(name)
+    const recipientKey = botChatRecipientKey({ kind: "new", name })
+    if (intent && pendingChatRecipients.current.has(recipientKey)) {
+      setNewChatError(PENDING_NEW_CHAT_RECIPIENT)
+      return
+    }
+    const prepared = intent ? createdChatRecipients.current.get(recipientKey) : undefined
+    if (prepared) {
+      newChatCreateIntent.current = null
+      setNewChatRecipients([{ kind: "bot", id: prepared.id }])
+      privateChatRecipient.current = prepared
+      void selectNewChat(`bot:${prepared.id}`, undefined, intent === "send", prepared)
+      return
+    }
+    newChatCreateIntent.current = intent ? { intent, recipientKey } : null
+    setEditor("new")
+  }
+  const visible = useMemo(
+    () =>
+      (snapshot?.bots ?? []).filter(
+        (bot) =>
+          bot.archived === showArchived &&
+          (showArchived || query.trim() || hiddenIds.includes(bot.id) === showHidden) &&
+          `${bot.name} ${bot.label ?? ""}`
+            .toLocaleLowerCase()
+            .includes(query.trim().toLocaleLowerCase())
+      ),
+    [snapshot?.bots, showArchived, query, view.hiddenBotIds, showHidden]
+  )
+  const pinnedIds = view.pinnedBotIds ?? []
+  const botById = useMemo(
+    () => new Map((snapshot?.bots ?? []).map((bot) => [bot.id, bot])),
+    [snapshot?.bots]
+  )
+  const visibleImConversations = showArchived
+    ? []
+    : filterImConversations(
+        snapshot?.imConversations ?? [],
+        botById,
+        query,
+        view.hiddenImConversationIds,
+        showHidden,
+        view.deletedImConversationIds
+      )
+  const pinnedBots = pinnedIds.flatMap((id) => {
+    const bot = visible.find((candidate) => candidate.id === id && !candidate.archived)
+    return bot ? [bot] : []
+  })
+  const selected = selectedGroup
+    ? null
+    : selectedId
+      ? (snapshot?.bots.find((bot) => bot.id === selectedId) ?? null)
+      : (visible[0] ?? null)
+  useEffect(() => {
+    if (!legacySelection || !snapshot) return
+    useBotViewStore.getState().update(client.hostId, { selectedId: visible[0]?.id ?? null })
+  }, [client.hostId, legacySelection, snapshot, visible])
+  const mainActivityByConversation = useMemo(
+    () => new Map((snapshot?.activities ?? []).map((item) => [`${item.kind}:${item.id}`, item])),
+    [snapshot?.activities]
+  )
+  const activityByConversation = useMemo(() => {
+    const result = new Map(mainActivityByConversation)
+    for (const work of snapshot?.workActivity ?? []) {
+      const key = `bot:${work.botId}`,
+        main = result.get(key)
+      result.set(key, {
+        kind: "bot",
+        id: work.botId,
+        version: main?.version ?? 0,
+        updatedAt: Math.max(main?.updatedAt ?? 0, work.updatedAt),
+        preview: work.updatedAt > (main?.updatedAt ?? 0) ? work.preview : (main?.preview ?? ""),
+        unread: Boolean(main?.unread || work.unread)
+      })
+    }
+    return result
+  }, [mainActivityByConversation, snapshot?.workActivity])
+  const sidebarSelectionKey = newChat
+    ? null
+    : selectedIm
+      ? `im:${selectedIm.id}`
+      : selectedGroup
+        ? `group:${selectedGroup.id}`
+        : selected
+          ? `bot:${selected.id}`
+          : null
+  const heldUnread = useHeldSidebarUnread(
+    sidebarSelectionKey ? `${client.hostId}:${sidebarSelectionKey}` : null,
+    Boolean(sidebarSelectionKey && activityByConversation.get(sidebarSelectionKey)?.unread)
+  )
+  const sortingPaused = sidebarScrolling || sidebarMenuOpen || Boolean(sidebarDrag)
+  const orderedConversations = useStableSidebarOrder(
+    orderBotConversations(
+      snapshot?.bots ?? [],
+      snapshot?.groups ?? [],
+      activityByConversation,
+      heldUnread?.slice(client.hostId.length + 1)
+    ),
+    (item) => `${item.kind}:${item.value.id}`,
+    sortingPaused,
+    `${client.hostId}:${query}:${showHidden}:${showArchived}`
+  )
+  const tasksByBot = useMemo(
+    () => privateBotTasksByBot(snapshot?.bots ?? [], snapshot?.tasks ?? []),
+    [snapshot?.bots, snapshot?.tasks]
+  )
+  const threadSummaries = useThreadStateSummaries()
+  const tasksByThread = useMemo(() => {
+    const result = new Map<string, BotTask[]>()
+    for (const task of snapshot?.tasks ?? []) {
+      const entries = result.get(task.threadId) ?? []
+      entries.push(task)
+      result.set(task.threadId, entries)
+    }
+    return result
+  }, [snapshot?.tasks])
+  const activeWorkId = selectedIm
+    ? (view.activeImWorkIdByConversation?.[selectedIm.id] ?? null)
+    : selected
+      ? (view.activeWorkIdByBot?.[selected.id] ?? null)
+      : null
+  const [workPreview, setWorkPreview] = useState<{
+    hostId: string
+    botId: string
+    workId: string
+    title: string
+    audience: string
+    fromWorkId: string | null
+  } | null>(null)
+  const workPreviewReturn = useRef<BotWorkPreviewReturn | null>(null)
+  // Keep an identity even with no open preview so dismissing a newer preview invalidates older navigation.
+  const workPreviewNavigation = useRef<{ preview: typeof workPreview }>({ preview: null })
+  const captureWorkNavigation = useCallback(() => {
+    const intent = workPreviewNavigation.current
+    return () => {
+      const { mainView, showCustomizeView } = useAppStore.getState()
+      return workPreviewNavigation.current === intent && mainView === "bots" && !showCustomizeView
+    }
+  }, [])
+  const approvalNavigation = useRef<object | null>(null)
+  const dismissWorkPreview = useCallback(() => {
+    approvalNavigation.current = null
+    workPreviewReturn.current = null
+    workPreviewNavigation.current = { preview: null }
+    setWorkPreview(null)
+  }, [])
+  useEffect(() => {
+    // Settings overlay Bots rather than changing mainView. A later navigation
+    // choice must invalidate pending opens even if the overlay is closed again.
+    const unsubscribe = useAppStore.subscribe(state => {
+      if (state.mainView !== "bots" || state.showCustomizeView) {
+        approvalNavigation.current = null
+        workPreviewNavigation.current = { preview: null }
+      }
+    })
+    return () => { unsubscribe(); workPreviewNavigation.current = { preview: null } }
+  }, [])
+  const canPreviewWork = client.hostId === "local" && !selectedGroup && !newChat
+  const preview = canPreviewWork && workPreview?.hostId === client.hostId &&
+    workPreview.fromWorkId === activeWorkId && workPreview.audience === (selectedIm?.id ?? "desktop") && workPreview.botId === selected?.id ? workPreview : null
+  const personalDetailOpen = detailOpen
+  useEffect(() => {
+    if (workPreview && !preview) dismissWorkPreview()
+  }, [workPreview, preview, dismissWorkPreview])
+  const works = useBotWorks(
+    client,
+    selected?.id,
+    activeWorkId ?? preview?.workId ?? null,
+    snapshot?.revision ?? 0,
+    selectedIm?.id ?? "desktop",
+    activeWorkId && preview?.workId !== activeWorkId ? preview?.workId : undefined
+  )
+  const loadedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
+  const workDeletionPending = isWorkDeletionPending(loadedWork)
+  const previewDetail = works.preview ?? works.selected
+  const previewWork = preview && previewDetail?.id === preview.workId &&
+    previewDetail.audienceKey === (selectedIm ? `im:${selectedIm.id}` : "desktop") ? previewDetail : null
+  const selectedWork =
+    loadedWork &&
+    !loadedWork.deletionCommitted &&
+    !loadedWork.deletionPending &&
+    loadedWork.conversation?.state !== "detached" &&
+    (selectedIm
+      ? loadedWork.source?.transport === "im" && loadedWork.source.bindingId === selectedIm.id
+      : loadedWork.source?.transport !== "im")
+      ? loadedWork
+      : null
+  const activeWorkTitle = (workDeletionPending ? loadedWork : selectedWork)?.title
+  const taskParentLabel = selectedIm ? `返回群聊「${selectedIm.title}」` : `返回 ${selected?.name ?? "Bot"} 主对话`
+  const desktopScheduleWork =
+    client.hostId === "local" &&
+    !selectedIm &&
+    selectedWork?.audienceKey === "desktop" &&
+    !selectedWork.source
+      ? selectedWork
+      : undefined
+  useEffect(() => {
+    if (!loadedWork || loadedWork.source || loadedWork.botId !== selected?.id) return
+    if (loadedWork.deletionCommitted) {
+      const activeWorkIdByBot = useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot
+      if (activeWorkIdByBot?.[loadedWork.botId] === loadedWork.id)
+        updateView({ activeWorkIdByBot: { ...activeWorkIdByBot, [loadedWork.botId]: null } })
+      return
+    }
+    if (client.hostId !== "local" || loadedWork.audienceKey !== "desktop" || loadedWork.deletionPending ||
+      loadedWork.conversation?.state !== "detached" || !client.conversations) return
+    let disposed = false
+    const work = loadedWork
+    const isNavigationCurrent = captureWorkNavigation()
+    const isCurrent = () => !disposed && isNavigationCurrent()
+    void (async () => {
+      const threadId = await resolveBotWorkThreadForNavigation(client, work, isCurrent).catch(cause => {
+        if (isCurrent()) throw cause
+        return null
+      })
+      if (disposed) return
+      const activeWorkIdByBot = useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot
+      if (activeWorkIdByBot?.[work.botId] !== work.id) return
+      const openThreadId = isCurrent() ? threadId : null
+      // A detached work no longer has a Bots conversation, even if a newer action prevented opening it.
+      updateView({
+        activeWorkIdByBot: { ...activeWorkIdByBot, [work.botId]: null }
+      })
+      if (openThreadId) await useAppStore.getState().selectThread(openThreadId)
+    })().catch((cause) => {
+      if (isCurrent()) toast.error(botErrorMessage(cause))
+    })
+    return () => {
+      disposed = true
+    }
+  }, [
+    client, loadedWork?.id, loadedWork?.conversation?.state, loadedWork?.deletionCommitted,
+    loadedWork?.deletionPending, selected?.id, captureWorkNavigation
+  ])
+  // Old saved navigation and workbench deep links still arrive by Bot ID. Resolve the
+  // host-owned source before rendering, then keep the source group selected.
+  useEffect(() => {
+    if (!loadedWork || selectedIm || !selected) return
+    if (loadedWork.source?.transport === "im") {
+      const group = snapshot?.imConversations?.find(
+        (item) => item.id === loadedWork.source!.bindingId && item.botId === selected.id
+      )
+      if (group)
+        updateView({
+          imConversationId: group.id,
+          activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null },
+          activeImWorkIdByConversation: {
+            ...view.activeImWorkIdByConversation,
+            [group.id]: loadedWork.id
+          }
+        })
+      else updateView({ activeWorkIdByBot: { ...view.activeWorkIdByBot, [selected.id]: null } })
+    }
+  }, [loadedWork?.id, selectedIm?.id, selected?.id, snapshot?.imConversations])
+  const selectedThreadId = activeWorkId
+    ? (selectedWork?.threadId ?? "")
+    : (selected?.threadId ?? "")
+  useEffect(() => {
+    setApprovalReturn(previous => previous?.targetThreadId === selectedThreadId && !selectedIm ? previous : null)
+  }, [selectedThreadId, selectedIm])
+  const conversationClient = useMemo(
+    () => (selectedWork ? botWorkClient(client, selectedWork) : client),
+    [client, selectedWork?.id, selectedWork?.threadId]
+  )
+  const currentBotId = selected?.id
+  const currentImId = selectedIm?.id
+  const selectWork = useCallback((id: string | null) => {
+    if (!currentBotId) return
+    dismissWorkPreview()
+    const prefs = useBotViewStore.getState().hosts[client.hostId]
+    if (currentImId)
+      updateView({
+        activeImWorkIdByConversation: {
+          ...prefs?.activeImWorkIdByConversation,
+          [currentImId]: id
+        }
+      })
+    else updateView({ activeWorkIdByBot: { ...prefs?.activeWorkIdByBot, [currentBotId]: id } })
+  }, [client.hostId, currentBotId, currentImId, updateView, dismissWorkPreview])
+  const openWorkPreview = useCallback((workId: string, trigger: HTMLButtonElement | null, title: string) => {
+    // Creation may finish while Settings covers the still-mounted Bots workspace.
+    const { mainView, showCustomizeView } = useAppStore.getState()
+    if (!canPreviewWork || !currentBotId || mainView !== "bots" || showCustomizeView) return
+    approvalNavigation.current = null
+    workPreviewNavigation.current = { preview: null }
+    const previous = workPreviewReturn.current
+    // Switching between previews keeps the position of the original details.
+    const container = !previous && detailOpen
+      ? (trigger ?? profileMenuTrigger.current)?.closest<HTMLElement>(".bot-details-content")
+      : null
+    workPreviewReturn.current = {
+      trigger,
+      scroll: previous?.scroll ?? (container ? { container, top: container.scrollTop } : undefined)
+    }
+    setWorkPreview({ hostId: client.hostId, botId: currentBotId, workId, title, audience: currentImId ?? "desktop", fromWorkId: activeWorkId })
+  }, [canPreviewWork, client.hostId, currentBotId, currentImId, activeWorkId, detailOpen])
+  const openWork = useCallback((workId: string | null) => {
+    if (!workId || !canPreviewWork || activeWorkId) { selectWork(workId); return }
+    const work = [...works.priority, ...works.items].find(item => item.id === workId)
+    openWorkPreview(workId, detailTriggerRef.current, work?.title ?? "任务")
+  }, [canPreviewWork, activeWorkId, selectWork, openWorkPreview, works.items, works.priority])
+  const closeWorkPreview = () => {
+    const previous = workPreviewReturn.current
+    dismissWorkPreview()
+    requestAnimationFrame(() => {
+      if (!workPreviewReturn.current) restoreBotWorkPreviewPosition(previous, detailTriggerRef.current)
+    })
+  }
+  const openPreviewConversation = async () => {
+    if (!preview || !previewWork || workPreviewNavigation.current.preview === preview) return
+    if (selectedIm) { selectWork(previewWork.id); return }
+    const intent = { preview }
+    workPreviewNavigation.current = intent
+    const isCurrent = () => workPreviewNavigation.current === intent &&
+      works.current.current.botId === preview.botId &&
+      works.current.current.selectedId === (preview.fromWorkId ?? preview.workId) &&
+      useAppStore.getState().mainView === "bots" && !useAppStore.getState().showCustomizeView
+    try {
+      const threadId = await resolveBotWorkThreadForNavigation(client, previewWork, isCurrent)
+      if (!threadId || !isCurrent()) return
+      dismissWorkPreview()
+      await openBotWorkThreadChat(threadContext, threadId)
+    } catch (cause) {
+      if (isCurrent()) toast.error(botErrorMessage(cause, "暂时无法打开聊天。"))
+    } finally {
+      if (workPreviewNavigation.current === intent) workPreviewNavigation.current = { preview: null }
+    }
+  }
+
+  const togglePersonalDetail = () => {
+    dismissWorkPreview()
+    setDetailOpen(!personalDetailOpen)
+  }
+  const openBotMain = (id: string) =>
+    updateView({
+      selectedId: id,
+      groupId: null,
+      detailTab: "details",
+      activeWorkIdByBot: {
+        ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+        [id]: null
+      }
+    })
+  useEffect(() => () => { approvalNavigation.current = null }, [client, currentBotId, currentImId, activeWorkId, newChat])
+  const openWorkApproval = async (approval: BotWorkApproval, interactionIsCurrent: () => boolean) => {
+    if (!selected || activeWorkId || selectedIm) return
+    // Invalidate pending automatic previews before looking up the original approval.
+    workPreviewNavigation.current = { preview: null }
+    const isNavigationCurrent = captureWorkNavigation()
+    const attempt = {}
+    approvalNavigation.current = attempt
+    const isCurrent = () => approvalNavigation.current === attempt && interactionIsCurrent() &&
+      isNavigationCurrent()
+    try {
+      if (!client.works?.pendingQuestions) throw new Error("原审批会话已不可用。")
+      const pending = await client.works.pendingQuestions(selected.id)
+      if (!isCurrent()) return
+      const latest = pending.find((item): item is BotWorkApproval =>
+        item.kind === "approval" && item.taskId === approval.taskId && item.requestId === approval.requestId)
+      if (!latest) {
+        toast.info("审批已处理或已失效。")
+        return
+      }
+      const { workId, target } = latest
+      if (target.botId === selected.id && target.workId === workId) {
+        if (client.hostId !== "local" || !client.works) throw new Error("原审批会话已不可用。")
+        const work = await client.works.get(target.botId, workId)
+        if (!isCurrent()) return
+        if (work.botId !== target.botId || work.id !== workId || work.threadId !== target.threadId ||
+          (work.conversation && work.conversation.state !== "bound"))
+          throw new Error("原审批会话已不可用。")
+        const threadId = await resolveBotWorkThreadForNavigation(client, work, isCurrent)
+        if (threadId && isCurrent()) await openBotWorkThreadChat(threadContext, threadId)
+        return
+      }
+      const peer = snapshot?.bots.find(bot => bot.id === target.botId && bot.threadId === target.threadId)
+      if (target.workId || !peer || peer.archived || peer.deleting)
+        throw new Error("原审批会话已不可用。")
+      if (peer.id === selected.id) return
+      setApprovalReturn({ sourceBotId: selected.id, targetThreadId: peer.threadId })
+      openBotMain(peer.id)
+    } catch (cause) {
+      if (isCurrent()) throw cause
+    } finally {
+      if (approvalNavigation.current === attempt) approvalNavigation.current = null
+    }
+  }
+  const tasks = selected ? (tasksByThread.get(selectedThreadId) ?? []) : []
+  const recentTasks = tasks.slice(-6).reverse()
+  const selectedState = botConversationState(
+    tasks,
+    selected ? threadSummaries[selectedThreadId] : undefined,
+    Boolean(selected && snapshot?.backgroundThreads?.includes(selectedThreadId))
+  )
+  const selectedConversationKey = selectedGroup
+    ? `group:${selectedGroup.id}`
+    : activeWorkId
+      ? `work:${activeWorkId}`
+      : `bot:${selected?.id}`
+  useEffect(() => {
+    setSuppressedRead(null)
+  }, [selectedConversationKey, newChat])
+  const foreground = useAppStore((state) => state.mainView === "bots" && !state.showCustomizeView)
+  const canAcknowledge = foreground && !newChat && suppressedRead !== selectedConversationKey
+  const conversationActivity = activeWorkId
+    ? selectedWork?.activity
+    : selectedIm
+      ? undefined
+      : mainActivityByConversation.get(selectedConversationKey)
+  useBotReadState(client, conversationActivity, canAcknowledge)
+
+  const privateMainId = !selectedIm && !activeWorkId ? selected?.id : undefined
+  const overview = privateMainId
+    ? snapshot?.workActivity?.find((item) => item.botId === privateMainId)
+    : undefined
+  useBotReadState(
+    client,
+    overview && { kind: "work-bot", id: overview.botId, version: overview.version, unread: overview.unread },
+    canAcknowledge
+  )
+  const personalIm = privateMainId
+    ? snapshot?.personalIm?.find((entry) => entry.botId === privateMainId)
+    : undefined
+  const carryGroupDraft = async (
+    group: BotGroup,
+    isCurrent: () => boolean,
+    replacePrepared = false,
+    preparedMembers?: readonly BotDefinition[]
+  ) => {
+    const text = newChatDraftRef.current
+    const key = groupDraftKey(client.hostId, group.id)
+    // New chat can target a group before its conversation has mounted after restart.
+    useBotGroupDrafts.getState().restore(key)
+    const current = useBotGroupDrafts.getState().drafts[key]
+    if (current?.storageError && !replacePrepared) throw new Error(current.storageError)
+    if (current?.sending) throw new Error("群聊消息正在发送，请稍后重试。")
+    const files = newChatFilesRef.current
+    const member = (preparedMembers ?? snapshot?.bots ?? []).find(
+      (bot) =>
+        bot.hostId === client.hostId &&
+        group.memberIds.includes(bot.id) &&
+        !bot.archived &&
+        !bot.deleting
+    )
+    if (files.length && !member) throw new Error("群聊中没有可用于添加附件的成员")
+    const attachments = member
+      ? await newChatTransfer.current.retain(
+          client,
+          member.id,
+          group.id,
+          files,
+          replacePrepared ? [] : (current?.attachments ?? []),
+          isCurrent
+        )
+      : []
+    if (!isCurrent()) return
+    if (useBotGroupDrafts.getState().drafts[key]?.revision !== current?.revision)
+      throw new Error("群聊草稿已变化，请重试。")
+    if (!text.trim() && !attachments.length) return
+    useBotGroupDrafts.getState().edit(key, {
+      text: replacePrepared
+        ? text
+        : current?.text.trim() && text.trim()
+          ? `${current.text}\n\n${text}`
+          : current?.text || text,
+      attachments: replacePrepared ? attachments : [...(current?.attachments ?? []), ...attachments]
+    })
+    const storageError = useBotGroupDrafts.getState().drafts[key]?.storageError
+    if (storageError) throw new Error(storageError)
+  }
+  const clearNewChatDraft = () => {
+    editNewChatDraft("")
+    editNewChatFiles([])
+    newChatTransfer.current.clear()
+    setNewChatRecipients([])
+    createdChatRecipients.current = new Map()
+    createdChatGroup.current = null
+    privateChatRecipient.current = null
+  }
+  const addNewChatRecipient = (recipient: BotChatRecipient) => {
+    const key = botChatRecipientKey(recipient)
+    if (creatingChat.current || newChatRecipients.some((item) => botChatRecipientKey(item) === key))
+      return
+    if (newChatRecipients.length >= 8) {
+      setNewChatError("一次最多选择 8 个 Bot。")
+      return
+    }
+    setNewChatRecipients((items) =>
+      items.some((item) => botChatRecipientKey(item) === key) || items.length >= 8
+        ? items
+        : [...items, recipient]
+    )
+    setNewChatError(null)
+    createdChatGroup.current = null
+    privateChatRecipient.current = null
+  }
+  const selectNewChat = async (
+    value: string,
+    createdGroup?: BotGroup,
+    send = false,
+    createdBot?: BotDefinition
+  ) => {
+    if (creatingChat.current) return
+    if (
+      value === "recipients" &&
+      newChatRecipients.some(
+        (recipient) =>
+          recipient.kind === "new" &&
+          pendingChatRecipients.current.has(botChatRecipientKey(recipient))
+      )
+    ) {
+      setNewChatError(PENDING_NEW_CHAT_RECIPIENT)
+      return
+    }
+    const onlyRecipient = newChatRecipients.length === 1 ? newChatRecipients[0] : undefined
+    if (
+      value === "recipients" &&
+      onlyRecipient?.kind === "bot" &&
+      privateChatRecipient.current?.id === onlyRecipient.id
+    ) {
+      value = `bot:${onlyRecipient.id}`
+      createdBot = privateChatRecipient.current
+    }
+    if (
+      value === "recipients" &&
+      newChatRecipients.length === 1 &&
+      newChatRecipients[0].kind === "new"
+    ) {
+      const recipient = newChatRecipients[0]
+      const prepared = createdChatRecipients.current.get(botChatRecipientKey(recipient))
+      if (!prepared) {
+        openNewBot(recipient.name, undefined, send ? "send" : "draft")
+        return
+      }
+      value = `bot:${prepared.id}`
+      createdBot = prepared
+    }
+    creatingChat.current = true
+    const attempt = ++newChatAttempt.current
+    setNewChatBusy(true)
+    setNewChatError(null)
+    try {
+      let preparedGroup = false
+      let preparedMembers: BotDefinition[] | undefined
+      if (value === "recipients") {
+        const recipients = await materializeBotChatRecipients(
+          client,
+          newChatRecipients,
+          snapshot?.bots ?? [],
+          createdChatRecipients.current,
+          () => attempt === newChatAttempt.current
+        )
+        preparedMembers = recipients
+        const names = recipients.map((bot) => bot.name)
+        const name = names.join("、")
+        createdGroup =
+          createdChatGroup.current ??
+          (await client.saveGroup({
+            name: name.length <= 120 ? name : `${names[0]}等 ${names.length} 位 Bot`,
+            memberIds: recipients.map((bot) => bot.id)
+          }))
+        createdChatGroup.current = createdGroup
+        if (attempt !== newChatAttempt.current) return
+        value = `group:${createdGroup.id}`
+        preparedGroup = true
+      }
+      if (value.startsWith("group:")) {
+        const group = createdGroup ?? snapshot?.groups.find((item) => item.id === value.slice(6))
+        if (!group) throw new Error("群聊已不可用")
+        await carryGroupDraft(
+          group,
+          () => attempt === newChatAttempt.current,
+          preparedGroup,
+          preparedMembers
+        )
+        if (attempt !== newChatAttempt.current) return
+        if (send) {
+          // Ownership passes to the existing persistent group draft before any network call.
+          clearNewChatDraft()
+          await sendGroupDraft(client, group)
+        }
+        if (attempt !== newChatAttempt.current) return
+        setGroupId(group.id)
+        updateView({
+          hiddenGroupIds: (
+            useBotViewStore.getState().hosts[client.hostId]?.hiddenGroupIds ?? []
+          ).filter((id) => id !== group.id)
+        })
+      } else {
+        const bot =
+          createdBot ??
+          snapshot?.bots.find(
+            (item) => item.id === value.slice(4) && !item.archived && !item.deleting
+          )
+        if (
+          !bot ||
+          bot.id !== value.slice(4) ||
+          bot.hostId !== client.hostId ||
+          bot.archived ||
+          bot.deleting
+        )
+          throw new Error("Bot 已不可用")
+        if (attempt !== newChatAttempt.current) return
+        // Explicit first sends must reach the durable inbox before opening can start a greeting.
+        // BotConversation opens after handoff; the original user enqueue suppresses introduction.
+        if (!send) await client.open(bot.id)
+        if (attempt !== newChatAttempt.current) return
+        const restoreError = restoreBotConversationDraft(
+          threadContext,
+          client.hostId,
+          bot.id,
+          bot.threadId
+        )
+        if (restoreError) throw new Error(restoreError)
+        const attachments = await newChatTransfer.current.retain(
+          client,
+          bot.id,
+          undefined,
+          newChatFilesRef.current,
+          send ? [] : threadContext.getThreadState(bot.threadId).draftAttachments,
+          () => attempt === newChatAttempt.current
+        )
+        if (attempt !== newChatAttempt.current) return
+        const text = newChatDraftRef.current
+        const actions = threadContext.getThreadActions(bot.threadId)
+        if (send) {
+          if (
+            threadContext.getThreadState(bot.threadId).queuedMessages.length >=
+            BOT_REQUEST_RECEIPT_LIMIT
+          )
+            throw new Error("待发送消息过多，请先处理已有消息。")
+          const draft = queueBotChatDraft(actions, text, attachments)
+          clearNewChatDraft()
+          await new BotDraftSender(
+            client,
+            bot.id,
+            actions,
+            (error) => {
+              if (error) toast.error(error)
+            },
+            () => {}
+          ).send(draft)
+          if (attempt !== newChatAttempt.current) return
+        } else {
+          const current = threadContext.getThreadState(bot.threadId)
+          if (text.trim())
+            actions.setDraftInput(
+              current.draftInput.trim() ? `${current.draftInput}\n\n${text}` : text
+            )
+          if (attachments.length)
+            actions.setDraftAttachments([...current.draftAttachments, ...attachments])
+          const saveError = saveBotConversationDraft(
+            threadContext,
+            client.hostId,
+            bot.id,
+            bot.threadId
+          )
+          if (saveError) {
+            // The source still owns these bytes if the target could not persist them.
+            actions.setDraftInput(current.draftInput)
+            actions.setDraftAttachments(current.draftAttachments)
+            throw new Error(saveError)
+          }
+        }
+        setSelectedId(bot.id)
+        setGroupId(null)
+        updateView({
+          activeWorkIdByBot: {
+            ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+            [bot.id]: null
+          }
+        })
+        updateView({
+          hiddenBotIds: (
+            useBotViewStore.getState().hosts[client.hostId]?.hiddenBotIds ?? []
+          ).filter((id) => id !== bot.id)
+        })
+      }
+      if (attempt !== newChatAttempt.current) return
+      setShowHidden(false)
+      setShowArchived(false)
+      setDetailOpen(false)
+      clearNewChatDraft()
+      createdChatRecipients.current.clear()
+      createdChatGroup.current = null
+      privateChatRecipient.current = null
+      setNewChat(false)
+    } catch (cause) {
+      if (attempt === newChatAttempt.current) setNewChatError(botErrorMessage(cause))
+    } finally {
+      creatingChat.current = false
+      setNewChatBusy(false)
+    }
+  }
+  const togglePin = (id: string, kind: "bot" | "group" = "bot") => {
+    const prefs = useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
+    const pinKey = kind === "bot" ? "pinnedBotIds" : "pinnedGroupIds"
+    const hiddenKey = kind === "bot" ? "hiddenBotIds" : "hiddenGroupIds"
+    const pinned = (prefs[pinKey] ?? []).includes(id)
+    const patch = botSidebarDropPatch(
+      prefs,
+      { kind, id, pinned },
+      pinned ? { kind: "agent-list" } : { kind: "pin-grid" },
+      snapshot?.groups.map((group) => group.id)
+    )
+    if (patch)
+      updateView({ ...patch, [hiddenKey]: (prefs[hiddenKey] ?? []).filter((item) => item !== id) })
+  }
+  const copyConversationId = async (bot: BotDefinition) => {
+    try {
+      if (bot.id === selected?.id && activeWorkId && !selectedWork)
+        throw new Error("任务会话尚未读取，请重试后再复制。")
+      await navigator.clipboard.writeText(bot.id === selected?.id ? selectedThreadId : bot.threadId)
+      toast.success("已复制对话 ID")
+    } catch (cause) {
+      toast.error(botErrorMessage(cause))
+    }
+  }
+  const moveToSection = (
+    botId: string,
+    sectionId: string | null,
+    kind: "bot" | "group" = "bot"
+  ) => {
+    const prefs = useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
+    const patch = botSidebarDropPatch(
+      prefs,
+      { kind, id: botId, pinned: false },
+      { kind: "section-body", id: sectionId }
+    )
+    if (patch) updateView(patch)
+  }
+  const setVisibility = (bot: BotDefinition) => {
+    const current = useBotViewStore.getState().hosts[client.hostId]
+    const hidden = current?.hiddenBotIds ?? []
+    const restoring = hidden.includes(bot.id)
+    updateView({
+      hiddenBotIds: restoring ? hidden.filter((id) => id !== bot.id) : [...hidden, bot.id],
+      ...(!restoring
+        ? { pinnedBotIds: (current?.pinnedBotIds ?? []).filter((id) => id !== bot.id) }
+        : {}),
+      ...(!restoring && selected?.id === bot.id ? { selectedId: null } : {})
+    })
+  }
+  const changeReadState = async (kind: "bot" | "group", id: string) => {
+    const key = `${kind}:${id}`,
+      activity = activityByConversation.get(key)
+    if (!activity?.unread) setSuppressedRead(key)
+    try {
+      if (activity?.unread) {
+        const main = mainActivityByConversation.get(key)
+        const work =
+          kind === "bot" ? snapshot?.workActivity?.find((item) => item.botId === id) : undefined
+        await Promise.all([
+          ...(main?.version ? [client.markRead(kind, id, main.version)] : []),
+          ...(work?.version && client.works ? [client.works.markAllRead(id, work.version)] : [])
+        ])
+        setSuppressedRead((previous) => (previous === key ? null : previous))
+      } else await client.markUnread(kind, id)
+    } catch (cause) {
+      setSuppressedRead((previous) => (previous === key ? null : previous))
+      toast.error(botErrorMessage(cause))
+    }
+  }
+  const createSection = (itemId: string, kind: "bot" | "group" = "bot") => {
+    const field = kind === "bot" ? "botIds" : "groupIds"
+    const current = useBotViewStore.getState().hosts[client.hostId]?.sections ?? []
+    if (current.length >= 32) return
+    const id = crypto.randomUUID(),
+      name = "新建分组"
+    updateView({
+      sections: [
+        ...current.map((section) => ({
+          ...section,
+          [field]: (section[field] ?? []).filter((item) => item !== itemId)
+        })),
+        { id, name, botIds: [], [field]: [itemId], collapsed: false }
+      ]
+    })
+    setQuery("")
+    setSectionEditor({ id, name })
+  }
+  const rowActions = (bot: BotDefinition) => ({
+    bot,
+    conversation: { hostId: client.hostId, id: bot.id, threadId: bot.threadId },
+    pinned: pinnedIds.includes(bot.id),
+    hidden: hiddenIds.includes(bot.id),
+    unread: activityByConversation.get(`bot:${bot.id}`)?.unread ?? false,
+    sections,
+    onVisibility: () => setVisibility(bot),
+    onReadState: () => {
+      void changeReadState("bot", bot.id)
+    },
+    onMove: (id: string | null) => moveToSection(bot.id, id),
+    onNewSection: () => createSection(bot.id),
+    onPin: () => togglePin(bot.id),
+    onRename: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setRenaming(bot)
+    },
+    onArchive: () => {
+      void archive(bot)
+    },
+    onDelete: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setDeleting(bot)
+    },
+    onCopy: () => {
+      void copyConversationId(bot)
+    }
+  })
+  const archive = async (bot: BotDefinition) => {
+    try {
+      await client.update({
+        ...bot,
+        expectedVersion: bot.version,
+        archived: !bot.archived
+      })
+      if (useBotViewStore.getState().hosts[client.hostId]?.selectedId === bot.id)
+        setSelectedId(null)
+    } catch (cause) {
+      toast.error(botErrorMessage(cause))
+    }
+  }
+  const groupActions = (group: BotGroup) => ({
+    bot: group,
+    conversation: { hostId: client.hostId, id: group.id },
+    kind: "group" as const,
+    pinned: pinnedGroupIds.includes(group.id),
+    hidden: hiddenGroupIds.includes(group.id),
+    sections,
+    unread: activityByConversation.get(`group:${group.id}`)?.unread ?? false,
+    onPin: () => togglePin(group.id, "group"),
+    onRename: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setRenamingGroup(group)
+    },
+    onDelete: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setDeletingGroup(group)
+    },
+    onCopy: () => {
+      void navigator.clipboard
+        .writeText(group.id)
+        .then(() => toast.success("已复制对话 ID"))
+        .catch((cause) => toast.error(botErrorMessage(cause)))
+    },
+    onReadState: () => {
+      void changeReadState("group", group.id)
+    },
+    onMove: (id: string | null) => moveToSection(group.id, id, "group"),
+    onNewSection: () => createSection(group.id, "group"),
+    onVisibility: () => {
+      const prefs = useBotViewStore.getState().hosts[client.hostId]
+      const hidden = prefs?.hiddenGroupIds ?? [],
+        restoring = hidden.includes(group.id)
+      updateView({
+        hiddenGroupIds: restoring ? hidden.filter((id) => id !== group.id) : [...hidden, group.id],
+        ...(!restoring
+          ? { pinnedGroupIds: (prefs?.pinnedGroupIds ?? []).filter((id) => id !== group.id) }
+          : {}),
+        ...(!restoring && selectedGroup?.id === group.id ? { groupId: null } : {})
+      })
+    }
+  })
+  const visibleGroups = showArchived
+    ? []
+    : (snapshot?.groups ?? []).filter(
+        (group) =>
+          (query.trim() || hiddenGroupIds.includes(group.id) === showHidden) &&
+          group.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+      )
+  const hasVisibleConversation = Boolean(
+    visible.length || visibleGroups.length || visibleImConversations.length
+  )
+  const showBotWelcome =
+    snapshot &&
+    snapshot.bots.length === 0 &&
+    snapshot.groups.length === 0 &&
+    !snapshot.imConversations?.length &&
+    !showArchived &&
+    !showHidden &&
+    !query.trim()
+  const emptyListMessage = query.trim()
+    ? "没有匹配的会话"
+    : showArchived
+      ? "没有已归档的 Bot"
+      : showHidden
+        ? "没有隐藏的会话"
+        : "暂无会话"
+  const pinOrder = botPinnedConversationIds(
+    view,
+    snapshot?.groups.map((group) => group.id)
+  )
+  const ungroupedDropTarget: BotSidebarDrop =
+    !showArchived && !showHidden && !query.trim() && sections.length
+      ? { kind: "section-body", id: null }
+      : { kind: "agent-list" }
+  const pinnedConversations = pinOrder.flatMap<
+    { kind: "bot"; value: BotDefinition } | { kind: "group"; value: BotGroup }
+  >((key) => {
+    const bot = pinnedBots.find((item) => `bot:${item.id}` === key)
+    if (bot) return [{ kind: "bot" as const, value: bot }]
+    const group = visibleGroups.find((item) => `group:${item.id}` === key)
+    return group ? [{ kind: "group" as const, value: group }] : []
+  })
+  const startSidebarDrag = (event: DragEvent, item: BotSidebarDrag) => {
+    event.stopPropagation()
+    setSidebarDrag({ hostId: client.hostId, item })
+    event.dataTransfer.effectAllowed = "move"
+    event.dataTransfer.setData("application/x-cmb-bot-sidebar", `${item.kind}:${item.id}`)
+  }
+  const sidebarDropAllowed = (event: DragEvent, target: BotSidebarDrop) => {
+    const source = sidebarDrag
+    if (
+      !source ||
+      source.hostId !== client.hostId ||
+      !event.dataTransfer.types.includes("application/x-cmb-bot-sidebar")
+    )
+      return false
+    if (source.item.kind === "section") return target.kind === "section"
+    return (
+      target.kind === "pin-grid" ||
+      target.kind === "section-body" ||
+      (source.item.pinned && target.kind === "agent-list")
+    )
+  }
+  const overSidebar = (event: DragEvent, target: BotSidebarDrop) => {
+    if (!sidebarDropAllowed(event, target)) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = "move"
+    setSidebarDrop((previous) =>
+      JSON.stringify(previous) === JSON.stringify(target) ? previous : target
+    )
+  }
+  const dropSidebar = (event: DragEvent, target: BotSidebarDrop) => {
+    if (!sidebarDropAllowed(event, target)) return
+    event.preventDefault()
+    event.stopPropagation()
+    const source = sidebarDrag!.item
+    if (
+      event.dataTransfer.getData("application/x-cmb-bot-sidebar") !== `${source.kind}:${source.id}`
+    ) {
+      clearSidebarDrag()
+      return
+    }
+    const exists =
+      source.kind === "section"
+        ? true
+        : source.kind === "bot"
+          ? snapshot?.bots.some((bot) => bot.id === source.id && !bot.deleting && !bot.archived)
+          : snapshot?.groups.some((group) => group.id === source.id && !group.deleting)
+    const prefs = useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
+    if (exists) {
+      const patch = botSidebarDropPatch(
+        prefs,
+        source,
+        target,
+        snapshot?.groups.map((group) => group.id)
+      )
+      if (patch) updateView(patch)
+    }
+    clearSidebarDrag()
+  }
+  const pinDropTarget = (event: DragEvent) =>
+    botPinDropTarget(
+      Array.from(event.currentTarget.querySelectorAll<HTMLElement>("[data-bot-pin-key]")).map(
+        (node) => {
+          const { left, right, top, bottom } = node.getBoundingClientRect()
+          return { key: node.dataset.botPinKey!, left, right, top, bottom }
+        }
+      ),
+      { x: event.clientX, y: event.clientY },
+      getComputedStyle(event.currentTarget).direction === "rtl"
+    )
+  const sectionDropTarget = (event: DragEvent, id: string): BotSidebarDrop => {
+    const rect = (
+      event.currentTarget.querySelector(".bot-section-heading") ?? event.currentTarget
+    ).getBoundingClientRect()
+    return sidebarDragging?.kind === "section"
+      ? {
+          kind: "section",
+          id,
+          position: event.clientY > rect.top + rect.height / 2 ? "after" : "before"
+        }
+      : { kind: "section-body", id }
+  }
+  const rowDragProps = (kind: "bot" | "group", id: string, pinned: boolean, enabled = true) => ({
+    draggable: enabled && !showArchived,
+    onDragStart: (event: DragEvent) => startSidebarDrag(event, { kind, id, pinned }),
+    onDragEnd: clearSidebarDrag,
+    onClickCapture: (event: React.MouseEvent) => {
+      if (sidebarDrag) {
+        event.preventDefault()
+        event.stopPropagation()
+      }
+    },
+    "data-bot-pin-key": pinned ? `${kind}:${id}` : undefined,
+    "data-bot-drop-position":
+      pinned && sidebarDrop?.kind === "pin-grid" && sidebarDrop.anchor === `${kind}:${id}`
+        ? sidebarDrop.position
+        : undefined
+  })
+  const sidebarListDropTarget = (event: DragEvent): BotSidebarDrop | null => {
+    const target = event.target instanceof Element ? event.target : null
+    if (!target?.closest(".bots-list") || target.closest(".bot-pinned-list")) return null
+    return target.closest("[data-bot-row-key], [data-bot-default-section]")
+      ? ungroupedDropTarget
+      : { kind: "agent-list" }
+  }
+  const renderGroupRow = (group: BotGroup, pinned = false) => {
+    const memberStates = group.memberIds.map((id) => {
+      const threadId = `group-${group.id}-${id}`
+      return botConversationState(
+        tasksByThread.get(threadId) ?? [],
+        threadSummaries[threadId],
+        snapshot?.backgroundThreads?.includes(threadId)
+      )
+    })
+    const state = memberStates.includes("waiting_user")
+      ? "waiting_user"
+      : memberStates.includes("running")
+        ? "running"
+        : memberStates.includes("queued")
+          ? "queued"
+          : null
+    return (
+      <BotRowMenu
+        key={`group:${group.id}`}
+        onMenuOpenChange={setSidebarMenuOpen}
+        compact={view.sidebarWidth < 180}
+        {...groupActions(group)}
+        waiting={state === "waiting_user"}
+        preview={
+          state === "waiting_user"
+            ? STATE_LABELS[state]
+            : (activityByConversation.get(`group:${group.id}`)?.preview ??
+              `${group.memberIds.length} 位 Bot`)
+        }
+        avatar={
+          <BotGroupAvatar
+            memberIds={group.memberIds}
+            bots={snapshot?.bots ?? []}
+            userInitials={userInitials}
+            size={18}
+          />
+        }
+      >
+        <button
+          {...rowDragProps("group", group.id, pinned, !group.deleting)}
+          className={pinned ? "bot-pinned-card" : "bot-list-item"}
+          data-bot-row-key={`group:${group.id}`}
+          data-bot-unread-count={
+            activityByConversation.get(`group:${group.id}`)?.unread ? 1 : undefined
+          }
+          data-selected={!newChat && selectedGroup?.id === group.id}
+          aria-label={pinned ? `${group.name}，已置顶` : group.name}
+          onClick={() => {
+            setSuppressedRead(null)
+            closeNewChat()
+            setGroupId(group.id)
+          }}
+        >
+          <BotGroupAvatar
+            memberIds={group.memberIds}
+            bots={snapshot?.bots ?? []}
+            userInitials={userInitials}
+          />
+          <span className={pinned ? "bot-pinned-name" : "min-w-0 flex-1"}>
+            <span className={pinned ? undefined : "bot-list-heading"}>
+              <span className={pinned ? undefined : "bot-list-name"}>{group.name}</span>
+              {!pinned && (
+                <SidebarTime value={activityByConversation.get(`group:${group.id}`)?.updatedAt} />
+              )}
+            </span>
+            {!pinned && (
+              <span className="bot-list-preview">
+                {state
+                  ? STATE_LABELS[state]
+                  : (activityByConversation.get(`group:${group.id}`)?.preview ??
+                    `${group.memberIds.length} 位 Bot`)}
+              </span>
+            )}
+          </span>
+          {activityByConversation.get(`group:${group.id}`)?.unread && (
+            <span className="bot-unread-dot" aria-label="未读动态" />
+          )}
+        </button>
+      </BotRowMenu>
+    )
+  }
+  const renderBotRow = (bot: BotDefinition) => {
+    const botTasks = tasksByBot.get(bot.id) ?? [],
+      current = botConversationState(
+        botTasks,
+        threadSummaries[bot.threadId],
+        snapshot?.backgroundThreads?.includes(bot.threadId)
+      ),
+      last = botTasks.at(-1),
+      activity = activityByConversation.get(`bot:${bot.id}`)
+    return (
+      <BotRowMenu
+        key={bot.id}
+        onMenuOpenChange={setSidebarMenuOpen}
+        compact={view.sidebarWidth < 180}
+        {...rowActions(bot)}
+        waiting={current === "waiting_user"}
+        preview={
+          current === "waiting_user"
+            ? STATE_LABELS[current]
+            : (activity?.preview ?? last?.message ?? "开始与 Bot 合作")
+        }
+        avatar={<BotAvatar color={bot.color} shape={bot.shape} size={16} />}
+      >
+        <button
+          {...rowDragProps("bot", bot.id, false, !bot.deleting && !bot.archived)}
+          className="bot-list-item"
+          data-bot-row-key={`bot:${bot.id}`}
+          data-bot-unread-count={activity?.unread ? 1 : undefined}
+          data-selected={!newChat && !selectedIm && selected?.id === bot.id}
+          aria-label={bot.name}
+          onClick={() => {
+            setSuppressedRead(null)
+            openPrivateMain(bot.id)
+          }}
+        >
+          <BotRuntimeAvatar
+            threadId={bot.threadId}
+            taskCreatedAt={botActiveTaskCreatedAt(botTasks, bot.threadId)}
+            settlement={last}
+            color={bot.color}
+            shape={bot.shape}
+            size={36}
+            busy={current === "running"}
+            waiting={current === "waiting_user"}
+          />
+          <span className="min-w-0 flex-1">
+            <span className="bot-list-heading">
+              <span className="bot-list-name">{bot.name}</span>
+              {bot.label && (
+                <span className="bot-list-label" title={bot.label}>
+                  {bot.label}
+                </span>
+              )}
+              <SidebarTime value={activity?.updatedAt} />
+            </span>
+            <span className="bot-list-preview">
+              {current
+                ? STATE_LABELS[current]
+                : (activity?.preview ?? last?.message ?? "开始与 Bot 合作")}
+            </span>
+          </span>
+          {activity?.unread ? (
+            <span className="bot-unread-dot" aria-label="未读动态" />
+          ) : (
+            current && <span className="bot-status-dot" aria-label={STATE_LABELS[current]} />
+          )}
+        </button>
+      </BotRowMenu>
+    )
+  }
+  const renderConversations = (bots: BotDefinition[], groups: BotGroup[]) => {
+    const keys = new Set([
+      ...bots.map((bot) => `bot:${bot.id}`),
+      ...groups.map((group) => `group:${group.id}`)
+    ])
+    return orderedConversations
+      .filter((item) => keys.has(`${item.kind}:${item.value.id}`))
+      .map((item) => (item.kind === "bot" ? renderBotRow(item.value) : renderGroupRow(item.value)))
+  }
+  const sidebarCollapsed = clampBotPanelWidth("sidebar", view.sidebarWidth) < 180
+  const footerActions = [
+    <BotWorkspaceMenu
+      key="account"
+      profileName={profileName}
+      initials={userInitials}
+      accentMode={view.accentMode ?? "neutral"}
+      onAccentChange={(accentMode) => updateView({ accentMode })}
+      showArchived={showArchived}
+      showHidden={showHidden}
+      onProfile={() => useAppStore.getState().setShowCustomizeView(true, "userinfo")}
+      onHidden={() => {
+        setShowHidden(!showHidden)
+        setShowArchived(false)
+        setSelectedId(null)
+        setGroupId(null)
+      }}
+      onArchive={() => {
+        setShowHidden(false)
+        setShowArchived(!showArchived)
+        setSelectedId(null)
+        setGroupId(null)
+      }}
+      onWorkbench={() => useAppStore.getState().setMainView("thread")}
+    />,
+    <Tooltip key="apps">
+      <TooltipTrigger asChild>
+        <button
+          className="bot-connect-apps"
+          aria-label="连接应用"
+          onClick={() => useAppStore.getState().setShowCustomizeView(true, "connectors")}
+        >
+          <BotStorefrontIcon />
+          <span>连接应用</span>
+        </button>
+      </TooltipTrigger>
+      {sidebarCollapsed && (
+        <TooltipContent data-bot-popup side="right" className="bot-control-tooltip rounded-xl">
+          连接应用
+        </TooltipContent>
+      )}
+    </Tooltip>
+  ]
+
+  // BotEditor captures this render's ownership before awaiting create/update.
+  const editorAttempt = newChatAttempt.current
+  const editorIntent = newChatCreateIntent.current
+  return (
+    <TooltipProvider delayDuration={250} skipDelayDuration={150}>
+      <div
+        className="bots-workspace"
+        data-details-open={!newChat && personalDetailOpen}
+        style={
+          {
+            "--bot-sidebar-width": `${clampBotPanelWidth("sidebar", view.sidebarWidth)}px`,
+            "--bot-detail-width": `${clampBotPanelWidth("detail", view.detailWidth)}px`,
+            ...(view.accentMode === "bot" && !newChat ? botChatAccent(selected?.color) : {})
+          } as React.CSSProperties
+        }
+      >
+        {deleting && (
+          <BotDeleteDialog
+            bot={deleting}
+            client={client}
+            returnFocusTo={editorTrigger.current}
+            onClose={() => setDeleting(null)}
+            onDeleted={() => {
+              setDeleting(null)
+              if (useBotViewStore.getState().hosts[client.hostId]?.selectedId === deleting.id)
+                setSelectedId(null)
+              const pins = useBotViewStore.getState().hosts[client.hostId]?.pinnedBotIds ?? []
+              const prefs = useBotViewStore.getState().hosts[client.hostId]
+              updateView({
+                pinnedBotIds: pins.filter((id) => id !== deleting.id),
+                hiddenBotIds: (prefs?.hiddenBotIds ?? []).filter((id) => id !== deleting.id),
+                sections: (prefs?.sections ?? []).map((section) => ({
+                  ...section,
+                  botIds: section.botIds.filter((id) => id !== deleting.id)
+                }))
+              })
+              void useAppStore.getState().loadThreads()
+            }}
+          />
+        )}
+        <aside
+          className="bots-sidebar"
+          aria-label="Bots"
+          onDragOver={(event) => {
+            const target = sidebarListDropTarget(event)
+            if (target) overSidebar(event, target)
+          }}
+          onDrop={(event) => {
+            const target = sidebarListDropTarget(event)
+            if (target) dropSidebar(event, target)
+          }}
+        >
+          <div className="bot-sidebar-safe-area" aria-hidden="true" />
+          <div className="bots-sidebar-toolbar">
+            <button
+              className="bot-icon-button bot-toolbar-action"
+              aria-label="搜索 Bot"
+              onClick={() => {
+                if (view.sidebarWidth < 180) updateView({ sidebarWidth: 264 })
+                setSearchOpen((value) => !value)
+              }}
+            >
+              <Search size={19} />
+            </button>
+            <ContextMenu onOpenChange={setSidebarMenuOpen}>
+              <ContextMenuTrigger asChild>
+                <button
+                  ref={newConversationTrigger}
+                  className="bot-icon-button bot-toolbar-action"
+                  aria-label="新建 Bot"
+                  disabled={newChatBusy}
+                  onClick={(event) => openNewBot("", event.currentTarget)}
+                >
+                  <Plus size={22} />
+                </button>
+              </ContextMenuTrigger>
+              <ContextMenuContent
+                data-bot-popup
+                className="bot-workspace-menu rounded-xl p-1.5"
+                onCloseAutoFocus={(event) => {
+                  if (newMenuTransfersFocus.current) {
+                    event.preventDefault()
+                    newMenuTransfersFocus.current = false
+                  }
+                }}
+              >
+                <ContextMenuItem
+                  disabled={newChatBusy}
+                  onSelect={() => {
+                    newMenuTransfersFocus.current = true
+                    openNewBot("", newConversationTrigger.current)
+                  }}
+                >
+                  新建 Bot
+                </ContextMenuItem>
+                <ContextMenuItem
+                  disabled={newChatBusy}
+                  onSelect={() => {
+                    newMenuTransfersFocus.current = true
+                    openNewChat()
+                  }}
+                >
+                  新建群聊
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
+          </div>
+          {searchOpen && (
+            <label className="bot-search">
+              <button
+                type="button"
+                className="bot-search-expand bot-icon-button"
+                aria-label="展开搜索 Bot"
+                onClick={(event) => {
+                  event.preventDefault()
+                  updateView({ sidebarWidth: 264 })
+                  requestAnimationFrame(() => searchInputRef.current?.focus())
+                }}
+              >
+                <Search size={17} />
+              </button>
+              <Search className="bot-search-icon" size={16} />
+              <input
+                ref={searchInputRef}
+                autoFocus
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索 Bot"
+                aria-label="搜索 Bot"
+              />
+            </label>
+          )}
+          {showCreateGroupAction && (
+            <button
+              type="button"
+              className="bot-list-item bot-search-create-group"
+              disabled={newChatBusy}
+              onClick={() => {
+                if (creatingChat.current) return
+                setQuery("")
+                setSearchOpen(false)
+                openNewChat()
+              }}
+            >
+              <UsersRound size={18} aria-hidden="true" />
+              <span>创建群聊</span>
+              <span>操作</span>
+            </button>
+          )}
+          <BotConversationList
+            label={showArchived ? "已归档 Bot" : "Bot 会话"}
+            onScrolling={setSidebarScrolling}
+          >
+            {(pinnedConversations.length > 0 ||
+              (sidebarDragging && sidebarDragging.kind !== "section")) && (
+              <div
+                className="bot-pinned-list"
+                aria-label="已置顶的 Bot"
+                data-drop-empty={!pinnedConversations.length || undefined}
+                data-bot-drop-target={sidebarDrop?.kind === "pin-grid" || undefined}
+                onDragOver={(event) => overSidebar(event, pinDropTarget(event))}
+                onDrop={(event) => dropSidebar(event, pinDropTarget(event))}
+              >
+                {pinnedConversations.map((conversation) => {
+                  if (conversation.kind === "group") return renderGroupRow(conversation.value, true)
+                  const bot = conversation.value
+                  const current = botConversationState(
+                    tasksByBot.get(bot.id) ?? [],
+                    threadSummaries[bot.threadId],
+                    snapshot?.backgroundThreads?.includes(bot.threadId)
+                  )
+                  return (
+                    <BotRowMenu
+                      onMenuOpenChange={setSidebarMenuOpen}
+                      key={`bot:${bot.id}`}
+                      compact={view.sidebarWidth < 180}
+                      {...rowActions(bot)}
+                      waiting={current === "waiting_user"}
+                      preview={
+                        current === "waiting_user"
+                          ? STATE_LABELS[current]
+                          : (activityByConversation.get(`bot:${bot.id}`)?.preview ??
+                            "开始与 Bot 合作")
+                      }
+                      avatar={<BotAvatar color={bot.color} shape={bot.shape} size={16} />}
+                    >
+                      <button
+                        {...rowDragProps("bot", bot.id, true, !bot.deleting)}
+                        className="bot-pinned-card"
+                        data-bot-row-key={`bot:${bot.id}`}
+                        data-bot-unread-count={
+                          activityByConversation.get(`bot:${bot.id}`)?.unread ? 1 : undefined
+                        }
+                        data-selected={
+                          !newChat && !selectedGroup && !selectedIm && selected?.id === bot.id
+                        }
+                        aria-label={`${bot.name}，已置顶`}
+                        onClick={() => {
+                          setSuppressedRead(null)
+                          openPrivateMain(bot.id)
+                        }}
+                      >
+                        <BotRuntimeAvatar
+                          threadId={bot.threadId}
+                          taskCreatedAt={botActiveTaskCreatedAt(
+                            tasksByBot.get(bot.id) ?? [],
+                            bot.threadId
+                          )}
+                          settlement={tasksByBot.get(bot.id)?.at(-1)}
+                          color={bot.color}
+                          shape={bot.shape}
+                          size={60}
+                          busy={current === "running"}
+                          waiting={current === "waiting_user"}
+                        />
+                        <span className="bot-pinned-name">{bot.name}</span>
+                        {activityByConversation.get(`bot:${bot.id}`)?.unread && (
+                          <span className="bot-unread-dot" aria-label="未读动态" />
+                        )}
+                      </button>
+                    </BotRowMenu>
+                  )
+                })}
+              </div>
+            )}
+            {!showArchived &&
+              !showHidden &&
+              !query.trim() &&
+              sections.map((section) => (
+                <section
+                  key={section.id}
+                  className="bot-sidebar-section"
+                  aria-label={section.name}
+                  data-bot-drop-target={
+                    sidebarDrop?.kind === "section-body" && sidebarDrop.id === section.id
+                      ? true
+                      : undefined
+                  }
+                  data-bot-drop-position={
+                    sidebarDrop?.kind === "section" && sidebarDrop.id === section.id
+                      ? sidebarDrop.position
+                      : undefined
+                  }
+                  onDragOver={(event) => overSidebar(event, sectionDropTarget(event, section.id))}
+                  onDrop={(event) => dropSidebar(event, sectionDropTarget(event, section.id))}
+                >
+                  {sectionEditor?.id === section.id ? (
+                    <BotSectionEditor
+                      name={section.name}
+                      onClose={() => setSectionEditor(null)}
+                      onSave={(name) => {
+                        const current =
+                          useBotViewStore.getState().hosts[client.hostId]?.sections ?? []
+                        updateView({
+                          sections: current.map((item) =>
+                            item.id === section.id ? { ...item, name } : item
+                          )
+                        })
+                        setSectionEditor(null)
+                      }}
+                    />
+                  ) : (
+                    <ContextMenu onOpenChange={setSidebarMenuOpen}>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          draggable
+                          onDragStart={(event) =>
+                            startSidebarDrag(event, { kind: "section", id: section.id })
+                          }
+                          onDragEnd={clearSidebarDrag}
+                          className="bot-section-heading"
+                          data-bot-row-key={`section:${section.id}`}
+                          data-bot-expand-unread={section.collapsed ? "true" : undefined}
+                          data-bot-unread-count={
+                            section.collapsed
+                              ? section.botIds.filter(
+                                  (id) =>
+                                    visible.some((bot) => bot.id === id) &&
+                                    !pinnedIds.includes(id) &&
+                                    activityByConversation.get(`bot:${id}`)?.unread
+                                ).length +
+                                (section.groupIds ?? []).filter(
+                                  (id) =>
+                                    visibleGroups.some((group) => group.id === id) &&
+                                    !pinnedGroupIds.includes(id) &&
+                                    activityByConversation.get(`group:${id}`)?.unread
+                                ).length
+                              : undefined
+                          }
+                          aria-label={section.name}
+                          title={section.name}
+                          aria-expanded={!section.collapsed}
+                          onClick={() => {
+                            if (sidebarDrag) return
+                            const current =
+                              useBotViewStore.getState().hosts[client.hostId]?.sections ?? []
+                            updateView({
+                              sections: current.map((item) =>
+                                item.id === section.id
+                                  ? { ...item, collapsed: !item.collapsed }
+                                  : item
+                              )
+                            })
+                          }}
+                        >
+                          <ChevronRight
+                            size={14}
+                            className={section.collapsed ? "" : "rotate-90"}
+                          />
+                          <span>{section.name}</span>
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent
+                        data-bot-popup
+                        className="bot-workspace-menu rounded-xl p-1.5"
+                        onCloseAutoFocus={(event) => {
+                          if (sectionFocus.current) {
+                            event.preventDefault()
+                            sectionFocus.current = false
+                          }
+                        }}
+                      >
+                        <ContextMenuItem
+                          onSelect={() => {
+                            sectionFocus.current = true
+                            if (view.sidebarWidth < 180) updateView({ sidebarWidth: 264 })
+                            setSectionEditor({ id: section.id, name: section.name })
+                          }}
+                        >
+                          重命名分组
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() =>
+                            updateView({
+                              sections: (
+                                useBotViewStore.getState().hosts[client.hostId]?.sections ?? []
+                              ).filter((item) => item.id !== section.id)
+                            })
+                          }
+                        >
+                          移除分组（保留聊天）
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
+                  )}
+                  {!section.collapsed &&
+                    renderConversations(
+                      visible.filter(
+                        (bot) => section.botIds.includes(bot.id) && !pinnedIds.includes(bot.id)
+                      ),
+                      visibleGroups.filter(
+                        (group) =>
+                          section.groupIds?.includes(group.id) && !pinnedGroupIds.includes(group.id)
+                      )
+                    )}
+                </section>
+              ))}
+            {!showArchived && !showHidden && !query.trim() && sections.length > 0 && (
+              <div className="bot-section-heading" data-bot-default-section>
+                <span>未分组</span>
+              </div>
+            )}
+            {renderConversations(
+              visible.filter(
+                (bot) =>
+                  (bot.archived || !pinnedIds.includes(bot.id)) &&
+                  (showArchived ||
+                    showHidden ||
+                    query.trim() ||
+                    !sections.some((section) => section.botIds.includes(bot.id)))
+              ),
+              visibleGroups.filter(
+                (group) =>
+                  !pinnedGroupIds.includes(group.id) &&
+                  (showHidden ||
+                    query.trim() ||
+                    !sections.some((section) => section.groupIds?.includes(group.id)))
+              )
+            )}
+            {!showArchived && (
+              <BotImConversationRows
+                hostId={client.hostId}
+                conversations={visibleImConversations}
+                bots={snapshot?.bots ?? []}
+                tasks={snapshot?.tasks}
+                backgroundThreads={snapshot?.backgroundThreads}
+                threadSummaries={threadSummaries}
+                selectedId={newChat ? null : selectedIm?.id}
+                pinnedIds={view.pinnedImConversationIds}
+                hiddenIds={view.hiddenImConversationIds}
+                historyCollapsed={view.imHistoryCollapsed}
+                query={query}
+                showHidden={showHidden}
+                sortingPaused={sortingPaused}
+                onSelect={openImConversation}
+                onMenuOpenChange={setSidebarMenuOpen}
+                onHistoryCollapsed={setImHistoryCollapsed}
+                onPin={(id) => {
+                  const prefs = useBotViewStore.getState().hosts[client.hostId]
+                  const pins = prefs?.pinnedImConversationIds ?? []
+                  updateView({
+                    pinnedImConversationIds: pins.includes(id)
+                      ? pins.filter((item) => item !== id)
+                      : [...pins, id]
+                  })
+                }}
+                onRead={(group) => {
+                  void client
+                    .markRead("im", group.id, group.activity.version)
+                    .catch((cause) => toast.error(botErrorMessage(cause)))
+                }}
+                onVisibility={(id) => {
+                  const hidden =
+                    useBotViewStore.getState().hosts[client.hostId]?.hiddenImConversationIds ?? []
+                  updateView({
+                    hiddenImConversationIds: hidden.includes(id)
+                      ? hidden.filter((item) => item !== id)
+                      : [...hidden, id]
+                  })
+                }}
+                onDelete={(group) => {
+                  setDeletingIm({
+                    hostId: client.hostId,
+                    id: group.id,
+                    title: group.title,
+                    trigger:
+                      Array.from(document.querySelectorAll<HTMLElement>("[data-bot-row-key]")).find(
+                        (row) => row.dataset.botRowKey === `im:${group.id}`
+                      ) ?? null
+                  })
+                }}
+              />
+            )}
+            {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
+            {snapshot && !hasVisibleConversation && !showCreateGroupAction &&
+              (newChat || selected || selectedGroup) && (
+                <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+                  {emptyListMessage}
+                </p>
+              )}
+          </BotConversationList>
+          <footer className="bots-sidebar-footer">
+            {sidebarCollapsed ? [footerActions[1], footerActions[0]] : footerActions}
+          </footer>
+        </aside>
+        <BotPanelDivider
+          kind="sidebar"
+          width={clampBotPanelWidth("sidebar", view.sidebarWidth)}
+          onChange={(sidebarWidth) => updateView({ sidebarWidth })}
+        />
+        <main className="bots-conversation" data-bot-floating-chat={
+          client.hostId === "local" && Boolean(selected) && !selectedGroup && !selectedIm && !activeWorkId || undefined
+        }>
+          {error && (
+            <div className="bot-notice" role="alert">
+              <CircleAlert size={16} />
+              {error}
+            </div>
+          )}
+          {!snapshot ? (
+            <div className="bot-empty" role="status">
+              {error ? (
+                <>
+                  <p>暂时无法读取 Bot 列表</p>
+                  <Button variant="outline" className="rounded-full" onClick={retry}>
+                    重试
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Loader2 className="size-5 animate-spin" aria-hidden="true" />
+                  <p>正在读取 Bots…</p>
+                </>
+              )}
+            </div>
+          ) : newChat ? (
+            <BotNewChat
+              bots={snapshot?.bots ?? []}
+              groups={snapshot?.groups ?? []}
+              recipients={newChatRecipients}
+              draft={newChatDraft}
+              files={newChatFiles}
+              busy={newChatBusy}
+              error={newChatError}
+              onDraft={editNewChatDraft}
+              onFiles={editNewChatFiles}
+              onSelect={(value, name) => {
+                if (value === "new-bot") {
+                  if (newChatRecipients.length >= 8) setNewChatError("一次最多选择 8 个 Bot。")
+                  else if (name && newChatRecipients.length)
+                    addNewChatRecipient({ kind: "new", name })
+                  else openNewBot(name, undefined, "draft")
+                } else if (value.startsWith("bot:"))
+                  addNewChatRecipient({ kind: "bot", id: value.slice(4) })
+                else void selectNewChat(value)
+              }}
+              onRemoveRecipient={(key) => {
+                if (creatingChat.current) return
+                setNewChatRecipients((items) =>
+                  items.filter((item) => botChatRecipientKey(item) !== key)
+                )
+                createdChatRecipients.current.delete(key)
+                createdChatGroup.current = null
+                privateChatRecipient.current = null
+              }}
+              onCommit={() => {
+                void selectNewChat("recipients")
+              }}
+              onSend={() => {
+                void selectNewChat("recipients", undefined, true)
+              }}
+              onClose={closeNewChat}
+            />
+          ) : selectedIm && selected && !activeWorkId ? (
+            <BotImConversation
+              works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]}
+              tasks={snapshot?.tasks ?? []}
+              backgroundThreads={snapshot?.backgroundThreads ?? []}
+              collaborationPending={Boolean(
+                selectedIm.threadId && snapshot?.collaborationThreads?.includes(selectedIm.threadId)
+              )}
+              key={selectedIm.id}
+              conversation={selectedIm}
+              bot={selected}
+              client={client}
+              revision={snapshot.revision}
+              detailOpen={detailOpen}
+              onDetails={() => setDetailOpen(!detailOpen)}
+              onManage={() => {
+                setImBindingId(selectedIm.bindingId)
+                setImBot(selected)
+              }}
+              onMain={() => openPrivateMain(selected.id)}
+              onWork={openWork}
+            />
+          ) : selectedGroup ? (
+            <BotGroupConversation
+              key={`${client.hostId}:${selectedGroup.id}`}
+              group={selectedGroup}
+              bots={snapshot?.bots ?? []}
+              userInitials={userInitials}
+              tasks={snapshot?.tasks ?? []}
+              backgroundThreads={snapshot?.backgroundThreads ?? []}
+              revision={snapshot?.revision ?? 0}
+              client={client}
+              onEdit={() => openGroupEditor(selectedGroup)}
+              onDetails={() => setDetailOpen(!detailOpen)}
+              detailOpen={detailOpen}
+              detailsTriggerRef={detailTriggerRef}
+              onOpenBot={(bot) => openPrivateMain(bot.id)}
+              onBrowser={() => {
+                updateView({ groupDetailTab: "computer", detailOpen: true })
+              }}
+              onFiles={() => {
+                updateView({ groupDetailTab: "files", detailOpen: true })
+              }}
+            />
+          ) : selected ? (
+            <>
+              <header className="bot-chat-header bot-personal-header" data-task={Boolean(activeWorkId) || undefined}>
+                {activeWorkId ? (
+                  <div className="bot-task-heading">
+                    <button type="button" className="bot-task-parent" title={taskParentLabel}
+                      aria-label={taskParentLabel} onClick={() => selectWork(null)}>
+                      <ChevronRight size={15} className="rotate-180 shrink-0" aria-hidden="true" />
+                      {selectedIm ? <UsersRound size={19} className="shrink-0" aria-hidden="true" /> :
+                        <BotAvatar color={selected.color} shape={selected.shape} size={24} animated={false} />}
+                      <span>{selectedIm?.title ?? selected.name}</span>
+                    </button>
+                    <span className="bot-task-header-divider" aria-hidden="true" />
+                    <h2 className="bot-task-header-title" title={activeWorkTitle}>{activeWorkTitle ?? "任务"}</h2>
+                  </div>
+                ) : (
+                <button
+                  className="bot-title-pill"
+                  aria-label={personalDetailOpen ? "关闭 Bot 详情" : "查看 Bot 详情"}
+                  aria-expanded={personalDetailOpen}
+                  onClick={togglePersonalDetail}
+                >
+                  <BotAvatar
+                    animated={false}
+                    color={selected.color}
+                    shape={selected.shape}
+                    size={28}
+                  />
+                  <span>{selected.name}</span>
+                </button>
+                )}
+                <div className="bot-personal-header-actions">
+                {selectedWork && <BotWorkHeader key={selectedWork.id} client={client} work={selectedWork}
+                  captureWorkNavigation={captureWorkNavigation} controller={works}
+                  disabled={Boolean(selected.archived || selected.deleting)} />}
+                <BotExecutionDetailsToggle hostId={client.hostId} compact />
+                {approvalReturn?.targetThreadId === selectedThreadId && !selectedIm && (
+                  <button className="bot-icon-button" aria-label="返回原交办对话" title="返回原交办对话"
+                    onClick={() => openBotMain(approvalReturn.sourceBotId)}>
+                    <ChevronRight size={16} className="rotate-180" aria-hidden="true" />
+                  </button>
+                )}
+                <button
+                  className="bot-icon-button"
+                  ref={detailTriggerRef}
+                  aria-label={personalDetailOpen ? "关闭详情" : "打开详情"}
+                  aria-expanded={personalDetailOpen}
+                  onClick={togglePersonalDetail}
+                >
+                  <PanelRight size={19} />
+                </button>
+                </div>
+              </header>
+              {personalIm && (
+                <div className="bot-im-context" role="status">
+                  <span>
+                    <span className="bot-im-connection-dot" data-online={personalIm.connected} aria-hidden="true" />
+                    {personalIm.connected ? "已连接招呼" : "招呼已离线"}
+                  </span>
+                </div>
+              )}
+              {!activeWorkId && <BotWorkAttention client={client} works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]} onWork={id => selectWork(id)} />}
+              {activeWorkId && !selectedWork ? (
+                <div className="bot-empty" role="status">
+                  {workDeletionPending ? (
+                    <p>{BOT_WORK_DELETION_PENDING_MESSAGE}</p>
+                  ) : (
+                    <>
+                      {works.error ?? "正在读取任务会话…"}
+                      <button onClick={() => void works.refresh()}>重试</button>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <BotConversation
+                  key={`${selected.hostId}:${selected.id}:${selectedThreadId}`}
+                  bot={selected}
+                  work={selectedWork}
+                  workDirectory={works}
+                  workQuestionTasks={client.hostId === "local" && !activeWorkId && !selectedIm ? snapshot?.tasks : undefined}
+                  onOpenWorkApproval={openWorkApproval}
+                  workRevision={snapshot?.revision ?? 0}
+                  onConfigureModel={() => openBotEditor(selected)}
+                  onOpenWork={openWork}
+                  captureWorkNavigation={captureWorkNavigation}
+                  onOpenWorkConversation={selectWork}
+                  onOpenBot={openPrivateMain}
+                  groups={snapshot?.groups ?? []}
+                  imGroups={snapshot?.imConversations ?? []}
+                  onOpenGroup={(id, source) => {
+                    if (source === "zhaohu") openImConversation(id)
+                    else updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })
+                  }}
+                  bots={snapshot?.bots ?? []}
+                  schedules={snapshot?.schedules ?? []}
+                  tasks={tasks}
+                  collaborationPending={Boolean(
+                    snapshot?.collaborationThreads?.includes(selectedThreadId)
+                  )}
+                  backgroundBusy={Boolean(
+                    snapshot?.backgroundThreads?.includes(selectedThreadId) ||
+                    threadSummaries[selectedThreadId]?.workflowRunning ||
+                    threadSummaries[selectedThreadId]?.hasRunningCoordinatorWorker
+                  )}
+                  client={conversationClient}
+                />
+              )}
+            </>
+          ) : showBotWelcome ? (
+            <div className="bot-welcome">
+              <section className="bot-welcome-card" aria-labelledby="bot-welcome-title">
+                <div className="bot-welcome-art" aria-hidden="true">
+                  <div className="bot-welcome-avatar">
+                    <BotAvatar color="#9159fe" shape="squircle" size={60} animated={false} />
+                  </div>
+                </div>
+                <h1 id="bot-welcome-title">创建你的第一个 Bot</h1>
+                <p>给它起个名字，就能开始聊天、交办任务。</p>
+                <Button
+                  type="button"
+                  size="lg"
+                  className="bot-welcome-create rounded-full focus-visible:ring-0"
+                  onClick={(event) => openNewBot("", event.currentTarget)}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  创建 Bot
+                </Button>
+              </section>
+            </div>
+          ) : (
+            <div className="bot-empty">
+              <p>{hasVisibleConversation ? "从侧栏选择一个会话" : emptyListMessage}</p>
+            </div>
+          )}
+        </main>
+            {preview && selected && (
+                <BotWorkPreview
+                  client={client}
+                  foreground={foreground}
+                  key={JSON.stringify([preview.hostId, preview.botId, preview.audience, preview.workId])}
+                  title={preview.title}
+                  work={previewWork?.deletionCommitted ? null : previewWork}
+                  activeTask={previewWork ? tasksByThread.get(previewWork.threadId)?.findLast((task) =>
+                    !task.injectedInto && (task.state === "running" || task.state === "waiting_user")) : undefined}
+                  directoryError={previewWork?.deletionCommitted ? "任务已删除。" : works.previewError ?? works.error}
+                  backLabel={detailOpen && detailTab === "details" ? "返回任务列表" : "关闭任务预览"}
+                  onBack={closeWorkPreview}
+                  onOpen={() => void openPreviewConversation()}
+                  onOpenMain={selectedIm ? () => selectWork(null) : previewWork?.parentThreadId === selected.threadId ? () => {
+                    dismissWorkPreview()
+                    if (previewWork.resultPublicationId) useChatSourceNavigation.getState().request({
+                      threadId: selected.threadId, messageId: previewWork.resultPublicationId, ordinal: 0
+                    })
+                    openBotMain(selected.id)
+                  } : undefined}
+                  onRetry={() => { void works.refresh() }}
+                />
+            )}
+        {!newChat && selectedIm && selected && (
+          <>
+            {detailOpen && (
+              <BotPanelDivider
+                kind="detail"
+                width={clampBotPanelWidth("detail", view.detailWidth)}
+                onChange={(detailWidth) => updateView({ detailWidth })}
+              />
+            )}
+            <BotDetailsPane open={detailOpen} label="招乎群详情" conversationId={activeWorkId ?? selectedIm.id}>
+              <BotImConversationDetails
+                key={selectedIm.id}
+                conversation={selectedIm}
+                schedules={snapshot?.schedules ?? []}
+                bot={selected}
+                client={client}
+                memoryGroupLabels={memoryGroupLabels}
+                revision={snapshot?.revision ?? 0}
+                onClose={() => setDetailOpen(false)}
+                onManage={() => {
+                  setImBindingId(selectedIm.bindingId)
+                  setImBot(selected)
+                }}
+                onMain={() => openPrivateMain(selected.id)}
+                onWork={selectWork}
+                controller={works}
+                captureWorkNavigation={captureWorkNavigation}
+                onPreview={canPreviewWork ? (work, trigger) => openWorkPreview(work.id, trigger, work.title) : undefined}
+                selectedWork={selectedWork}
+                workOpen={Boolean(activeWorkId)}
+                onBack={() => selectWork(null)}
+              />
+            </BotDetailsPane>
+          </>
+        )}
+        {!newChat && selectedGroup && (
+          <>
+            {detailOpen && (
+              <BotPanelDivider
+                kind="detail"
+                width={clampBotPanelWidth("detail", view.detailWidth)}
+                onChange={(detailWidth) => updateView({ detailWidth })}
+              />
+            )}
+            <BotDetailsPane open={detailOpen} label="群聊详情" conversationId={selectedGroup.id}>
+              <div className="bot-detail-actions">
+                <button
+                  className="bot-icon-button"
+                  aria-label="关闭群聊详情"
+                  onClick={() => setDetailOpen(false)}
+                >
+                  <X size={19} />
+                </button>
+              </div>
+              <div className="bot-profile">
+                <BotGroupAvatar
+                  memberIds={selectedGroup.memberIds}
+                  bots={snapshot?.bots ?? []}
+                  userInitials={userInitials}
+                  size={64}
+                />
+                <BotNameInput
+                  key={`${client.hostId}:${selectedGroup.id}`}
+                  name={selectedGroup.name}
+                  version={selectedGroup.version}
+                  label="群组名称"
+                  maxLength={120}
+                  disabled={Boolean(selectedGroup.deleting)}
+                  onSave={(name, version) =>
+                    client.saveGroup(
+                      { name, memberIds: selectedGroup.memberIds },
+                      { id: selectedGroup.id, version }
+                    )
+                  }
+                />
+              </div>
+              <GroupDetails key={selectedGroup.id}
+                group={selectedGroup} bots={snapshot?.bots ?? []} client={client}
+                groupLabels={memoryGroupLabels}
+                tasks={selectedGroup.memberIds.flatMap(id =>
+                  tasksByThread.get(`group-${selectedGroup.id}-${id}`) ?? [])}
+                tab={view.groupDetailTab ?? "details"}
+                onTabChange={groupDetailTab => updateView({ groupDetailTab })}
+                onSettings={() => openGroupEditor(selectedGroup)}
+                onOpenMember={bot => openPrivateMain(bot.id)}
+              />
+            </BotDetailsPane>
+          </>
+        )}
+        {!newChat && selected && !selectedIm && (
+          <>
+            {personalDetailOpen && (
+              <BotPanelDivider
+                kind="detail"
+                width={clampBotPanelWidth("detail", view.detailWidth)}
+                onChange={(detailWidth) => updateView({ detailWidth })}
+              />
+            )}
+
+            <BotDetailsPane open={personalDetailOpen} label="Bot 详情" conversationId={activeWorkId ?? selected.id}>
+              <div>
+              <div className="bot-detail-actions">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      ref={profileMenuTrigger}
+                      className="bot-icon-button"
+                      aria-label="更多 Bot 操作"
+                    >
+                      <MoreHorizontal size={20} />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    data-bot-popup
+                    align="end"
+                    className="bot-workspace-menu rounded-xl p-1.5"
+                  >
+                    {!selected.archived && (
+                      <button
+                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
+                        onClick={() => togglePin(selected.id)}
+                      >
+                        {pinnedIds.includes(selected.id) ? (
+                          <PinOff className="mr-2 size-4" />
+                        ) : (
+                          <Pin className="mr-2 size-4" />
+                        )}
+                        {pinnedIds.includes(selected.id) ? "取消置顶" : "置顶 Bot"}
+                      </button>
+                    )}
+                    <button
+                      className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
+                      onClick={() => openBotEditor(selected, profileMenuTrigger.current)}
+                    >
+                      <Settings2 className="mr-2 size-4" />
+                      编辑 Bot
+                    </button>
+                    {client.im && (
+                      <button
+                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
+                        onClick={() => {
+                          setImBindingId(null)
+                          setImBot(selected)
+                        }}
+                      >
+                        <MessageCircle className="mr-2 size-4" aria-hidden="true" />
+                        招乎接入
+                      </button>
+                    )}
+                    <button
+                      className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
+                      onClick={() => void archive(selected)}
+                    >
+                      <Archive className="mr-2 size-4" />
+                      {selected.archived ? "恢复 Bot" : "归档 Bot"}
+                    </button>
+                    <button
+                      className="flex w-full items-center rounded p-2 text-sm text-destructive hover:bg-accent"
+                      onClick={() => {
+                        editorTrigger.current = profileMenuTrigger.current
+                        setDeleting(selected)
+                      }}
+                    >
+                      <Trash2 className="mr-2 size-4" />
+                      {selected.deleting ? "继续删除" : "删除 Bot"}
+                    </button>
+                  </PopoverContent>
+                </Popover>
+                <button
+                  className="bot-icon-button"
+                  aria-label="关闭详情"
+                  onClick={() => setDetailOpen(false)}
+                >
+                  <X size={19} />
+                </button>
+              </div>
+              {activeWorkId ? (
+                <div className="bot-task-detail-owner">
+                  <BotAvatar color={selected.color} shape={selected.shape} size={24} animated={false} />
+                  <span>{selected.name}</span>
+                </div>
+              ) : <div className="bot-profile" key={`profile:${selected.id}`}>
+                <BotAvatarEditor
+                  bot={selected}
+                  client={client}
+                />
+                <div className="bot-profile-identity">
+                  <BotNameInput
+                    name={selected.name}
+                    version={selected.version}
+                    label="Bot 名称"
+                    maxLength={80}
+                    disabled={Boolean(selectedState || selected.deleting)}
+                    onSave={(name, expectedVersion) =>
+                      client.update({ ...selected, name, expectedVersion })
+                    }
+                  />
+                  <BotProfileLabel
+                    bot={selected}
+                    client={client}
+                    disabled={Boolean(selectedState || selected.deleting)}
+                  />
+                </div>
+                {(selectedState || selected.archived) && (
+                  <span>
+                    {selectedState
+                      ? STATE_LABELS[selectedState]
+                      : selected.archived
+                        ? "已归档"
+                        : ""}
+                  </span>
+                )}
+              </div>}
+              <Tabs
+                value={detailTab === "memory" ? "details" : detailTab}
+                onValueChange={(tab) => {
+                  if (tab === "details" || tab === "files" || tab === "computer") setDetailTab(tab)
+                }}
+              >
+                <BotDetailTabs label="Bot 详情导航" tabs={["details", "files", "computer"]}
+                  onDetails={detailTab === "memory" ? () => setDetailTab("details") : undefined} />
+                <TabsContent
+                  value={detailTab === "memory" ? "details" : detailTab}
+                  className="mt-0"
+                >
+                  {activeWorkId &&
+                  !selectedWork &&
+                  (detailTab === "files" || detailTab === "computer") ? (
+                    <div className="bot-detail-section" role="status">
+                      <p>{workDeletionPending
+                        ? "删除待完成"
+                        : works.error ?? "正在读取任务会话，资源面板暂不可用…"}</p>
+                      {!workDeletionPending && <button onClick={() => void works.refresh()}>重试</button>}
+                      <button onClick={() => selectWork(null)}>返回主对话</button>
+                    </div>
+                  ) : selectedWork?.source && selectedWork.source.transport !== "im" &&
+                    (detailTab === "files" || detailTab === "computer") ? (
+                    <div className="bot-detail-section" role="note">
+                      外部接入仅支持文字；此工作无法访问本机资料库和电脑。
+                    </div>
+                  ) : detailTab === "files" ? (
+                    <BotFilesPanel
+                      key={selectedThreadId}
+                      bot={selected}
+                      peers={snapshot?.bots ?? []}
+                      client={conversationClient}
+                      conversationThreadId={selectedThreadId}
+                      refreshKey={botFileRefreshKey(tasks)}
+                    />
+                  ) : detailTab === "computer" ? (
+                    <BotTaskBrowser
+                      key={selected.id}
+                      botId={selected.id}
+                      mainScope={selected.id}
+                      client={client}
+                      works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]}
+                      selectedWork={selectedWork}
+                      onWork={id => selectWork(id)}
+                    />
+                  ) : detailTab === "memory" ? (
+                    <BotMemoryPanel
+                      key={`${client.hostId}:${selected.id}`}
+                      bot={selected}
+                      client={client}
+                      peers={snapshot?.bots ?? []}
+                      groupLabels={memoryGroupLabels}
+                      onBack={() => {
+                        setDetailTab("details")
+                        requestAnimationFrame(() => memoryTriggerRef.current?.focus())
+                      }}
+                    />
+                  ) : (
+                    <div className="bot-detail-cards">
+                      <BotDetailCard label="Bot 设置">
+                        <BotDetailRow label="职责与设置" icon={<Settings2 size={16} aria-hidden="true" />}
+                          description={selected.instructions?.trim()} onClick={event => openBotEditor(selected, event.currentTarget)} />
+                        <BotDetailRow ref={memoryTriggerRef} label="管理记忆" icon={<Brain size={16} aria-hidden="true" />}
+                          onClick={() => setDetailTab("memory")} />
+                        {client.im && <BotDetailRow label="招乎接入" icon={<MessageCircle size={16} aria-hidden="true" />}
+                          onClick={() => { setImBindingId(null); setImBot(selected) }} />}
+                      </BotDetailCard>
+                      <BotWorkPanel
+                        key={`${client.hostId}:${selected.id}`}
+                        client={client}
+                        botId={selected.id}
+                        controller={works}
+                        selected={selectedWork}
+                        onSelect={selectWork}
+                        captureWorkNavigation={captureWorkNavigation}
+                        onPreview={canPreviewWork ? (work, trigger) => openWorkPreview(work.id, trigger, work.title) : undefined}
+                        disabled={Boolean(selected.archived || selected.deleting)}
+                      />
+                      <BotSchedulePanel
+                        key={desktopScheduleWork?.id ?? selected.id}
+                        botId={selected.id}
+                        client={client}
+                        work={desktopScheduleWork}
+                        readOnly={Boolean(selected.archived || selected.deleting)}
+                        allowCreate={
+                          !activeWorkId ||
+                          client.hostId !== "local" ||
+                          Boolean(selectedIm) ||
+                          Boolean(
+                            desktopScheduleWork &&
+                              desktopScheduleWork.state === "active" &&
+                              !desktopScheduleWork.dispatchStopped &&
+                              (!desktopScheduleWork.conversation ||
+                                desktopScheduleWork.conversation.state === "bound")
+                          )
+                        }
+                        schedules={(snapshot?.schedules ?? []).filter(
+                          (item) =>
+                            item.botId === selected.id &&
+                            (item.audienceKey ?? "desktop") ===
+                              (selectedWork?.audienceKey ?? "desktop") &&
+                            (!desktopScheduleWork ||
+                              item.workId === desktopScheduleWork.id ||
+                              item.workMonitor?.workId === desktopScheduleWork.id)
+                        )}
+                      />
+                      {tasks.length > 0 && <details className="bot-detail-card bot-detail-activity">
+                        <summary className="bot-detail-row">
+                          <History size={16} aria-hidden="true" />
+                          <span className="bot-detail-row-copy"><span>最近活动{recentTasks.some(task => task.error) && <small className="bot-detail-activity-error"> · 有异常</small>}</span></span>
+                          <ChevronRight size={14} aria-hidden="true" />
+                        </summary>
+                        {recentTasks.map((task) => (
+                          <details className="bot-detail-activity-item" key={task.id}>
+                            <summary><span>{STATE_LABELS[task.state]}</span><span>{botTaskPreview(task).replace(/\s+/g, " ").slice(0, 100)}</span></summary>
+                            <p>{botTaskPreview(task)}</p>
+                            {task.error && <small role="alert">{task.error}</small>}
+                          </details>
+                        ))}
+                      </details>}
+                    </div>
+                  )}
+                </TabsContent>
+              </Tabs>
+              </div>
+            </BotDetailsPane>
+          </>
+        )}
+        {deletingIm?.hostId === client.hostId && (
+          <Dialog
+            open
+            onOpenChange={(open) => {
+              if (!open) setDeletingIm(null)
+            }}
+          >
+            <DialogContent
+              className="sm:max-w-[420px]"
+              onCloseAutoFocus={(event) => {
+                if (!deletingIm.trigger?.isConnected) return
+                event.preventDefault()
+                deletingIm.trigger.focus({ preventScroll: true })
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>删除「{deletingIm.title}」的会话？</DialogTitle>
+                <DialogDescription>
+                  此群已解除绑定。将从 App 列表永久移除此会话，无法撤销。
+                  聊天记录、群任务、记忆和文件仍保留。
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setDeletingIm(null)}>
+                  取消
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    const group = snapshot?.imConversations?.find(
+                      (item) => item.id === deletingIm.id
+                    )
+                    const prefs =
+                      useBotViewStore.getState().hosts[client.hostId] ?? DEFAULT_BOT_VIEW
+                    const patch = group && removeImConversationFromView(prefs, group)
+                    if (!patch) {
+                      toast.error("群聊状态已变化，仅已解除绑定的群聊可以删除")
+                      setDeletingIm(null)
+                      return
+                    }
+                    updateView(patch)
+                    setDeletingIm(null)
+                    toast.success("已从列表删除会话")
+                  }}
+                >
+                  删除会话
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )}
+        {renamingGroup && (
+          <BotGroupEditor
+            key={renamingGroup.id}
+            group={renamingGroup}
+            bots={snapshot?.bots ?? []}
+            client={client}
+            nameOnly
+            returnFocusTo={editorTrigger.current}
+            onClose={() => setRenamingGroup(null)}
+            onSaved={() => setRenamingGroup(null)}
+          />
+        )}
+        {deletingGroup && (
+          <BotDeleteDialog
+            bot={deletingGroup}
+            kind="group"
+            client={client}
+            returnFocusTo={editorTrigger.current}
+            onClose={() => setDeletingGroup(null)}
+            onDeleted={() => {
+              const id = deletingGroup.id,
+                prefs = useBotViewStore.getState().hosts[client.hostId]
+              updateView({
+                pinnedGroupIds: (prefs?.pinnedGroupIds ?? []).filter((item) => item !== id),
+                hiddenGroupIds: (prefs?.hiddenGroupIds ?? []).filter((item) => item !== id),
+                sections: (prefs?.sections ?? []).map((section) => ({
+                  ...section,
+                  groupIds: section.groupIds?.filter((item) => item !== id)
+                })),
+                ...(prefs?.groupId === id ? { groupId: null } : {})
+              })
+              setDeletingGroup(null)
+            }}
+          />
+        )}
+        {groupEditor && (
+          <BotGroupEditor
+            group={groupEditor === "new" ? null : groupEditor}
+            returnFocusTo={groupEditorTrigger.current}
+            bots={snapshot?.bots ?? []}
+            client={client}
+            onClose={() => setGroupEditor(null)}
+            onSaved={(group) => {
+              if (newChat) {
+                createdChatGroup.current = group
+                setGroupEditor(null)
+                void selectNewChat(`group:${group.id}`, group)
+                return
+              }
+              setGroupId(group.id)
+              setGroupEditor(null)
+              setShowArchived(false)
+            }}
+          />
+        )}
+        {renaming && (
+          <BotEditor
+            key={renaming.id}
+            bot={renaming}
+            client={client}
+            nameOnly
+            returnFocusTo={editorTrigger.current}
+            onClose={() => setRenaming(null)}
+            onSaved={() => setRenaming(null)}
+          />
+        )}
+        {imBot && client.im && (
+          <BotImChannelDialog
+            key={`${client.hostId}:${imBot.id}`}
+            client={client}
+            bot={imBot}
+            initialBindingId={imBindingId}
+            onOpenSettings={() => useAppStore.getState().setShowCustomizeView(true, "robot")}
+            onOpenConversation={(bindingId) => {
+              const group = snapshot?.imConversations?.find(
+                (item) => item.botId === imBot.id && item.bindingId === bindingId
+              )
+              if (group) openImConversation(group.id)
+            }}
+            onClose={() => setImBot(null)}
+            onOpenMain={() =>
+              updateView({
+                selectedId: imBot.id,
+                groupId: null,
+                activeWorkIdByBot: {
+                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+                  [imBot.id]: null
+                }
+              })
+            }
+            onOpenWork={(id) =>
+              updateView({
+                selectedId: imBot.id,
+                groupId: null,
+                detailOpen: true,
+                detailTab: "details",
+                activeWorkIdByBot: {
+                  ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+                  [imBot.id]: id
+                }
+              })
+            }
+          />
+        )}
+        {editor && (
+          <BotEditor
+            bot={editor === "new" ? null : editor}
+            initialName={newBotName}
+            client={client}
+            createBot={
+              editorIntent
+                ? (input) => {
+                    if (
+                      editorAttempt !== newChatAttempt.current ||
+                      editorIntent !== newChatCreateIntent.current
+                    )
+                      return Promise.reject(new Error("创建页面已变化，请从当前草稿重试。"))
+                    return createNewChatRecipient(input, editorIntent.recipientKey)
+                  }
+                : undefined
+            }
+            returnFocusTo={editorTrigger.current}
+            onClose={() => {
+              if (
+                editorAttempt !== newChatAttempt.current ||
+                editorIntent !== newChatCreateIntent.current
+              )
+                return
+              newChatAttempt.current++
+              newChatCreateIntent.current = null
+              setEditor(null)
+            }}
+            onSaved={(bot) => {
+              if (
+                editorAttempt !== newChatAttempt.current ||
+                editorIntent !== newChatCreateIntent.current
+              )
+                return
+              newChatCreateIntent.current = null
+              if (editor === "new" && newChat && editorIntent) {
+                setEditor(null)
+                setNewChatRecipients([{ kind: "bot", id: bot.id }])
+                privateChatRecipient.current = bot
+                void selectNewChat(`bot:${bot.id}`, undefined, editorIntent.intent === "send", bot)
+                return
+              }
+              if (editor === "new" && newChat) closeNewChat()
+              setSelectedId(bot.id)
+              setGroupId(null)
+              setShowArchived(bot.archived)
+              setEditor(null)
+            }}
+          />
+        )}
+      </div>
+    </TooltipProvider>
+  )
+}

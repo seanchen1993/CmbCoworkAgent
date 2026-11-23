@@ -1,0 +1,8 @@
+Persistent experiment record: <repo>/docs/experiments/bot-dispatch/runs/20261117T102811Z-983da2a8/record.json
+{"case":"greeting","actual":"inline","preferred":"inline","seconds":1.8,"mainSeconds":1.7,"mainModelRequests":1,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":[]}
+{"case":"event-plan","stage":"main-idle","seconds":3.3,"workCreated":true}
+{"case":"event-plan","actual":"independent","preferred":"independent","seconds":28.9,"mainSeconds":3.2,"dispatchSeconds":3.1,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_work_create"]}
+{"case":"revision","actual":"continue","preferred":"continue","seconds":26.9,"mainSeconds":2.8,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_work_send"]}
+{"case":"status","actual":"inline","preferred":"inline","seconds":2.1,"mainSeconds":1.8,"mainModelRequests":1,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":[]}
+{"case":"reopen","actual":"continue","preferred":"continue","seconds":27.8,"mainSeconds":4.6,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_work_continue","bot_work_send"]}
+Routing evaluation report: <temp>/bot-integration-build-LdTUwD/artifacts/routing-1794911291889.json

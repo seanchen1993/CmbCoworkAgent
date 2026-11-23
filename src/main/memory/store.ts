@@ -35,6 +35,8 @@ export interface RecallStats {
 }
 
 export interface SearchOptions {
+  /** Restrict candidates before ranking/limiting; empty means no readable documents. */
+  allowedPaths?: readonly string[]
   trackRecall?: boolean
 }
 
@@ -300,6 +302,9 @@ export class MemoryStore {
   search(query: string, limit = 5, options: SearchOptions = {}): SearchResult[] {
     if (!this.db) return []
 
+    if (options.allowedPaths?.length === 0) return []
+    const paths = options.allowedPaths
+    const pathFilter = paths ? ` AND path IN (${paths.map(() => "?").join(",")})` : ""
     const tokens = tokenize(query)
     if (tokens.length === 0) return []
 
@@ -354,8 +359,8 @@ export class MemoryStore {
             `SELECT c.text, c.path, c.start_line, c.end_line, matchinfo(chunks_fts, 'pcnalx') as info
              FROM chunks_fts f
              JOIN chunks c ON c.id = f.rowid
-             WHERE chunks_fts MATCH ?`,
-            [ftsQuery]
+             WHERE chunks_fts MATCH ?${pathFilter}`,
+            [ftsQuery, ...(paths ?? [])]
           )
           if (results.length > 0 && results[0].values.length > 0) {
             addRankedRows(
@@ -381,10 +386,10 @@ export class MemoryStore {
           `SELECT text, path, start_line, end_line, score FROM (
              SELECT text, path, start_line, end_line, created_at, (${scoreExpr}) as score
              FROM chunks
-           ) WHERE score > 0
+           ) WHERE score > 0${pathFilter}
            ORDER BY score DESC, created_at DESC
            LIMIT ?`,
-          [...likeParams, overFetch]
+          [...likeParams, ...(paths ?? []), overFetch]
         )
         if (results.length > 0 && results[0].values.length > 0) {
           addRankedRows(

@@ -1,0 +1,101 @@
+import { createHash } from "node:crypto"
+import { botTaskAcceptsUserInput, type BotTask } from "../../shared/bots/contracts"
+import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
+
+export type BotStoppedTaskContext =
+  | {
+      taskId: string
+      state: "cancelled" | "interrupted"
+      source: BotTask["origin"]["kind"]
+      reference?: { kind: string; key: string; runStartedAt?: string }
+      messagePreview: string
+    }
+  | {
+      commandId: string
+      state: "cancelled"
+      source: "background_command"
+      sourceTaskId: string | null
+      commandPreview: string
+    }
+
+/** Direct or host-forwarded user input may join only its own conversation Runtime. */
+export function canSteerBotTask(source: BotTask, incoming: BotTask): boolean {
+  // Selected skills need their own destination decision. Do not inject them into
+  // an old inline run, or inject unrelated input into the short dispatch turn.
+  // Independent task corrections still use the existing safe-boundary queue.
+  if (selectedMainBotSkill(source) || selectedMainBotSkill(incoming)) return false
+  if (
+    source.botId !== incoming.botId ||
+    // Sharing a transcript does not let remote input join a locally privileged run.
+    Boolean(source.mockSource) !== Boolean(incoming.mockSource) ||
+    (source.mockSource &&
+      JSON.stringify(source.mockSource) !== JSON.stringify(incoming.mockSource)) ||
+    source.threadId !== incoming.threadId ||
+    source.workId !== incoming.workId
+  )
+    return false
+  if (incoming.origin.kind === "user" || (incoming.origin.kind === "work" && incoming.workId))
+    return botTaskAcceptsUserInput(source)
+  return (
+    source.origin.kind === "group" &&
+    incoming.origin.kind === "group" &&
+    source.origin.groupId === incoming.origin.groupId &&
+    source.threadId === `group-${source.origin.groupId}-${source.botId}`
+  )
+}
+
+/** A peer feedback joins only the explicitly addressed physical task. */
+export function canDeliverBotFeedback(target: BotTask, feedback: BotTask): boolean {
+  if (
+    feedback.origin.kind !== "bot" ||
+    !feedback.origin.feedbackForTaskId ||
+    feedback.origin.feedbackForTaskId !== target.id ||
+    feedback.origin.expectsReply ||
+    feedback.botId !== target.botId ||
+    feedback.threadId !== target.threadId ||
+    feedback.workId !== target.workId ||
+    target.mockSource ||
+    feedback.mockSource
+  )
+    return false
+  const root = target.origin.kind === "bot" ? target.origin.rootTaskId : target.id
+  return (
+    feedback.origin.rootTaskId === root &&
+    (target.origin.kind === "group" ||
+      (target.origin.kind === "bot" && target.origin.expectsReply)) &&
+    feedback.origin.groupId === target.origin.groupId
+  )
+}
+
+/** Workflow receipts need their instance fence; legacy receipts and coordinator claims stay unchanged. */
+export function canDeferBotTask(task: Pick<BotTask, "origin">): boolean {
+  return (
+    ["group", "discussion", "bot", "schedule"].includes(task.origin.kind) ||
+    (task.origin.kind === "notification" &&
+      (task.origin.notificationKind === "command" ||
+        task.origin.notificationKind === "reaction" ||
+        (task.origin.notificationKind === "workflow" && Boolean(task.origin.runStartedAt))))
+  )
+}
+
+/** Stable, hidden transcript identity; the original user message is never overwritten. */
+export function botContinuationMessageId(taskId: string, checkpointId: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(taskId) || !checkpointId.trim() || checkpointId.length > 200)
+    throw new Error("Bot 续办标识无效")
+  return `bot-continuation:${taskId}:${createHash("sha256").update(checkpointId).digest("hex")}`
+}
+
+/** Bot notification retry classification; policy/user stops are decisions, not transient failures. */
+export function isRetryableNotificationTerminal(terminal: {
+  outcome: string
+  code: string
+  coordinatorNotificationDelivered?: boolean
+}): boolean {
+  return (
+    !terminal.coordinatorNotificationDelivered &&
+    terminal.outcome !== "success" &&
+    !["cancelled", "hook_halt", "failure_fuse", "prompt_blocked", "recovery_interrupted"].includes(
+      terminal.code
+    )
+  )
+}

@@ -31,7 +31,15 @@ const dependencies = vi.hoisted(() => ({
   getThread: vi.fn(),
   getThreadCore: vi.fn(),
   modelConfig: vi.fn(),
+  botBind: vi.fn(),
+  botTurn: vi.fn(),
+  botChanged: vi.fn(),
   assertScheduleCanStart: vi.fn()
+}))
+vi.mock("../bots/feature-service", () => ({
+  bindManagedFeatureSession: dependencies.botBind,
+  startFeatureTurn: dependencies.botTurn,
+  publishFeatureRun: dependencies.botChanged
 }))
 vi.mock("../models/registry", () => ({
   getModelConfigByRef: dependencies.modelConfig
@@ -133,7 +141,6 @@ vi.mock("./managed-run-store", async (importOriginal) => {
 
 import { ManagedRunStore as RunStore } from "./managed-run-store"
 import { getManagedRunModelOverride } from "./managed-run-model"
-import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import { createManagedHarnessSession } from "./auto-mode-action-executor"
 import {
   handleAutoModeAgentCancelled,
@@ -271,35 +278,75 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe("start managed mode with an existing session", () => {
-  it("allows managed UAT Ultra sessions outside production service hours", async () => {
-    await start({ modelSelection: "ultra" })
-    vi.useFakeTimers({ toFake: ["Date"] })
-    vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
-    try {
-      dependencies.modelConfig.mockReturnValue({
-        apiKey: "test-key",
-        transport: "idle-gateway",
-        idleModelEnvironment: "uat"
-      })
-      expect(getManagedRunModelOverride("origin")).toBe("builtin:idle-ultra")
-      expect(metadata().model).toBe("original-model")
-    } finally {
-      vi.useRealTimers()
+  it("durably claims a Bot-owned run before submission and transfers the same origin to its next project session", async () => {
+    const operationId = "b".repeat(64)
+    const claimed = vi.fn()
+    dependencies.botTurn.mockImplementation(
+      async (id, request, _delivery, _context, startStream) => {
+        startStream()
+        expect(id).toBe(operationId)
+        expect(claimed).toHaveBeenCalledTimes(1)
+        return { threadId: request.threadId, completion: Promise.resolve() }
+      }
+    )
+    const run = await startManagedRun(
+      {
+        projectId: "project",
+        featureId: "feature",
+        existingThreadId: "origin",
+        workspacePath: root,
+        delivery
+      },
+      { operationId, authorize: vi.fn(), created: claimed }
+    )
+    expect(run.status).toBe("running")
+    expect(dependencies.store!.getRun(run).snapshot?.botOperationId).toBe(operationId)
+    expect(dependencies.botBind).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: run.runId }),
+      "origin",
+      operationId
+    )
+    feature = {
+      ...feature,
+      currentNodeId: "dev.review",
+      featureStateHash: `v1:sha256:${"f".repeat(64)}`
     }
+    await handleAutoModeAgentTurnEnd({
+      threadId: "origin",
+      outcome: "success",
+      endReason: { code: "normal" },
+      delivery
+    })
+    expect(dependencies.botBind).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: run.runId, nodeId: "dev.review" }),
+      "created",
+      operationId
+    )
+    expect(dependencies.botTurn).toHaveBeenCalledTimes(2)
+    expect(dependencies.grant).not.toHaveBeenCalled()
+    await stopManagedRun(run)
+    expect(dependencies.store!.getRun(run).snapshot?.status).toBe("cancelled")
   })
 
-  it("keeps service-hours errors non-retryable for managed Ultra sessions", async () => {
-    await start({ modelSelection: "ultra" })
-    vi.useFakeTimers({ toFake: ["Date"] })
-    vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00"))
-    try {
-      dependencies.modelConfig.mockReturnValue({ apiKey: "test-key", transport: "idle-gateway" })
-      expect(() => getManagedRunModelOverride("origin")).toThrow(IdleModelServiceHoursError)
-      expect(metadata().model).toBe("original-model")
-    } finally {
-      vi.useRealTimers()
+  it.each(["production", "uat"] as const)(
+    "allows managed %s Pro sessions during the day",
+    async (environment) => {
+      await start({ modelSelection: "ultra" })
+      vi.useFakeTimers({ toFake: ["Date"] })
+      vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+      try {
+        dependencies.modelConfig.mockReturnValue({
+          apiKey: "test-key",
+          transport: "idle-gateway",
+          idleModelEnvironment: environment
+        })
+        expect(getManagedRunModelOverride("origin")).toBe("builtin:idle-ultra")
+        expect(metadata().model).toBe("original-model")
+      } finally {
+        vi.useRealTimers()
+      }
     }
-  })
+  )
 
   it("uses the explicit creation model without reading the run store inside the factory", async () => {
     const read = vi.spyOn(dependencies.store!, "getRun").mockImplementation(() => {

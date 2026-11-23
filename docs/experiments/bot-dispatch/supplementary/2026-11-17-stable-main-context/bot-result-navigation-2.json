@@ -1,0 +1,109 @@
+{
+  "tasks": [
+    {
+      "id": "83b223bb-e320-4cd9-af39-f8b2eeb52466",
+      "requestId": "work-result-31c2cc7d-3652-4819-b873-ee9613fb66c7"
+    },
+    {
+      "id": "9edc51ac-b15b-4b84-b800-03c29d50caca",
+      "requestId": "work-result-b1ae899e-8aca-4fff-adce-1a73d1406027"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m05-1",
+      "role": "assistant",
+      "content": "[]"
+    },
+    {
+      "id": "3ac3877c-f56a-44ca-9dc3-92872f0adbff",
+      "role": "user",
+      "content": "M05_PRIVATE_MAIN：先讨论其他话题，不要建工作。"
+    },
+    {
+      "id": "m05-2",
+      "role": "assistant",
+      "content": "这是主对话的其他讨论，不交办工作。"
+    },
+    {
+      "id": "1d4fb619-ae94-4ece-a2ed-8bc09804535a",
+      "role": "user",
+      "content": "M05_CREATE_WORK：请独立交办一份季度安排草稿。"
+    },
+    {
+      "id": "m05-3",
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "id": "run-01a1e91a-657d-70ad-a9d9-723106ec90a5-tool-call-3",
+      "role": "tool",
+      "content": "{\"kind\":\"bot-work-receipt\",\"operation\":\"bot_work_create\",\"receipt\":{\"work\":{\"id\":\"820b6665-fe21-4441-aa55-25a7bdd1e04b\",\"botId\":\"6acb848c-29d1-4444-b05a-3de4cd830445\",\"threadId\":\"bot-work-820b6665-fe2"
+    },
+    {
+      "id": "bot-dispatch-227b6aa5-428f-472d-8a74-1607941f8108",
+      "role": "assistant",
+      "content": "我会继续处理，结果会发回这里。"
+    },
+    {
+      "id": "53017770-35f0-4fda-967f-87618e025ff2",
+      "role": "user",
+      "content": "M05_MAIN_PING：工作等待时主对话能继续吗？"
+    },
+    {
+      "id": "m05-5",
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "id": "run-01a1e91a-6795-71de-925e-89e88ee1df83-tool-call-5",
+      "role": "tool",
+      "content": "{\"kind\":\"bot-work-receipt\",\"operation\":\"bot_work_read\",\"receipt\":{\"work\":{\"id\":\"820b6665-fe21-4441-aa55-25a7bdd1e04b\",\"title\":\"季度安排草稿\",\"goal\":\"M05_WORK_GOAL：请写一份季度安排到 report.md 并交付文件。\",\"execution\":{\"o"
+    },
+    {
+      "id": "m05-6",
+      "role": "assistant",
+      "content": "主对话仍然可用。"
+    },
+    {
+      "id": "work-result-31c2cc7d-3652-4819-b873-ee9613fb66c7",
+      "role": "user",
+      "content": "{\"workId\":\"820b6665-fe21-4441-aa55-25a7bdd1e04b\",\"title\":\"季度安排草稿\",\"executionState\":\"completed\",\"requestContext\":{\"messages\":[{\"text\":\"M05_WORK_GOAL：请写一份季度安排到 report.md 并交付文件。\",\"truncated\":false}],\"mes"
+    },
+    {
+      "id": "m05-9",
+      "role": "assistant",
+      "content": "M05_WORK_RETURN：季度安排第一版已写好，report.md 在原任务中，可继续修改。"
+    },
+    {
+      "id": "a5106a28-128b-46a4-b105-18bb5413f5f6",
+      "role": "user",
+      "content": "M05_PARENT_EDIT：把刚才那份改成第二版，继续原任务。"
+    },
+    {
+      "id": "m05-10",
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "id": "run-01a1e91a-6ebc-732b-88df-26a87e0b5c49-tool-call-10",
+      "role": "tool",
+      "content": "{\"kind\":\"bot-work-receipt\",\"operation\":\"bot_work_send\",\"receipt\":{\"id\":\"b1ae899e-8aca-4fff-adce-1a73d1406027\",\"botId\":\"6acb848c-29d1-4444-b05a-3de4cd830445\",\"threadId\":\"bot-work-820b6665-fe21-4441-aa5"
+    },
+    {
+      "id": "bot-dispatch-99d157fe-76f0-433f-b734-c907117aac76",
+      "role": "assistant",
+      "content": "我会继续处理，结果会发回这里。"
+    },
+    {
+      "id": "work-result-b1ae899e-8aca-4fff-adce-1a73d1406027",
+      "role": "user",
+      "content": "{\"workId\":\"820b6665-fe21-4441-aa55-25a7bdd1e04b\",\"title\":\"季度安排草稿\",\"executionState\":\"completed\",\"requestContext\":{\"messages\":[{\"text\":\"M05_EDIT_WORK：将 report.md 中的第一版安排改为第二版安排，其他内容保持不变，交付修改后的文件。\",\"trun"
+    },
+    {
+      "id": "m05-14",
+      "role": "assistant",
+      "content": "M05_WORK_RETURN：季度安排已按意见更新为第二版，文件在原任务中。"
+    }
+  ]
+}

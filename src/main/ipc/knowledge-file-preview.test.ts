@@ -116,12 +116,15 @@ describe("knowledge file preview", () => {
     })
   })
 
-  it("rejects requests mixing knowledge and granted external sources", async () => {
-    const { file } = await knowledgeFile()
-    expect(await readKnowledge(file, { externalGrant: "grant" })).toMatchObject({
-      success: false,
-      errorCode: "invalid-request"
-    })
-    expect(mocks.readText).not.toHaveBeenCalled()
-  })
+  it.each([{ externalGrant: "grant" }, { threadId: "thread" }, { botGroupId: "group" }])(
+    "rejects requests mixing knowledge and another source: %j",
+    async (sourceOverrides) => {
+      const { file } = await knowledgeFile()
+      expect(await readKnowledge(file, sourceOverrides)).toMatchObject({
+        success: false,
+        errorCode: "invalid-request"
+      })
+      expect(mocks.readText).not.toHaveBeenCalled()
+    }
+  )
 })

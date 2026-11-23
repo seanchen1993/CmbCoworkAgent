@@ -1,0 +1,2 @@
+{"label": "architecture-01", "args": ["--import", "tsx", "tests/standard-thread-turn-architecture.spec.ts"], "exitCode": 0, "seconds": 0.21, "log": "architecture-01.log.txt"}
+standard-thread-turn-architecture.spec.ts passed

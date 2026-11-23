@@ -17,7 +17,7 @@ import { promisify } from "util"
 import { getWindowsSandboxMode } from "../storage"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import type { ModelConfig, Provider, WorkspaceSetParams, WorkspaceLoadParams } from "../types"
-import { isModelAvailable, isModelSelectable } from "../../shared/model-catalog"
+import { isModelAvailable } from "../../shared/model-catalog"
 import { getModelConnection } from "../models/connection"
 import { LocalSandbox } from "../agent/local-sandbox"
 import {
@@ -3889,6 +3889,7 @@ function getResolvedStoredDefaultModelId(): string {
 }
 
 function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number]): ModelConfig {
+  const available = isModelAvailable(config)
   return {
     id: toModelRef(config),
     name: config.name,
@@ -3896,8 +3897,8 @@ function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number
     source: config.source,
     model: config.model,
     description: config.baseUrl,
-    available: isModelAvailable(config),
-    selectable: isModelSelectable(config),
+    available,
+    selectable: available,
     notice: config.notice,
     unavailableReason: config.unavailableReason,
     maxTokens: config.maxTokens,

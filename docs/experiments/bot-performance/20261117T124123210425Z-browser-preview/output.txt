@@ -1,0 +1,1 @@
+PASS: preview failures/timeouts are visible, retry keeps the selected page, stale responses cannot replace it, and takeover stays available

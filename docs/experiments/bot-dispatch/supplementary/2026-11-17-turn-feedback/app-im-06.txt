@@ -1,0 +1,3 @@
+stage: launch real App <temp>/bot-group-app-KtJRx2
+stage: selected Zhaohu group -> real Runtime -> WS delivery -> work -> return group/private
+PASS: unified App/IM acknowledgement; 4 executed probes, 1 nonexecuted continuation; accepted receipt skips post-dispatch model; real failure and new findings stay visible

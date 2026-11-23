@@ -82,11 +82,11 @@ async function runWrappedModelCall(
   runtime: ReturnType<typeof rt>,
   runToken?: string,
   messages: BaseMessage[] = [],
-  loadGoalProviderOccurrence?: Parameters<typeof createCurrentRunMessageQueueMiddleware>[1]
+  loadGoalProviderOccurrence?: Parameters<typeof createCurrentRunMessageQueueMiddleware>[2]
 ): Promise<AIMessage> {
   const ownerToken = runToken ?? (runtime.configurable?.thread_id === T2 ? RUN2 : RUN1)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mw = createCurrentRunMessageQueueMiddleware(ownerToken, loadGoalProviderOccurrence) as any
+  const mw = createCurrentRunMessageQueueMiddleware(ownerToken, undefined, loadGoalProviderOccurrence) as any
   return await mw.wrapModelCall({ runtime, messages }, async () => response)
 }
 
@@ -863,6 +863,33 @@ async function testBeforeModelInjectsAndDrains(): Promise<void> {
   assertEqual(peekCurrentRunMessageQueue(T1).length, 0, "queue drained after injection")
 }
 
+async function testInternalCueIsNotADurableInjectionAnchor(): Promise<void> {
+  for (const phase of ["before", "after"] as const) {
+    for (const withHistory of [false, true]) {
+      reset()
+      let anchorMessage: { id: string; role: string } | undefined
+      setCurrentRunInjectionNotifier((_threadId, _messages, context) => {
+        anchorMessage = context?.anchorMessage
+      })
+      const history = withHistory
+        ? [new HumanMessage({ id: "visible-user", content: "Earlier task" })]
+        : []
+      const cue = new HumanMessage({
+        id: "hidden-cue",
+        content: "Internal first conversation",
+        additional_kwargs: { cmb_internal_coordinator_notification: true }
+      })
+      queueCurrentRunMessage(T1, msg("first-real-message", "Use this name"))
+      const result = phase === "before"
+        ? await runBeforeModel({ messages: [...history, cue] }, rt(T1))
+        : await runAfterModel({ messages: [...history, cue, new AIMessage({ id: "greeting", content: "Hello" })] }, rt(T1))
+      assert(result && Array.isArray(result.messages), "actual user message is injected")
+      assertEqual(anchorMessage?.id, withHistory ? "visible-user" : undefined,
+        "internal cue cannot become an unresolvable durable predecessor")
+    }
+  }
+}
+
 async function testInjectedMessagePreservesVisibleAlias(): Promise<void> {
   reset()
   queueCurrentRunMessage(T1, msg("a", "hook context\n\nrewritten prompt", "user original"))
@@ -910,7 +937,10 @@ async function testAfterModelInjectsOnFinalReply(): Promise<void> {
   const state = { messages: [new AIMessage({ content: "all done" })] }
   const result = await runAfterModel(state, rt(T1))
   assert(result && Array.isArray(result.messages), "afterModel injects on final reply")
-  assertEqual(result.messages.length, 1, "one injected message")
+  assertEqual(result.messages.length, 2, "completed reply snapshot and one injected message")
+  assert(result.messages[0] !== state.messages[0], "checkpoint prefix reuse sees a new assistant object")
+  assertEqual(result.messages[0].id, state.messages[0].id, "snapshot replaces the original reply identity")
+  assertEqual(result.messages[1].content, "steer me", "correction follows the completed reply")
   assertEqual(result.jumpTo, "model", "jumps back to model so the steer is answered")
   assertEqual(peekCurrentRunMessageQueue(T1).length, 0, "queue drained")
 }
@@ -1379,8 +1409,48 @@ function testContinuationTransferPreservesWithdrawal(): void {
   )
 }
 
+async function testHostReceiptPrecedesTranscriptAndCancelledMessageIsNotInjected(): Promise<void> {
+  clearCurrentRunMessageQueue(T1)
+  setCurrentRunMessageQueueOwner(T1, RUN1)
+  const events: string[] = []
+  queueCurrentRunMessage(T1, { id: "accepted", content: "Continue", beforeInject: () => {
+    events.push("receipt"); return true
+  } })
+  queueCurrentRunMessage(T1, { id: "withdrawn", content: "Do not execute", beforeInject: () => false })
+  setCurrentRunInjectionNotifier((_thread, messages) => {
+    events.push("transcript")
+    assertEqual(messages.length, 1, "withdrawn host task never reaches transcript")
+  })
+  const result = await runBeforeModel({ messages: [] }, rt(T1))
+  assertEqual(events.join(","), "receipt,transcript", "host receipt precedes durable injection")
+  assertEqual(result.messages.length, 1, "only accepted message reaches model")
+  assertEqual(result.messages[0].id, "accepted", "original durable ID retained")
+  assert(!JSON.stringify(result.messages).includes("beforeInject"), "host callbacks never enter graph state")
+  clearCurrentRunMessageQueue(T1)
+}
+
+async function testHostReceiptFailurePreventsModelInjection(): Promise<void> {
+  clearCurrentRunMessageQueue(T1)
+  setCurrentRunMessageQueueOwner(T1, RUN1)
+  let notified = false
+  setCurrentRunInjectionNotifier(() => { notified = true })
+  queueCurrentRunMessage(T1, { id: "failed-receipt", content: "Must not execute", beforeInject: () => {
+    throw new Error("receipt unavailable")
+  } })
+  let failed = false
+  try { await runBeforeModel({ messages: [] }, rt(T1)) } catch { failed = true }
+  assert(failed, "failed receipt fails model boundary")
+  assert(!notified, "no transcript acknowledgement on failed host receipt")
+  assertEqual(getCurrentRunInjectedMessageIds(T1).length, 0, "no consumed IDs on failure")
+  clearCurrentRunMessageQueue(T1)
+}
+
 async function main(): Promise<void> {
   const tests = [
+    testSettlementFollowsDurableConsumption,
+    testCancelledAndFencedReceiptsSettleOnce,
+    testHostReceiptPrecedesTranscriptAndCancelledMessageIsNotInjected,
+    testHostReceiptFailurePreventsModelInjection,
     testIncrementalContentBlockTranscriptMerge,
     testStreamToolCallChunksPersistCompleteArguments,
     testCompletedAssistantIdentityUsesCurrentProviderOccurrence,
@@ -1394,6 +1464,7 @@ async function main(): Promise<void> {
     testThreadIsolationStore,
     testPeekReturnsCopy,
     testBeforeModelInjectsAndDrains,
+    testInternalCueIsNotADurableInjectionAnchor,
     testInjectedMessagePreservesVisibleAlias,
     testInjectedMessageOmitsRedundantVisibleAlias,
     testBeforeModelNoThreadNoop,
@@ -1427,6 +1498,36 @@ async function main(): Promise<void> {
     console.log(`✓ ${test.name}`)
   }
   console.log(`\n${tests.length} passed`)
+}
+
+async function testSettlementFollowsDurableConsumption(): Promise<void> {
+  reset()
+  const events: string[] = []
+  queueCurrentRunMessage(T1, { id: "durable-receipt", content: "change the result",
+    onInjected: () => events.push("consumed"), onDiscarded: () => events.push("discarded") })
+  setCurrentRunInjectionNotifier(() => { throw new Error("disk unavailable") })
+  try { await runBeforeModel({ messages: [] }, rt(T1)) } catch { /* expected */ }
+  assertEqual(events.length, 0, "failed persistence must not claim consumption or discard a retryable input")
+  setCurrentRunInjectionNotifier(() => { events.push("persisted") })
+  await runBeforeModel({ messages: [] }, rt(T1))
+  clearCurrentRunMessageQueue(T1, RUN1)
+  assertEqual(events.join(","), "persisted,consumed", "a consumed input is not discarded at run cleanup")
+}
+
+async function testCancelledAndFencedReceiptsSettleOnce(): Promise<void> {
+  reset()
+  const discarded: string[] = []
+  const entry = (id: string): CurrentRunQueuedMessage => ({ id, content: id,
+    onDiscarded: () => discarded.push(id), onInjected: () => { throw new Error("must not be consumed") } })
+  queueCurrentRunMessage(T1, entry("withdrawn"))
+  deleteCurrentRunQueuedMessage(T1, "withdrawn")
+  queueCurrentRunMessage(T1, { ...entry("invalid"), beforeInject: () => false })
+  queueCurrentRunMessage(T1, { ...entry("broken"), beforeInject: () => { throw new Error("owner removed") } })
+  try { await runBeforeModel({ messages: [] }, rt(T1)) } catch { /* expected */ }
+  clearCurrentRunMessageQueue(T1, RUN2)
+  assertEqual(discarded.join(","), "withdrawn,invalid", "obsolete run cleanup cannot discard current inputs")
+  clearCurrentRunMessageQueue(T1, RUN1)
+  assertEqual(discarded.join(","), "withdrawn,invalid,broken", "a failed guard retains its receipt until cleanup")
 }
 
 main().catch((error) => {

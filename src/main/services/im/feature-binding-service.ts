@@ -32,14 +32,13 @@ export interface ImRemoteFeatureListItem {
   status: string
 }
 
-export type ImFeatureValidationResult =
-  | {
-      valid: true
-      project: ImRemoteProjectListItem
-      feature: ImRemoteFeatureListItem
-      workspacePath: string
-    }
-  | { valid: false; reasonCode: string; message: string }
+type FeatureAccess = {
+  valid: true
+  project: ImRemoteProjectListItem
+  feature: ImRemoteFeatureListItem
+}
+type FeatureDenied = { valid: false; reasonCode: string; message: string }
+export type ImFeatureValidationResult = (FeatureAccess & { workspacePath: string }) | FeatureDenied
 
 /**
  * A session's shape, as a person picks it in Zhaohu.
@@ -109,7 +108,10 @@ function settingsAllowFeatures(dependencies: FeatureBindingDependencies): boolea
 export class ImFeatureBindingService {
   private readonly dependencies: FeatureBindingDependencies
 
-  constructor(dependencies: Partial<FeatureBindingDependencies> = {}) {
+  constructor(
+    dependencies: Partial<FeatureBindingDependencies> = {},
+    private readonly access: "remote" | "desktop" = "remote"
+  ) {
     this.dependencies = {
       conversationState: dependencies.conversationState ?? imConversationStateStore,
       getSettings: dependencies.getSettings ?? getBuiltinRobotSettings,
@@ -133,7 +135,7 @@ export class ImFeatureBindingService {
 
   async listRemoteProjects(): Promise<ImRemoteProjectListItem[]> {
     if (
-      !settingsAllowFeatures(this.dependencies) ||
+      (this.access === "remote" && !settingsAllowFeatures(this.dependencies)) ||
       !(await this.dependencies.projectModeEnabled())
     ) {
       return []
@@ -210,12 +212,11 @@ export class ImFeatureBindingService {
 
   // Validate current access eligibility only. Thread creation and execution load
   // the plugin context when they actually consume its prompt and agent config.
-  async validateFeature(
+  async featureAccess(
     projectId: string,
-    featureSlug: string,
-    existingWorkspacePath?: string
-  ): Promise<ImFeatureValidationResult> {
-    if (!settingsAllowFeatures(this.dependencies)) {
+    featureSlug: string
+  ): Promise<FeatureAccess | FeatureDenied> {
+    if (this.access === "remote" && !settingsAllowFeatures(this.dependencies)) {
       return {
         valid: false,
         reasonCode: "REMOTE_FEATURE_ACCESS_DISABLED",
@@ -271,6 +272,25 @@ export class ImFeatureBindingService {
       }
     }
 
+    return {
+      valid: true,
+      project: { id: projectId, name: project.name.trim() || projectId },
+      feature: {
+        projectId,
+        slug: feature.slug,
+        title: feature.title.trim() || feature.slug,
+        status: feature.overallStatus?.label || feature.featureStatusLabel || feature.featureStatus
+      }
+    }
+  }
+
+  async validateFeature(
+    projectId: string,
+    featureSlug: string,
+    existingWorkspacePath?: string
+  ): Promise<ImFeatureValidationResult> {
+    const access = await this.featureAccess(projectId, featureSlug)
+    if (!access.valid) return access
     let workspacePath: string | null
     try {
       workspacePath = existingDirectory(
@@ -292,17 +312,7 @@ export class ImFeatureBindingService {
       }
     }
 
-    return {
-      valid: true,
-      project: { id: projectId, name: project.name.trim() || projectId },
-      feature: {
-        projectId,
-        slug: feature.slug,
-        title: feature.title.trim() || feature.slug,
-        status: feature.overallStatus?.label || feature.featureStatusLabel || feature.featureStatus
-      },
-      workspacePath
-    }
+    return { ...access, workspacePath }
   }
 
   async validateExistingFeatureThread(
@@ -413,6 +423,7 @@ export class ImFeatureBindingService {
 }
 
 export const imFeatureBindingService = new ImFeatureBindingService()
+export const desktopFeatureCatalog = new ImFeatureBindingService({}, "desktop")
 
 export function validateImExistingFeatureThread(
   metadata: Record<string, unknown>,

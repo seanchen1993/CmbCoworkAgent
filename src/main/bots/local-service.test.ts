@@ -1,0 +1,509 @@
+import { beforeEach, describe, expect, it, vi } from "vitest"
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, realpathSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
+import { createHash } from "node:crypto"
+import type { BotRunPort } from "./host"
+
+const fixture = vi.hoisted(() => ({
+  stop: vi.fn(),
+  browserClose: vi.fn(),
+  browserScope: vi.fn(),
+  hasPersonalBrowserScope: vi.fn(),
+  browserAudience: undefined as ((viewer: string, scope: string) => boolean) | undefined,
+  getWork: vi.fn(),
+  desktopDeliveryWorks: vi.fn(),
+  inputProjections: vi.fn(),
+  browserWorkspace: undefined as ((scope: string) => string) | undefined,
+  memoryClose: vi.fn(),
+  memoryChanged: vi.fn(),
+  hasActiveRuns: vi.fn(),
+  notifyMemory: undefined as ((botId: string) => void) | undefined,
+  summaryClose: vi.fn(),
+  databaseClose: vi.fn(),
+  getThread: vi.fn(),
+  getMessages: vi.fn(),
+  getFollowingMessages: vi.fn(),
+  readReply: undefined as ((...args: unknown[]) => unknown) | undefined,
+  readReactions: undefined as ((...args: unknown[]) => unknown) | undefined,
+  removeReactions: vi.fn(),
+  openDatabase: vi.fn(),
+  validateExplicitSkillReference: vi.fn(),
+  validateSkillSelection: undefined as BotRunPort["validateSkillSelection"],
+  dataRoot: "/synthetic-test",
+  trace: [] as string[]
+}))
+vi.mock("../db", () => ({
+  getThreadCore: fixture.getThread,
+  getThreadMessagesByIds: fixture.getMessages,
+  getThreadMessagesAfterAnyId: fixture.getFollowingMessages
+}))
+vi.mock("./fork-input-projection", () => ({ readForkInputProjections: () => new Map() }))
+vi.mock("../agent/pending-notification-scheduler", () => ({
+  pendingNotificationScheduler: { setManagedDispatcher: vi.fn() }
+}))
+vi.mock("../app-data-root", () => ({ getCmbCoworkAgentDataRoot: () => fixture.dataRoot }))
+vi.mock("../db/native-sqlite-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../db/native-sqlite-adapter")>()),
+  openNativeSqliteDatabase: fixture.openDatabase
+}))
+vi.mock("./store", () => ({
+  BotStore: class {
+    constructor(...args: unknown[]) {
+      fixture.readReactions = args[6] as typeof fixture.readReactions
+      fixture.readReply = args[3] as typeof fixture.readReply
+    }
+  }
+}))
+vi.mock("./host", () => ({
+  LocalBotHost: class {
+    constructor(_store: unknown, runtime: BotRunPort) {
+      fixture.validateSkillSelection = runtime.validateSkillSelection
+    }
+    telemetry = { due: () => [], settle: () => 0 }
+    stop = fixture.stop
+    memoryChanged = fixture.memoryChanged
+    hasActiveRuns = fixture.hasActiveRuns
+    removeMessageReactionsForThreads = fixture.removeReactions
+    browserScope = fixture.browserScope
+    hasPersonalBrowserScope = fixture.hasPersonalBrowserScope
+    getWork = fixture.getWork
+    desktopDeliveryWorks = fixture.desktopDeliveryWorks
+    inputProjections = fixture.inputProjections
+  }
+}))
+vi.mock("../agent/standard-thread-turn", () => ({
+  validateExplicitSkillReference: fixture.validateExplicitSkillReference
+}))
+vi.mock("./runtime-adapter", () => ({ createLocalBotRunPort: vi.fn() }))
+vi.mock("./memory", () => ({
+  BotMemoryService: class {
+    constructor(_root: string, onChanged: (botId: string) => void) {
+      fixture.notifyMemory = onChanged
+    }
+    close = fixture.memoryClose
+  }
+}))
+vi.mock("./browser", () => ({
+  BotBrowserService: class {
+    constructor(_start: unknown, workspace: (scope: string) => string, audience: (viewer: string, scope: string) => boolean) {
+      fixture.browserWorkspace = workspace
+      fixture.browserAudience = audience
+    }
+    close = fixture.browserClose
+  }
+}))
+vi.mock("./electron-browser-engine", () => ({ startElectronBotBrowser: vi.fn() }))
+vi.mock("./memory-summary-adapter", () => ({
+  createBotMemoryMaintainer: () => ({ close: fixture.summaryClose })
+}))
+vi.mock("../storage", () => ({ computeNextRunAt: vi.fn() }))
+
+beforeEach(() => {
+  vi.resetModules()
+  vi.resetAllMocks()
+  fixture.trace = []
+  fixture.notifyMemory = undefined
+  fixture.readReactions = undefined
+  fixture.browserWorkspace = undefined
+  fixture.browserAudience = undefined
+  fixture.validateSkillSelection = undefined
+  fixture.dataRoot = "/synthetic-test"
+  fixture.openDatabase.mockReturnValue({ database: { close: fixture.databaseClose } })
+  fixture.hasActiveRuns.mockReturnValue(true)
+  fixture.desktopDeliveryWorks.mockReturnValue([])
+  fixture.inputProjections.mockReturnValue(new Map())
+  fixture.browserClose.mockImplementation(async () => {
+    fixture.trace.push("browser")
+  })
+  fixture.summaryClose.mockImplementation(async () => {
+    fixture.trace.push("summary")
+  })
+  fixture.memoryClose.mockImplementation(async () => {
+    fixture.trace.push("memory")
+  })
+  fixture.databaseClose.mockImplementation(() => {
+    fixture.trace.push("database")
+  })
+})
+
+describe("Bot local service shutdown", () => {
+  it("wires exact installed skill validation into the production Bot Host", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    const selection = { name: "review", path: "/registered/review/SKILL.md" }
+    fixture.validateExplicitSkillReference.mockResolvedValueOnce(null).mockResolvedValueOnce("原技能不可用")
+    try {
+      await expect(fixture.validateSkillSelection!(selection)).resolves.toBeUndefined()
+      await expect(fixture.validateSkillSelection!(selection)).rejects.toThrow("原技能不可用")
+      expect(fixture.validateExplicitSkillReference.mock.calls).toEqual([
+        [selection, undefined, undefined, true], [selection, undefined, undefined, true]
+      ])
+    } finally { await service.stopLocalBotHost() }
+  })
+
+  it("resolves desktop browser audiences through the Host's personal binding proof", async () => {
+    const service = await import("./local-service")
+    service.getBotBrowserService()
+    fixture.hasPersonalBrowserScope.mockReturnValueOnce(true).mockReturnValueOnce(false)
+    expect(fixture.browserAudience!("owner", "im-dm--owner--peer")).toBe(true)
+    expect(fixture.browserAudience!("owner", "im-group--owner--peer")).toBe(false)
+    expect(fixture.hasPersonalBrowserScope.mock.calls).toEqual([
+      ["owner", "im-dm--owner--peer"], ["owner", "im-group--owner--peer"]
+    ])
+    await service.stopLocalBotHost()
+  })
+
+  it("resolves IM browser files in the execution workspace without widening path access", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "bot-im-browser-")))
+    fixture.dataRoot = root
+    const service = await import("./local-service")
+    const { resolveBotWorkspaceFile } = await import("./workspace-file")
+    service.getBotBrowserService()
+    const resolve = fixture.browserWorkspace!
+    try {
+      const workspace = resolve("im-binding-a--bot-a")
+      expect(workspace).toBe(join(root, "bots/workspaces/mock-binding-a"))
+      expect(fixture.browserScope).toHaveBeenCalledWith("im-binding-a--bot-a")
+      writeFileSync(join(workspace, "report.txt"), "current result")
+      expect(await resolveBotWorkspaceFile(workspace, "report.txt")).toBe(join(workspace, "report.txt"))
+      expect(await resolveBotWorkspaceFile(workspace, join(workspace, "report.txt"), { allowAbsolute: true })).toBe(join(workspace, "report.txt"))
+      expect(resolve("im-binding-a--bot-a--peer-b--im-peer-root-peer-b")).toBe(workspace)
+      expect(fixture.browserScope).toHaveBeenCalledWith("im-binding-a--bot-a--peer-b--im-peer-root-peer-b")
+      const other = resolve("im-binding-b--bot-b")
+      await expect(resolveBotWorkspaceFile(other, join(workspace, "report.txt"), { allowAbsolute: true })).rejects.toThrow()
+      mkdirSync(join(workspace, "downloads"))
+      writeFileSync(join(workspace, "downloads/result.txt"), "downloaded")
+      expect(readFileSync(join(root, "bots/workspaces/mock-binding-a/downloads/result.txt"), "utf8")).toBe("downloaded")
+
+      fixture.getWork.mockReturnValue({ threadId: "work-thread", source: { transport: "im", bindingId: "binding-a" } })
+      expect(resolve("work-work-a--bot-a")).toBe(workspace)
+      fixture.getWork.mockReturnValue({ threadId: "work-thread", workspace: { path: root }, source: { transport: "im", bindingId: "binding-a" } })
+      expect(resolve("work-work-a--bot-a")).toBe(root)
+      fixture.getWork.mockReturnValue({ threadId: "work-thread" })
+      expect(resolve("work-work-a--bot-a")).toBe(resolve("bot-a"))
+      expect(resolve("group-group-a--bot-a")).toBe(join(root, "bots/workspaces/group-group-a"))
+      fixture.browserScope.mockImplementation(() => { throw new Error("invalid owner") })
+      expect(() => resolve("im-binding-a--bot-b")).toThrow("invalid owner")
+    } finally {
+      await service.stopLocalBotHost()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps prior owners' admitted user quotes after unlink and rebind, scoped to the original thread", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    fixture.getThread.mockReturnValue({ created_at: 10, metadata: JSON.stringify({ cmb_thread_incarnation: "original" }) })
+    fixture.desktopDeliveryWorks.mockReturnValue([{
+      id: "former-work", botId: "former-owner", threadId: "owned-thread", audienceKey: "desktop",
+      conversation: { state: "detached", origin: "existing", ref: { kind: "local_thread", threadId: "owned-thread",
+        incarnation: { token: "original", legacyCreatedAt: 10 } } }
+    }])
+    fixture.getMessages.mockReturnValue([{ id: "source", ordinal: 12, role: "user", content: "PRIVATE-OLD" }])
+    fixture.inputProjections.mockReturnValue(new Map([["source", "Allowed summary"]]))
+    expect(fixture.readReply!("owned-thread", "source")).toMatchObject({ text: "Allowed summary" })
+    expect(fixture.inputProjections).toHaveBeenCalledWith("former-owner", "owned-thread", ["source"], ["former-work"], "reply")
+    fixture.inputProjections.mockReturnValue(new Map([["source", null]]))
+    expect(fixture.readReply!("owned-thread", "source")).toBeNull()
+    fixture.getThread.mockReturnValue({ created_at: 20, metadata: JSON.stringify({ cmb_thread_incarnation: "replacement" }) })
+    expect(fixture.readReply!("owned-thread", "source")).toMatchObject({ text: "PRIVATE-OLD" })
+    await service.stopLocalBotHost()
+  })
+
+  it("resolves a private file-only reply from its own successful delivery receipt and sent bytes", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    fixture.getMessages.mockReturnValue([{
+      id: "file-card", ordinal: 12, role: "assistant", content: "",
+      tool_calls: [{ id: "delivery", name: "bot_deliver_files", args: {} }]
+    }])
+    const receipt = {
+      id: "receipt", ordinal: 13, role: "tool", name: "bot_deliver_files", tool_call_id: "delivery",
+      content: JSON.stringify({ kind: "bot-file-delivery", files: [
+        { name: "report.json", size: 44, filePath: "/workspace/report.json", attachmentPath: "/workspace/.sent/v1.json" }
+      ] })
+    }
+    fixture.getFollowingMessages.mockReturnValue([receipt])
+    const reply = fixture.readReply!("owned-thread", "file-card") as { id: string; text: string; preview: string }
+    expect(reply.id).toBe("file-card")
+    expect(reply.text).toContain("report.json")
+    expect(reply.text).toContain("/workspace/.sent/v1.json")
+    expect(reply.text).not.toContain('"filePath"')
+    expect(reply.text).not.toContain('"attachmentPath"')
+    expect(reply.preview).toBe("📎 report.json")
+    expect(reply.text).not.toContain('"path":"/workspace/report.json"')
+    for (const following of [
+      [{ ...receipt, is_error: true }],
+      [{ ...receipt, tool_call_id: "unrelated" }],
+      [{ role: "user", content: "next turn" }, receipt],
+      [{ role: "assistant", content: "next call" }, receipt]
+    ]) {
+      fixture.getFollowingMessages.mockReturnValue(following)
+      expect((fixture.readReply!("owned-thread", "file-card") as { text: string }).text).toBe("")
+    }
+    await service.stopLocalBotHost()
+  })
+
+  it("quotes a desktop receipt only within the current native work's delivery scope", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    const threadId = "owned-thread", token = "target", workspace = "/workspace-new"
+    const incarnation = { token, legacyCreatedAt: 10 }
+    fixture.getThread.mockReturnValue({ created_at: 10, metadata: JSON.stringify({
+      cmb_thread_incarnation: token, workspacePath: workspace
+    }) })
+    fixture.desktopDeliveryWorks.mockReturnValue([{
+      id: "target-work", botId: "bot", threadId, audienceKey: "desktop",
+      conversation: { state: "detached", origin: "existing", ref: { kind: "local_thread", threadId, incarnation } }
+    }])
+    fixture.getMessages.mockReturnValue([{
+      id: "file-card", ordinal: 12, role: "assistant", content: "Original summary",
+      tool_calls: [{ id: "delivery", name: "bot_deliver_files", args: {} }]
+    }])
+    const quote = (receiptThread: string, receiptWorkId: string) => {
+      fixture.getFollowingMessages.mockReturnValue([{
+        ordinal: 13, role: "tool", name: "bot_deliver_files", tool_call_id: "delivery",
+        content: JSON.stringify({ kind: "bot-file-delivery", receiptThread, receiptWorkId,
+          files: [{ name: "report.json", size: 44, filePath: `${workspace}/report.json`,
+            attachmentPath: `${workspace}/.bot-deliveries/${"a".repeat(64)}/report.json` }] })
+      }])
+      return fixture.readReply!(threadId, "file-card", true)
+    }
+    const receipt = `thread-${createHash("sha256").update(JSON.stringify([threadId, incarnation])).digest("hex")}`
+    expect(quote(`thread-${"b".repeat(64)}`, "source-work")).toEqual({ id: "file-card", ordinal: 12,
+      role: "assistant", text: "Original summary" })
+    expect(quote(receipt, "target-work")).toMatchObject({ preview: "📎 report.json",
+      text: expect.stringContaining(JSON.stringify({ source: {
+        threadId, assistantMessageId: "file-card", callId: "delivery", fileIndex: 0
+      } }).slice(1, -1)) })
+    await service.stopLocalBotHost()
+  })
+
+  it("keeps the original desktop work selection when distinct deliveries share the same snapshot", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    const threadId = "owned-thread", token = "local-batches"
+    const incarnation = { token, legacyCreatedAt: 10 }
+    fixture.getThread.mockReturnValue({ created_at: 10, metadata: JSON.stringify({ cmb_thread_incarnation: token }) })
+    fixture.desktopDeliveryWorks.mockReturnValue([{
+      id: "work", botId: "bot", threadId, audienceKey: "desktop",
+      conversation: { state: "detached", origin: "existing", ref: { kind: "local_thread", threadId, incarnation } }
+    }])
+    const receiptThread = `thread-${createHash("sha256").update(JSON.stringify([threadId, incarnation])).digest("hex")}`
+    const quotes: string[] = []
+    for (const directory of ["a", "b"]) {
+      fixture.getMessages.mockReturnValue([{
+        id: `card-${directory}`, ordinal: 12, role: "assistant", content: "",
+        tool_calls: [{ id: "delivery", name: "bot_deliver_files", args: {} }]
+      }])
+      fixture.getFollowingMessages.mockReturnValue([{
+        id: `receipt-${directory}`, role: "tool", name: "bot_deliver_files", tool_call_id: "delivery",
+        content: JSON.stringify({ kind: "bot-file-delivery", receiptThread, receiptWorkId: "work",
+          files: [{ name: "report.md", size: 20,
+            filePath: "/workspace/report.md", attachmentPath: "/workspace/.sent/shared.md" }] })
+      }])
+      const reply = fixture.readReply!(threadId, `card-${directory}`, true) as { text: string }
+      const reference = JSON.parse(reply.text.split("\n")[1])
+      expect(reference).toEqual({ name: "report.md", size: 20, path: "/workspace/.sent/shared.md",
+        attachmentPath: "/workspace/.sent/shared.md", filePath: "/workspace/report.md",
+        source: { threadId, assistantMessageId: `card-${directory}`, callId: "delivery", fileIndex: 0 } })
+      quotes.push(reply.text)
+    }
+    expect(quotes[0]).not.toBe(quotes[1])
+    await service.stopLocalBotHost()
+  })
+  it("uses the initialized host for committed reaction cleanup and fences cleanup during shutdown", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    service.removeLocalBotMessageReactionsForThreads(["deleted", "deleted"])
+    expect(fixture.removeReactions).toHaveBeenCalledExactlyOnceWith(["deleted"])
+    expect(fixture.openDatabase).toHaveBeenCalledTimes(1)
+    await service.stopLocalBotHost()
+    expect(() => service.removeLocalBotMessageReactionsForThreads(["late"])).toThrow("退出")
+    expect(fixture.removeReactions).toHaveBeenCalledTimes(1)
+  })
+
+  it("removes only exact orphan thread reactions from dormant storage without starting or migrating Bots", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-reaction-cleanup-"))
+    fixture.dataRoot = root
+    const path = join(root, "bots", "control.sqlite")
+    mkdirSync(join(root, "bots"))
+    const db = new DatabaseSync(path)
+    try {
+      db.exec(
+        "CREATE TABLE bot_message_reactions(scope_kind TEXT,scope_id TEXT,message_id TEXT,emoji TEXT); CREATE TABLE bot_meta(revision INTEGER); INSERT INTO bot_meta VALUES(7)"
+      )
+      const insert = db.prepare("INSERT INTO bot_message_reactions VALUES(?,?,?,?)")
+      insert.run("thread", "deleted", "m", "😀")
+      insert.run("thread", "kept", "m", "😀")
+      insert.run("group", "deleted", "m", "😀")
+      const service = await import("./local-service")
+      service.removeLocalBotMessageReactionsForThreads(["deleted"])
+      service.removeLocalBotMessageReactionsForThreads(["deleted"])
+      expect(
+        db
+          .prepare("SELECT scope_kind,scope_id FROM bot_message_reactions ORDER BY scope_kind")
+          .all()
+      ).toEqual([
+        { scope_kind: "group", scope_id: "deleted" },
+        { scope_kind: "thread", scope_id: "kept" }
+      ])
+      expect(db.prepare("SELECT revision FROM bot_meta").get()?.revision).toBe(7)
+      expect(fixture.openDatabase).not.toHaveBeenCalled()
+      expect(fixture.readReactions).toBeUndefined() // no BotStore/host/runtime was constructed
+    } finally {
+      db.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("does not create absent control storage or add a reaction schema to an older dormant database", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-reaction-cleanup-"))
+    fixture.dataRoot = root
+    const path = join(root, "bots", "control.sqlite")
+    try {
+      const service = await import("./local-service")
+      service.removeLocalBotMessageReactionsForThreads(["deleted"])
+      expect(existsSync(join(root, "bots"))).toBe(false)
+      mkdirSync(join(root, "bots"))
+      const db = new DatabaseSync(path)
+      db.exec("CREATE TABLE original(value TEXT); INSERT INTO original VALUES('kept')")
+      service.removeLocalBotMessageReactionsForThreads(["deleted"])
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()).toEqual([
+        { name: "original" }
+      ])
+      expect(db.prepare("SELECT value FROM original").get()?.value).toBe("kept")
+      db.close()
+      expect(fixture.openDatabase).not.toHaveBeenCalled()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("fails immediately when dormant control storage has a competing writer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-reaction-cleanup-"))
+    fixture.dataRoot = root
+    mkdirSync(join(root, "bots"))
+    const db = new DatabaseSync(join(root, "bots", "control.sqlite"))
+    try {
+      db.exec(
+        "CREATE TABLE bot_message_reactions(scope_kind TEXT,scope_id TEXT,message_id TEXT,emoji TEXT); INSERT INTO bot_message_reactions VALUES('thread','deleted','m','😀'); BEGIN IMMEDIATE"
+      )
+      const service = await import("./local-service")
+      const started = performance.now()
+      expect(() => service.removeLocalBotMessageReactionsForThreads(["deleted"])).toThrow(
+        /locked|busy/i
+      )
+      expect(performance.now() - started).toBeLessThan(1000)
+      expect(db.prepare("SELECT COUNT(*) AS count FROM bot_message_reactions").get()?.count).toBe(1)
+      expect(fixture.openDatabase).not.toHaveBeenCalled()
+      expect(fixture.readReactions).toBeUndefined()
+    } finally {
+      db.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("leaves corrupt dormant storage untouched and does not invoke recovery", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-reaction-cleanup-"))
+    fixture.dataRoot = root
+    mkdirSync(join(root, "bots"))
+    const path = join(root, "bots", "control.sqlite")
+    const bytes = Buffer.from("not a sqlite database")
+    writeFileSync(path, bytes)
+    try {
+      const service = await import("./local-service")
+      expect(() => service.removeLocalBotMessageReactionsForThreads(["deleted"])).toThrow()
+      expect(readFileSync(path)).toEqual(bytes)
+      expect(fixture.openDatabase).not.toHaveBeenCalled()
+      expect(fixture.readReactions).toBeUndefined()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+  it("reads reaction identities from the exact native thread, including file-only rows and without message bodies", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    fixture.getThread.mockReturnValue({
+      metadata: JSON.stringify({ botId: "a", botHostId: "local" })
+    })
+    fixture.getMessages.mockReturnValue([
+      { id: "file-only", role: "user", ordinal: 1, content: [] },
+      { id: "reply", role: "assistant", ordinal: 2, content: "private body not returned" },
+      { id: "tool", role: "tool", ordinal: 3, content: "hidden" },
+      { id: "temporary", role: "assistant", content: "partial" }
+    ])
+    expect(fixture.readReactions!("a", "thread-a", ["file-only", "reply"])).toEqual([
+      { id: "file-only", role: "user", ordinal: 1 },
+      { id: "reply", role: "assistant", ordinal: 2 }
+    ])
+    expect(fixture.getMessages).toHaveBeenCalledWith("thread-a", ["file-only", "reply"])
+    fixture.getMessages.mockClear()
+    fixture.getThread.mockReturnValue({
+      metadata: JSON.stringify({ botId: "other", botHostId: "local" })
+    })
+    expect(() => fixture.readReactions!("a", "thread-a", ["reply"])).toThrow("归属")
+    expect(fixture.getMessages).not.toHaveBeenCalled()
+    fixture.getThread.mockReturnValue({ metadata: "null" })
+    expect(() => fixture.readReactions!("a", "thread-a", ["reply"])).toThrow("元数据")
+    fixture.getThread.mockReturnValue(null)
+    expect(fixture.readReactions!("a", "thread-a", ["reply"])).toEqual([])
+    await service.stopLocalBotHost()
+  }, 15_000)
+  it("routes committed memory invalidation through the existing host and fences it on shutdown", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    fixture.notifyMemory!("bot-a")
+    expect(fixture.memoryChanged.mock.calls).toEqual([["bot-a"]])
+    const close = service.stopLocalBotHost()
+    fixture.notifyMemory!("bot-a")
+    await close
+    expect(fixture.memoryChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it("drains the host before closing resources, shares a single shutdown, and fences late IPC", async () => {
+    let release!: () => void
+    fixture.stop.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        })
+    )
+    const service = await import("./local-service")
+    expect(service.hasActiveBotRuns()).toBe(false)
+    service.getLocalBotHost()
+    const first = service.stopLocalBotHost()
+    expect(service.stopLocalBotHost()).toBe(first)
+    expect(() => service.getLocalBotHost()).toThrow("退出")
+    await Promise.resolve()
+    expect(fixture.databaseClose).not.toHaveBeenCalled()
+    expect(fixture.browserClose).not.toHaveBeenCalled()
+    expect(service.hasActiveBotRuns()).toBe(true)
+    release()
+    await first
+    expect(fixture.trace.slice(0, 2).sort()).toEqual(["browser", "summary"])
+    expect(fixture.trace.slice(2)).toEqual(["memory", "database"])
+    expect(fixture.stop).toHaveBeenCalledTimes(1)
+    fixture.hasActiveRuns.mockImplementation(() => {
+      throw new Error("Database is closed")
+    })
+    expect(service.hasActiveBotRuns()).toBe(false)
+    expect(() => service.getLocalBotHost()).toThrow("退出")
+  })
+
+  it("still closes independent resources after one close fails", async () => {
+    fixture.browserClose.mockRejectedValue(new Error("browser cleanup failed"))
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    await expect(service.stopLocalBotHost()).rejects.toThrow("退出清理")
+    expect(fixture.summaryClose).toHaveBeenCalledTimes(1)
+    expect(fixture.memoryClose).toHaveBeenCalledTimes(1)
+    expect(fixture.databaseClose).toHaveBeenCalledTimes(1)
+    fixture.hasActiveRuns.mockImplementation(() => {
+      throw new Error("Database is closed")
+    })
+    expect(service.hasActiveBotRuns()).toBe(false)
+  })
+})

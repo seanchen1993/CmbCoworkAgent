@@ -22,6 +22,8 @@ export interface HarnessAdapterDetailProjectInput {
 export interface HarnessAdapterDetailProjectResult {
   runs: HarnessFeatureSummary[]
   watchRefs: HarnessWatchRef[]
+  /** Usable for display, but missing entries are not evidence of deletion. */
+  incompleteRuns?: true
 }
 
 export interface HarnessAdapterDetailBatchResult {

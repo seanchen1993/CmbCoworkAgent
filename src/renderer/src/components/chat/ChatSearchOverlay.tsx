@@ -1,3 +1,4 @@
+import { chatScrollInsets } from "@/lib/chat-scroll-insets"
 import {
   finishThreadSearchNavigation,
   isCurrentThreadSearchNavigation,
@@ -193,12 +194,15 @@ export function scrollChatSearchRangeIntoView(viewport: HTMLElement, range: Rang
   const rect = range.getBoundingClientRect()
   if (rect.height <= 0) return
   const viewportRect = viewport.getBoundingClientRect()
+  const inset = chatScrollInsets(viewport)
+  const visibleHeight = Math.max(1, viewport.clientHeight - inset.top - inset.bottom)
   const target =
     viewport.scrollTop +
     rect.top -
     viewportRect.top -
     viewport.clientTop -
-    (viewport.clientHeight - Math.min(rect.height, viewport.clientHeight)) / 2
+    inset.top -
+    (visibleHeight - Math.min(rect.height, visibleHeight)) / 2
   viewport.scrollTo({
     top: Math.max(0, Math.min(target, viewport.scrollHeight - viewport.clientHeight)),
     behavior: "auto"

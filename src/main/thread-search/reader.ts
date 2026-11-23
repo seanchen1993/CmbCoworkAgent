@@ -99,12 +99,29 @@ const tokenProjection = `CASE WHEN json_type(${metadata}, '$.${THREAD_INCARNATIO
   THEN ${boundedText(token, 4096)} END`
 const tokenOversized = `json_type(${metadata}, '$.${THREAD_INCARNATION_METADATA_KEY}') = 'text'
   AND octet_length(${token}) > 4096`
+// Match the ordinary sidebar scope, including its linked Bot work conversations.
 const ordinaryThreadPredicate = `NOT (
     json_type(${metadata}, '$.harnessFeature.projectId') IS 'text'
     AND json_type(${metadata}, '$.harnessFeature.slug') IS 'text'
   ) AND NOT (
     json_type(${metadata}, '$.harnessProjectSession.projectId') IS 'text'
     AND json_type(${metadata}, '$.harnessProjectSession.kind') IS 'text'
+  ) AND (
+    json_type(${metadata}, '$.botId') IS NOT 'text'
+    OR json_extract(${metadata}, '$.botId') IS ''
+    OR (
+      json_extract(${metadata}, '$.botHostId') IS 'local'
+      AND json_type(${metadata}, '$.botWorkId') IS 'text'
+      AND COALESCE(json_extract(${metadata}, '$.botGroupId'), '') IN ('', 0)
+      AND (
+        (json_extract(${metadata}, '$.botAudienceKey') IS 'desktop'
+          AND COALESCE(json_extract(${metadata}, '$.botMockBindingId'), '') IN ('', 0))
+        OR (json_type(${metadata}, '$.botMockBindingId') IS 'text'
+          AND (json_extract(${metadata}, '$.botMockTransport') IS 'im'
+            OR (json_extract(${metadata}, '$.botMockTransport') IS NULL
+              AND substr(json_extract(${metadata}, '$.botAudienceKey'), 1, 3) IS 'im:')))
+      )
+    )
   )`
 
 const candidateSql = (goalPresence: string, scope = "") => `

@@ -1111,9 +1111,9 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
   })
 
   assert.deepEqual(humanCalls, [
-    { notificationId: "gate-1", decision: "approve" },
-    { notificationId: "gate-2", decision: "reject" },
-    { notificationId: "gate-3", decision: "approve" }
+    { ...ROUTE, notificationId: "gate-1", decision: "approve" },
+    { ...ROUTE, notificationId: "gate-2", decision: "reject" },
+    { ...ROUTE, notificationId: "gate-3", decision: "approve" }
   ])
   assert.deepEqual(gateway.acknowledged.slice(0, 3), [
     "receipt-human-gate",
@@ -1691,7 +1691,23 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
   console.log("PASS testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued")
 }
 
+async function testDesktopGroupBindingGrantReachesTheWire(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const publisher = new ImCardPublisher({
+    gateway:gateway as never,interactions:new ImCardInteractionStore(),
+    isThreadLive:()=>true,warn:()=>undefined
+  })
+  await publisher.publish({...approvalCardInput(),botBindingRef:"binding:group:2"})
+  assert.equal(gateway.sent[0].botBindingRef,"binding:group:2")
+  assert.equal(gateway.sent[0].botEventId,undefined)
+  assertRemoteImCardSendV1(gateway.sent[0])
+  assert.throws(()=>assertRemoteImCardSendV1({...gateway.sent[0],botEventId:"another-event"}))
+  assert.throws(()=>assertRemoteImCardSendV1({...gateway.sent[0],botBindingRef:"missing"}))
+  console.log("PASS testDesktopGroupBindingGrantReachesTheWire")
+}
+
 async function main(): Promise<void> {
+  await testDesktopGroupBindingGrantReachesTheWire()
   testEveryBuiltCardSatisfiesTheContract()
   testEveryKvRowIsShapedTheWayTheClientParses()
   testEveryPendingCardPointsAtTextModeAboveItsBody()

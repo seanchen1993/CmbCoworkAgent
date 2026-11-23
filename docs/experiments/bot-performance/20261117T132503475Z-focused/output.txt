@@ -1,0 +1,51 @@
+
+ RUN  v3.2.4 <repo>
+
+(node:71629) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:71630) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/work-projection.test.ts (5 tests) 3009ms
+   ✓ work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history  2502ms
+(node:71753) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+ ✓ src/main/bots/feature-follow.test.ts (31 tests) 1272ms
+ ✓ src/main/bots/memory.test.ts (15 tests) 94ms
+ ✓ src/main/bots/prompt.test.ts (36 tests) 19ms
+(node:71760) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] Custom model: o07-test-model baseUrl: https://o07.invalid/v1
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 1/5 after 1000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 2/5 after 2000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 3/5 after 4000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 4/5 after 8000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 5/5 after 16000ms
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch headers in 0ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+ ✓ src/main/bots/performance-regression.test.ts (8 tests) 782ms
+   ✓ invalidates peer commands/workflows and bounds large transaction notifications  311ms
+ ✓ src/main/bots/host.test.ts (175 tests) 13818ms
+   ✓ stops the whole group including completed peer owners (worker first: false)  303ms
+   ✓ Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host  2743ms
+
+ Test Files  6 passed (6)
+      Tests  270 passed (270)
+   Start at  21:25:03
+   Duration  14.83s (transform 2.27s, setup 0ms, collect 3.95s, tests 18.99s, environment 0ms, prepare 208ms)
+

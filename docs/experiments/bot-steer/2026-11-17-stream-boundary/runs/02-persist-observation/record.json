@@ -1,0 +1,135 @@
+{
+  "id": "02-persist-observation",
+  "kind": "controlled-model-real-electron",
+  "status": "failed",
+  "note": "保留失败观测后确认 Bot 仍出现同一回复两个气泡，修复前台不足。",
+  "sourceLogModifiedAt": "2026-11-17T03:43:28.729Z",
+  "timestampMeaning": "日志最后写入时间，不等于启动时间",
+  "timezone": "Asia/Shanghai",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v22.23.5",
+    "model": "controlled-local-stream"
+  },
+  "exitCode": null,
+  "exitCodeNote": "原始日志未记录退出码，保留 unknown；status 依据断言或最终 result",
+  "build": {
+    "builtAt": "2026-11-17T03:40:13.406Z",
+    "commit": "98ef8cf3a04d287bff1aaca87d145ee144052e9e",
+    "branch": "codex/merge-uat-into-bot-beta",
+    "dirty": true,
+    "capturedFiles": [
+      {
+        "path": "src/main/agent/bot-communication-prompt.ts",
+        "sha256": "20b982b64dd51b3e185d81238b019f34027e72a5a0701245c6c95fe932f6f7d6"
+      },
+      {
+        "path": "src/main/agent/foreground-work-budget.ts",
+        "sha256": "8b1c950b198024398e6bacd5361eab4b5b5497596babc6e61d0e8111345a551a"
+      },
+      {
+        "path": "src/main/bots/prompt.ts",
+        "sha256": "6efcfa58ee75e545d2828659623fcbee0e0bb945482a8251b5e75e418d471d64"
+      },
+      {
+        "path": "src/main/bots/work-input.ts",
+        "sha256": "b5d109c0a54596fa80b847096dd33eb7de3b6e4a92ea8c0622b4197596c31961"
+      },
+      {
+        "path": "src/main/bots/work-tools.ts",
+        "sha256": "bfff0b9059e727a828275d6167416a12d4a57c982c2e6721f8e61f5b8e6cb54b"
+      },
+      {
+        "path": "src/main/agent/runtime.ts",
+        "sha256": "15aed1bafbbc4eaef087e6ef6e7d495ed1102c0ae779b526d0c28395695fe024"
+      },
+      {
+        "path": "src/main/bots/runtime-adapter.ts",
+        "sha256": "7b276b406eb0a668888e31dd4fa701bfb97b02cb8b2ac5699ed59da864b1b0f6"
+      },
+      {
+        "path": "src/main/bots/host.ts",
+        "sha256": "61ccfadaabbe798843e39feb5e535b3626af3478fe61289fe74bc8f5a277ba15"
+      },
+      {
+        "path": "src/main/bots/store.ts",
+        "sha256": "76c2541292e4f2aa77e5b89181a6d68a69564bc6e15c85ad93e7a4a33e69c267"
+      },
+      {
+        "path": "src/main/agent/standard-thread-turn.ts",
+        "sha256": "e480e095fa8f3fd65c2e84bbbd34a84ff7317f9dd5abb6186906f0df8041843c"
+      },
+      {
+        "path": "src/main/agent/current-run-message-queue.ts",
+        "sha256": "e5d8dd224a85cd7d62b12de938892ebad7485f5ddf4f9a3bf988f228ef427b68"
+      },
+      {
+        "path": "src/main/ipc/agent.ts",
+        "sha256": "cdff9e8df73f4b893979f6c4e86aaac125a62135748d3b82fc4bbf1856759d1b"
+      },
+      {
+        "path": "tests/support/bot-slash-skill-fixture.ts",
+        "sha256": "4764561d555fffbcb3ad05821d26a330a8339846e64ffe37b23891ca5c93881e"
+      },
+      {
+        "path": "src/shared/bots/contracts.ts",
+        "sha256": "7898564a3c4ee56e7a5de0c2b8c214a8b0094133eae23549c71accbdd7056328"
+      }
+    ],
+    "coverageNote": "旧构建清单仅含原有 Bot 核心文件指纹，并未覆盖此次所有 UI/测试文件，缺失部分未知。"
+  },
+  "testVersion": null,
+  "report": {
+    "model": "controlled-local-stream",
+    "passed": false,
+    "results": [
+      {
+        "kind": "bot-main",
+        "samples": 63,
+        "maxBefore": 2,
+        "maxAfter": 1,
+        "duplicates": [
+          [
+            {
+              "id": "reused-provider-id",
+              "text": "CMBDevClaw开始于 2026-11-17 11:43BEFORE_bot-main"
+            },
+            {
+              "id": "current-run-assistant:58be560b-919c-4627-b7d6-09a0eca5e10a",
+              "text": "BEFORE_bot-main"
+            }
+          ],
+          [
+            {
+              "id": "reused-provider-id",
+              "text": "CMBDevClaw开始于 2026-11-17 11:43BEFORE_bot-main"
+            },
+            {
+              "id": "current-run-assistant:58be560b-919c-4627-b7d6-09a0eca5e10a",
+              "text": "BEFORE_bot-main"
+            }
+          ],
+          [
+            {
+              "id": "reused-provider-id",
+              "text": "CMBDevClaw开始于 2026-11-17 11:43BEFORE_bot-main"
+            },
+            {
+              "id": "current-run-assistant:58be560b-919c-4627-b7d6-09a0eca5e10a",
+              "text": "BEFORE_bot-main"
+            }
+          ]
+        ]
+      }
+    ],
+    "requests": [
+      "other",
+      "STEER_START_bot-main",
+      "STEER_SECOND_bot-main"
+    ],
+    "errors": []
+  },
+  "sourceLogSha256": "46dc1e4130cb054e1e4ee699dee2859d52db75a55772a2de98e0af19c4ec4b66",
+  "command": "BOT_TEST_APP_OUT=<isolated-build> node --import tsx tests/bots-steer-stream-app.spec.ts"
+}

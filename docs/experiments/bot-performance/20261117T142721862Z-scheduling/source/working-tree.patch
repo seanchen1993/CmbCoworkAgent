@@ -1,0 +1,1339 @@
+diff --git a/src/main/bots/background-commands.test.ts b/src/main/bots/background-commands.test.ts
+index b675971c1..73eb4fa1b 100644
+--- a/src/main/bots/background-commands.test.ts
++++ b/src/main/bots/background-commands.test.ts
+@@ -259,6 +259,9 @@ describe("Bot native command receipts", () => {
+   it("migrates old command rows without inventing their original user request", () => {
+     const { db, store, task, command, result } = fixture()
+     store.acceptCommand(task.id, command)
++    // Reconstruct the old schema, which had neither this index nor connection-local observers.
++    db.run("DROP INDEX bot_commands_busy_source")
++    for (const action of ["INSERT", "UPDATE", "DELETE"]) db.run(`DROP TRIGGER bot_commands_invalidate_${action}`)
+     db.run("ALTER TABLE bot_commands DROP COLUMN source_task_id")
+     const reopened = new BotStore(db)
+     reopened.transition(task.id, "completed")
+diff --git a/src/main/bots/feature-store.ts b/src/main/bots/feature-store.ts
+index 2ca8102f3..3ae78798b 100644
+--- a/src/main/bots/feature-store.ts
++++ b/src/main/bots/feature-store.ts
+@@ -11,6 +11,9 @@ export interface FeatureTaskQuery {
+   before?: number
+   limit?: number
+   followId?: string
++  followIds?: string[]
++  attentionOnly?: boolean
++  liveIds?: string[]
+ }
+ export interface FeatureOwner extends FeatureScope, BotFeatureFollow {}
+ export type FeatureOperation = "session" | "continue" | "manage" | "stop" | "interrupt"
+@@ -73,6 +76,15 @@ export class BotFeatureStore {
+       decision_thread: "TEXT",
+       terminal_phase: "TEXT"
+     })
++    db.run(`CREATE INDEX IF NOT EXISTS bot_feature_directory ON bot_feature_follows(bot_id,audience);
++      CREATE INDEX IF NOT EXISTS bot_feature_ops_history ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue');
++      CREATE INDEX IF NOT EXISTS bot_feature_ops_active ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue') AND state IN ('starting','active');
++      CREATE INDEX IF NOT EXISTS bot_feature_ops_decision ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue') AND decision_id IS NOT NULL;
++      CREATE INDEX IF NOT EXISTS bot_feature_ops_active_decision ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue') AND decision_id IS NOT NULL AND state IN ('starting','active');`)
++  }
++  linkedSlugs(scope: FeatureScope, projectId: string): Set<string> {
++    return new Set(this.rows("SELECT slug FROM bot_feature_follows WHERE bot_id=? AND audience=? AND project_id=?",
++      [scope.botId, scope.audience, projectId]).map(row => String(row.slug)))
+   }
+   follow(scope: FeatureScope, feature: Omit<BotFeatureFollow, "id">): FeatureOwner {
+     this.db.run(
+@@ -151,7 +163,7 @@ export class BotFeatureStore {
+   /** Only small indexed Bot records: listing tasks never reads project files, messages or run logs. */
+   taskRows(
+     scope: FeatureScope,
+-    { query = "", before = Number.MAX_SAFE_INTEGER, limit = -1, followId }: FeatureTaskQuery = {}
++    { query = "", before = Number.MAX_SAFE_INTEGER, limit = -1, followId, followIds, attentionOnly, liveIds = [] }: FeatureTaskQuery = {}
+   ) {
+     return this.rows(
+       `SELECT f.rowid AS ordinal,f.id,f.project_id AS projectId,f.slug,f.project_name AS projectName,f.title,
+@@ -161,12 +173,20 @@ export class BotFeatureStore {
+         WHEN o.terminal_phase IS NOT NULL THEN o.terminal_phase WHEN o.state='failed' THEN 'failed'
+         WHEN o.state='finished' THEN 'replied' WHEN EXISTS(SELECT 1 FROM bot_feature_sessions s WHERE s.follow_id=f.id) THEN 'linked'
+         ELSE 'following' END AS phase
+-      FROM bot_feature_follows f LEFT JOIN bot_feature_ops o ON o.id=(
+-        SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue')
+-        ORDER BY (decision_id IS NOT NULL) DESC,(state IN ('starting','active')) DESC,rowid DESC LIMIT 1)
+-      WHERE f.bot_id=? AND f.audience=? ${followId ? "AND f.id=?" : ""} AND f.rowid<? AND (?='' OR instr(lower(f.title||' '||f.project_name||' '||f.slug),lower(?))>0)
++      FROM bot_feature_follows f LEFT JOIN bot_feature_ops o ON o.id=COALESCE(
++        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') AND decision_id IS NOT NULL AND state IN ('starting','active') ORDER BY rowid DESC LIMIT 1),
++        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') AND decision_id IS NOT NULL ORDER BY rowid DESC LIMIT 1),
++        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') AND state IN ('starting','active') ORDER BY rowid DESC LIMIT 1),
++        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') ORDER BY rowid DESC LIMIT 1))
++      WHERE f.bot_id=? AND f.audience=? ${followId ? "AND f.id=?" : ""}
++      ${followIds ? `AND f.id IN (${followIds.map(() => "?").join(",")})` : ""}
++      ${attentionOnly ? `AND f.state='active' AND f.id IN (
++        SELECT follow_id FROM bot_feature_ops WHERE action IN ('manage','session','continue') AND state IN ('starting','active')
++        UNION SELECT follow_id FROM bot_feature_ops WHERE action IN ('manage','session','continue') AND decision_id IS NOT NULL
++        ${liveIds.length ? `UNION SELECT id FROM bot_feature_follows WHERE id IN (${liveIds.map(() => "?").join(",")})` : ""})` : ""}
++      AND f.rowid<? AND (?='' OR instr(lower(f.title||' '||f.project_name||' '||f.slug),lower(?))>0)
+       ORDER BY f.rowid DESC LIMIT ?`,
+-      [scope.botId, scope.audience, ...(followId ? [followId] : []), before, query, query, limit]
++      [scope.botId, scope.audience, ...(followId ? [followId] : []), ...(followIds ?? []), ...(attentionOnly ? liveIds : []), before, query, query, limit]
+     ) as unknown as (Omit<BotFeatureTask, "kind"> & { ordinal: number })[]
+   }
+   private touch(id: string) {
+diff --git a/src/main/bots/feature-turns.ts b/src/main/bots/feature-turns.ts
+index 5144e8d09..d05ed2952 100644
+--- a/src/main/bots/feature-turns.ts
++++ b/src/main/bots/feature-turns.ts
+@@ -44,6 +44,9 @@ export class BotFeatureTurns {
+     const turn = this.turns.get(threadId)
+     if (turn?.operationId === operationId) turn.phase = phase
+   }
++  activeFollowIds() {
++    return [...new Set([...this.turns.values()].map(turn => turn.followId))]
++  }
+   activity(followId: string) {
+     let primary: { phase: "running" | "question" | "approval"; threadId: string } | undefined
+     for (const [threadId, turn] of this.turns) {
+diff --git a/src/main/bots/host.test.ts b/src/main/bots/host.test.ts
+index 77f6370d7..3ba73495e 100644
+--- a/src/main/bots/host.test.ts
++++ b/src/main/bots/host.test.ts
+@@ -704,7 +704,7 @@ describe("Bot control state", () => {
+     const unsubscribe = host.subscribe(listener)
+     host.memoryChanged(bot.id)
+     expect(listener.mock.calls).toEqual([
+-      [{ hostId: "local", revision: before.revision, memoryBotId: bot.id }]
++      [{ hostId: "local", revision: before.revision, memoryBotId: bot.id, workChanges: [] }]
+     ])
+     expect(host.snapshot()).toEqual(before)
+     unsubscribe()
+diff --git a/src/main/bots/host.ts b/src/main/bots/host.ts
+index f1ec21f20..6196caff4 100644
+--- a/src/main/bots/host.ts
++++ b/src/main/bots/host.ts
+@@ -160,13 +160,24 @@ export class LocalBotHost {
+   private stopping = false
+   private faulted = false
+   private scheduled = false
++  private yieldBeforePump = false
++  private admissionExcluded: Set<string> | undefined
+   private mockDelivering: Promise<void> | null = null
+   private scheduleTimer: ReturnType<typeof setTimeout> | undefined
+   private lastHistoryMaintenance = -Infinity
+   // A tool may wake this queue, but its expiring call scope must not own a new Bot run.
+   private readonly pumpInHostContext = AsyncResource.bind(() => {
++    if (this.stopping || this.faulted) {
++      this.scheduled = false
++      return
++    }
++    // A wake already queued by a receipt/listener must not bypass a requested yield.
++    if (this.yieldBeforePump) {
++      this.yieldBeforePump = false
++      setImmediate(this.pumpInHostContext)
++      return
++    }
+     this.scheduled = false
+-    if (this.stopping || this.faulted) return
+     try {
+       this.pump()
+     } catch (error) {
+@@ -183,14 +194,14 @@ export class LocalBotHost {
+     private readonly nextSchedule?: (input: BotScheduleInput, from: Date) => string | null,
+     private readonly mockTransport: BotMockTransport = { send: async () => "sent" }
+   ) {
+-    // Positive infinity explicitly disables only the Host-wide admission cap.
++    // Production disables only the Host-wide cap; thread/resource ownership still applies.
+     if (
+       concurrency !== Number.POSITIVE_INFINITY &&
+       (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
+     )
+       throw new Error("Invalid Bot concurrency")
+     store.recover()
+-    this.unsubscribe = runtime.onAvailable(() => this.wake())
++    this.unsubscribe = runtime.onAvailable(() => { this.admissionExcluded = undefined; this.wake() })
+     this.wake()
+     this.armSchedules()
+     if (runtime.recover) {
+@@ -345,6 +356,7 @@ export class LocalBotHost {
+     const event = {
+       hostId: LOCAL_BOT_HOST_ID,
+       revision: this.store.revision(),
++      workChanges: this.store.workInvalidations.take(),
+       ...detail
+     }
+     for (const listener of this.listeners) {
+@@ -507,6 +519,29 @@ export class LocalBotHost {
+       return { task, ordinal }
+     })
+   }
++  featureTaskPage(scope: FeatureScope, input: import("../../shared/bots/feature").BotFeaturePageInput = {}) {
++    const query = input.query ?? ""
++    const ids = input.refreshIds ?? []
++    if (typeof query !== "string" || query.length > 200 || !Array.isArray(ids) || ids.length > 40 ||
++      ids.some(id => typeof id !== "string" || id.length > 160) || new Set(ids).size !== ids.length)
++      throw new BotError("INVALID_INPUT", "Feature 查询无效")
++    let before = Number.MAX_SAFE_INTEGER
++    if (input.cursor !== undefined) {
++      try {
++        if (typeof input.cursor !== "string" || input.cursor.length > 2048) throw new Error()
++        const [botId, audience, search, ordinal] = JSON.parse(Buffer.from(input.cursor, "base64url").toString())
++        if (botId !== scope.botId || audience !== scope.audience || search !== query || !Number.isSafeInteger(ordinal) || ordinal <= 0) throw new Error()
++        before = ordinal
++      } catch { throw new BotError("INVALID_INPUT", "Feature 游标无效") }
++    }
++    const rows = this.featureTasks(scope, { query, before, limit: 41 })
++    return {
++      items: rows.slice(0, 40).map(row => row.task),
++      priority: this.featureTasks(scope, { query, attentionOnly: true, liveIds: this.featureTurns.activeFollowIds(), limit: 6 }).map(row => row.task),
++      refreshed: ids.length ? this.featureTasks(scope, { followIds: ids, limit: 40 }).map(row => row.task) : [],
++      nextCursor: rows.length > 40 ? Buffer.from(JSON.stringify([scope.botId, scope.audience, query, rows[39].ordinal])).toString("base64url") : null
++    }
++  }
+   taskDirectory(taskId: string, cursor?: string, query = "") {
+     const source = this.workToolSource(taskId)
+     if (source.workId || (source.mockSource && source.mockSource.transport !== "im"))
+@@ -666,13 +701,14 @@ export class LocalBotHost {
+       throw new BotError("CONFLICT", "请从 Bot 主对话或已绑定的招乎群交办项目工作")
+     return task
+   }
+-  featureChanged(scope: FeatureScope, followed?: { projectId: string; slug: string }) {
++  featureChanged(scope: FeatureScope & { id?: string; projectId?: string; slug?: string }, followed?: { id?: string; projectId: string; slug: string }) {
++    if (!followed && scope.projectId && scope.slug) followed = { id: scope.id, projectId: scope.projectId, slug: scope.slug }
+     if (!this.stopping)
+       this.changed({
+         featureScope: {
+           botId: scope.botId,
+           audience: scope.audience,
+-          ...(followed ? { projectId: followed.projectId, slug: followed.slug } : {})
++          ...(followed ? { projectId: followed.projectId, slug: followed.slug, ...(followed.id ? { followId: followed.id } : {}) } : {})
+         }
+       })
+   }
+@@ -746,7 +782,12 @@ export class LocalBotHost {
+       if (active) run.browserHelp = help
+       else if (run.browserHelp?.generation === help.generation) run.browserHelp = undefined
+     }
+-    this.updateImState(() => this.store.im.browserHelpNotice(this.store.getTask(taskId), help, active))
++    const task = this.store.getTask(taskId)
++    const workId = botTaskWorkFamily(task)
++    if (workId) this.store.workInvalidations.mark(workId)
++    this.updateImState(() => this.store.im.browserHelpNotice(task, help, active))
++    // Local browser help can change without an IM outbox write.
++    if (workId) this.changed()
+   }
+   imFileStatuses(botId: string, threadId: string, callId: string) {
+     return this.store.im.fileStatuses(botId, threadId, callId)
+@@ -1968,8 +2009,10 @@ export class LocalBotHost {
+     this.mockRecoveryTimer.unref?.()
+   }
+ 
+-  private wake(): void {
+-    if (this.stopping || this.faulted || this.scheduled) return
++  private wake(yieldToLoop = false): void {
++    if (this.stopping || this.faulted) return
++    this.yieldBeforePump ||= yieldToLoop
++    if (this.scheduled) return
+     this.scheduled = true
+     queueMicrotask(this.pumpInHostContext)
+   }
+@@ -1995,16 +2038,26 @@ export class LocalBotHost {
+     if (this.store.hasPendingCommandNotifications() && this.store.flushReplies()) this.wake()
+     this.pumpMockDelivery()
+     const excluded = new Set([
++      ...(this.admissionExcluded ?? []),
+       ...[...this.active.values()].map((run) => run.task.threadId),
+       ...[...this.commandCancellations.values()].map((run) => run.threadId)
+     ])
++    this.admissionExcluded = undefined
++    const startedAt = performance.now()
++    let inspected = 0
+     while (!this.stopping && this.active.size < this.concurrency) {
++      // Bound synchronous scheduling time, never the number of concurrent tasks.
++      // Count unsuccessful lease attempts too; unavailable threads must not spin.
++      if (inspected > 0 && performance.now() - startedAt >= 8) {
++        this.admissionExcluded = excluded
++        this.wake(true)
++        return
++      }
++      inspected++
+       const task = this.store.nextQueued(
+         [...excluded],
+-        // The finite-slot policy reserves capacity for main conversations. With
+-        // admission uncapped, unrelated work threads need no global reservation.
+         this.concurrency === Number.POSITIVE_INFINITY ||
+-          ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task))
++          ![...this.active.values()].some(run => !!botTaskWorkFamily(run.task))
+       )
+       if (!task) return
+       if (this.store.taskRootCancelled(task)) {
+diff --git a/src/main/bots/memory.ts b/src/main/bots/memory.ts
+index eda0725e6..6958e25a5 100644
+--- a/src/main/bots/memory.ts
++++ b/src/main/bots/memory.ts
+@@ -24,6 +24,14 @@ import {
+ } from "../../shared/bots/memory-scope"
+ 
+ const MAX_FILE_BYTES = 48_000
++const MAX_CACHED_BYTES = 24 * 1024 * 1024
++interface CachedMemory {
++  botId: string
++  identity: string
++  modified: number
++  bytes: number
++  entry: BotMemory
++}
+ const digest = (text: string) => createHash("sha256").update(text).digest("hex")
+ 
+ /** Reuses the existing memory index; file identities stay relative to this Bot. */
+@@ -33,6 +41,8 @@ export class BotMemoryService {
+   private stopping = false
+   private readonly retiredBots = new Set<string>()
+   private readonly edits = new Map<string, number>()
++  private readonly files = new Map<string, CachedMemory>()
++  private cachedBytes = 0
+   constructor(
+     private readonly root: string,
+     private readonly onChanged: (botId: string) => void = () => {}
+@@ -60,14 +70,47 @@ export class BotMemoryService {
+       throw new BotError("INVALID_INPUT", "记忆文件格式或大小不受支持")
+     return readFileSync(path, "utf8")
+   }
+-  list(botId: string, context?: BotMemoryContext): BotMemory[] {
++  private forgetFile(path: string): void {
++    const prior = this.files.get(path)
++    if (prior) this.cachedBytes -= prior.bytes
++    this.files.delete(path)
++  }
++  private readDirectory(botId: string): CachedMemory[] {
+     const directory = this.directory(botId)
+     const files = readdirSync(directory).filter((name) => name.endsWith(".md"))
+     if (files.length > 201) throw new BotError("CONFLICT", "记忆数量已达上限，请先整理")
+-    // The reused index scans every Markdown file, including the manifest.
++    const paths = new Set(files.map(name => join(directory, name)))
++    for (const [path, entry] of this.files)
++      if (entry.botId === botId && !paths.has(path)) this.forgetFile(path)
++    const entries: CachedMemory[] = []
++    // Revalidate names and file identity on every read, including the manifest.
++    // Cache content, never visibility: each caller applies its own conversation scope.
+     for (const name of files) {
+       if (!/^[a-zA-Z0-9_-]+\.md$/.test(name)) throw new BotError("INVALID_INPUT", "记忆文件名无效")
+-      this.readFile(join(directory, name))
++      const path = join(directory, name)
++      const info = lstatSync(path, { bigint: true })
++      if (!info.isFile() || info.isSymbolicLink() || info.size > BigInt(MAX_FILE_BYTES)) {
++        this.forgetFile(path)
++        throw new BotError("INVALID_INPUT", "记忆文件格式或大小不受支持")
++      }
++      if (name === "MEMORY.md") continue
++      const identity = `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`
++      let cached = this.files.get(path)
++      this.forgetFile(path)
++      if (cached?.identity !== identity) {
++        const text = readFileSync(path, "utf8")
++        const parsed = parseFrontmatter(text)
++        cached = {
++          botId, identity, modified: Number(info.mtimeNs),
++          bytes: 1024 + text.length * 2,
++          entry: { id: name.slice(0, -3), name: parsed.frontmatter.name ?? name,
++            content: parsed.body, version: digest(text), scope: this.scopeFromFile(parsed.frontmatter) }
++        }
++      }
++      this.files.set(path, cached)
++      this.cachedBytes += cached.bytes
++      while (this.cachedBytes > MAX_CACHED_BYTES) this.forgetFile(this.files.keys().next().value!)
++      entries.push(cached)
+     }
+     const index = join(directory, "index.sqlite")
+     if (
+@@ -75,32 +118,23 @@ export class BotMemoryService {
+       (lstatSync(index).isSymbolicLink() || lstatSync(index).size > 32 * 1024 * 1024)
+     )
+       throw new BotError("INVALID_INPUT", "记忆索引无效")
+-    return files
+-      .filter((name) => name !== "MEMORY.md")
+-      .map((name) => {
+-        const text = this.readFile(join(directory, name)),
+-          parsed = parseFrontmatter(text)
+-        return {
+-          id: name.slice(0, -3),
+-          name: parsed.frontmatter.name ?? name,
+-          content: parsed.body,
+-          version: digest(text),
+-          scope: this.scopeFromFile(parsed.frontmatter)
+-        }
+-      })
+-      .filter((entry) => !context || botMemoryVisible(entry, context))
++    return entries
++  }
++  list(botId: string, context?: BotMemoryContext): BotMemory[] {
++    return this.readDirectory(botId)
++      .filter(({ entry }) => !context || botMemoryVisible(entry, context))
++      .map(({ entry }) => ({ ...entry, scope: entry.scope && { ...entry.scope } }))
+   }
+   private scopeFromFile(header: Record<string, string>): BotMemoryScope {
+     if (!header.bot_scope) return { kind: "private" }
+     return parseBotMemoryScope({ kind: header.bot_scope, groupId: header.bot_group_id })
+   }
+-  /** Fresh per-run snapshot, newest first like the original memory manifest. No second cache. */
++  /** Fresh identities and visibility per run; unchanged content is reused within a byte budget. */
+   forPrompt(botId: string, context: BotMemoryContext = {}): BotMemory[] {
+-    const directory = this.directory(botId)
+-    return this.list(botId, context)
+-      .map((entry) => ({ entry, modified: lstatSync(join(directory, `${entry.id}.md`)).mtimeMs }))
++    return this.readDirectory(botId)
++      .filter(({ entry }) => botMemoryVisible(entry, context))
+       .sort((a, b) => b.modified - a.modified || a.entry.id.localeCompare(b.entry.id))
+-      .map(({ entry }) => entry)
++      .map(({ entry }) => ({ ...entry, scope: entry.scope && { ...entry.scope } }))
+   }
+   write(botId: string, input: WriteBotMemoryInput): BotMemory {
+     const result = this.persist(botId, input)
+@@ -309,6 +343,7 @@ export class BotMemoryService {
+     // Resolve the host-owned path before retirement, including on a cleanup retry.
+     const directory = botDirectory(this.root, "memories", botId)
+     this.retiredBots.add(botId)
++    for (const [path, entry] of this.files) if (entry.botId === botId) this.forgetFile(path)
+     this.edits.set(botId, this.editVersion(botId) + 1)
+     const index = this.indexes.get(botId)
+     if (index) {
+@@ -324,5 +359,7 @@ export class BotMemoryService {
+     this.indexes.clear()
+     this.users.clear()
+     this.edits.clear()
++    this.files.clear()
++    this.cachedBytes = 0
+   }
+ }
+diff --git a/src/main/bots/message-reactions.test.ts b/src/main/bots/message-reactions.test.ts
+index b48fea410..2298fc6be 100644
+--- a/src/main/bots/message-reactions.test.ts
++++ b/src/main/bots/message-reactions.test.ts
+@@ -241,6 +241,7 @@ describe("persisted local user message reactions", () => {
+     expect(listener.mock.calls[0][0]).toEqual({
+       hostId: "local",
+       revision: f.store.revision(),
++      workChanges: [],
+       reactionTarget: f.target
+     })
+     const tasks = f.store.recentTasks()
+diff --git a/src/main/bots/prompt.ts b/src/main/bots/prompt.ts
+index d0a17875e..e590ced3a 100644
+--- a/src/main/bots/prompt.ts
++++ b/src/main/bots/prompt.ts
+@@ -71,6 +71,9 @@ export function buildBotMemoryPrompt(memories: readonly BotMemory[]): string {
+   const shown: string[] = []
+   let remaining = MEMORY_PROMPT_CHAR_BUDGET - 2 // JSON array delimiters
+   for (const memory of memories) {
++    // JSON encoding cannot shorten content. Avoid serializing an entire large
++    // memory just to discover it cannot fit; smaller later facts still qualify.
++    if (memory.content.length > remaining) continue
+     const entry = JSON.stringify({
+       id: memory.id,
+       name: memory.name,
+diff --git a/src/main/bots/store.ts b/src/main/bots/store.ts
+index ae6147277..b181bd58e 100644
+--- a/src/main/bots/store.ts
++++ b/src/main/bots/store.ts
+@@ -1,3 +1,4 @@
++import { BotWorkInvalidations } from "./work-invalidation"
+ import { pageBotWorkInputs, type BotWorkInput } from "./work-input"
+ import { parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
+ import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
+@@ -173,6 +174,7 @@ export class BotStore {
+   external(source?: BotMockSource): BotMockChannelStore {
+     return source?.transport === "im" ? this.im : this.mock
+   }
++  readonly workInvalidations: BotWorkInvalidations
+   private transactionSerial = 0
+   constructor(
+     private readonly db: NativeSqliteAdapter,
+@@ -364,6 +366,8 @@ export class BotStore {
+         db.run("ALTER TABLE bot_commands ADD COLUMN pending_notification TEXT")
+       db.run(`CREATE INDEX IF NOT EXISTS bot_commands_pending_notification ON bot_commands(updated_at,id)
+         WHERE pending_notification IS NOT NULL AND suppressed=0`)
++      db.run(`CREATE INDEX IF NOT EXISTS bot_commands_busy_source ON bot_commands(source_task_id)
++        WHERE state='accepted' OR (pending_notification IS NOT NULL AND suppressed=0)`)
+       // Repair partially applied older migrations without changing valid group/private ownership.
+       db.run(
+         "UPDATE bot_tasks SET thread_id=(SELECT thread_id FROM bots WHERE bots.id=bot_tasks.bot_id) WHERE thread_id IS NULL"
+@@ -412,6 +416,11 @@ export class BotStore {
+       )
+       db.run("CREATE INDEX IF NOT EXISTS bot_tasks_updated ON bot_tasks(updated_at,id)")
+       upgradeWorkConversationSchema(db)
++      db.run(`CREATE INDEX IF NOT EXISTS bot_work_directory ON bot_work_items(bot_id,ordinal) WHERE detached=0;
++        CREATE INDEX IF NOT EXISTS bot_tasks_work_active ON bot_tasks(work_id,state) WHERE state IN ('queued','running','waiting_user');
++        CREATE INDEX IF NOT EXISTS bot_tasks_work_order ON bot_tasks(work_id,created_at) WHERE work_id IS NOT NULL;
++        CREATE INDEX IF NOT EXISTS bot_tasks_work_outcome ON bot_tasks(work_id,created_at) WHERE work_id IS NOT NULL AND injected_into IS NULL;
++        CREATE INDEX IF NOT EXISTS bot_workflow_refs_live ON bot_workflow_refs(source_task_id) WHERE retired_at IS NULL;`)
+       // The main Bot reads a tiny recent-link notice every turn, even when most works
+       // are unlinked/generated. Avoid scanning that entire Bot's task directory.
+       db.run(`CREATE INDEX IF NOT EXISTS bot_work_association_notice
+@@ -501,6 +510,7 @@ export class BotStore {
+     this.im.setAllOffline()
+     this.restoreImConversationActivities()
+     this.telemetry = new BotTelemetryStore(db, telemetryContext)
++    this.workInvalidations = new BotWorkInvalidations(db, sql => this.rows(sql))
+   }
+ 
+   imConversationHistory(botId: string, id: string, before?: string) {
+@@ -904,20 +914,28 @@ export class BotStore {
+       (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,
+       (SELECT updated_at FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_at,
+       (SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_preview,
+-      (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id OR
+-        (json_extract(t.origin_json,'$.rootWorkId')=+w.id AND t.state IN ('queued','running','waiting_user'))
+-      ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
+-      t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
++      COALESCE((SELECT t.state FROM bot_tasks t WHERE t.state IN ('queued','running','waiting_user')
++        AND (t.work_id=w.id OR json_extract(t.origin_json,'$.rootWorkId')=+w.id)
++        ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END LIMIT 1),
++        (SELECT t.state FROM bot_tasks t INDEXED BY bot_tasks_work_order WHERE t.work_id=w.id
++          ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1)) AS execution_state,
+       (SELECT json_object('taskId',t.id,'state',t.state,'updatedAt',t.updated_at,'error',substr(t.error,1,1000))
+-        FROM bot_tasks t INDEXED BY bot_tasks_work_history WHERE t.work_id=w.id AND t.injected_into IS NULL
++        FROM bot_tasks t INDEXED BY bot_tasks_work_outcome WHERE t.work_id=w.id AND t.injected_into IS NULL
+         ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1) AS last_execution,
+       (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
+         AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
+-      (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
+-        WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))
+-       OR EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
+-         SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id
+-       ))) AS background_busy`
++      (EXISTS(SELECT 1 FROM bot_commands c WHERE c.thread_id=w.thread_id
++          AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
++       OR w.id IN (SELECT json_extract(p.origin_json,'$.rootWorkId') FROM bot_commands c
++          CROSS JOIN bot_tasks p ON p.id=c.source_task_id
++          WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
++          AND json_extract(p.origin_json,'$.rootWorkId') IS NOT NULL)
++       OR w.id IN (
++         SELECT wf_owner.work_id FROM bot_workflow_refs r CROSS JOIN bot_tasks wf_owner ON wf_owner.id=r.source_task_id
++           WHERE r.retired_at IS NULL AND wf_owner.work_id IS NOT NULL
++         UNION SELECT json_extract(wf_owner.origin_json,'$.rootWorkId') FROM bot_workflow_refs r CROSS JOIN bot_tasks wf_owner ON wf_owner.id=r.source_task_id
++           WHERE r.retired_at IS NULL AND json_extract(wf_owner.origin_json,'$.rootWorkId') IS NOT NULL
++       )) AS background_busy`
+   }
+   getWork(botId: string, workId: string): BotWorkItem {
+     this.getBot(botId)
+@@ -1011,8 +1029,8 @@ export class BotStore {
+     const rows = this.rows(
+       `SELECT w.ordinal,w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
+       ${this.workActivityProjection()}
+-      FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT ?`,
+-      [botId, audience ?? null, audience ?? null, before, query, query, pageSize + 1]
++      FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? ${audience === undefined ? "" : "AND w.audience_key=?"} AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT ?`,
++      [botId, ...(audience === undefined ? [] : [audience]), before, query, query, pageSize + 1]
+     )
+     // Command-first CROSS JOINs below prevent SQLite from scanning all task/work
+     // history to enumerate command owners. Keep every active/pending receipt;
+@@ -1021,7 +1039,7 @@ export class BotStore {
+       items: rows.slice(0, pageSize).map((row) => this.workSummary(row)),
+       priority: this.rows(
+         `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
+-        ${this.workActivityProjection()} FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.state='active'
++        ${this.workActivityProjection()} FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? ${audience === undefined ? "" : "AND w.audience_key=?"} AND w.state='active'
+         AND (?='' OR instr(lower(w.title),lower(?))>0) AND w.id IN (
+           SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')
+           UNION SELECT json_extract(origin_json,'$.rootWorkId') FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.rootWorkId') IS NOT NULL
+@@ -1029,7 +1047,7 @@ export class BotStore {
+           UNION SELECT x.id FROM bot_commands c CROSS JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE x.detached=0 AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
+           UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c CROSS JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
+         ORDER BY CASE execution_state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,w.updated_at DESC,w.ordinal DESC LIMIT 6`,
+-        [botId, audience ?? null, audience ?? null, query, query]
++        [botId, ...(audience === undefined ? [] : [audience]), query, query]
+       ).map((row) => this.workSummary(row)),
+       nextCursor:
+         rows.length > pageSize
+diff --git a/src/main/bots/work-projection.test.ts b/src/main/bots/work-projection.test.ts
+index b7e781ecb..a90e71061 100644
+--- a/src/main/bots/work-projection.test.ts
++++ b/src/main/bots/work-projection.test.ts
+@@ -105,16 +105,33 @@ describe("work activity projection query boundaries", () => {
+       ).toBe(false)
+       // Workflow ownership also seeks exact source IDs; it must not scan unrelated task history.
+       expect(plan.some(detail => detail.startsWith("SCAN wf_owner"))).toBe(false)
+-      expect(plan.some(detail => detail.startsWith("SEARCH r USING INDEX bot_workflow_refs_source"))).toBe(true)
+-      expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_work_history") && detail.includes("work_id=?"))).toBe(true)
++      expect(plan.some(detail => detail.includes("bot_workflow_refs_live"))).toBe(true)
++      expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_work_order") && detail.includes("work_id=?"))).toBe(true)
+       expect(plan.some(detail => detail.startsWith("SCAN t"))).toBe(false)
+       expect(plan.some(detail => detail.startsWith("SCAN x"))).toBe(false)
+       expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_injected"))).toBe(false)
+       // Compare every projected field against the prior SQL, not only peer counts.
+-      const priorSql = sql.replaceAll("=+w.id", "=w.id")
+-        .replaceAll("CROSS JOIN", "JOIN")
+-        .replaceAll(" INDEXED BY bot_tasks_work_history", "")
+-        .replace("WHERE x.detached=0 AND ", "WHERE ")
++      const priorProjection = `(SELECT version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_version,
++      (SELECT attention_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS attention_version,
++      (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,
++      (SELECT updated_at FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_at,
++      (SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_preview,
++      (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id OR
++        (json_extract(t.origin_json,'$.rootWorkId')=+w.id AND t.state IN ('queued','running','waiting_user'))
++      ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
++      t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
++      (SELECT json_object('taskId',t.id,'state',t.state,'updatedAt',t.updated_at,'error',substr(t.error,1,1000))
++        FROM bot_tasks t INDEXED BY bot_tasks_work_history WHERE t.work_id=w.id AND t.injected_into IS NULL
++        ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1) AS last_execution,
++      (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
++        AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
++      (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
++        WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))
++       OR EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
++         SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id
++       ))) AS background_busy`
++      const priorSql = sql.replace((f.store as any).workActivityProjection(), priorProjection)
++      expect(priorSql).not.toBe(sql)
+       expect(f.db.exec(sql, bindings)).toEqual(f.db.exec(priorSql, bindings))
+     }
+     expect(
+diff --git a/src/main/ipc/bots.ts b/src/main/ipc/bots.ts
+index d4b0c3edc..8c861d901 100644
+--- a/src/main/ipc/bots.ts
++++ b/src/main/ipc/bots.ts
+@@ -153,8 +153,11 @@ export function registerBotHandlers(
+     return (await featureCatalog(groupId)).listRemoteProjects()
+   })
+   ipcMain.handle("bots:feature:catalog", async (event, hostId, botId, projectId, groupId) => {
+-    featureScope(desktopHost(event, hostId), botId, groupId)
+-    return (await featureCatalog(groupId)).listRemoteFeatures(featureText(projectId))
++    const host = desktopHost(event, hostId)
++    const scope = featureScope(host, botId, groupId)
++    const id = featureText(projectId)
++    const linked = host.featureStore.linkedSlugs(scope, id)
++    return (await (await featureCatalog(groupId)).listRemoteFeatures(id)).map(feature => ({ ...feature, linked: linked.has(feature.slug) }))
+   })
+   ipcMain.handle("bots:feature:follow", async (event, hostId, botId, projectId, slug, groupId) => {
+     const host = desktopHost(event, hostId)
+@@ -189,6 +192,15 @@ export function registerBotHandlers(
+       }
+     )
+   })
++  ipcMain.handle("bots:feature:page", (event, hostId, botId, groupId, input) => {
++    const host = desktopHost(event, hostId)
++    if (input !== undefined && (!input || typeof input !== "object" || Array.isArray(input)))
++      throw new BotError("INVALID_INPUT", "Feature 查询无效")
++    const page = host.featureTaskPage(featureScope(host, botId, groupId), input)
++    const tasks = [...page.items, ...page.priority, ...page.refreshed]
++    if (tasks.length) void refreshBotFeatureProjects([...new Set(tasks.map(task => task.projectId))])
++    return page
++  })
+   ipcMain.handle("bots:feature:list", (event, hostId, botId, groupId) => {
+     const host = desktopHost(event, hostId)
+     const tasks = host.featureTasks(featureScope(host, botId, groupId)).map((row) => row.task)
+diff --git a/src/preload/bots.ts b/src/preload/bots.ts
+index f7c0bb669..6fba7d098 100644
+--- a/src/preload/bots.ts
++++ b/src/preload/bots.ts
+@@ -11,6 +11,7 @@ export const localBotsApi: BotClient = {
+       ipcRenderer.invoke("bots:feature:catalog", LOCAL_BOT_HOST_ID, botId, projectId, groupId),
+     follow: (botId, projectId, slug, groupId) =>
+       ipcRenderer.invoke("bots:feature:follow", LOCAL_BOT_HOST_ID, botId, projectId, slug, groupId),
++    page: (botId, groupId, input) => ipcRenderer.invoke("bots:feature:page", LOCAL_BOT_HOST_ID, botId, groupId, input),
+     list: (botId, groupId) =>
+       ipcRenderer.invoke("bots:feature:list", LOCAL_BOT_HOST_ID, botId, groupId),
+     lifecycle: (botId, id, action, version, groupId) =>
+diff --git a/src/renderer/src/components/bots/BotFeaturePanel.tsx b/src/renderer/src/components/bots/BotFeaturePanel.tsx
+index 60dc85797..9736ed49f 100644
+--- a/src/renderer/src/components/bots/BotFeaturePanel.tsx
++++ b/src/renderer/src/components/bots/BotFeaturePanel.tsx
+@@ -1,4 +1,5 @@
+-import { useCallback, useEffect, useState } from "react"
++import { useBotRefresh } from "./use-bot-refresh"
++import { useCallback, useEffect, useRef, useState } from "react"
+ import "./bot-features.css"
+ import { ArrowUpRight, ChevronDown, ChevronRight } from "lucide-react"
+ import { useAppStore } from "@/lib/store"
+@@ -40,14 +41,17 @@ export function FollowPicker({
+   done: () => void
+ }) {
+   const [projects, setProjects] = useState<{ id: string; name: string }[]>()
+-  const [features, setFeatures] = useState<{ slug: string; title: string }[]>()
++  const [features, setFeatures] = useState<{ slug: string; title: string; linked?: boolean }[]>()
+   const [project, setProject] = useState(""),
+     [slug, setSlug] = useState(""),
+     [error, setError] = useState(""),
+     [busy, setBusy] = useState(false)
+-  const linkedSlugs = new Set(followed?.filter((f) => f.projectId === project).map((f) => f.slug))
++  const linkedSlugs = new Set([
++    ...(followed?.filter((f) => f.projectId === project).map((f) => f.slug) ?? []),
++    ...(features?.filter((f) => f.linked).map((f) => f.slug) ?? [])
++  ])
+   const canFollow = Boolean(
+-    followed && features?.some((f) => f.slug === slug) && !linkedSlugs.has(slug)
++    (api.page || followed) && features?.some((f) => f.slug === slug) && !linkedSlugs.has(slug)
+   )
+   useEffect(() => {
+     let current = true
+@@ -171,35 +175,30 @@ export function FeatureRow({
+     [detail, setDetail] = useState<BotFeatureDetail>(),
+     [error, setError] = useState("")
+   const [busy, setBusy] = useState(false)
++  const detailRead = useBotRefresh(
++    JSON.stringify([botId, groupId, feature.id, open]),
++    () => (open ? api.detail(botId, feature.id, groupId) : Promise.resolve(undefined)),
++    (value) => {
++      if (value) {
++        setDetail(value)
++        setError("")
++      }
++    },
++    (cause) => setError(botErrorMessage(cause))
++  )
++  useEffect(() => {
++    setDetail(undefined)
++  }, [botId, groupId, feature.id])
++  useEffect(() => {
++    if (open) void detailRead.refresh()
++  }, [open, revision, api, botId, groupId, feature.id, detailRead.refresh])
+   useEffect(() => {
+     if (!open) return
+-    let current = true
+-    let pending = false
+-    const refresh = async () => {
+-      if (pending) return
+-      pending = true
+-      try {
+-        const value = await api.detail(botId, feature.id, groupId)
+-        if (current) {
+-          setDetail(value)
+-          setError("")
+-        }
+-      } catch (e) {
+-        if (current) setError(botErrorMessage(e))
+-      } finally {
+-        pending = false
+-      }
+-    }
+-    void refresh()
+-    // Wait registries can change independently of a Bot turn, e.g. an approval from the desktop.
+     const timer = setInterval(() => {
+-      if (document.visibilityState === "visible") void refresh()
++      if (document.visibilityState === "visible") void detailRead.refresh()
+     }, 5000)
+-    return () => {
+-      current = false
+-      clearInterval(timer)
+-    }
+-  }, [api, feature.id, botId, groupId, open, revision])
++    return () => clearInterval(timer)
++  }, [open, detailRead.refresh])
+   const current = open && detail ? detail : feature
+   return (
+     <div className="bot-feature-row">
+@@ -280,50 +279,155 @@ export function FeatureRow({
+     </div>
+   )
+ }
+-export function useBotFeatureTasks({ client, botId, groupId }: Props) {
++export function useBotFeatureTasks({
++  client,
++  botId,
++  groupId,
++  query = ""
++}: Props & { query?: string }) {
+   const [items, setItems] = useState<BotFeatureTask[]>([]),
++    [priority, setPriority] = useState<BotFeatureTask[]>([]),
++    [cursor, setCursor] = useState<string | null>(null),
+     [error, setError] = useState(""),
+-    [loading, setLoading] = useState(Boolean(client.features)),
+     [revision, setRevision] = useState(0)
+   const api = client.features
+-  const refresh = useCallback(() => setRevision((x) => x + 1), [])
++  const key = JSON.stringify([client.hostId, botId, groupId, query])
++  const [loadedKey, setLoadedKey] = useState("")
++  const displayed = useRef(items),
++    expanded = useRef(false),
++    nextPage = useRef<string | undefined>(undefined)
++  const changedIds = useRef(new Set<string>()),
++    restart = useRef(true)
++  displayed.current = items
++  const reader = useBotRefresh(
++    key,
++    async () => {
++      const after = nextPage.current
++      nextPage.current = undefined
++      const reset = restart.current
++      restart.current = false
++      const ids = [...changedIds.current]
++      changedIds.current.clear()
++      if (!api)
++        return {
++          page: { items: [], priority: [], refreshed: [], nextCursor: null },
++          after,
++          reset,
++          ids
++        }
++      if (!api.page)
++        return {
++          page: {
++            items: await api.list(botId, groupId),
++            priority: [],
++            refreshed: [],
++            nextCursor: null
++          },
++          after,
++          reset: true,
++          ids
++        }
++      // A single target change normally refreshes at most one older row. Larger scoped
++      // invalidations restart paging instead of fetching an unbounded loaded directory.
++      const page = await api.page(botId, groupId, {
++        cursor: after,
++        query,
++        refreshIds: ids.slice(0, 40)
++      })
++      return { page, after, reset: reset || ids.length > 40, ids }
++    },
++    ({ page, after, reset, ids }) => {
++      if (reset) expanded.current = false
++      if (after) expanded.current = true
++      const head = new Set(page.items.map((item) => item.id))
++      const updates = new Map(page.refreshed.map((item) => [item.id, item]))
++      const requested = new Set(ids)
++      const matches = (item: BotFeatureTask) =>
++        (item.title + " " + item.projectName + " " + item.slug)
++          .toLowerCase()
++          .includes(query.trim().toLowerCase())
++      setItems((old) => {
++        const remaining = reset
++          ? []
++          : old
++              .filter((item) => !requested.has(item.id) || updates.has(item.id))
++              .map((item) => updates.get(item.id) ?? item)
++              .filter(matches)
++        if (after) {
++          const known = new Set(remaining.map((item) => item.id))
++          return [...remaining, ...page.items.filter((item) => !known.has(item.id))]
++        }
++        const merged = new Map(page.items.map((item) => [item.id, item]))
++        if (expanded.current)
++          for (const item of remaining) if (!head.has(item.id)) merged.set(item.id, item)
++        for (const item of page.refreshed) if (matches(item)) merged.set(item.id, item)
++        return [...merged.values()]
++      })
++      setPriority(page.priority)
++      if (after || !expanded.current) setCursor(page.nextCursor)
++      setLoadedKey(key)
++      setError("")
++    },
++    (cause) => {
++      restart.current = true
++      setLoadedKey(key)
++      setError(botErrorMessage(cause))
++    }
++  )
++  const refresh = useCallback(() => {
++    restart.current = true
++    nextPage.current = undefined
++    setRevision((value) => value + 1)
++    void reader.refresh()
++  }, [reader.refresh])
++  useEffect(() => {
++    setItems([])
++    setPriority([])
++    setCursor(null)
++    setError("")
++    changedIds.current.clear()
++    expanded.current = false
++    refresh()
++  }, [api, key, refresh])
+   useEffect(() => {
+     if (!api) return
+     let timer: ReturnType<typeof setTimeout> | undefined
+     const audience = groupId ? `im:${groupId}` : "desktop"
+     const stop = client.subscribe((event) => {
+-      if (event.featureScope?.botId !== botId || event.featureScope.audience !== audience) return
++      const target = event.featureScope
++      if (target?.botId !== botId || target.audience !== audience) return
++      if (target.followId) changedIds.current.add(target.followId)
++      else if (!target.projectId || !target.slug) restart.current = true
++      else
++        for (const item of displayed.current)
++          if (item.projectId === target.projectId && item.slug === target.slug)
++            changedIds.current.add(item.id)
+       if (!timer)
+         timer = setTimeout(() => {
+           timer = undefined
+-          refresh()
++          nextPage.current = undefined
++          setRevision((value) => value + 1)
++          void reader.refresh()
+         }, 150)
+     })
+     return () => {
+       stop()
+       clearTimeout(timer)
+     }
+-  }, [api, client, refresh, botId, groupId])
+-  useEffect(() => {
+-    if (!api) return
+-    let current = true
+-    api
+-      .list(botId, groupId)
+-      .then((rows) => {
+-        if (current) {
+-          setItems(rows)
+-          setError("")
+-        }
+-      })
+-      .catch((e) => {
+-        if (current) setError(botErrorMessage(e))
+-      })
+-      .finally(() => {
+-        if (current) setLoading(false)
+-      })
+-    return () => {
+-      current = false
+-    }
+-  }, [api, botId, groupId, revision])
+-  return { items, revision, refresh, error, loading }
++  }, [api, client, reader.refresh, botId, groupId])
++  const more = () => {
++    if (!cursor || reader.loading) return
++    nextPage.current = cursor
++    void reader.refresh()
++  }
++  return {
++    items: loadedKey === key ? items : [],
++    priority: loadedKey === key ? priority : [],
++    cursor: loadedKey === key ? cursor : null,
++    revision,
++    refresh,
++    more,
++    error,
++    loading: reader.loading || (Boolean(api) && loadedKey !== key)
++  }
+ }
+diff --git a/src/renderer/src/components/bots/BotWorkPanel.tsx b/src/renderer/src/components/bots/BotWorkPanel.tsx
+index 07eb4a70c..e092803f6 100644
+--- a/src/renderer/src/components/bots/BotWorkPanel.tsx
++++ b/src/renderer/src/components/bots/BotWorkPanel.tsx
+@@ -39,7 +39,7 @@ export function BotWorkPanel({
+     [limit, setLimit] = useState(6)
+   const [searching, setSearching] = useState(false)
+   const [completedOpen, setCompletedOpen] = useState(false)
+-  const features = useBotFeatureTasks({ client, botId, groupId })
++  const features = useBotFeatureTasks({ client, botId, groupId, query: controller.query })
+   const [createKind, setCreateKind] = useState<"work" | "feature">("work")
+   const canAdd = !disabled && !readOnlyGroup
+   const isCurrentAudience = () =>
+@@ -94,14 +94,21 @@ export function BotWorkPanel({
+       priority: priority.has(work.id),
+       updatedAt: work.updatedAt
+     })),
+-    ...features.items
++    ...[
++      ...features.priority,
++      ...features.items.filter(
++        (item) => !features.priority.some((priority) => priority.id === item.id)
++      )
++    ]
+       .filter((f) =>
+         (f.title + " " + f.projectName + " " + f.slug).toLocaleLowerCase().includes(needle)
+       )
+       .map((feature) => ({
+         kind: "feature" as const,
+         feature,
+-        priority: Boolean(feature.attentionThreadId),
++        priority:
++          Boolean(feature.attentionThreadId) ||
++          features.priority.some((item) => item.id === feature.id),
+         updatedAt: feature.updatedAt
+       }))
+   ].sort((a, b) => {
+@@ -285,7 +292,7 @@ export function BotWorkPanel({
+           onClick={() => setCompletedOpen(!completedOpen)}
+         >
+           <ChevronDown size={13} className={completedOpen ? "rotate-180" : ""} />
+-          已完成{controller.cursor ? "" : ` · ${completed.length}`}
++          已完成{controller.cursor || features.cursor ? "" : ` · ${completed.length}`}
+         </button>
+       )}
+       {!directory.length &&
+@@ -301,13 +308,14 @@ export function BotWorkPanel({
+                 : "在聊天中交办一项工作，或点击 + 创建。"}
+           </p>
+         )}
+-      {(visible.length > limit || controller.cursor) && (
++      {(visible.length > limit || controller.cursor || features.cursor) && (
+         <button
+-          disabled={controller.loading}
++          disabled={controller.loading || features.loading}
+           onClick={() => {
+             if (limit < visible.length) setLimit(Math.min(visible.length, limit + 40))
+             else {
+               if (controller.cursor) void controller.more()
++              if (features.cursor) features.more()
+               setLimit((v) => v + 40)
+             }
+           }}
+diff --git a/src/renderer/src/components/bots/use-bot-works.ts b/src/renderer/src/components/bots/use-bot-works.ts
+index 59b7125a3..41fd7f90e 100644
+--- a/src/renderer/src/components/bots/use-bot-works.ts
++++ b/src/renderer/src/components/bots/use-bot-works.ts
+@@ -3,7 +3,7 @@ import type { BotClient } from "../../../../shared/bots/contracts"
+ import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
+ import { botErrorMessage } from "@/lib/bot-error-message"
+ 
+-/** One selected Bot directory, driven by the existing host revision, never transcript polling. */
++/** Scoped invalidation; one request chain per mounted directory, never transcript polling. */
+ export function useBotWorks(
+   client: BotClient,
+   botId: string | undefined,
+@@ -13,7 +13,7 @@ export function useBotWorks(
+ ) {
+   const [items, setItems] = useState<BotWorkSummary[]>([])
+   const [priority, setPriority] = useState<BotWorkSummary[]>([])
+-  const displayed = useRef<BotWorkSummary[]>([])
++  const displayed = useRef(items)
+   displayed.current = items
+   const [selected, setSelected] = useState<BotWorkItem | null>(null)
+   const [cursor, setCursor] = useState<string | null>(null)
+@@ -23,71 +23,88 @@ export function useBotWorks(
+   const pending = useRef<Promise<void> | null>(null),
+     dirty = useRef(false),
+     mounted = useRef(true)
++  // null means explicit full refresh. Scoped events only read the changed loaded IDs.
++  const changedIds = useRef<Set<string> | null>(null),
++    removed = useRef(new Set<string>())
++  const scopedEvents = useRef(false)
+   const [error, setError] = useState<string | null>(null)
+   const [loading, setLoading] = useState(false)
+   const generation = useRef(0),
+-    expanded = useRef(false),
+-    current = useRef({ botId, selectedId, audience })
++    expanded = useRef(false)
++  const current = useRef({ botId, selectedId, audience })
+   current.current = { botId, selectedId, audience }
+-  const load = useCallback(async () => {
+-    const token = ++generation.current
+-    if (!botId || !client.works) {
+-      setItems([])
+-      setSelected(null)
+-      setCursor(null)
+-      return
+-    }
+-    setLoading(true)
+-    try {
+-      const [page, detail] = await Promise.all([
+-        client.works.list(botId, undefined, query),
+-        selectedId ? client.works.get(botId, selectedId) : Promise.resolve(null)
+-      ])
+-      const refreshed: BotWorkSummary[] = []
+-      const extra = expanded.current
+-        ? displayed.current
+-            .filter((item) => !page.items.some((v) => v.id === item.id))
+-            .map((item) => item.id)
+-        : []
+-      for (let offset = 0; offset < extra.length; offset += 40) {
+-        if (generation.current !== token) return
+-        refreshed.push(...(await client.works.summaries(botId, extra.slice(offset, offset + 40))))
+-      }
+-      if (generation.current !== token) return
+-      setLoadedScope(scope)
+-      setPriority(page.priority)
+-      setItems((old) =>
+-        expanded.current
+-          ? [
+-              ...page.items,
+-              ...old
+-                .filter((item) => !page.items.some((v) => v.id === item.id))
+-                .map((item) => refreshed.find((v) => v.id === item.id) ?? item)
+-            ]
+-          : page.items
+-      )
+-      if (!expanded.current) setCursor(page.nextCursor)
+-      setSelected(detail)
+-      setError(null)
+-    } catch (cause) {
+-      if (generation.current === token) {
++  const load = useCallback(
++    async (changed: Set<string> | null) => {
++      const token = ++generation.current
++      if (!botId || !client.works) {
++        setItems([])
+         setSelected(null)
+-        setError(botErrorMessage(cause))
++        setCursor(null)
++        return
+       }
+-    } finally {
+-      if (generation.current === token) setLoading(false)
+-    }
+-  }, [client, botId, selectedId, query, scope])
++      setLoading(true)
++      try {
++        const readDetail =
++          !!selectedId && !removed.current.has(selectedId) && (!changed || changed.has(selectedId))
++        const [page, detail] = await Promise.all([
++          client.works.list(botId, undefined, query),
++          readDetail ? client.works.get(botId, selectedId!) : Promise.resolve(undefined)
++        ])
++        const pageIds = new Set(page.items.map((item) => item.id))
++        const candidates =
++          changed ?? new Set(expanded.current ? displayed.current.map((item) => item.id) : [])
++        const extra = [...candidates].filter((id) => !pageIds.has(id) && !removed.current.has(id))
++        const refreshed = new Map<string, BotWorkSummary>()
++        for (let offset = 0; offset < extra.length; offset += 40) {
++          if (generation.current !== token) return
++          for (const item of await client.works.summaries(botId, extra.slice(offset, offset + 40)))
++            refreshed.set(item.id, item)
++        }
++        if (generation.current !== token) return
++        setLoadedScope(scope)
++        setPriority(page.priority.filter((item) => !removed.current.has(item.id)))
++        const needle = query.trim().toLowerCase()
++        setItems((old) => {
++          const merged = new Map(page.items.map((item) => [item.id, item]))
++          if (expanded.current)
++            for (const item of old) if (!merged.has(item.id)) merged.set(item.id, item)
++          // Also include newly created rows outside the first page of a burst. Their
++          // IDs come from the bounded scope event, never from an all-history scan.
++          for (const [id, item] of refreshed) merged.set(id, item)
++          return [...merged.values()].filter(
++            (item) =>
++              !removed.current.has(item.id) &&
++              item.conversation?.state !== "detached" &&
++              (!needle || item.title.toLowerCase().includes(needle))
++          )
++        })
++        if (!expanded.current) setCursor(page.nextCursor)
++        if (detail !== undefined) setSelected(detail)
++        if (!selectedId || removed.current.has(selectedId)) setSelected(null)
++        setError(null)
++      } catch (cause) {
++        if (generation.current === token) {
++          setSelected(null)
++          setError(botErrorMessage(cause))
++        }
++      } finally {
++        if (generation.current === token) setLoading(false)
++      }
++    },
++    [client, botId, selectedId, query, scope]
++  )
+   const latestLoad = useRef(load)
+   latestLoad.current = load
+-  const refresh = useCallback(() => {
++  const drain = useCallback(() => {
+     dirty.current = true
+     if (pending.current) return pending.current
+     pending.current = Promise.resolve()
+       .then(async () => {
+         while (dirty.current && mounted.current) {
+           dirty.current = false
+-          await latestLoad.current()
++          const ids = changedIds.current
++          changedIds.current = new Set()
++          await latestLoad.current(ids)
+         }
+       })
+       .finally(() => {
+@@ -95,6 +112,10 @@ export function useBotWorks(
+       })
+     return pending.current
+   }, [])
++  const refresh = useCallback(() => {
++    changedIds.current = null
++    return drain()
++  }, [drain])
+   useEffect(() => {
+     mounted.current = true
+     return () => {
+@@ -103,8 +124,16 @@ export function useBotWorks(
+       generation.current++
+     }
+   }, [])
++  useEffect(() => {
++    scopedEvents.current = false
++    return client.subscribe((event) => {
++      if (!event.workChanges) return
++      scopedEvents.current = true
++    })
++  }, [client])
+   useEffect(() => {
+     expanded.current = false
++    removed.current.clear()
+     setItems([])
+     setPriority([])
+     setCursor(null)
+@@ -121,26 +150,77 @@ export function useBotWorks(
+     return () => {
+       generation.current++
+     }
+-  }, [load, refresh, revision])
++  }, [load, refresh])
++  useEffect(() => {
++    if (!scopedEvents.current) void refresh()
++  }, [revision, refresh])
++  useEffect(() => {
++    let timer: ReturnType<typeof setTimeout> | undefined
++    const stop = client.subscribe((event) => {
++      if (!event.workChanges) return // Legacy hosts still use the snapshot revision above.
++      const changes = event.workChanges.filter(
++        (change) =>
++          change.botId === botId &&
++          change.audience === (audience === "desktop" ? audience : `im:${audience}`)
++      )
++      if (!changes.length) return
++      for (const change of changes) {
++        if (change.reset) {
++          // Restart cursor paging explicitly when a large transaction changes the directory.
++          expanded.current = false
++          changedIds.current = null
++          removed.current.clear()
++        } else {
++          for (const id of change.workIds) {
++            changedIds.current?.add(id)
++            removed.current.delete(id)
++          }
++          for (const id of change.removedIds) removed.current.add(id)
++        }
++      }
++      if (!timer)
++        timer = setTimeout(() => {
++          timer = undefined
++          void drain()
++        }, 100)
++    })
++    const focus = () => {
++      void refresh()
++    }
++    window.addEventListener("focus", focus)
++    return () => {
++      stop()
++      clearTimeout(timer)
++      window.removeEventListener("focus", focus)
++    }
++  }, [client, botId, audience, drain, refresh])
+   const more = async () => {
+     if (!botId || !cursor || !client.works || loading || pending.current) return
+     const token = generation.current
+     setLoading(true)
+-    try {
+-      const page = await client.works.list(botId, cursor, query)
+-      if (token !== generation.current) return
+-      expanded.current = true
+-      setItems((old) => [
+-        ...old,
+-        ...page.items.filter((item) => !old.some((v) => v.id === item.id))
+-      ])
+-      setCursor(page.nextCursor)
+-      setError(null)
+-    } catch (cause) {
+-      if (token === generation.current) setError(botErrorMessage(cause))
+-    } finally {
+-      if (token === generation.current) setLoading(false)
+-    }
++    pending.current = (async () => {
++      try {
++        const page = await client.works!.list(botId, cursor, query)
++        if (token !== generation.current) return
++        expanded.current = true
++        setItems((old) => {
++          const ids = new Set(old.map((item) => item.id))
++          return [
++            ...old,
++            ...page.items.filter((item) => !ids.has(item.id) && !removed.current.has(item.id))
++          ]
++        })
++        setCursor(page.nextCursor)
++        setError(null)
++      } catch (cause) {
++        if (token === generation.current) setError(botErrorMessage(cause))
++      } finally {
++        if (token === generation.current) setLoading(false)
++        pending.current = null
++        if (dirty.current && mounted.current) void drain()
++      }
++    })()
++    return pending.current
+   }
+   return {
+     priority: loadedScope === scope ? priority : [],
+diff --git a/src/renderer/src/components/bots/use-bots.ts b/src/renderer/src/components/bots/use-bots.ts
+index 42b30d0e4..ab8b0c476 100644
+--- a/src/renderer/src/components/bots/use-bots.ts
++++ b/src/renderer/src/components/bots/use-bots.ts
+@@ -38,7 +38,7 @@ export function useBots(client: BotClient) {
+     }
+     const unsubscribe = client.subscribe((event) => {
+       // Memory owns its scoped reader; these writes do not change the control snapshot.
+-      if (!event.memoryBotId) void refresh()
++      if (!event.memoryBotId || event.workChanges?.length) void refresh()
+     })
+     const onFocus = () => {
+       void refresh()
+diff --git a/src/shared/bots/contracts.ts b/src/shared/bots/contracts.ts
+index 4a831cc40..805c94b49 100644
+--- a/src/shared/bots/contracts.ts
++++ b/src/shared/bots/contracts.ts
+@@ -409,10 +409,21 @@ export interface BotConversationActivity {
+   unread: boolean
+ }
+ 
++export interface BotWorkChange {
++  botId: string
++  audience: string
++  workIds: string[]
++  removedIds: string[]
++  /** A large transaction invalidates this scope; never silently drops IDs. */
++  reset?: true
++}
++
+ export interface BotChangeEvent {
++  /** Present even when empty on scoped hosts; absent on legacy clients. */
++  workChanges?: BotWorkChange[]
+   /** Group routes available to the project's association picker have changed. */
+   featureTargetsChanged?: true
+-  featureScope?: { botId: string; audience: string; projectId?: string; slug?: string }
++  featureScope?: { botId: string; audience: string; projectId?: string; slug?: string; followId?: string }
+   hostId: string
+   revision: number
+   /** Invalidate only this reaction view; no transcript or emoji payload travels in the event. */
+diff --git a/src/shared/bots/feature.ts b/src/shared/bots/feature.ts
+index 7d9ba0dd7..96ec7d9e3 100644
+--- a/src/shared/bots/feature.ts
++++ b/src/shared/bots/feature.ts
+@@ -77,6 +77,13 @@ export interface BotFeatureTarget {
+   unavailable?: "archived" | "revoked"
+ }
+ 
++export interface BotFeaturePage {
++  items: BotFeatureTask[]
++  priority: BotFeatureTask[]
++  refreshed: BotFeatureTask[]
++  nextCursor: string | null
++}
++export interface BotFeaturePageInput { cursor?: string; query?: string; refreshIds?: string[] }
+ export interface BotFeatureClient {
+   targets(feature?: Pick<BotFeatureFollow, "projectId" | "slug">): Promise<BotFeatureTarget[]>
+   projects(botId: string, groupId?: string): Promise<{ id: string; name: string }[]>
+@@ -84,7 +91,7 @@ export interface BotFeatureClient {
+     botId: string,
+     projectId: string,
+     groupId?: string
+-  ): Promise<{ slug: string; title: string }[]>
++  ): Promise<{ slug: string; title: string; linked?: boolean }[]>
+   follow(
+     botId: string,
+     projectId: string,
+@@ -92,6 +99,7 @@ export interface BotFeatureClient {
+     groupId?: string
+   ): Promise<BotFeatureFollow>
+   list(botId: string, groupId?: string): Promise<BotFeatureTask[]>
++  page?(botId: string, groupId?: string, input?: BotFeaturePageInput): Promise<BotFeaturePage>
+   lifecycle(
+     botId: string,
+     id: string,
+diff --git a/tests/support/bots-work-directory-fixture.tsx b/tests/support/bots-work-directory-fixture.tsx
+index 7d0541517..cb5f1df29 100644
+--- a/tests/support/bots-work-directory-fixture.tsx
++++ b/tests/support/bots-work-directory-fixture.tsx
+@@ -25,6 +25,7 @@ const rows = Array.from({ length: 45 }, (_, i) => ({
+ const state: any = { rows, maxBatch: 0, calls: 0, inFlight: 0, maxInFlight: 0, hold: null }
+ const client = {
+   hostId: "local",
++  subscribe: () => () => {},
+   works: {
+     async list(botId: string, cursor?: string, query = "") {
+       state.calls++

@@ -1,0 +1,56 @@
+[
+  {
+    "id": "01-foreground-only",
+    "status": "failed",
+    "note": "仅前台 SDK 修复未解决 Bot；断言失败时脚本尚未先保存观测结果，因此结果数组为空。",
+    "record": "runs/01-foreground-only/record.json"
+  },
+  {
+    "id": "02-persist-observation",
+    "status": "failed",
+    "note": "保留失败观测后确认 Bot 仍出现同一回复两个气泡，修复前台不足。",
+    "record": "runs/02-persist-observation/record.json"
+  },
+  {
+    "id": "03-extended-alias",
+    "status": "failed",
+    "note": "尝试扩大 renderer alias 映射仍重复；该尝试已撤回。",
+    "record": "runs/03-extended-alias/record.json"
+  },
+  {
+    "id": "04-diagnostic-console",
+    "status": "failed",
+    "note": "增加事件诊断；此轮未捕获 console 证据，未解决问题。",
+    "record": "runs/04-diagnostic-console/record.json"
+  },
+  {
+    "id": "05-diagnostic-buffer",
+    "status": "failed",
+    "note": "改为在诊断构建中收集事件到数组，发现 scheduler 流缺失 alias 和 injected-user 事件。诊断构建 JS 额外插桩，不作为可发布构建。",
+    "record": "runs/05-diagnostic-buffer/record.json"
+  },
+  {
+    "id": "06-run-delivery",
+    "status": "partial",
+    "note": "主 Bot 通过；页面 reload 后测试脚本 __name 未定义，独立任务未完成验证。",
+    "record": "runs/06-run-delivery/record.json"
+  },
+  {
+    "id": "07-fixture-report",
+    "status": "partial",
+    "note": "主 Bot 通过；独立任务运行后的 JSON 结果通知被测试模型误识别为需要挂起的输入，等待 idle 超时。修正模拟模型识别，不修改产品逻辑。",
+    "record": "runs/07-fixture-report/record.json"
+  },
+  {
+    "id": "08-two-surfaces",
+    "status": "passed",
+    "note": "主 Bot、独立任务均通过；相同 provider ID、两条 steer、撤回、持久化顺序与 reload。",
+    "record": "runs/08-two-surfaces/record.json"
+  },
+  {
+    "id": "09-live-order",
+    "status": "passed",
+    "note": "重新构建并补充流式未结束时的用户消息顺序断言，两种会话均通过。",
+    "record": "runs/09-live-order/record.json"
+  }
+]

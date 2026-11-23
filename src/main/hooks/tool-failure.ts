@@ -19,6 +19,7 @@
  */
 
 import { classifyApiError, type ApiErrorCode } from "../agent/failover"
+import { hasFailedCommandResult } from "../../shared/command-result"
 import { isShellTaskMonitorToolName } from "../agent/shell-task-monitor"
 
 export type ToolFailureKind =
@@ -58,8 +59,11 @@ export function detectToolFailure(toolName: string, toolResult: unknown): ToolFa
       ? /^\[Command (succeeded|failed) with exit code (-?\d+|null), elapsed: \d+s\]$/.exec(
           toolResult.slice(toolResult.lastIndexOf("\n") + 1)
         )
-      : /\[Command (succeeded|failed) with exit code (-?\d+)\]/.exec(toolResult)
-    if (match && (match[1] === "failed" || (match[2] !== "null" && Number(match[2]) !== 0))) {
+      : null
+    const failed = isShellTaskMonitorToolName(toolName)
+      ? !!match && (match[1] === "failed" || (match[2] !== "null" && Number(match[2]) !== 0))
+      : hasFailedCommandResult(toolResult)
+    if (failed) {
       const truncated = toolResult.length > 500 ? toolResult.slice(0, 500) + "…" : toolResult
       return {
         kind: "exit-nonzero",

@@ -2,12 +2,59 @@ import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langcha
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { LocalSandbox } from "./local-sandbox"
+import { foregroundCommandEvidence } from "./foreground-command-evidence"
 import { createDeepAgent, getModelInstance } from "./runtime"
 import { WORKFLOW_SUBAGENT_BASE_PROMPT } from "./workflow/prompts"
 
 afterEach(() => vi.restoreAllMocks())
 
 describe("workflow leaf tool execution", () => {
+  it.each(["normal", "test failure", "ordinary thread", "hook rewrite", "hook block"] as const)(
+    "records only the exact opted-in process exit (%s)", async mode => {
+      const threadId = `foreground-${mode}`
+      const sandbox = new LocalSandbox({ rootDir: process.cwd(), runId: threadId, windowsSandbox: "none" })
+      const preHook = mode === "hook rewrite" ? { updatedInput: { command: "echo HOOK_REPLACED" } }
+        : mode === "hook block" ? { blocked: true, stdout: "PRIVATE_HOOK_DIAGNOSTIC" } : null
+      Reflect.set(sandbox, "runPreToolUseHook", async () => preHook)
+      const command = mode === "test failure" ? "echo sandbox-test-failed; exit 7" : "echo EXACT_CHECK"
+      const model = getModelInstance({ id: "test", model: "test-model", baseUrl: "https://example.test/v1", apiKey: "test" }, undefined, 1)
+      let turns = 0
+      vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+        const tool = turns++ === 0
+        const delta = tool ? { tool_calls: [{ index: 0, id: "exact-exec", type: "function",
+          function: { name: "execute", arguments: JSON.stringify({ command }) } }] } : { content: "Done" }
+        const chunks = [delta, {}].map((part, index) => ({ id: `reply-${turns}`,
+          object: "chat.completion.chunk", created: 1, model: "test-model", choices: [{ index: 0, delta: part,
+            finish_reason: index === 0 ? null : tool ? "tool_calls" : "stop" }] }))
+        return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } })
+      })
+      const agent = createDeepAgent({ threadId, model, backend: sandbox,
+        mainSubagentsEnabled: false, mainTodosEnabled: false, includeGeneralPurposeSubagent: false })
+      const record = vi.fn()
+      const run = async () => {
+        let messages: BaseMessage[] = []
+        const stream = await agent.stream({ messages: [new HumanMessage("Check once")] },
+          { streamMode: ["values", "messages"], recursionLimit: 12 })
+        for await (const [mode, value] of stream) if (mode === "values") messages = value.messages
+        return messages
+      }
+      const messages = mode === "ordinary thread" ? await run() : await foregroundCommandEvidence.run({
+        threadId, begin: callId => evidence => record(callId, evidence)
+      }, run)
+      const tool = messages.find(message => ToolMessage.isInstance(message) && message.tool_call_id === "exact-exec")
+      const expectedText = mode === "test failure" ? "sandbox-test-failed" : "EXACT_CHECK"
+      expect(String(tool?.content)).toContain(mode === "hook rewrite" ? "HOOK_REPLACED"
+        : mode === "hook block" ? "PRIVATE_HOOK_DIAGNOSTIC" : expectedText)
+      if (mode === "normal" || mode === "test failure") {
+        expect(record).toHaveBeenCalledExactlyOnceWith("exact-exec", {
+          command, directory: ".", output: expect.stringContaining(expectedText), exitCode: mode === "test failure" ? 7 : 0,
+          truncated: false
+        })
+      } else expect(record).not.toHaveBeenCalled()
+    }
+  )
+
   it.each([
     { enableThinking: false, interleavedThinking: false },
     { enableThinking: true, interleavedThinking: false },

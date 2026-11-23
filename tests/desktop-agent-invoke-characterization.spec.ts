@@ -190,7 +190,7 @@ function testPromptSkillHookAndHarnessPreparation(): void {
   )
   assertSourceOrder(
     sharedFeatureBinding,
-    ["readHarnessFeatureMetadata(metadata)", "resolveHarnessFeatureCurrentStage("],
+    ["readHarnessFeatureMetadata(metadata)", "resolveHarnessExecutionStage(binding.projectId, binding.slug)"],
     "shared Feature Harness preparation"
   )
   assertSourceOrder(
@@ -198,7 +198,7 @@ function testPromptSkillHookAndHarnessPreparation(): void {
     [
       "await resolveHarnessFeatureBindingContext(bindingMetadata)",
       "createStandardTurnTrace({",
-      "const harnessAgentContext = await getHarnessAgentContext(metadata",
+      "harnessAgentContext = await getHarnessAgentContext(metadata",
       "await fireSessionStartOnce(",
       "const preparedPrompt = await prepareUserPromptForCurrentRun"
     ],
@@ -240,7 +240,7 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
   for (const expected of [
     "currentRunMessageQueueOwnerToken: runToken",
     "abortSignal: abortController.signal",
-    "enableRequestUserInput: true",
+    "...foregroundToolPolicy(effectiveAgentMode, metadata)",
     "agentMode: effectiveAgentMode",
     "traceContext: runtimeTraceContext",
     "hookTurnId: turnState.turnId",
@@ -290,7 +290,7 @@ function testResumeAndInterruptContinueTheSameLogicalTurn(): void {
       `${label} ownership and TurnState continuity`
     )
     assertNotIncludes(handler, "resetTurnStateForNewInvoke(", `${label} does not start a new turn`)
-    assertIncludes(handler, "enableRequestUserInput: true", `${label} retains structured input`)
+    assertIncludes(handler, `...foregroundToolPolicy(${label}AgentMode, metadata)`, `${label} retains structured input`)
     assertIncludes(
       handler,
       "harnessContext: harnessAgentContext",
@@ -411,7 +411,7 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
   )
   assertOccurrences(
     invoke,
-    "enableRequestUserInput: true",
+    "...foregroundToolPolicy(effectiveAgentMode, metadata)",
     1,
     "the invoke Runtime factory retains request_user_input for every model variant"
   )
@@ -505,12 +505,38 @@ function testTurnCompletionGateCoversEveryEntryPoint(): void {
   }
 }
 
+function testBotPromptReceiptAppliesOnlyAfterAcceptedSubmission(): void {
+  assertIncludes(invoke, 'const onBotUserPromptPrepared = runExecutionContext.source === "bot"\n        ? runExecutionContext.onUserPromptPrepared : undefined', "only the trusted Bot source can supply post-submit projections")
+  assertSourceOrder(invoke, [
+    'rawMessage: onBotUserPromptPrepared ? "" : rootUserPrompt',
+    'let memoryUserPrompt = runExecutionContext.source === "bot" ? undefined : rootUserPrompt',
+    "if (!preparedPrompt.accepted) {",
+    "effectiveMessage = preparedPrompt.content",
+    "if (onBotUserPromptPrepared) {",
+    'const approvedRequest = runGoalId ? "" : preparedPrompt.submissionContent',
+    "const approved = onBotUserPromptPrepared(",
+    "tracer.setPreparedUserMessage(approvedRequest)",
+    "memoryUserPrompt = runGoalId ? undefined : approved?.memoryUserText || undefined",
+    "memoryUserPrompt !== undefined &&",
+    "`User: ${memoryUserPrompt}\\n\\nAssistant: ${postRunAssistantText}`"
+  ], "ordinary workbench keeps its root prompt and Bot tracing and memory consume only trusted submit receipts")
+  assertSourceOrder(invoke, [
+    "let botPreparedSystemPrompt: string | undefined",
+    "if (!preparedPrompt.accepted) {",
+    "effectiveMessage = preparedPrompt.content",
+    "botPreparedSystemPrompt = approved?.extraSystemPrompt",
+    "extraSystemPrompt: botPreparedSystemPrompt",
+    ": runExecutionContext.extraSystemPrompt"
+  ], "the original system prompt passes through when no accepted Bot receipt adds context")
+}
+
 const tests = [
   testForegroundHandlerInventory,
   testTurnCompletionGateCoversEveryEntryPoint,
   testInvokeReplacementOwnershipOrder,
   testFreshTurnGoalAndTranscriptSemantics,
   testPromptSkillHookAndHarnessPreparation,
+  testBotPromptReceiptAppliesOnlyAfterAcceptedSubmission,
   testRoutingRuntimeCheckpointAndAutoCommit,
   testResumeAndInterruptContinueTheSameLogicalTurn,
   testIdentityFencedCleanupAndCancellation,

@@ -16,9 +16,12 @@ afterEach(() => {
 })
 
 describe("skills in a resumed thread", () => {
-  it.each(["deleted", "disabled"])(
-    "removes a %s skill from the next model prompt",
-    async (change) => {
+  it.each([
+    { change: "deleted", botCommunication: false }, { change: "disabled", botCommunication: false },
+    { change: "deleted", botCommunication: true }, { change: "disabled", botCommunication: true }
+  ])(
+    "removes a $change skill from the next prompt (Bot communication: $botCommunication)",
+    async ({ change, botCommunication }) => {
       const root = mkdtempSync(join(tmpdir(), "cmb-skill-refresh-"))
       temporaryDirs.push(root)
       const source = join(root, "skills")
@@ -49,6 +52,7 @@ describe("skills in a resumed thread", () => {
           backend,
           checkpointer,
           skills: [source],
+          botCommunication,
           middleware: [capturePrompt],
           mainFilesystemEnabled: false,
           mainTodosEnabled: false,
@@ -62,11 +66,15 @@ describe("skills in a resumed thread", () => {
       }
 
       await invoke("first")
-      expect(prompts.at(-1)).toContain("**obsolete-skill**")
+      if (botCommunication) {
+        expect(prompts.at(-1)).toContain('"name":"obsolete-skill","description":"An obsolete skill"')
+        expect(prompts.at(-1)).toContain("call bot_work_create directly")
+        expect(prompts.at(-1)).not.toContain("How to Use Skills")
+      } else expect(prompts.at(-1)).toContain("**obsolete-skill**")
       if (change === "deleted") rmSync(skillDir, { recursive: true })
       else backend.setHiddenSkillDirs([skillDir])
       await invoke("second")
-      expect(prompts.at(-1)).not.toContain("**obsolete-skill**")
+      expect(prompts.at(-1)).not.toContain("obsolete-skill")
     }
   )
 })

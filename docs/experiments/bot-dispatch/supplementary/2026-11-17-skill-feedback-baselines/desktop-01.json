@@ -1,0 +1,11 @@
+{
+  "label": "desktop-01",
+  "args": [
+    "--import",
+    "tsx",
+    "tests/desktop-agent-invoke-characterization.spec.ts"
+  ],
+  "exitCode": 0,
+  "seconds": 0.22,
+  "log": "desktop-01.log.txt"
+}

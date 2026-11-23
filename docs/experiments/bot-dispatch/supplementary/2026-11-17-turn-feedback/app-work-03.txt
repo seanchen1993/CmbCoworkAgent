@@ -1,0 +1,6 @@
+stage: launching isolated App <temp>/m05-local-work-app-8PSXdy
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+stage: real-work-runtime-file-delivery
+PASS: silent dispatch emits one fallback; creation and same-work revision skip post-dispatch model calls; both files and results return
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-8PSXdy

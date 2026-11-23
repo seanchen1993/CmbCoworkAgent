@@ -223,6 +223,9 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Added only to desktop history responses; storage and model inputs ignore it. */
+  botHistoryInputOrigin?: import("../shared/bots/message-reply").BotHistoryInputOrigin
+  botHistoryDeliveryScope?: import("../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
   provider_source_id?: string
@@ -359,6 +362,11 @@ export interface ThreadDeleteOptions {
   groupGuard?: ThreadGroupDeleteGuard
 }
 
+/** The ordinary delete path returns no value. Work draft cleanup requires its exact committed owner. */
+export type ThreadDeleteResult = void | {
+  deletedWork: NonNullable<import("../shared/bots/conversation").BotConversationDeletionOutcome["deletedWork"]>
+}
+
 export interface ThreadMessagesPage {
   /** Messages are always returned in durable ascending transcript order. */
   messages: Message[]
@@ -410,6 +418,8 @@ export interface ThreadLegacyCheckpointBootstrapResult {
 }
 
 export interface ThreadMessageSearchOptions {
+  /** Bot's normal view excludes tool summaries and inline assistant reasoning. */
+  bodyOnly?: boolean
   /**
    * Cursor returned by the previous search page. Both fields must be supplied
    * together so duplicate legacy ordinals cannot skip or repeat messages.
@@ -1201,17 +1211,26 @@ export interface UserInputQuestion {
   id: string
   question: string
   options: UserInputOption[]
+  /** Enabled by the trusted Bot question tool; absent in ordinary threads. */
+  allowMultiple?: boolean
 }
 
 export interface UserInputRequest {
   requestId: string
   threadId: string
+  /** A host-created, desktop-only choice bound to one Bot conversation operation. */
+  kind?: "bot_conversation_action" | "bot_result_confirmation"
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   createdAt: string
 }
 
 export type UserInputAnswer =
+  | {
+      type: "options"
+      questionId: string
+      options: Array<UserInputOption & { optionIndex: number }>
+    }
   | {
       type: "option"
       questionId: string

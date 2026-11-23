@@ -1,12 +1,13 @@
-import { IDLE_MODEL_ID } from "./model-catalog"
+import { IDLE_MODEL_ID, IDLE_MODEL_NAME } from "./model-catalog"
 
+// The "ultra" value is persisted in existing managed runs and schedules.
 export type ManagedRunModelSelection = "default" | "ultra"
 
-export const MANAGED_ULTRA_MODEL_REF = `builtin:${IDLE_MODEL_ID}`
+export const MANAGED_IDLE_MODEL_REF = `builtin:${IDLE_MODEL_ID}`
 
 export const MANAGED_RUN_MODEL_LABELS: Record<ManagedRunModelSelection, string> = {
   default: "使用默认模型",
-  ultra: "使用内置 Ultra 模型（夜间可用）"
+  ultra: `使用${IDLE_MODEL_NAME}`
 }
 
 export function resolveManagedRunModelSelection(value: unknown): ManagedRunModelSelection {

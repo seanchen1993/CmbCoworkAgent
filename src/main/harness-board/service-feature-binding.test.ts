@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   root: `/tmp/harness-binding-review-${process.pid}-${Date.now()}`,
   supportsPlugin: true,
   featureExists: true,
+  partialCatalog: false,
   projectExists: true,
   artifactConfig: undefined as unknown,
   sessionContextCommand: "",
@@ -86,6 +87,7 @@ vi.mock("./adapter-detail-client", () => ({
       projects: {
         project: {
           runs: state.featureExists ? [{ kind: "feature", slug: "f" }] : [],
+          incompleteRuns: state.partialCatalog,
           watchRefs: []
         }
       }
@@ -96,6 +98,7 @@ import {
   updateHarnessFeatureDeployUnits,
   buildHarnessFeatureAgentContext,
   archiveHarnessProject,
+  getHarnessProjectDetail,
   prepareHarnessKnowledgeDeposition,
   getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessRunDetail,
@@ -108,6 +111,7 @@ import {
   knowledgeDirectory
 } from "../services/knowledge-base-state"
 import { invalidateHarnessRunInspection } from "./run-inspect-cache"
+import { onHarnessFeatureCatalogChange } from "./feature-catalog-lifecycle"
 import { FEATURE_V2_FILE, DEPLOY_UNIT_V2_FILE, initializeHarnessConfigV2 } from "./config-v2"
 
 const binding = {
@@ -127,6 +131,7 @@ beforeEach(async () => {
   await initializeHarnessConfigV2(state.root)
   state.supportsPlugin = true
   state.featureExists = true
+  state.partialCatalog = false
   state.projectExists = true
   state.artifactConfig = undefined
   state.sessionContextCommand = ""
@@ -249,6 +254,28 @@ describe("public system constraint indicators", () => {
 })
 
 describe("page and conversation inspection sharing", () => {
+  it("uses only complete project inspections for removal, including an explicitly empty list", async () => {
+    const observed = vi.fn()
+    const stop = onHarnessFeatureCatalogChange(observed)
+    try {
+      await getHarnessProjectDetail("p")
+      expect(observed.mock.calls).toEqual([["p", new Set(["f"])]])
+      observed.mockClear()
+      state.featureExists = false
+      state.partialCatalog = true
+      await getHarnessProjectDetail("p")
+      expect(observed).not.toHaveBeenCalled()
+      state.partialCatalog = false
+      await getHarnessProjectDetail("p")
+      expect(observed.mock.calls).toEqual([["p", new Set()]])
+      observed.mockClear()
+      state.projectExists = false
+      await expect(getHarnessProjectDetail("p")).rejects.toThrow()
+      expect(observed).not.toHaveBeenCalled()
+    } finally {
+      stop()
+    }
+  })
   it("runs the adapter once, survives page buffer transfer and keeps managed decisions fresh", async () => {
     const script = join(state.root, "inspect.cjs")
     const countFile = join(state.root, "inspect-count")

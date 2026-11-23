@@ -400,7 +400,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "coordinator: disableCoordinatorModeOption",
+    "coordinator: Boolean(coordinatorModeDisabledReason)",
     "ChatContainer disables only the unavailable coordinator stop instead of locking the whole slider"
   )
 
@@ -439,7 +439,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   const tabbedPanel = await readProjectFile("src/renderer/src/components/tabs/TabbedPanel.tsx")
   assertMatches(
     tabbedPanel,
-    /<ChatContainer\s+key=\{threadId\}/,
+    /<OrdinaryChat\s+key=\{threadId\}\s+threadId=\{threadId\}/,
     "TabbedPanel remounts ChatContainer when switching threads so old agent mode state cannot leak across threads"
   )
   assertIncludes(
@@ -944,7 +944,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft))",
+    "guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft, !managedTurn))",
     "ChatContainer keeps user-typed coordinator internal markers visible as ordinary text"
   )
   // The `keepPrepareApprovalForSaveMetadata` assertions were removed: that
@@ -981,23 +981,40 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "harnessProjectId: harnessFeature?.projectId",
     "Harness feature failures preserve the project identity for runtime policy"
   )
-  assertOccurrenceCount(
-    agentIpc,
-    "disableSubagents: shouldDisableNormalModeSubagents(",
-    3,
-    "invoke, resume, and interrupt runtime factories preserve the Solo/Multi policy across failovers"
-  )
+  for (const mode of ["effectiveAgentMode", "resumeAgentMode", "interruptAgentMode"]) {
+    assertIncludes(agentIpc, `...foregroundToolPolicy(${mode}, metadata)`,
+      "invoke, resume, and interrupt must each apply the shared Solo/Multi policy")
+  }
   const replacementLock = await readProjectFile("src/main/ipc/async-keyed-lock.ts")
   assertIncludes(
     agentIpc,
     "resolveCoordinatorModeRequest",
     "agent IPC imports coordinator resolver"
   )
-  assertOccurrenceCount(
-    agentIpc,
-    "allowForcedRequests: allowsForcedCoordinatorRequests(",
-    4,
-    "invoke, final resolution, resume, and interrupt all enforce the Harness feature gate"
+  const forcedCoordinatorGateCalls = agentIpc.match(
+    /allowForcedRequests:\s*(?:messageControlsEnabled\s*&&\s*)?allowsForcedCoordinatorRequests\(/g
+  ) ?? []
+  assert(
+    forcedCoordinatorGateCalls.length === 4,
+    `invoke, final resolution, resume, and interrupt all enforce the Harness feature gate: expected 4 gated calls, got ${forcedCoordinatorGateCalls.length}`
+  )
+  assertMatches(
+    sliceBetween(
+      agentIpc,
+      "const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(",
+      "const initialInvokeWorkspacePath ="
+    ),
+    /allowForcedRequests:\s*messageControlsEnabled\s*&&\s*allowsForcedCoordinatorRequests\(initialInvokeMetadata\)/,
+    "initial invoke also enforces the trusted message-controls policy"
+  )
+  assertMatches(
+    sliceBetween(
+      agentIpc,
+      "const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata, {",
+      "effectiveMessage = coordinatorRequest.message"
+    ),
+    /allowForcedRequests:\s*messageControlsEnabled\s*&&\s*allowsForcedCoordinatorRequests\(metadata\)/,
+    "final invoke resolution also enforces the trusted message-controls policy"
   )
   assertIncludes(agentIpc, "coordinatorWorkerManager", "agent IPC imports worker manager")
   assertIncludes(
@@ -1399,8 +1416,13 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertMatches(
     agentIpc,
-    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
-    "a workflow summary claims a run its own surface owes, not whichever is newest"
+    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner, \.\.\.workflowNotificationClaim \}\s*\)/,
+    "a workflow summary retains its surface owner and the validated Bot instance filter"
+  )
+  assertMatches(
+    agentIpc,
+    /const workflowNotificationClaim = botWorkflowNotificationClaim\(\s*runExecutionContext,\s*initialInvokeMetadata\s*\)/,
+    "the optional workflow instance filter is validated against the local Bot lease and metadata"
   )
   assertIncludes(
     agentIpc,
@@ -1724,14 +1746,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "lastUserIndex = i\n        break",
     "agent Stop hook values context treats internal coordinator notification messages as the current-turn boundary"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "isTrustedCoordinatorNotificationInvoke ? undefined : message",
-    "agent Stop hook context does not seed internal coordinator notification turns as user messages"
+    /const stopContextUserMessage = isTrustedCoordinatorNotificationInvoke \|\| isBotInternalTurnInvoke \|\|\s+onBotUserPromptPrepared \? undefined : message/,
+    "agent Stop hook context does not seed trusted coordinator or command receipts as user messages"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "userMessage: isInternalNotificationTurn ? undefined : message",
+    /userMessage: isInternalNotificationTurn \? undefined :\s+onBotUserPromptPrepared \? botPreparedUserRequest : message/,
     "agent Stop hook context does not override internal (coordinator OR workflow) notification turns with placeholder text"
   )
   assertIncludes(
@@ -1820,12 +1842,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "extractRawText(kwargs.content)",
     "agent IPC compares raw checkpoint message text before trace truncation"
   )
-  const stableValuesSanitizations =
-    agentIpc.match(/\{ messages: latestValuesSnapshot\.messages \}/g)?.length ?? 0
-  assert(
-    stableValuesSanitizations === 3,
-    "invoke, resume, and interrupt retain complete values only for exceptional reset paths"
-  )
+  for (const snapshot of ["latestStableStreamValues", "latestStableResumeValues", "latestStableInterruptValues"]) {
+    assertIncludes(agentIpc, `replayCommittedStreamValues(${snapshot})`,
+      "invoke, resume, and interrupt must replay their last committed values after reset")
+  }
+  assertIncludes(agentIpc, "{ messages: projectCommittedGoalMessages(snapshot.messages) }",
+    "reset replay preserves committed Goal identities before forwarding")
   assertSourceOrder(
     streamSerialization,
     "messages.slice(currentTurnBoundary)",
@@ -1860,7 +1882,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "data: sanitizeStreamDataForRenderer(mode, payload, valuesMessageIndexOffset)",
+    "data: sanitizeStreamDataForRenderer(mode, outgoing, valuesMessageIndexOffset)",
     "normal invoke stream sanitizes renderer payloads"
   )
   assertIncludes(
@@ -1875,20 +1897,20 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
+    "coordinatorNotificationDelivery: {",
     "agent IPC acknowledges task-notifications when they are delivered into the coordinator turn, matching Claude Code queue removal"
   )
   assertSourceOrder(
     agentIpc,
     "const humanMessages",
-    "const acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
+    "coordinatorNotificationDelivery: {",
     "agent IPC delivery-acknowledges task-notifications only after constructing the internal HumanMessage batch"
   )
   assertSourceOrder(
     agentIpc,
-    "for await (const chunk of source)",
-    "await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()",
-    "agent IPC removes delivered task-notifications from the queue only after the coordinator stream starts producing output"
+    "onCommitted: async () =>",
+    "coordinatorNotificationsEnteredContext = true",
+    "agent IPC confirms durable conversation input before consuming notifications"
   )
   assertIncludes(
     agentIpc,
@@ -1925,9 +1947,15 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "drainedCoordinatorNotifications.length === 1",
     "agent IPC should not special-case single notification turns"
   )
+  assertSourceOrder(
+    agentIpc,
+    'name: "settle-coordinator-notification-input"',
+    'name: "settle-managed-workflow-handoff"',
+    "agent IPC settles coordinator input before releasing the physical run lease"
+  )
   assertIncludes(
     agentIpc,
-    'settleNotifications: () => settleDrainedCoordinatorNotifications("restore")',
+    'settleNotifications: () => settleDrainedCoordinatorNotifications()',
     "agent IPC routes pre-acknowledgement notification restoration through the physical-run finalizer"
   )
   assertIncludes(
@@ -2033,7 +2061,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     stopContext,
-    "getCoordinatorVisibleUserMessage(msg)",
+    "getHookUserMessage(msg)",
     "agent IPC uses visible user message metadata when collecting Stop hook context"
   )
   assertIncludes(
@@ -2120,7 +2148,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     agentIpc,
     "isCoordinatorWorkerStreamChunk(mode, data, threadId)",
-    "} = serializeForRun(mode, data)",
+    "const frame = serializeForRun(mode, data)",
     "agent IPC filters async worker chunks before serializing payloads for renderer forwarding"
   )
   assertIncludes(
@@ -2219,12 +2247,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'void settleDrainedCoordinatorNotifications("ack").catch(',
+    'void settleDrainedCoordinatorNotifications().catch(',
     "agent IPC starts delivered task-notification acknowledgement after a successful turn without delaying the terminal event"
   )
   assertIncludes(
     agentIpc,
-    "coordinatorNotificationsDelivered",
+    "coordinatorNotificationsEnteredContext",
     "agent IPC separates task-notification delivery ack from final turn settlement"
   )
   assertIncludes(
@@ -3143,7 +3171,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertSourceOrder(
     threadsIpcForRollback,
     "while (deletingThreads.has(threadId))",
-    "const deletion = performThreadDeletion(event, threadId, metadata, options)",
+    "const deletion = performThreadDeletion(event, threadId, metadata, options, assertOwnership)",
     "a new deletion WAITS OUT any in-flight deletion of the same thread before starting"
   )
   assertMatches(
@@ -3320,17 +3348,17 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "mainTodosEnabled: !isCoordinatorMode",
+    "mainTodosEnabled:\n      !options.botCommunication &&\n      !isCoordinatorMode &&\n      (options.allowedToolNames === undefined || options.allowedToolNames.includes(\"write_todos\")),",
     "runtime disables coordinator todos"
   )
   assertIncludes(
     runtime,
-    "mainFilesystemEnabled: !isCoordinatorMode",
+    "mainFilesystemEnabled:\n      !isCoordinatorMode &&\n      (options.allowedToolNames === undefined ||\n        options.allowedToolNames.some((name) =>\n          [\"read_file\", \"write_file\", \"edit_file\", \"ls\", \"glob\", \"grep\", \"execute\"].includes(name)\n        )),",
     "runtime disables coordinator filesystem"
   )
   assertMatches(
     runtime,
-    /includeGeneralPurposeSubagent:\s*!isCoordinatorMode &&/,
+    /includeGeneralPurposeSubagent:\s*sessionAllowedExpertNames === undefined &&\s*!isCoordinatorMode &&\s*isGeneralPurposeSubagentEnabled\(projectModeTaskSubagentConfig\)/,
     "runtime hides general worker in coordinator"
   )
   assertIncludes(
@@ -3406,9 +3434,11 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "buildCoordinatorTaskPrompt(threadId)",
     "runtime scopes task prompt to threadId"
   )
-  assertIncludes(
-    runtime,
-    "skills: mainSkillSources",
+  assert(
+    runtime.includes(
+      "const mainSkillSources =\n    !isCoordinatorMode && allSkillsSources.length > 0 ? allSkillsSources : undefined"
+    ) &&
+      runtime.includes("skills: sessionAllowedSkillNames?.length === 0 ? [] : mainSkillSources"),
     "runtime avoids injecting full skill middleware into coordinator main thread"
   )
   assertIncludes(
@@ -3514,7 +3544,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertMatches(
     agentIpc,
-    /const switchToNextFailoverCandidate = async[\s\S]{0,180}?if \(isHookHaltError\(error\)\) throw error/,
+    /const switchToNextFailoverCandidate = async[\s\S]{0,180}?if \(isHookHaltError\(error\) \|\| error instanceof StreamTranscriptRollbackError\) throw error/,
     "goal-continuation failover never reclassifies a Hook halt as a model failure"
   )
   assertMatches(

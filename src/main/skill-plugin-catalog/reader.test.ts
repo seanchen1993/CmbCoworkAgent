@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -169,7 +169,7 @@ describe("skill/plugin catalog reader", () => {
         name: "review",
         source: "user"
       })
-    ).toEqual({ filePath: join(custom, "SKILL.md") })
+    ).toEqual({ filePath: realpathSync(join(custom, "SKILL.md")) })
   })
 
   it("resolves one legacy display-name alias to every matching standalone canonical id", () => {
@@ -493,7 +493,7 @@ describe("skill/plugin catalog reader", () => {
         source: "user",
         pluginId: "plugin-b"
       })
-    ).toEqual({ filePath: join(root, "plugin-b", "skills", "shared", "SKILL.md") })
+    ).toEqual({ filePath: realpathSync(join(root, "plugin-b", "skills", "shared", "SKILL.md")) })
     expect(
       resolveSkillPreview(source, {
         id: "plugin:plugin-a/shared",

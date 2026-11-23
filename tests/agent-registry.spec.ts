@@ -518,7 +518,13 @@ function testLevel2AvailableToMultiAndWorkflowMainAgents(): void {
   // inline task types. Coordinator and leaf runtimes remain excluded.
   assert(
     RUNTIME_SRC.includes("const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents") &&
-      RUNTIME_SRC.includes("const registrySubagentSpecs = mainSubagentsEnabled"),
+      RUNTIME_SRC.includes(
+        "const allRegistryProfiles = mainSubagentsEnabled\n    ? await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)\n    : []"
+      ) &&
+      RUNTIME_SRC.includes(
+        "const registryProfiles =\n    sessionAllowedExpertNames === undefined\n      ? allRegistryProfiles\n      : allRegistryProfiles.filter((profile) => sessionAllowedExpertNames.includes(profile.name))"
+      ) &&
+      RUNTIME_SRC.includes("const registrySubagentSpecs = registryProfiles.map((profile) => ({"),
     "registry task subagents follow the task tool's Multi/Workflow availability"
   )
   assert(

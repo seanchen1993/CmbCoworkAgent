@@ -1,0 +1,525 @@
+import { expect, it } from "vitest"
+import type {
+  BotDefinition,
+  BotGroup,
+  BotConversationActivity
+} from "../../../shared/bots/contracts"
+import {
+  botSidebarPreview,
+  botPinnedConversationIds,
+  botSidebarDropPatch,
+  botPinDropTarget,
+  orderBotConversations,
+  orderImConversations,
+  filterImConversations,
+  removeImConversationFromView,
+  retainSidebarOrder,
+  botSidebarTime
+} from "./bot-sidebar-view"
+import type { BotImConversation } from "../../../shared/bots/im-channel"
+import type { BotViewState } from "../components/bots/view-store"
+
+it("prioritizes pending questions over drafts and drafts over history, with bounded Unicode previews", () => {
+  expect(botSidebarPreview("等待你确认", "未发送", true)).toEqual({
+    isDraft: false,
+    text: "等待你确认"
+  })
+  expect(botSidebarPreview("旧消息", " 新草稿\n第二行 ", false)).toEqual({
+    isDraft: true,
+    text: "新草稿 第二行"
+  })
+  expect(botSidebarPreview("旧消息", " \n ", false)).toEqual({ isDraft: false, text: "旧消息" })
+  expect(botSidebarPreview("😀".repeat(141), "", false).text).toBe("😀".repeat(140) + "…")
+})
+
+it("mixes groups and Bots with unread first, retaining the selected tier until leaving and ignoring rename/version clocks", () => {
+  const bot = { id: "a", createdAt: 10, updatedAt: 900 } as BotDefinition
+  const group = { id: "g" } as BotGroup
+  const activity = (
+    kind: "bot" | "group",
+    id: string,
+    updatedAt: number
+  ): BotConversationActivity => ({ kind, id, updatedAt, version: 1, preview: "", unread: false })
+  const activities = new Map([
+    ["bot:a", activity("bot", "a", 20)],
+    ["group:g", activity("group", "g", 30)]
+  ])
+  const bots = [bot],
+    groups = [group]
+  expect(orderBotConversations(bots, groups, activities).map((item) => item.value.id)).toEqual([
+    "g",
+    "a"
+  ])
+  activities.set("bot:a", { ...activities.get("bot:a")!, unread: true, version: 100 })
+  expect(orderBotConversations(bots, groups, activities).map((item) => item.value.id)).toEqual([
+    "a",
+    "g"
+  ])
+  activities.set("bot:a", activity("bot", "a", 20))
+  expect(
+    orderBotConversations(bots, groups, activities, "bot:a").map((item) => item.value.id)
+  ).toEqual(["a", "g"])
+  expect(orderBotConversations(bots, groups, activities).map((item) => item.value.id)).toEqual([
+    "g",
+    "a"
+  ])
+  activities.set("bot:a", activity("bot", "a", 40))
+  expect(orderBotConversations(bots, groups, activities).map((item) => item.value.id)).toEqual([
+    "a",
+    "g"
+  ])
+  expect(bots).toEqual([bot])
+  expect(groups).toEqual([group])
+})
+
+const im = (
+  id: string,
+  time: number,
+  unread = false,
+  state: "active" | "revoked" = "active"
+): BotImConversation => ({
+  id,
+  botId: "bot",
+  bindingId: `remote-${id}`,
+  title: "同名群聊",
+  state,
+  connected: false,
+  activity: { kind: "im", id, version: 1, updatedAt: time, preview: "", unread }
+})
+
+it("keeps manual pins first, then unread and recent groups; revoked pins always go to history", () => {
+  const rooms = [
+    im("recent", 100),
+    im("old-unread", 20, true),
+    im("new-unread", 30, true),
+    im("pin-a", 2),
+    im("pin-b", 1),
+    im("revoked", 200, true, "revoked")
+  ]
+  const { active, history } = orderImConversations(rooms, ["revoked", "pin-b", "missing", "pin-a"])
+  expect(active.map((room) => room.id)).toEqual([
+    "pin-b",
+    "pin-a",
+    "new-unread",
+    "old-unread",
+    "recent"
+  ])
+  expect(history.map((room) => room.id)).toEqual(["revoked"])
+  expect(active.every((room) => !room.connected)).toBe(true) // offline is not unbound
+  expect(orderImConversations([im("z", 1), im("a", 1)]).active.map((room) => room.id)).toEqual([
+    "a",
+    "z"
+  ])
+  expect(rooms[0].id).toBe("recent")
+})
+
+it("holds the selected unread tier without fabricating unread and keeps separate binding identities", () => {
+  const old = im("old", 1, false, "revoked"),
+    rebound = im("new", 2)
+  expect(
+    orderImConversations([old, rebound, im("newer", 3)], [], "im:new").active.map((room) => room.id)
+  ).toEqual(["new", "newer"])
+  expect(rebound.activity.unread).toBe(false)
+  expect(orderImConversations([old, rebound]).history.map((room) => room.id)).toEqual(["old"])
+})
+
+it("searches retained/hidden groups by group or Bot name, even when the serving Bot is archived", () => {
+  const bots = new Map([["bot", { name: "项目助手", archived: true } as BotDefinition]])
+  const rooms = [im("live", 2), im("history", 1, false, "revoked")]
+  expect(filterImConversations(rooms, bots, "", ["history"]).map((item) => item.id)).toEqual([
+    "live"
+  ])
+  expect(filterImConversations(rooms, bots, "", ["history"], true).map((item) => item.id)).toEqual([
+    "history"
+  ])
+  expect(
+    filterImConversations(rooms, bots, "项目助手", ["history"]).map((item) => item.id)
+  ).toEqual(["live", "history"])
+  expect(filterImConversations(rooms, bots, "同名群聊", ["history"])).toHaveLength(2)
+  expect(filterImConversations(rooms, bots, "无匹配")).toHaveLength(0)
+})
+
+it("defers reorder during interaction, drops removed rows and appends new rows without duplicates", () => {
+  expect(retainSidebarOrder(["new", "b", "a"], ["a", "gone", "b"], (id) => id)).toEqual([
+    "a",
+    "b",
+    "new"
+  ])
+})
+
+it("only removes revoked IM rows, including search/hidden lists, without confusing re-bound groups", () => {
+  const bots = new Map([["bot", { name: "项目助手" } as BotDefinition]])
+  const rooms = [im("active", 2), im("old", 1, false, "revoked"), im("rebound", 3)]
+  for (const query of ["", "同名群聊"])
+    expect(
+      filterImConversations(rooms, bots, query, [], false, ["old", "active"]).map((g) => g.id)
+    ).toEqual(["active", "rebound"])
+  expect(filterImConversations(rooms, bots, "", ["old"], true, ["old"])).toEqual([])
+  rooms[1].activity.version++ // late replies/read-state updates must not resurrect revoked rows
+  expect(filterImConversations(rooms, bots, "", [], false, ["old"])).toHaveLength(2)
+  rooms[1].state = "active"
+  expect(filterImConversations(rooms, bots, "", [], false, ["old"])).toHaveLength(3)
+})
+
+it("clears only the deleted group's navigation and refuses a still-bound group", () => {
+  const view = {
+    ...sidebarView(),
+    imConversationId: "old",
+    selectedId: "bot",
+    activeWorkIdByBot: { bot: "private-task" },
+    activeImWorkIdByConversation: { old: "group-task", other: "other-task" },
+    pinnedImConversationIds: ["old", "other"],
+    hiddenImConversationIds: ["old"],
+    deletedImConversationIds: ["previous"]
+  }
+  expect(removeImConversationFromView(view, im("old", 1))).toBeNull()
+  const patch = removeImConversationFromView(view, im("old", 1, true, "revoked"))!
+  expect(patch).toMatchObject({
+    imConversationId: null,
+    selectedId: "bot",
+    detailTab: "details",
+    activeWorkIdByBot: { bot: null },
+    activeImWorkIdByConversation: { other: "other-task" },
+    deletedImConversationIds: ["previous", "old"],
+    pinnedImConversationIds: ["other"],
+    hiddenImConversationIds: []
+  })
+  expect(view.imConversationId).toBe("old")
+  expect(view.activeImWorkIdByConversation.old).toBe("group-task")
+  expect(
+    removeImConversationFromView(
+      { ...view, imConversationId: "other" },
+      im("old", 1, false, "revoked")
+    )
+  ).not.toHaveProperty("selectedId")
+})
+
+it("shows bounded local calendar times instead of heartbeat or relative-second churn", () => {
+  const now = new Date(2026, 10, 6, 14, 20).getTime()
+  expect(botSidebarTime(new Date(2026, 10, 6, 9, 5).getTime(), now)).toBe("09:05")
+  expect(botSidebarTime(new Date(2026, 10, 5, 23, 50).getTime(), now)).toBe("昨天")
+  expect(botSidebarTime(new Date(2026, 9, 10).getTime(), now)).toBe("10/10")
+  expect(botSidebarTime(new Date(2025, 9, 10).getTime(), now)).toBe("2025/10/10")
+  expect(botSidebarTime(undefined, now)).toBe("")
+})
+
+const sidebarView = (): BotViewState => ({
+  selectedId: "current-private-chat",
+  activeWorkIdByBot: {},
+  groupId: null,
+  detailOpen: true,
+  detailTab: "files",
+  groupDetailTab: "members",
+  showArchived: false,
+  showExecutionDetails: false,
+  accentMode: "bot",
+  sidebarWidth: 264,
+  detailWidth: 320,
+  pinnedBotIds: ["a", "b"],
+  pinnedGroupIds: ["g1", "g2"],
+  hiddenBotIds: ["hidden"],
+  hiddenGroupIds: [],
+  sections: [
+    { id: "s1", name: "First", botIds: ["a", "other"], groupIds: ["g1"], collapsed: true },
+    { id: "s2", name: "Second", botIds: [], collapsed: false }
+  ]
+})
+
+it("preserves the actual legacy Bot-then-group layout without writing or migrating preferences", () => {
+  const view = sidebarView()
+  expect(botPinnedConversationIds(view, ["g2", "g1"])).toEqual([
+    "bot:a",
+    "bot:b",
+    "group:g2",
+    "group:g1"
+  ])
+  expect(view).not.toHaveProperty("pinnedConversationIds")
+})
+
+it("accepts older persisted hosts that predate group pins and sections without migrating on read", () => {
+  const view = { pinnedBotIds: ["a"] } as BotViewState
+  expect(botPinnedConversationIds(view)).toEqual(["bot:a"])
+  expect(
+    botSidebarDropPatch(view, { kind: "group", id: "g", pinned: false }, { kind: "pin-grid" })
+  ).toEqual({
+    pinnedGroupIds: ["g"],
+    hiddenGroupIds: [],
+    pinnedConversationIds: ["bot:a", "group:g"]
+  })
+  expect(view).toEqual({ pinnedBotIds: ["a"] })
+})
+
+it("projects a mixed pin order once, ignores stale entries and appends missing membership", () => {
+  const view = sidebarView()
+  view.pinnedConversationIds = ["group:g2", "bot:a", "bot:a", "bot:removed", "section:s1"]
+  expect(botPinnedConversationIds(view)).toEqual(["group:g2", "bot:a", "bot:b", "group:g1"])
+  expect(view.pinnedBotIds).toEqual(["a", "b"])
+})
+
+it("moves across Bot/group grid slots without dropping unseen pins or changing conversation state", () => {
+  const view = sidebarView()
+  view.pinnedBotIds.push("unseen")
+  view.pinnedConversationIds = ["bot:a", "bot:unseen", "group:g1", "bot:b", "group:g2"]
+  const before = structuredClone(view)
+  const patch = botSidebarDropPatch(
+    view,
+    { kind: "bot", id: "b", pinned: true },
+    {
+      kind: "pin-grid",
+      anchor: "bot:a",
+      position: "before"
+    }
+  )!
+  expect(patch.pinnedConversationIds).toEqual([
+    "bot:b",
+    "bot:a",
+    "bot:unseen",
+    "group:g1",
+    "group:g2"
+  ])
+  expect(Object.keys(patch).sort()).toEqual([
+    "hiddenBotIds",
+    "pinnedBotIds",
+    "pinnedConversationIds"
+  ])
+  const next = { ...view, ...patch }
+  expect(next.sections).toBe(view.sections)
+  expect(next.selectedId).toBe("current-private-chat")
+  expect(next.groupId).toBeNull()
+  expect(next.detailTab).toBe("files")
+  expect(view).toEqual(before)
+})
+
+it("pins an ordinary row idempotently and clears only that row's hidden preference", () => {
+  const view = sidebarView()
+  const source = { kind: "bot" as const, id: "hidden", pinned: false }
+  const target = { kind: "pin-grid" as const, anchor: "group:g1", position: "before" as const }
+  const patch = botSidebarDropPatch(view, source, target)!
+  const next = { ...view, ...patch }
+  expect(next.pinnedBotIds).toEqual(["a", "b", "hidden"])
+  expect(next.hiddenBotIds).toEqual([])
+  expect(next.pinnedConversationIds).toEqual([
+    "bot:a",
+    "bot:b",
+    "bot:hidden",
+    "group:g1",
+    "group:g2"
+  ])
+  expect(botSidebarDropPatch(next, source, target)).toBeNull()
+})
+
+it("unpins a tile into the list without erasing its existing section, collapsed state or other pins", () => {
+  const view = sidebarView()
+  view.pinnedConversationIds = ["group:g1", "bot:a", "bot:b", "group:g2"]
+  const patch = botSidebarDropPatch(
+    view,
+    { kind: "bot", id: "a", pinned: true },
+    { kind: "agent-list" }
+  )!
+  expect(patch.pinnedBotIds).toEqual(["b"])
+  expect(patch.pinnedConversationIds).toEqual(["group:g1", "bot:b", "group:g2"])
+  expect(patch).not.toHaveProperty("sections")
+  expect(view.sections[0].botIds).toEqual(["a", "other"])
+  expect(view.sections[0].collapsed).toBe(true)
+  expect(
+    botSidebarDropPatch(view, { kind: "bot", id: "other", pinned: false }, { kind: "agent-list" })
+  ).toBeNull()
+})
+
+it("moves a pinned group into a section with one patch and keeps unrelated Bot membership", () => {
+  const view = sidebarView()
+  const patch = botSidebarDropPatch(
+    view,
+    { kind: "group", id: "g1", pinned: true },
+    {
+      kind: "section-body",
+      id: "s2"
+    }
+  )!
+  expect(patch.pinnedGroupIds).toEqual(["g2"])
+  expect(patch.sections![0]).toEqual({ ...view.sections[0], groupIds: [] })
+  expect(patch.sections![1]).toEqual({ ...view.sections[1], groupIds: ["g1"] })
+  expect(patch).not.toHaveProperty("pinnedBotIds")
+  expect(patch).not.toHaveProperty("selectedId")
+})
+
+it("keeps existing pin membership and mixed order when the original menu moves a conversation", () => {
+  const view = sidebarView()
+  view.pinnedConversationIds = ["group:g1", "bot:a", "bot:b", "group:g2"]
+  const patch = botSidebarDropPatch(
+    view,
+    { kind: "bot", id: "a", pinned: false },
+    {
+      kind: "section-body",
+      id: "s2"
+    }
+  )!
+  expect(Object.keys(patch)).toEqual(["sections"])
+  const next = { ...view, ...patch }
+  expect(next.pinnedBotIds).toBe(view.pinnedBotIds)
+  expect(next.pinnedConversationIds).toBe(view.pinnedConversationIds)
+  expect(next.sections[1].botIds).toEqual(["a"])
+})
+
+it("uses the synthetic ungrouped section as a move destination without manually sorting ordinary rows", () => {
+  const view = sidebarView()
+  const patch = botSidebarDropPatch(
+    view,
+    { kind: "bot", id: "other", pinned: false },
+    {
+      kind: "section-body",
+      id: null
+    }
+  )!
+  expect(patch.sections![0].botIds).toEqual(["a"])
+  expect(patch.sections![0].groupIds).toEqual(["g1"])
+  expect(
+    botSidebarDropPatch(
+      { ...view, ...patch },
+      { kind: "bot", id: "other", pinned: false },
+      {
+        kind: "section-body",
+        id: null
+      }
+    )
+  ).toBeNull()
+})
+
+it("reorders sections while preserving each section object and handles the reverse direction", () => {
+  const view = sidebarView()
+  const patch = botSidebarDropPatch(
+    view,
+    { kind: "section", id: "s1" },
+    {
+      kind: "section",
+      id: "s2",
+      position: "after"
+    }
+  )!
+  expect(patch.sections).toEqual([view.sections[1], view.sections[0]])
+  expect(patch.sections![1]).toBe(view.sections[0])
+  const back = botSidebarDropPatch(
+    { ...view, ...patch },
+    { kind: "section", id: "s1" },
+    {
+      kind: "section",
+      id: "s2",
+      position: "before"
+    }
+  )!
+  expect(back.sections).toEqual(view.sections)
+})
+
+it("does not persist cancelled, same-slot, missing-anchor, deleted-section or cross-kind drop routes", () => {
+  const view = sidebarView()
+  expect(
+    botSidebarDropPatch(
+      view,
+      { kind: "bot", id: "a", pinned: true },
+      { kind: "pin-grid", anchor: "bot:a" }
+    )
+  ).toBeNull()
+  expect(
+    botSidebarDropPatch(
+      view,
+      { kind: "bot", id: "a", pinned: true },
+      { kind: "pin-grid", anchor: "bot:missing" }
+    )
+  ).toBeNull()
+  expect(
+    botSidebarDropPatch(
+      view,
+      { kind: "bot", id: "a", pinned: true },
+      { kind: "section-body", id: "deleted" }
+    )
+  ).toBeNull()
+  expect(botSidebarDropPatch(view, { kind: "section", id: "s1" }, { kind: "pin-grid" })).toBeNull()
+  expect(
+    botSidebarDropPatch(
+      view,
+      { kind: "bot", id: "a", pinned: true },
+      { kind: "section", id: "s1", position: "before" }
+    )
+  ).toBeNull()
+  expect(
+    botSidebarDropPatch(
+      view,
+      { kind: "section", id: "deleted" },
+      { kind: "section", id: "s1", position: "before" }
+    )
+  ).toBeNull()
+})
+
+it("uses the current preference snapshot so a pin added during a drag remains present", () => {
+  const view = sidebarView()
+  const current = { ...view, pinnedBotIds: [...view.pinnedBotIds, "new-during-drag"] }
+  const patch = botSidebarDropPatch(
+    current,
+    { kind: "bot", id: "b", pinned: true },
+    {
+      kind: "pin-grid",
+      anchor: "bot:a",
+      position: "before"
+    }
+  )!
+  expect(patch.pinnedConversationIds).toContain("bot:new-during-drag")
+  expect(patch.pinnedBotIds).toEqual(["a", "b", "new-during-drag"])
+})
+
+const grid = [
+  { key: "bot:a", left: 0, right: 80, top: 0, bottom: 80 },
+  { key: "group:g", left: 88, right: 168, top: 0, bottom: 80 },
+  { key: "bot:b", left: 0, right: 80, top: 88, bottom: 168 },
+  { key: "bot:c", left: 88, right: 168, top: 88, bottom: 168 }
+]
+
+it("resolves pin insertion by both row and column, including blank grid and trailing space", () => {
+  expect(botPinDropTarget([], { x: 0, y: 0 })).toEqual({ kind: "pin-grid" })
+  expect(botPinDropTarget(grid, { x: 10, y: 20 })).toEqual({
+    kind: "pin-grid",
+    anchor: "bot:a",
+    position: "before"
+  })
+  expect(botPinDropTarget(grid, { x: 100, y: 20 })).toEqual({
+    kind: "pin-grid",
+    anchor: "group:g",
+    position: "before"
+  })
+  expect(botPinDropTarget(grid, { x: 170, y: 20 })).toEqual({
+    kind: "pin-grid",
+    anchor: "bot:b",
+    position: "before"
+  })
+  expect(botPinDropTarget(grid, { x: 10, y: 100 })).toEqual({
+    kind: "pin-grid",
+    anchor: "bot:b",
+    position: "before"
+  })
+  expect(botPinDropTarget(grid, { x: 170, y: 200 })).toEqual({
+    kind: "pin-grid",
+    anchor: "bot:c",
+    position: "after"
+  })
+})
+
+it("resolves compact single-column and RTL grid insertions without changing stored identity keys", () => {
+  expect(botPinDropTarget([grid[0], grid[2]], { x: 50, y: 100 })).toEqual({
+    kind: "pin-grid",
+    anchor: "bot:b",
+    position: "after"
+  })
+  const rtl = [
+    { ...grid[1], key: "bot:a" },
+    { ...grid[0], key: "group:g" }
+  ]
+  expect(botPinDropTarget(rtl, { x: 180, y: 20 }, true)).toEqual({
+    kind: "pin-grid",
+    anchor: "bot:a",
+    position: "before"
+  })
+  expect(botPinDropTarget(rtl, { x: 90, y: 20 }, true)).toEqual({
+    kind: "pin-grid",
+    anchor: "group:g",
+    position: "before"
+  })
+})

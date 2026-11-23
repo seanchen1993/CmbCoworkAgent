@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261116T034925Z-import-fe464b98",
+  "kind": "historical-real-model-electron",
+  "startedAt": "2026-11-16T03:49:25.036Z",
+  "displayTimezone": "Asia/Shanghai",
+  "archivedOn": "2026-11-17",
+  "status": "failure-recorded",
+  "exitCode": null,
+  "selectedCases": null,
+  "provenance": {
+    "sourceArtifact": "bot-integration-build-7meOko/artifacts/routing-1794800965036.json",
+    "originalReportSha256": "fe464b98ab8b3ca702676249a9061e3bd136c4fecd841cf091e5b17fa1f0822a",
+    "originalExitCodeUnavailable": true,
+    "originalCaseSelectionUnavailable": true,
+    "note": "历史回收。保留缺失字段；未见 error 不等于证实进程成功。未使用当前源码回填历史版本。"
+  },
+  "build": {
+    "builtAt": "2026-11-16T03:46:29.116Z",
+    "mainSha256": "eb885d085129afaafdbb5ba260864ba0a5464e9c7c3117faaab273b7bc8d8896",
+    "sourceAtBuild": null
+  },
+  "notes": "浏览器关闭导致未完成；不能将未跑到的用例计为通过。",
+  "report": {
+    "model": "deepseek-v4-flash",
+    "wire": {
+      "main": 17,
+      "guided": 17,
+      "worker": 0,
+      "workerCreate": 0
+    },
+    "results": [
+      {
+        "id": "greeting",
+        "label": "日常问答",
+        "preferred": "inline",
+        "message": "你好，用一句话说说你能帮我做什么。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 4.2,
+        "tools": [],
+        "mainTools": [],
+        "reply": "你好，我可以帮你处理日常工作中的问答、信息整理、文档写作、代码编写与调试，以及文件和数据处理，并按需交付成可用的结果。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "rewrite",
+        "label": "短文改写",
+        "preferred": "inline",
+        "message": "把这句话改得更礼貌，只给一句：明天下午三点来参加读书会，记得带书。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 1.9,
+        "tools": [],
+        "mainTools": [],
+        "reply": "明天下午三点，方便的话请您来参加读书会，并记得带上书。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "lookup",
+        "label": "读取一个文件查事实",
+        "preferred": "inline",
+        "files": {
+          "场地.md": "阅览室最多容纳24人，免费，周一闭馆。\n"
+        },
+        "message": "看一下 <test-workspace>/lookup/场地.md，告诉我阅览室最多能坐多少人。一句话即可。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 3.1,
+        "tools": [
+          "read_file"
+        ],
+        "mainTools": [
+          "read_file"
+        ],
+        "reply": "\n阅览室最多能坐 24 人。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "small-edit",
+        "label": "文件中修改一个时间",
+        "preferred": "inline",
+        "files": {
+          "notice.txt": "读书会本周日下午三点开始，地点社区阅览室。\n"
+        },
+        "message": "把 <test-workspace>/small-edit/notice.txt 中的下午三点改成下午四点，其他内容不变。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 192.5,
+        "tools": [
+          "read_file",
+          "edit_file"
+        ],
+        "mainTools": [
+          "read_file",
+          "edit_file",
+          "read_file"
+        ],
+        "reply": "先读取该文件内容。\n\n\n已改好：`读书会本周日下午四点开始，地点社区阅览室。` 其余内容未动。\n\n（文件在指定目录，不在我的工作区内，无法作为附件交付。）",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "event-plan",
+        "label": "多材料筹备方案及交付",
+        "preferred": "independent",
+        "files": {
+          "活动约束.md": "虚构读书会：周日下午三点开始，共90分钟，20人，各带一本书。必须有签到、分组讨论和分享。预算1000元。\n",
+          "场地说明.md": "社区阅览室免费，可容纳24人，室内不受天气影响。小公园免费、容量40人，下雨不可用。活动中心收费300元、容量30人，有投影。\n",
+          "费用.csv": "项目,单价,数量\n饮用水,5,20\n材料,120,1\n备用金,100,1\n"
+        },
+        "message": "请帮我做好周日读书会筹备方案。工作目录 <test-workspace>/event-plan。读取活动约束.md、场地说明.md、费用.csv，核算费用，比较三个场地的容量、预算和天气风险，推荐一个；制定90分钟流程、分工清单和两条应急安排。写入 plan.md，检查总时长和预算后交给我。后面我会调整时间。资料均为虚构，不用浏览器，也不联系任何人。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 167.1,
+        "tools": [
+          "ls",
+          "read_file",
+          "write_file",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "read_file",
+          "write_file",
+          "execute",
+          "bot_deliver_files",
+          "execute"
+        ],
+        "reply": "我会先读取这三份输入文件，然后生成并检查计划。\n\n\n\n\n\n方案已写入并核对完成：[plan.md](<test-workspace>/event-plan/plan.md)。该文件位于你的指定目录，不在我的附件工作区内，所以只能以链接形式提供，无法作为附件发出。\n\n核心结论：\n\n- **费用**：水 5×20=100 + 材料 120 + 备用金 100 = **320 元**（不含场地），占 1000 元 32%。\n- **推荐场地：社区阅览室**。容量 24 人，可容纳 20 人；免费，室内无天气风险，环境安静，适合分组讨论。小公园虽然容量 40 人且更宽松，但下雨不可用，又没有室内替代方案；活动中心容量充足且有投影，但要多花 300 元，总费用 620 元。阅览室唯一的短板是无投影，可用白板加纸质材料替代。\n- **流程**：签到 10 分钟、开场 10 分钟、破冰 15 分钟、分组讨论 30 分钟（4 组×5 人）、小组分享 15 分钟、自由交流 7 分钟、收尾 3 分钟，共 **90 分钟**，15:00 开始，16:30 结束；脚本已核对，时间区间连续、没有空档。\n- **分工**：总协调、签到物料、主持、计时、4 名组长、记录拍照、清尾 2 人；如兼任，最低 7 人。\n- **应急**：①场地临时不可用或超员时，切换到活动中心，总费用 620 元仍在预算内；②流程超时时，优先缩减自由交流，再缩减破冰，三个必备环节不缩减。\n\n时间调整时只需平移钟点，各段时长和 90 分钟总长不用改动；告诉我新的开始时间，我直接改表。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "reconcile",
+        "label": "跨文件核对数据并输出报告",
+        "error": "page.evaluate: Target page, context or browser has been closed"
+      }
+    ]
+  },
+  "logs": [
+    {
+      "name": "bot-routing-v2-real.log",
+      "text": "{\"case\":\"greeting\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":4.2,\"tools\":[]}\n{\"case\":\"rewrite\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":1.9,\"tools\":[]}\n{\"case\":\"lookup\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":3.1,\"tools\":[\"read_file\"]}\n{\"case\":\"small-edit\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":192.5,\"tools\":[\"read_file\",\"edit_file\",\"read_file\"]}\n{\"case\":\"event-plan\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":167.1,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"read_file\",\"write_file\",\"execute\",\"bot_deliver_files\",\"execute\"]}\nFAIL reconcile page.evaluate: Target page, context or browser has been closed\nRouting evaluation report: <temp>/bot-integration-build-7meOko/artifacts/routing-1794800965036.json\npage.evaluate: Target page, context or browser has been closed\n",
+      "sha256": "842808f3fc685d6366e984491624037e1e8ea8d4d68c96ba700a2859f4dac098"
+    }
+  ]
+}

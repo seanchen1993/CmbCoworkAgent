@@ -1,11 +1,15 @@
+import { chatScrollInsets } from "@/lib/chat-scroll-insets"
 import type { Message } from "@/types"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
+import { ChatMessageVisibilityContext } from "./chat-presentation-context"
 import {
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode
@@ -359,6 +363,13 @@ function parseUserInputRequestResponse(
               [questionId, additionalText ? `${answer.label} · ${additionalText}` : answer.label]
             ]
           }
+          if (
+            answer.type === "options" &&
+            Array.isArray(answer.options) &&
+            answer.options.every((option) => isRecord(option) && typeof option.label === "string")
+          ) {
+            return [[questionId, answer.options.map((option) => option.label).join("、")]]
+          }
           return []
         }
       )
@@ -370,7 +381,10 @@ function parseUserInputRequestResponse(
   }
 }
 
-function getChatScrollQuestions(messages: Message[]): {
+function getChatScrollQuestions(
+  messages: Message[],
+  hidden?: ReadonlySet<string>
+): {
   questions: ChatScrollQuestion[]
   userMessageIndexes: number[]
 } {
@@ -404,6 +418,7 @@ function getChatScrollQuestions(messages: Message[]): {
   let activeRequestToolCallIds = new Set<string>()
 
   for (const [messageIndex, message] of messages.entries()) {
+    if (hidden?.has(message.id)) continue
     if (message.role === "user") {
       activeQuestionIndex = questions.length
       activeRequestToolCallIds = new Set()
@@ -454,21 +469,25 @@ interface ChatScrollQuestionProjection {
 export function createChatScrollQuestionProjector(): (
   messages: Message[],
   revision: number,
-  gapBeforeMessageId?: string | null
+  gapBeforeMessageId?: string | null,
+  hidden?: ReadonlySet<string>
 ) => ChatScrollQuestionProjection {
   let previousRevision = -1
   let previousGapBeforeMessageId: string | null = null
   let projection: ChatScrollQuestionProjection | null = null
+  let previousHidden: ReadonlySet<string> | undefined
 
-  return (messages, revision, gapBeforeMessageId = null) => {
+  return (messages, revision, gapBeforeMessageId = null, hidden) => {
     if (
       projection &&
       previousRevision === revision &&
-      previousGapBeforeMessageId === gapBeforeMessageId
+      previousGapBeforeMessageId === gapBeforeMessageId &&
+      previousHidden === hidden
     ) {
       return projection
     }
-    const { questions, userMessageIndexes } = getChatScrollQuestions(messages)
+    const { questions, userMessageIndexes } = getChatScrollQuestions(messages, hidden)
+    previousHidden = hidden
     const userMessageIds = questions.map((question) => question.id)
     const questionIndexByMessageId = new Map(
       userMessageIds.map((messageId, index) => [messageId, index])
@@ -568,11 +587,23 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
 }: ChatScrollMarkerRailProps): React.JSX.Element {
   const wrapperRef = useRef<HTMLDivElement | null>(null)
   const buttonRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+  const [hoveredQuestionId, setHoveredQuestionId] = useState<string | null>(null)
+  const hoveredIndex = useMemo(() => {
+    if (hoveredQuestionId === null) return null
+    const index = questions.findIndex((question) => question.id === hoveredQuestionId)
+    return index < 0 ? null : index
+  }, [questions, hoveredQuestionId])
+  const hoveredQuestion = hoveredIndex === null ? null : questions[hoveredIndex]
   const [popoverOpen, setPopoverOpen] = useState(false)
   const [popoverPosition, setPopoverPosition] = useState({ top: 0, left: 0 })
   const openTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // History windows can replace the hovered question before the pointer moves.
+  if (hoveredQuestionId !== null && hoveredIndex === null) {
+    setHoveredQuestionId(null)
+    setPopoverOpen(false)
+  }
 
   const clearOpenTimer = useCallback(() => {
     if (openTimerRef.current) {
@@ -591,7 +622,7 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
   const handleClose = useCallback(() => {
     clearOpenTimer()
     clearCloseTimer()
-    setHoveredIndex(null)
+    setHoveredQuestionId(null)
     setPopoverOpen(false)
   }, [clearCloseTimer, clearOpenTimer])
 
@@ -607,26 +638,37 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
     })
   }, [])
 
+  useLayoutEffect(() => {
+    if (hoveredIndex === null) {
+      clearOpenTimer()
+      clearCloseTimer()
+      return
+    }
+    updatePopoverPosition(hoveredIndex)
+  }, [clearCloseTimer, clearOpenTimer, hoveredIndex, updatePopoverPosition])
+
   const openPopoverFor = useCallback(
     (index: number) => {
+      const question = questions[index]
+      if (!question) return handleClose()
       clearCloseTimer()
-      setHoveredIndex(index)
-      updatePopoverPosition(index)
+      setHoveredQuestionId(question.id)
       clearOpenTimer()
       openTimerRef.current = setTimeout(() => setPopoverOpen(true), POPOVER_OPEN_DELAY_MS)
     },
-    [clearCloseTimer, clearOpenTimer, updatePopoverPosition]
+    [clearCloseTimer, clearOpenTimer, handleClose, questions]
   )
 
   const handleButtonFocus = useCallback(
     (index: number) => {
+      const question = questions[index]
+      if (!question) return handleClose()
       clearCloseTimer()
-      setHoveredIndex(index)
-      updatePopoverPosition(index)
+      setHoveredQuestionId(question.id)
       clearOpenTimer()
       setPopoverOpen(true)
     },
-    [clearCloseTimer, clearOpenTimer, updatePopoverPosition]
+    [clearCloseTimer, clearOpenTimer, handleClose, questions]
   )
 
   const armClose = useCallback(() => {
@@ -776,7 +818,7 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
       className="pointer-events-none absolute left-0 top-[46%] z-20 hidden -translate-y-1/2 md:block"
     >
       <Popover
-        open={popoverOpen}
+        open={popoverOpen && hoveredQuestion !== null}
         onOpenChange={(open) => {
           if (!open) handleClose()
         }}
@@ -865,7 +907,7 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
             </button>
           )}
         </div>
-        {hoveredIndex !== null && (
+        {hoveredQuestion !== null && (
           <PopoverAnchor asChild>
             <span
               className="pointer-events-none absolute"
@@ -886,7 +928,9 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
           onMouseLeave={armClose}
           className="mb-10 max-h-[70vh] max-w-80 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border-border/70 bg-popover px-3 py-2 leading-relaxed shadow-lg shadow-black/5 backdrop-blur-sm"
         >
-          {hoveredIndex !== null && renderPopoverContent(questions[hoveredIndex], hoveredIndex)}
+          {hoveredQuestion !== null &&
+            hoveredIndex !== null &&
+            renderPopoverContent(hoveredQuestion, hoveredIndex)}
         </PopoverContent>
       </Popover>
     </div>
@@ -914,10 +958,12 @@ export function ChatScrollNavigator({
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(-1)
 
   const [projectChatScrollQuestions] = useState(createChatScrollQuestionProjector)
+  const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
   const questionProjection = projectChatScrollQuestions(
     messages,
     questionStructureRevision,
-    historyGapBeforeMessageId
+    historyGapBeforeMessageId,
+    hiddenMessageIds
   )
   const {
     questions,
@@ -975,8 +1021,9 @@ export function ChatScrollNavigator({
 
     const { scrollTop, scrollHeight, clientHeight } = viewport
     const nearBottom = scrollHeight - scrollTop - clientHeight < 80
-    const viewportAnchor = scrollTop + 24
-    const viewportBottomAnchor = scrollTop + clientHeight - 80
+    const insets = chatScrollInsets(viewport)
+    const viewportAnchor = scrollTop + insets.top + 24
+    const viewportBottomAnchor = scrollTop + clientHeight - insets.bottom - 80
     // User rows are in transcript order, so their top positions are monotonic.
     // Binary search avoids forcing layout for every historical question on each
     // scroll frame. With the 240-row transcript window this needs at most about
@@ -1046,7 +1093,8 @@ export function ChatScrollNavigator({
         const targetElement = userMessageRefs.current.get(messageId)
         if (nextViewport && targetElement) {
           pendingRevealFrameRef.current = null
-          const targetTop = Math.max(0, getElementTopInViewport(targetElement, nextViewport) - 8)
+          const topInset = chatScrollInsets(nextViewport).top
+          const targetTop = Math.max(0, getElementTopInViewport(targetElement, nextViewport) - topInset - 8)
           nextViewport.scrollTo({ top: targetTop, behavior: "smooth" })
           onScrollToQuestionRef.current?.()
           return

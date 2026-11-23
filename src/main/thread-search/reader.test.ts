@@ -9,6 +9,7 @@ import { Worker } from "node:worker_threads"
 import { build } from "esbuild"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { iterateChatSearchLocations, projectChatSearchPlan } from "../../shared/chat-search-index"
+import { matchesOrdinaryThreadScope } from "../../shared/thread-search-scope"
 import { createThreadSearchMessagePlan } from "../../shared/thread-search-projection"
 import { THREAD_SEARCH_GOAL_EVENT_SQL } from "./goal-event"
 import * as threadDb from "../db"
@@ -587,6 +588,28 @@ describe("isolated thread search read path", () => {
     expect(search("Preferred exact match")).toMatchObject([
       { threadId: "anchored", navigation: "exact", target: { kind: "goalEvent" } }
     ])
+  })
+
+  it("matches the ordinary sidebar for linked Bot tasks and private or group-only conversations", () => {
+    const work = { botId: "bot", botHostId: "local", botWorkId: "work" }
+    const rows = [
+      { id: "ordinary", metadata: {} },
+      { id: "private", metadata: { botId: "bot" } },
+      { id: "group", metadata: { ...work, botAudienceKey: "desktop", botGroupId: "group" } },
+      { id: "desktop-work", metadata: { ...work, botAudienceKey: "desktop" } },
+      { id: "im-work", metadata: { ...work, botMockBindingId: "binding", botMockTransport: "im" } },
+      { id: "legacy-im-work", metadata: { ...work, botMockBindingId: "binding", botAudienceKey: "im:group" } },
+      { id: "mock-work", metadata: { ...work, botMockBindingId: "binding", botMockTransport: "mock" } }
+    ]
+    const update = sqlite.prepare("UPDATE threads SET metadata = ? WHERE thread_id = ?")
+    for (const row of rows) {
+      insertThread(row.id)
+      update.run(JSON.stringify(row.metadata), row.id)
+    }
+    const expected = ["desktop-work", "im-work", "legacy-im-work", "ordinary"]
+    expect(rows.filter((row) => matchesOrdinaryThreadScope(row)).map((row) => row.id).sort()).toEqual(expected)
+    const reader = createThreadSearchReader(sqlite)
+    expect(reader.captureCandidates(undefined, flag).candidates.map((row) => row.threadId).sort()).toEqual(expected)
   })
 
   it("keeps remote inbox rows in their actual scope while hiding the disk path in results", () => {

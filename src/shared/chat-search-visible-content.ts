@@ -5,6 +5,7 @@ import { getSystemNoticePresentation, projectGoalNoticeVisibleText, systemNotice
 import { parseSkillUseBlock } from "./skill-use-block"
 import { createChatSearchPlan } from "./chat-search-plan"
 import {
+  BOT_BROWSER_PROMPT_PREFIX,
   LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX,
   LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   stripBuiltinBrowserInstructions
@@ -42,6 +43,7 @@ function parseUserTransportText(content: string): {
     visibleText = wrappedText
   } else {
     for (const prefix of [
+      BOT_BROWSER_PROMPT_PREFIX,
       LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
       LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX,
       LEGACY_BROWSER_PREFIX
