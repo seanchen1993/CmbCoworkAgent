@@ -1193,7 +1193,6 @@ interface ThreadDisplayBaselineCacheEntry {
   sourceTailSnapshot: Message | undefined
   sourceTailProjected: boolean
   baseline: Message[]
-  hasReplayCandidates: boolean
 }
 
 const threadDisplayBaselineCache = new WeakMap<
@@ -1205,9 +1204,9 @@ const noDisplayedReplayAliases: ReadonlyMap<string, string> = new Map()
 function getThreadDisplayBaseline(
   messages: readonly Message[],
   contentVersion: number
-): ThreadDisplayBaselineCacheEntry {
+): Message[] {
   const cached = threadDisplayBaselineCache.get(messages)
-  if (cached?.contentVersion === contentVersion) return cached
+  if (cached?.contentVersion === contentVersion) return cached.baseline
   const sourceTail = messages.at(-1)
   if (
     cached &&
@@ -1217,8 +1216,7 @@ function getThreadDisplayBaseline(
     sourceTail.role !== "user" &&
     cached.sourceTailSnapshot.id === sourceTail.id &&
     cached.sourceTailSnapshot.role === sourceTail.role &&
-    cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id &&
-    cached.sourceTailSnapshot.provider_source_id === sourceTail.provider_source_id
+    cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
   ) {
     const projectedTail = filterCoordinatorNoiseMessages(
       isVisibleCheckpointTranscriptMessage(sourceTail)
@@ -1228,7 +1226,7 @@ function getThreadDisplayBaseline(
     if (!cached.sourceTailProjected && projectedTail.length === 0) {
       cached.contentVersion = contentVersion
       cached.sourceTailSnapshot = sourceTail
-      return cached
+      return cached.baseline
     }
     if (
       cached.sourceTailProjected &&
@@ -1238,23 +1236,21 @@ function getThreadDisplayBaseline(
       cached.baseline[cached.baseline.length - 1] = projectedTail[0]
       cached.contentVersion = contentVersion
       cached.sourceTailSnapshot = sourceTail
-      return cached
+      return cached.baseline
     }
   }
   const baseline = filterCoordinatorNoiseMessages(
     excludeDuplicateGoalSidecars(messages.filter(isVisibleCheckpointTranscriptMessage))
       .map(cleanUserAttachmentMarkupForDisplay)
   )
-  const entry = {
+  threadDisplayBaselineCache.set(messages, {
     contentVersion,
     sourceLength: messages.length,
     sourceTailSnapshot: sourceTail,
     sourceTailProjected: Boolean(sourceTail && baseline.at(-1)?.id === sourceTail.id),
-    baseline,
-    hasReplayCandidates: hasToolReplayCandidates(messages)
-  }
-  threadDisplayBaselineCache.set(messages, entry)
-  return entry
+    baseline
+  })
+  return baseline
 }
 
 type ForkDestinationMode = "local" | "workspace"
@@ -3625,7 +3621,7 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [appleIntelligenceGlowEnabled, isLoading])
 
-  const { baseline: threadDisplayBaseline, hasReplayCandidates } = useMemo(
+  const threadDisplayBaseline = useMemo(
     () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
     [messagesContentVersion, threadMessages]
   )
@@ -3655,6 +3651,10 @@ export function ChatContainer({
     displayMessages,
     displayMessageProjection.changedMessages,
     displayMessagesStructureVersion
+  )
+  const hasReplayCandidates = useMemo(
+    () => hasToolReplayCandidates(displayMessages),
+    [displayMessages, displayMessagesStructureVersion]
   )
   const projectedReplayAliases = useMemo(() =>
     hasReplayCandidates ? findDisplayedReplayAliases(displayMessages) : noDisplayedReplayAliases,

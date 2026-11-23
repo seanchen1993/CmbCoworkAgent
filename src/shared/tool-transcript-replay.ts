@@ -317,9 +317,22 @@ function readInterleavedReplays<T extends TranscriptMessage>(
 
   const assistants = [first]
   let end = start + 1
-  while (messages[end]?.role === "assistant" && hasSameReplayId(first, messages[end])) {
+  while (
+    messages[end]?.role === "assistant" &&
+    hasSameReplayId(first, messages[end]) &&
+    Array.isArray(messages[end].tool_calls) &&
+    messages[end].tool_calls?.length
+  ) {
     assistants.push(messages[end++])
   }
+  if (assistants.length < 2) return
+  // A final text-only message can be committed before the tool result arrives.
+  while (
+    messages[end]?.role === "assistant" &&
+    (!messages[end].tool_calls ||
+      (Array.isArray(messages[end].tool_calls) && messages[end].tool_calls?.length === 0))
+  )
+    end++
   const results = new Map<string, T[]>()
   while (messages[end]?.role === "tool") {
     const result = messages[end++]
@@ -365,7 +378,8 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     }
   >()
   const ambiguousCalls = new Set<string>()
-  const carriedUnfinishedCalls = new Set<string>()
+  const carriedUnfinishedCalls = new Map<string, number | null>()
+  const observedResultIds = new Set<string>()
   const callCouldBelongElsewhere = (id: string): boolean =>
     ambiguousCalls.has(id) || carriedUnfinishedCalls.has(id)
   const foldCompleted = (current: ToolExchange<T>): void => {
@@ -404,30 +418,37 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       completedResults.clear()
     }
     if (message.role === "user") {
-      for (const id of deferredCalls.keys()) carriedUnfinishedCalls.add(id)
-      for (const id of ambiguousCalls) carriedUnfinishedCalls.add(id)
+      for (const id of ambiguousCalls) carriedUnfinishedCalls.set(id, null)
+      for (const id of deferredCalls.keys()) {
+        const carried = carriedUnfinishedCalls.get(id)
+        if (carried !== null) carriedUnfinishedCalls.set(id, (carried ?? 0) + 1)
+      }
       deferredCalls.clear()
       ambiguousCalls.clear()
     }
     const exchange = readExchange(messages, index)
     const exchanges = exchange ? [exchange] : readInterleavedReplays(messages, index)
     if (!exchanges) {
-      if (
-        message.role === "tool" &&
-        message.tool_call_id &&
-        !callCouldBelongElsewhere(message.tool_call_id)
-      ) {
-        const owner = deferredCalls.get(message.tool_call_id)
-        if (owner) {
-          deferredCalls.delete(message.tool_call_id)
-          owner.results.set(message.tool_call_id, message)
-          if (hasToolResultExecutionId(message))
-            completedResults.set(resultReplayKey(message), message)
+      if (message.role === "tool" && message.tool_call_id) {
+        const callId = message.tool_call_id
+        const resultKey = resultReplayKey(message)
+        const isNewResult = !observedResultIds.has(resultKey)
+        observedResultIds.add(resultKey)
+        const owner = deferredCalls.get(callId)
+        const carried = carriedUnfinishedCalls.get(callId)
+        if (owner && !ambiguousCalls.has(callId)) {
+          deferredCalls.delete(callId)
+          owner.results.set(callId, message)
+          if (hasToolResultExecutionId(message)) completedResults.set(resultKey, message)
           if (owner.expected?.size === owner.results.size) {
             foldCompleted({ assistant: owner.assistant, results: owner.results, end: index + 1 })
           }
-        } else if (hasToolResultExecutionId(message)) {
-          const resolved = completedResults.get(resultReplayKey(message))
+        } else if (!owner && !ambiguousCalls.has(callId) && carried && isNewResult) {
+          if (carried === 1) carriedUnfinishedCalls.delete(callId)
+          else carriedUnfinishedCalls.set(callId, carried - 1)
+          if (hasToolResultExecutionId(message)) completedResults.set(resultKey, message)
+        } else if (!callCouldBelongElsewhere(callId) && hasToolResultExecutionId(message)) {
+          const resolved = completedResults.get(resultKey)
           if (resolved && resolved.id !== message.id && sameRow(resolved, message)) {
             aliases.set(message.id, resolved.id)
           }
@@ -454,6 +475,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       for (const id of current.results.keys()) {
         if (deferredCalls.has(id)) ambiguousCalls.add(id)
       }
+      for (const result of current.results.values()) observedResultIds.add(resultReplayKey(result))
       foldCompleted(current)
     }
     index = exchanges[0].end

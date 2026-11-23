@@ -239,6 +239,36 @@ describe("tool transcript replay", () => {
         replayTool
       ])
     ).toEqual(expected)
+    expect(
+      findReplayedToolExchangeAliases([user, assistant, replay, final, tool, replayTool])
+    ).toEqual(expected)
+    const reusedFinal = { ...final, id: "shared-response::cmb-same-role-duplicate:assistant:3" }
+    expect(
+      findReplayedToolExchangeAliases([user, assistant, replay, reusedFinal, tool, replayTool])
+    ).toEqual(expected)
+  })
+
+  it("retires a uniquely resolved older owner before folding a later exchange", () => {
+    const [assistant, tool] = exchange()
+    const [replay, replayTool] = exchange(2)
+    const previous = { ...assistant, id: "earlier-assistant" }
+    const previousUser = { ...user, id: "earlier-user" }
+    const previousResult = {
+      ...tool,
+      id: "earlier-result",
+      provider_source_id: undefined,
+      content: "Earlier result"
+    }
+    const rows = [previousUser, previous, user, previousResult, assistant, tool, replay, replayTool]
+    expect(findReplayedToolExchangeAliases(rows)).toEqual(
+      new Map([
+        [replay.id, assistant.id],
+        [replayTool.id, tool.id]
+      ])
+    )
+    expect(
+      findReplayedToolExchangeAliases(rows.filter(({ id }) => id !== previousResult.id)).size
+    ).toBe(0)
   })
 
   it("retains partial evidence and folds subsequent exact complete copies", () => {

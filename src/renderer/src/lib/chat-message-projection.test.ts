@@ -78,6 +78,22 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     expect(findReplayedToolExchangeAliases(ambiguousOrder).size).toBe(0)
     const reordered = createChatMessageProjector()(ambiguousOrder, [], resolvedHints)
     expect(findDisplayedReplayAliases(reordered.messages).get(replay.id)).toBe(original.id)
+
+    const durableOnly = [user, original, result]
+    const liveReplay = [replay, replayResult]
+    expect(hasToolReplayCandidates(durableOnly)).toBe(false)
+    expect(hasToolReplayCandidates(liveReplay)).toBe(false)
+    const mixed = createChatMessageProjector()(durableOnly, liveReplay, [
+      ...durableOnly,
+      ...liveReplay
+    ])
+    expect(hasToolReplayCandidates(mixed.messages)).toBe(true)
+    expect(findDisplayedReplayAliases(mixed.messages)).toEqual(
+      new Map([
+        [replay.id, original.id],
+        [replayResult.id, result.id]
+      ])
+    )
   })
 
   it("keeps a late tool result attached to an older pending user turn", () => {
