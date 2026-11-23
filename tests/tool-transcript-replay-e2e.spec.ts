@@ -105,6 +105,7 @@ async function seedHistory(): Promise<number> {
     firstFinal,
     setOccurrence(first[2], 4),
     ...nextWithLateResult,
+    setOccurrence(next[1], 2),
     setOccurrence(next[2], 2),
     mismatch[0],
     ...mismatch.slice(1).map((row) => setOccurrence(row, 2)),

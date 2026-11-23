@@ -1,5 +1,8 @@
 import type { Message } from "../types"
+import { findReplayedToolExchangeAliases } from "../../../shared/tool-transcript-replay"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
+import { areToolResultAssociationsEqual } from "./message-render-stability"
+import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 
 export interface ChatMessageProjection {
   /**
@@ -21,6 +24,31 @@ export interface ChatLiveMessageProjectionMetadata {
 }
 
 const noReplayAliases: ReadonlyMap<string, string> = new Map()
+
+/** Only hide rows when the remaining tool cards keep their original results. */
+export function preserveReplayToolBindings(
+  messages: readonly Message[],
+  aliases: ReadonlyMap<string, string>
+): ReadonlyMap<string, string> {
+  if (aliases.size === 0) return aliases
+  const retained = messages.filter((message) => !aliases.has(message.id))
+  const originalResults = buildToolResultAssociations(messages)
+  const retainedResults = buildToolResultAssociations(retained)
+  for (const message of retained) {
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue
+    for (let index = 0; index < message.tool_calls.length; index++) {
+      const key = getWorkerToolUiKey(message.id, message.tool_calls[index]?.id, index)
+      if (!areToolResultAssociationsEqual(originalResults.get(key), retainedResults.get(key))) {
+        return noReplayAliases
+      }
+    }
+  }
+  return aliases
+}
+
+export function findDisplayedReplayAliases(messages: readonly Message[]): ReadonlyMap<string, string> {
+  return preserveReplayToolBindings(messages, findReplayedToolExchangeAliases(messages))
+}
 
 /** A live row may have the only surviving copy of renderer-only reasoning. */
 export function resolveChatReplayAliases(

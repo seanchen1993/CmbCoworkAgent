@@ -2,7 +2,8 @@ import type { CheckpointAuthorityTranscriptMessage } from "./checkpoint-transcri
 import {
   buildMessageSameRoleDuplicateId,
   getMessageProviderOccurrence,
-  getMessageProviderSourceId
+  getMessageProviderSourceId,
+  MESSAGE_SAME_ROLE_DUPLICATE_MARKER
 } from "./message-role-collision"
 
 type TranscriptMessage = CheckpointAuthorityTranscriptMessage & {
@@ -275,17 +276,24 @@ function hasExecutionIdentity(exchange: ToolExchange<TranscriptMessage>): boolea
   )
 }
 
-/** Whether a tail result content update can change an existing replay proof. */
-export function hasEarlierToolResultSource(messages: readonly TranscriptMessage[]): boolean {
-  const tail = messages.at(-1)
-  if (tail?.role !== "tool") return false
-  const source = getMessageProviderSourceId(tail)
-  return messages.some(
-    (message, index) =>
-      index + 1 < messages.length &&
-      message.role === "tool" &&
-      getMessageProviderSourceId(message) === source
-  )
+/** Fast structural gate. Rendering hints can prove these candidates even when
+ * their order in a persisted page by itself is ambiguous. */
+export function hasToolReplayCandidates(messages: readonly TranscriptMessage[]): boolean {
+  const seen = new Set<string>()
+  for (const message of messages) {
+    if (
+      message.role === "assistant" &&
+      message.id.startsWith("current-run-assistant:") &&
+      message.id.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)
+    )
+      return true
+    if (message.role !== "tool" || !message.tool_call_id || !hasToolResultExecutionId(message))
+      continue
+    const key = resultReplayKey(message)
+    if (seen.has(key)) return true
+    seen.add(key)
+  }
+  return false
 }
 
 /** A complete snapshot may group repeated assistants before their results. */
@@ -348,8 +356,47 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   const aliases = new Map<string, string>()
   const seen = new Map<string, ToolExchange<T>>()
   const completedResults = new Map<string, T>()
-  const deferredCalls = new Set<string>()
+  const deferredCalls = new Map<
+    string,
+    {
+      assistant: T
+      expected: ReadonlySet<string> | undefined
+      results: Map<string, T>
+    }
+  >()
   const ambiguousCalls = new Set<string>()
+  const carriedUnfinishedCalls = new Set<string>()
+  const callCouldBelongElsewhere = (id: string): boolean =>
+    ambiguousCalls.has(id) || carriedUnfinishedCalls.has(id)
+  const foldCompleted = (current: ToolExchange<T>): void => {
+    if ([...current.results.keys()].some(callCouldBelongElsewhere)) return
+    for (const [alias, canonical] of current.replayResults ?? []) aliases.set(alias, canonical)
+    for (const result of current.results.values()) {
+      if (hasToolResultExecutionId(result)) completedResults.set(resultReplayKey(result), result)
+    }
+    if (!hasExecutionIdentity(current)) return
+    const key = JSON.stringify([
+      exchangeKey(current),
+      [...current.results.keys()]
+        .sort()
+        .map((id) => getMessageProviderSourceId(current.results.get(id)!))
+    ])
+    const previous = seen.get(key)
+    if (!previous || !isSameExchange(previous, current)) {
+      seen.set(key, current)
+      return
+    }
+    if (
+      previous.assistant.id === current.assistant.id ||
+      (previous.assistant.reasoning || "") !== (current.assistant.reasoning || "")
+    )
+      return
+    aliases.set(current.assistant.id, previous.assistant.id)
+    for (const [id, result] of current.results) {
+      const canonical = previous.results.get(id)!
+      if (canonical.id !== result.id) aliases.set(result.id, canonical.id)
+    }
+  }
   for (let index = 0; index < messages.length; ) {
     const message = messages[index]
     if (message.role === "user" || message.role === "system") {
@@ -357,6 +404,8 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       completedResults.clear()
     }
     if (message.role === "user") {
+      for (const id of deferredCalls.keys()) carriedUnfinishedCalls.add(id)
+      for (const id of ambiguousCalls) carriedUnfinishedCalls.add(id)
       deferredCalls.clear()
       ambiguousCalls.clear()
     }
@@ -366,11 +415,17 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       if (
         message.role === "tool" &&
         message.tool_call_id &&
-        !ambiguousCalls.has(message.tool_call_id)
+        !callCouldBelongElsewhere(message.tool_call_id)
       ) {
-        if (deferredCalls.delete(message.tool_call_id)) {
+        const owner = deferredCalls.get(message.tool_call_id)
+        if (owner) {
+          deferredCalls.delete(message.tool_call_id)
+          owner.results.set(message.tool_call_id, message)
           if (hasToolResultExecutionId(message))
             completedResults.set(resultReplayKey(message), message)
+          if (owner.expected?.size === owner.results.size) {
+            foldCompleted({ assistant: owner.assistant, results: owner.results, end: index + 1 })
+          }
         } else if (hasToolResultExecutionId(message)) {
           const resolved = completedResults.get(resultReplayKey(message))
           if (resolved && resolved.id !== message.id && sameRow(resolved, message)) {
@@ -378,9 +433,17 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
           }
         }
       }
-      for (const id of ownedCallIds(message)) {
-        if (deferredCalls.has(id)) ambiguousCalls.add(id)
-        deferredCalls.add(id)
+      const callIds = ownedCallIds(message)
+      if (callIds.length) {
+        const owner = {
+          assistant: message,
+          expected: readCallIds(message),
+          results: new Map<string, T>()
+        }
+        for (const id of callIds) {
+          if (deferredCalls.has(id)) ambiguousCalls.add(id)
+          deferredCalls.set(id, owner)
+        }
       }
       index++
       continue
@@ -391,33 +454,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       for (const id of current.results.keys()) {
         if (deferredCalls.has(id)) ambiguousCalls.add(id)
       }
-      if ([...current.results.keys()].some((id) => ambiguousCalls.has(id))) continue
-      for (const [alias, canonical] of current.replayResults ?? []) aliases.set(alias, canonical)
-      for (const result of current.results.values()) {
-        if (hasToolResultExecutionId(result)) completedResults.set(resultReplayKey(result), result)
-      }
-      if (!hasExecutionIdentity(current)) continue
-      const key = JSON.stringify([
-        exchangeKey(current),
-        [...current.results.keys()]
-          .sort()
-          .map((id) => getMessageProviderSourceId(current.results.get(id)!))
-      ])
-      const previous = seen.get(key)
-      if (!previous || !isSameExchange(previous, current)) {
-        seen.set(key, current)
-        continue
-      }
-      if (
-        previous.assistant.id === current.assistant.id ||
-        (previous.assistant.reasoning || "") !== (current.assistant.reasoning || "")
-      )
-        continue
-      aliases.set(current.assistant.id, previous.assistant.id)
-      for (const [id, result] of current.results) {
-        const canonical = previous.results.get(id)!
-        if (canonical.id !== result.id) aliases.set(result.id, canonical.id)
-      }
+      foldCompleted(current)
     }
     index = exchanges[0].end
   }

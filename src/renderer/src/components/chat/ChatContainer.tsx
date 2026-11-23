@@ -262,10 +262,7 @@ import {
   formatGoalEventMessage,
   isVisibleCheckpointTranscriptMessage
 } from "@/lib/goal-transcript"
-import {
-  findReplayedToolExchangeAliases,
-  hasEarlierToolResultSource
-} from "../../../../shared/tool-transcript-replay"
+import { hasToolReplayCandidates } from "../../../../shared/tool-transcript-replay"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
 import {
@@ -297,7 +294,11 @@ import {
   type ChatSearchCorpus,
   type ChatSearchDocument
 } from "@/lib/chat-search-matches"
-import { createChatMessageProjector, resolveChatReplayAliases } from "@/lib/chat-message-projection"
+import {
+  createChatMessageProjector,
+  findDisplayedReplayAliases,
+  resolveChatReplayAliases
+} from "@/lib/chat-message-projection"
 import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
 import {
   createChatSearchPlan,
@@ -1191,15 +1192,15 @@ interface ThreadDisplayBaselineCacheEntry {
   sourceLength: number
   sourceTailSnapshot: Message | undefined
   sourceTailProjected: boolean
-  sourceTailMayReplay: boolean
   baseline: Message[]
-  replayAliases: ReadonlyMap<string, string>
+  hasReplayCandidates: boolean
 }
 
 const threadDisplayBaselineCache = new WeakMap<
   readonly Message[],
   ThreadDisplayBaselineCacheEntry
 >()
+const noDisplayedReplayAliases: ReadonlyMap<string, string> = new Map()
 
 function getThreadDisplayBaseline(
   messages: readonly Message[],
@@ -1214,7 +1215,6 @@ function getThreadDisplayBaseline(
     cached.sourceTailSnapshot &&
     sourceTail &&
     sourceTail.role !== "user" &&
-    !cached.sourceTailMayReplay &&
     cached.sourceTailSnapshot.id === sourceTail.id &&
     cached.sourceTailSnapshot.role === sourceTail.role &&
     cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id &&
@@ -1250,9 +1250,8 @@ function getThreadDisplayBaseline(
     sourceLength: messages.length,
     sourceTailSnapshot: sourceTail,
     sourceTailProjected: Boolean(sourceTail && baseline.at(-1)?.id === sourceTail.id),
-    sourceTailMayReplay: hasEarlierToolResultSource(messages),
     baseline,
-    replayAliases: findReplayedToolExchangeAliases(messages)
+    hasReplayCandidates: hasToolReplayCandidates(messages)
   }
   threadDisplayBaselineCache.set(messages, entry)
   return entry
@@ -3626,7 +3625,7 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [appleIntelligenceGlowEnabled, isLoading])
 
-  const { baseline: threadDisplayBaseline, replayAliases: baselineReplayAliases } = useMemo(
+  const { baseline: threadDisplayBaseline, hasReplayCandidates } = useMemo(
     () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
     [messagesContentVersion, threadMessages]
   )
@@ -3658,8 +3657,8 @@ export function ChatContainer({
     displayMessagesStructureVersion
   )
   const projectedReplayAliases = useMemo(() =>
-    baselineReplayAliases.size ? findReplayedToolExchangeAliases(displayMessages) : baselineReplayAliases,
-    [baselineReplayAliases, displayMessages, displayMessagesStructureVersion, toolDerivationProjection.version]
+    hasReplayCandidates ? findDisplayedReplayAliases(displayMessages) : noDisplayedReplayAliases,
+    [hasReplayCandidates, displayMessages, displayMessagesStructureVersion, toolDerivationProjection.version]
   )
   const replayAliases = resolveChatReplayAliases(
     projectedReplayAliases,
@@ -4042,6 +4041,7 @@ export function ChatContainer({
     baselineIndexLookup: MessageIdIndexLookup
     rawMessages: readonly Message[]
     indexById: ReadonlyMap<string, number>
+    replayAliases: ReadonlyMap<string, string>
     buildDocument: typeof buildSearchDocument
     gapBeforeMessageId: string | null | undefined
     contentVersion: number
@@ -4057,6 +4057,7 @@ export function ChatContainer({
     liveStructureVersion: number
     liveContentVersion: number
     displayIndexById: ReadonlyMap<string, number>
+    replayAliases: ReadonlyMap<string, string>
     buildDocument: typeof buildSearchDocument
     documents: ChatSearchDocument[]
     documentIndexById: Map<string, number>
@@ -4078,6 +4079,7 @@ export function ChatContainer({
         cached.baseline === threadDisplayBaseline &&
         cached.rawMessages === threadMessages &&
         cached.indexById === displayMessageProjection.indexById &&
+        cached.replayAliases === replayAliases &&
         cached.buildDocument === buildSearchDocument &&
         cached.gapBeforeMessageId === historyGapBeforeRawMessageId
       if (cached && stableIdentityMatches && cached.contentVersion !== messagesContentVersion) {
@@ -4135,6 +4137,7 @@ export function ChatContainer({
         cached.baseline !== threadDisplayBaseline ||
         cached.rawMessages !== threadMessages ||
         cached.indexById !== displayMessageProjection.indexById ||
+        cached.replayAliases !== replayAliases ||
         cached.buildDocument !== buildSearchDocument ||
         cached.gapBeforeMessageId !== historyGapBeforeRawMessageId
       ) {
@@ -4188,6 +4191,7 @@ export function ChatContainer({
           baselineIndexLookup: createMessageIdIndexLookup(threadDisplayBaseline),
           rawMessages: threadMessages,
           indexById: displayMessageProjection.indexById,
+          replayAliases,
           buildDocument: buildSearchDocument,
           gapBeforeMessageId: historyGapBeforeRawMessageId,
           contentVersion: messagesContentVersion,
@@ -4214,6 +4218,7 @@ export function ChatContainer({
         ) {
           await yieldIfNeeded()
           const liveMessage = liveDisplayMessages[liveIndex]
+          if (replayAliases.has(liveMessage.id)) continue
           const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
           if (sortIndex === undefined) continue
           const message = displayMessages[sortIndex]
@@ -4239,6 +4244,7 @@ export function ChatContainer({
           liveStructureVersion: liveDisplayProjection.structureVersion,
           liveContentVersion: liveDisplayProjection.contentVersion,
           displayIndexById: displayMessageProjection.indexById,
+          replayAliases,
           buildDocument: buildSearchDocument,
           documents,
           documentIndexById: new Map(
@@ -4252,6 +4258,7 @@ export function ChatContainer({
         !dynamicCache ||
         dynamicCache.liveStructureVersion !== liveDisplayProjection.structureVersion ||
         dynamicCache.displayIndexById !== displayMessageProjection.indexById ||
+        dynamicCache.replayAliases !== replayAliases ||
         dynamicCache.buildDocument !== buildSearchDocument
       ) {
         dynamicCache = await rebuildDynamicDocuments()
@@ -4260,6 +4267,7 @@ export function ChatContainer({
         dynamicCache = { ...dynamicCache, documents: [...dynamicCache.documents] }
         for (const liveMessage of liveDisplayProjection.changedMessages) {
           await yieldIfNeeded()
+          if (replayAliases.has(liveMessage.id)) continue
           const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
           if (sortIndex === undefined) {
             requiresRebuild = true

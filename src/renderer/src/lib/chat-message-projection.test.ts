@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest"
 
 import type { Message, ToolCall } from "../types"
-import { findReplayedToolExchangeAliases } from "../../../shared/tool-transcript-replay"
+import {
+  hasToolReplayCandidates,
+  findReplayedToolExchangeAliases
+} from "../../../shared/tool-transcript-replay"
 import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 import {
   createChatMessageProjector,
+  findDisplayedReplayAliases,
+  preserveReplayToolBindings,
   resolveChatReplayAliases,
   type ChatLiveMessageProjectionMetadata
 } from "./chat-message-projection"
@@ -55,7 +60,7 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     const durable = [user, original, result, replay, replayResult, other, otherResult]
     const hints = [user, original, replayResult, other, otherResult, replay, result]
     const display = createChatMessageProjector()(durable, [], hints)
-    const aliases = findReplayedToolExchangeAliases(display.messages)
+    const aliases = findDisplayedReplayAliases(display.messages)
     expect(aliases.get(result.id)).toBe(replayResult.id)
     const results = buildToolResultAssociations(
       display.messages.filter(({ id }) => !aliases.has(id))
@@ -66,6 +71,41 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     expect(results.get(getWorkerToolUiKey(original.id, executeCall.id, 0))?.content).toBe(
       "First result"
     )
+
+    const ambiguousOrder = [user, original, replay, other, result, replayResult, otherResult]
+    const resolvedHints = [user, original, result, replay, replayResult, other, otherResult]
+    expect(hasToolReplayCandidates(ambiguousOrder)).toBe(true)
+    expect(findReplayedToolExchangeAliases(ambiguousOrder).size).toBe(0)
+    const reordered = createChatMessageProjector()(ambiguousOrder, [], resolvedHints)
+    expect(findDisplayedReplayAliases(reordered.messages).get(replay.id)).toBe(original.id)
+  })
+
+  it("keeps a late tool result attached to an older pending user turn", () => {
+    const user = (id: string) => assistant({ id, role: "user", content: id })
+    const call = (id: string) => assistant({ id, tool_calls: [executeCall] })
+    const resultId = "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465"
+    const done: Message = {
+      id: resultId,
+      role: "tool",
+      tool_call_id: executeCall.id,
+      content: "Newest done",
+      created_at: new Date(1)
+    }
+    const replay = { ...done, id: `${resultId}::cmb-same-role-duplicate:tool:2` }
+    const oldestDone = { ...done, id: "oldest-result", content: "Oldest done" }
+    const rows = [
+      user("u1"),
+      call("oldest"),
+      user("u2"),
+      call("previous"),
+      user("u3"),
+      call("newest"),
+      done,
+      replay,
+      oldestDone
+    ]
+    expect(findDisplayedReplayAliases(rows).size).toBe(0)
+    expect(preserveReplayToolBindings(rows, new Map([[replay.id, done.id]])).size).toBe(0)
   })
   it("keeps a replay row visible when only it has the live reasoning", () => {
     const original = assistant()

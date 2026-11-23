@@ -216,6 +216,31 @@ describe("tool transcript replay", () => {
     expect(findReplayedToolExchangeAliases([multipleOwners, separator, tool, copy]).size).toBe(0)
   })
 
+  it("recognizes full replays of a late completed call", () => {
+    const [assistant, tool] = exchange()
+    const [replay, replayTool] = exchange(2)
+    const final: Message = { id: "finished", role: "assistant", content: "Done" }
+    const replayFinal = { ...final, id: "unrelated-reply" }
+    const expected = new Map([
+      [replay.id, assistant.id],
+      [replayTool.id, tool.id]
+    ])
+    expect(
+      findReplayedToolExchangeAliases([user, assistant, final, tool, replay, replayTool])
+    ).toEqual(expected)
+    expect(
+      findReplayedToolExchangeAliases([
+        user,
+        assistant,
+        final,
+        tool,
+        replay,
+        replayFinal,
+        replayTool
+      ])
+    ).toEqual(expected)
+  })
+
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")
     const final = exchange(2)
