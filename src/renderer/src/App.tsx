@@ -22,10 +22,12 @@ import {
   Globe2,
   GripVertical,
   Loader2,
+  MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  Workflow
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { SettingsOverlay } from "@/components/customize/SettingsOverlay"
@@ -409,10 +411,15 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+  const projectModeEnabled = true
   const [activeModeTab, setActiveModeTab] = useState<"design" | "requirements">("requirements")
   const [productEntryKey, setProductEntryKey] = useState(0)
   const [openDesignGallery, setOpenDesignGallery] = useState(false)
   const [productNavigationVisible, setProductNavigationVisible] = useState(true)
+  const selectDesignProjectMode = useCallback(() => {
+    if (!projectModeEnabled) return
+    setMainView("harness")
+  }, [projectModeEnabled, setMainView])
   const selectRequirementHistory = useCallback(() => {
     localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
     setProductNavigationVisible(true)
@@ -1124,6 +1131,36 @@ function App(): React.JSX.Element {
               </div>
             )}
             <div role="tablist" aria-label="工作模式" className="ml-1 flex h-9 items-center gap-1">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "thread"}
+                onClick={() => setMainView("thread")}
+                className={`${panelToggleBaseClass} ${
+                  mainView === "thread" ? moduleActiveClass : moduleInactiveClass
+                }`}
+              >
+                <MessageSquare size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>对话模式</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "harness"}
+                aria-disabled={!projectModeEnabled}
+                onClick={selectDesignProjectMode}
+                title={projectModeEnabled ? "切换到项目模式" : "项目模式暂未开放"}
+                className={`${panelToggleBaseClass} ${
+                  projectModeEnabled
+                    ? mainView === "harness"
+                      ? moduleActiveClass
+                      : moduleInactiveClass
+                    : "cursor-not-allowed text-muted-foreground/50"
+                }`}
+              >
+                <Workflow size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>项目模式</span>
+              </button>
               <button
                 type="button"
                 role="tab"
