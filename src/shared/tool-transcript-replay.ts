@@ -458,7 +458,8 @@ function findReplayedResultRebindings<T extends TranscriptMessage>(
   messages: readonly T[],
   ownership: ReadonlyMap<string, T>,
   owned: ReadonlySet<T>,
-  ownedExecutionIds: ReadonlySet<string>
+  ownedExecutionIds: ReadonlySet<string>,
+  withinUserTurn = false
 ): { aliases: ReadonlyMap<string, string>; disputed: ReadonlySet<T> } {
   const disputed = new Set<T>()
   const seen = new Map<string, T[]>()
@@ -470,6 +471,8 @@ function findReplayedResultRebindings<T extends TranscriptMessage>(
     rememberVersion(seen, keyFor(row), row, sameRow)
   }
   for (const row of messages) {
+    if (withinUserTurn && (row.role === "user" || row.role === "system"))
+      waitingForReplacement.clear()
     if (!row.tool_call_id || !hasToolResultExecutionId(row)) continue
     const call = getRawWorkerToolCallId(row.tool_call_id)
     const key = keyFor(row)
@@ -1044,7 +1047,9 @@ function repairLocalResultReplays<T extends TranscriptMessage>(
   const executionIds = new Set(
     [...owned].filter(hasToolResultExecutionId).map(getMessageProviderSourceId)
   )
-  const { aliases } = findReplayedResultRebindings(messages, ownership, owned, executionIds)
+  // A later checkpoint can still supply the missing assistant for an
+  // unowned result. Avoid assigning it to a call from an earlier user turn.
+  const { aliases } = findReplayedResultRebindings(messages, ownership, owned, executionIds, true)
   return stageToolResultReplays(messages, new Set(aliases.keys()), checkpointTurns)
 }
 
@@ -1622,8 +1627,7 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
     Set<AnchoredToolSlots<T>>,
     {
       slots: Map<string, AnchoredToolSlots<T>[]>
-      withPendingResults: Set<AnchoredToolSlots<T>>
-      physicalBatch?: string
+      alternatives: Map<number, { donor: AnchoredToolSlots<T>; physical?: string }[]>
     }
   >()
   const resultKey = (row: T, project: boolean) => JSON.stringify([
@@ -1631,8 +1635,6 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
     payloadId(project ? extractPersistedMessageContent(row.content) : row.content)
   ])
   const slotKey = (slot: number, result: string) => JSON.stringify([slot, result])
-  const physicalBatchKey = (rows: readonly (T | undefined)[]) =>
-    JSON.stringify(rows.map((row) => row && resultReplayKey(row)))
   const pendingResultKeys = new Set(
     [...unbound.values()].flatMap((rows) => rows.flatMap((row) =>
       [resultKey(row, false), resultKey(row, true)]
@@ -1646,40 +1648,44 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
     let index = projectedDonors.get(candidates)
     if (!index) {
       const slots = new Map<string, AnchoredToolSlots<T>[]>()
-      const withPendingResults = new Set<AnchoredToolSlots<T>>()
-      const batches = new Set<string>()
+      const alternatives = new Map<number, { donor: AnchoredToolSlots<T>; physical?: string }[]>()
       for (const candidate of candidates) {
-        batches.add(physicalBatchKey(candidate.exchange.results))
         candidate.exchange.results.forEach((row, slot) => {
-          if (!row) return
-          const result = resultKey(row, false)
-          const key = slotKey(slot, result)
-          const group = slots.get(key) ?? []
-          group.push(candidate)
-          slots.set(key, group)
-          if (pendingResultKeys.has(result)) withPendingResults.add(candidate)
+          const key = row && resultKey(row, false)
+          if (key) {
+            const observation = slotKey(slot, key)
+            const group = slots.get(observation) ?? []
+            group.push(candidate)
+            slots.set(observation, group)
+          }
+          if (!row || !positions.has(row.id) || (key !== undefined && pendingResultKeys.has(key))) {
+            const group = alternatives.get(slot) ?? []
+            group.push({ donor: candidate, physical: row && resultReplayKey(row) })
+            alternatives.set(slot, group)
+          }
         })
       }
-      index = {
-        slots,
-        withPendingResults,
-        physicalBatch: batches.size === 1 ? batches.values().next().value : undefined
-      }
+      index = { slots, alternatives }
       projectedDonors.set(candidates, index)
     }
     const matching = batch.results.map((row, slot) => {
       const raw = index.slots.get(slotKey(slot, resultKey(row, false))) ?? []
       const projected = index.slots.get(slotKey(slot, resultKey(row, true))) ?? []
-      return raw === projected ? raw : [...raw, ...projected]
+      const physical = resultReplayKey(row)
+      const alternatives = index.alternatives.get(slot)?.flatMap((alternative) =>
+        alternative.physical === physical ? [] : [alternative.donor]
+      ) ?? []
+      const additional = raw === projected ? [] : projected
+      return {
+        raw, additional, alternatives,
+        size: raw.length + additional.length + alternatives.length
+      }
     })
-    // With the same physical slots, every occupied slot has to match.
-    if (index.physicalBatch === physicalBatchKey(batch.results)) {
-      const smallest = matching.reduce((left, right) => left.length <= right.length ? left : right)
-      return new Set(smallest)
-    }
-    // Reconciliation requires at least one observed result. Include any
-    // donor that can cite an exact current or pending result as that witness.
-    return new Set([...matching.flat(), ...index.withPendingResults])
+    // An occupied array slot must match the existing result, be absent on
+    // the donor, or admit a different result that can be inserted or rebound.
+    // The smallest per-slot candidate set still contains every valid donor.
+    const smallest = matching.reduce((left, right) => left.size <= right.size ? left : right)
+    return new Set([...smallest.raw, ...smallest.additional, ...smallest.alternatives])
   }
   const removed = new Set<string>()
   const replaced = new Map<string, T>()
@@ -2158,7 +2164,7 @@ function isReplayProseExtension(after: ReplayProse, before: ReplayProse): boolea
   )
 }
 
-function nameCheckpointResultVersions<T extends TranscriptMessage>(
+function nameCheckpointReplayOccurrences<T extends TranscriptMessage>(
   messages: T[],
   checkpointTurns?: CheckpointReplayTurns
 ): { messages: T[]; checkpointTurns?: CheckpointReplayTurns } {
@@ -2175,27 +2181,34 @@ function nameCheckpointResultVersions<T extends TranscriptMessage>(
     const prior = byId.get(row.id)
     const first = prior?.row
     if (!first) byId.set(row.id, { row, turn })
-    else if (
-      row.role === "tool" &&
-      first.role === "tool" &&
-      row.name !== botFileDeliveryToolName &&
-      first.name !== botFileDeliveryToolName &&
-      getMessageProviderSourceId(row) === row.id &&
-      (getMessageProviderOccurrence(first) ?? 1) === 1 &&
-      (getMessageProviderOccurrence(row) ?? 1) === 1 &&
-      hasToolResultExecutionId(row) &&
-      resultReplayKey(row) === resultReplayKey(first) &&
-      row.goal_id === first.goal_id &&
-      row.active_window_id === first.active_window_id
-    ) {
-      if (!sameStoredToolResult(first, row)) {
+    else {
+      const unnamed =
+        getMessageProviderSourceId(row) === row.id &&
+        (getMessageProviderOccurrence(first) ?? 1) === 1 &&
+        (getMessageProviderOccurrence(row) ?? 1) === 1
+      const sharedScope = row.goal_id === first.goal_id && row.active_window_id === first.active_window_id
+      const resultCopy =
+        row.role === "tool" &&
+        first.role === "tool" &&
+        row.name !== botFileDeliveryToolName &&
+        first.name !== botFileDeliveryToolName &&
+        hasToolResultExecutionId(row) &&
+        resultReplayKey(row) === resultReplayKey(first)
+      const assistantCopy =
+        row.role === "assistant" &&
+        first.role === "assistant" &&
+        Array.isArray(row.tool_calls) &&
+        Array.isArray(first.tool_calls) &&
+        row.tool_calls.length > 0 &&
+        first.tool_calls.length > 0
+      if (!unnamed || !sharedScope || (!resultCopy && !assistantCopy)) {
+        ambiguous.add(row.id)
+      } else if (resultCopy && !sameStoredToolResult(first, row)) {
         changed.add(row.id)
         versioned.add(row.id)
       } else if (prior?.turn === turn) {
         versioned.add(row.id)
       }
-    } else {
-      ambiguous.add(row.id)
     }
   }
   for (const id of ambiguous) versioned.delete(id)
@@ -2206,7 +2219,7 @@ function nameCheckpointResultVersions<T extends TranscriptMessage>(
     for (const row of checkpointTurns.rawToolTranscript) {
       used.add(row.id)
       if (row.role === "user" || row.role === "system") rawTurn++
-      if (row.role !== "tool") {
+      if (row.role !== byId.get(row.id)?.row.role) {
         versioned.delete(row.id)
         continue
       }
@@ -2225,14 +2238,14 @@ function nameCheckpointResultVersions<T extends TranscriptMessage>(
   const done = new Map<string, number>()
   const renamed = new Map<string, string[]>()
   const named = messages.map((row) => {
-    if (!versioned.has(row.id) || row.role !== "tool") return row
+    if (!versioned.has(row.id) || (row.role !== "tool" && row.role !== "assistant")) return row
     let occurrence = (done.get(row.id) ?? 0) + 1
     if (occurrence === 1) {
       done.set(row.id, occurrence)
       return row
     }
-    let id = buildMessageSameRoleDuplicateId(row.id, "tool", occurrence)
-    while (used.has(id)) id = buildMessageSameRoleDuplicateId(row.id, "tool", ++occurrence)
+    let id = buildMessageSameRoleDuplicateId(row.id, row.role, occurrence)
+    while (used.has(id)) id = buildMessageSameRoleDuplicateId(row.id, row.role, ++occurrence)
     done.set(row.id, occurrence)
     used.add(id)
     const ids = renamed.get(row.id) ?? [row.id]
@@ -2243,13 +2256,17 @@ function nameCheckpointResultVersions<T extends TranscriptMessage>(
   if (!checkpointTurns) return { messages: named }
   const offsets = new Map<string, number>()
   const uniqueMessageIds = new Set(checkpointTurns.uniqueMessageIds)
+  const hiddenAssistants = new Set(checkpointTurns.hiddenAssistants)
+  const leadingHiddenAssistants = new Set(checkpointTurns.leadingHiddenAssistants)
   const rawToolTranscript = checkpointTurns.rawToolTranscript.map((row) => {
-    const ids = row.role === "tool" ? renamed.get(row.id) : undefined
+    const ids = renamed.get(row.id)
     if (!ids) return row
     const offset = offsets.get(row.id) ?? 0
     const id = ids[offset]
     offsets.set(row.id, offset + 1)
     uniqueMessageIds.add(id)
+    if (hiddenAssistants.has(row.id)) hiddenAssistants.add(id)
+    if (leadingHiddenAssistants.has(row.id)) leadingHiddenAssistants.add(id)
     return { ...row, id }
   })
   return {
@@ -2257,6 +2274,8 @@ function nameCheckpointResultVersions<T extends TranscriptMessage>(
     checkpointTurns: {
       ...checkpointTurns,
       uniqueMessageIds,
+      hiddenAssistants,
+      leadingHiddenAssistants,
       rawToolTranscript,
       rawResultByCall: resolveToolResultOwnership(rawToolTranscript, ({ id }) => id)
     }
@@ -2689,7 +2708,7 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   const repairedDurable = repairLocalResultReplays(durableRows)?.messages ?? durableRows
   const canonical =
     foldInterruptedAndProjectedToolCopies(repairedDurable)?.messages ?? repairedDurable
-  const checkpointVersions = nameCheckpointResultVersions(checkpointRows, rawCheckpointTurns)
+  const checkpointVersions = nameCheckpointReplayOccurrences(checkpointRows, rawCheckpointTurns)
   const stagedCheckpoint = repairLocalResultReplays(
     checkpointVersions.messages,
     checkpointVersions.checkpointTurns

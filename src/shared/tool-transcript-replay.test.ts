@@ -338,7 +338,8 @@ describe("tool transcript replay", () => {
     "fresh-result",
     "stale-before-fresh",
     "hidden-repeat-with-fresh",
-    "hidden-repeat-without-fresh"
+    "hidden-repeat-without-fresh",
+    "hidden-repeat-already-recovered"
   ])(
     "reconciles old observed drafts before checkpoint ordering (%s)",
     (mode) => {
@@ -350,7 +351,8 @@ describe("tool transcript replay", () => {
       const hiddenRepeat = mode.startsWith("hidden-repeat")
       const staleBeforeFresh = mode === "stale-before-fresh" || hiddenRepeat
       const hasFresh =
-        mode === "fresh-result" || mode === "stale-before-fresh" || mode === "hidden-repeat-with-fresh"
+        mode === "fresh-result" || mode === "stale-before-fresh" ||
+        mode === "hidden-repeat-with-fresh" || mode === "hidden-repeat-already-recovered"
       const blocks = [
         { type: "text", index: 0, text: "Directory listing" },
         { type: "text", index: 1, text: "Read results" }
@@ -373,7 +375,8 @@ describe("tool transcript replay", () => {
         final,
         grownResult,
         nextUser,
-        ...(mode === "durable-view" ? [replay, replayedResult] : [])
+        ...(mode === "durable-view" ? [replay, replayedResult] : []),
+        ...(mode === "hidden-repeat-already-recovered" ? [fresh] : [])
       ]
       const checkpoint = mode === "durable-view"
         ? durable
@@ -2519,30 +2522,52 @@ describe("tool transcript replay", () => {
     expect(argumentReads).toBeLessThan(3_000)
   })
 
-  it.each(["exact", "projected", "projected-with-unrelated-result"])(
+  it.each([
+    "exact", "projected", "projected-with-unrelated-result", "parallel-projected", "parallel-raw"
+  ])(
     "indexes distinct structured outcomes (%s)",
     (mode) => {
     let payloadReads = 0
     const versionCount = 180
+    const parallel = mode.startsWith("parallel")
+    const resultContent = (text: string, checkpoint: boolean) => [
+      {
+        type: "text",
+        get text() {
+          payloadReads++
+          return text
+        }
+      },
+      ...(checkpoint && mode !== "exact"
+        ? [{ type: "resource_link", uri: "https://example.com/result" }]
+        : [])
+    ]
     const build = (checkpoint = false) => [user, ...Array.from({ length: versionCount }, (_, index) => {
       const [assistant, result] = exchange(index + 1)
+      const raw = checkpoint && mode === "parallel-raw"
+      const listing = {
+        id: `run-01a2083d-0c02-779f-a925-${String(index).padStart(12, "0")}-tool-list`,
+        role: "tool",
+        tool_call_id: "list",
+        name: "ls",
+        content: resultContent(`Listing version ${index}`, checkpoint)
+      }
       return [
-        { ...assistant, content: `Checking version ${index}` },
+        {
+          ...assistant,
+          ...(raw ? { id: "shared-response", provider_source_id: undefined,
+            provider_occurrence: undefined } : {}),
+          content: `Checking version ${index}`,
+          tool_calls: parallel
+            ? [...assistant.tool_calls!, { id: "list", name: "ls", args: {} }]
+            : assistant.tool_calls
+        },
         {
           ...result,
-          content: [
-            {
-              type: "text",
-              get text() {
-                payloadReads++
-                return `Result version ${index}`
-              }
-            },
-            ...(checkpoint && mode !== "exact"
-              ? [{ type: "resource_link", uri: `https://example.com/results/${index}` }]
-              : [])
-          ]
-        }
+          ...(raw ? { id: resultId, provider_source_id: undefined, provider_occurrence: undefined } : {}),
+          content: resultContent(parallel ? "Same read" : `Result version ${index}`, checkpoint)
+        },
+        ...(parallel ? [listing] : [])
       ]
     }).flat()]
     const durable = build()
