@@ -1582,6 +1582,48 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it.each([
+    ["Checking beta", "Checking", "Checking alpha"],
+    ["Checking", "Checking alpha", "Checking", "Checking beta"]
+  ])("keeps incompatible text at opposite ends of a verified result chain (%j)", (...texts) => {
+    const toolIds = [
+      resultId,
+      "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      "de0e2358-c06a-4b8d-88ee-87c8a75e04f5",
+      "212aadc7-cda7-40f6-9252-ddce6e5d5a9b"
+    ]
+    const rows = [
+      user,
+      ...texts.flatMap((content, index) => {
+        const [assistant] = exchange(index + 1)
+        const calls = texts.map((_, slot) => ({
+          id: `call-${slot}`,
+          name: "inspect",
+          args: { slot }
+        }))
+        const results = toolIds.slice(0, texts.length - index).map((id, slot) => ({
+          id: index ? `${id}::cmb-same-role-duplicate:tool:${index + 1}` : id,
+          role: "tool",
+          name: "inspect",
+          tool_call_id: calls[slot].id,
+          content: `Output ${slot}`
+        }))
+        return [{ ...assistant, content, tool_calls: calls }, ...results]
+      })
+    ]
+    const aliases = findReplayedToolExchangeAliases(rows)
+    const content = getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))
+    const visible = rows
+      .filter(({ id, role }) => role === "assistant" && !aliases.has(id))
+      .map((row) => content.get(row.id) ?? row.content)
+      .sort()
+    expect(visible).toEqual(
+      texts.length === 4
+        ? ["Checking", "Checking alpha", "Checking beta"]
+        : ["Checking alpha", "Checking beta"]
+    )
+  })
+
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")
     const final = exchange(2)

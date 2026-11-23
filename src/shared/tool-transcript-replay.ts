@@ -727,36 +727,44 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (target) containing.set(version.batch, target)
   }
 
-  // Independent revisions can extend the same prefix without extending one
-  // another. Keep those presentations and the original result owner.
-  const longestPresentation = new Map<PartialToolExchange<T>, T>()
-  const divergentPresentations = new Set<PartialToolExchange<T>>()
-  for (const [copy, original] of containing) {
-    const longest =
-      longestPresentation.get(original) ?? continuedText.get(original) ?? original.assistant
-    const copyPresentation = continuedText.get(copy) ?? copy.assistant
-    if (extendedText(copyPresentation, longest)) longestPresentation.set(original, copyPresentation)
-    else if (
-      !sameValue(copyPresentation.content, longest.content) &&
-      !extendedText(longest, copyPresentation)
-    ) {
-      divergentPresentations.add(original)
+  const candidates = new Map([...containing, ...samePresentation, ...presentationAliases])
+  const children = new Map<PartialToolExchange<T>, PartialToolExchange<T>[]>()
+  for (const [copy, target] of candidates) {
+    const copies = children.get(target) ?? []
+    copies.push(copy)
+    children.set(target, copies)
+  }
+  const pending = new Map([...children].map(([target, copies]) => [target, copies.length]))
+  const ready = [...candidates.keys()].filter((batch) => !pending.has(batch))
+  const textByGroup = new Map<PartialToolExchange<T>, T>()
+  const direct = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+  for (const batch of ready) {
+    const own = continuedText.get(batch) ?? batch.assistant
+    let longest = own
+    let divergent = false
+    const compatible: Array<{ copy: PartialToolExchange<T>; content: T }> = []
+    // A short common prefix can match either branch. Check the full text
+    // already accepted below each child before attaching it to this batch.
+    for (const copy of children.get(batch) ?? []) {
+      const content = textByGroup.get(copy) ?? copy.assistant
+      if (!compatibleText(own, content)) continue
+      compatible.push({ copy, content })
+      if (!compatibleText(longest, content)) divergent = true
+      else if (extendedText(content, longest)) longest = content
+    }
+    for (const { copy, content } of compatible) {
+      if (!divergent || !extendedText(content, own)) direct.set(copy, batch)
+    }
+    textByGroup.set(batch, divergent ? own : longest)
+    const parent = candidates.get(batch)
+    if (parent) {
+      const remaining = pending.get(parent)! - 1
+      pending.set(parent, remaining)
+      if (!remaining) ready.push(parent)
     }
   }
-  for (const [copy, original] of containing) {
-    if (
-      divergentPresentations.has(original) &&
-      !sameValue(
-        (continuedText.get(copy) ?? copy.assistant).content,
-        (continuedText.get(original) ?? original.assistant).content
-      )
-    ) {
-      containing.delete(copy)
-    }
-  }
-  // Resolve the surviving edges after checking each fork. The equal-coverage
-  // edges point to their own canonical row and every other edge adds results.
-  const direct = new Map([...containing, ...samePresentation, ...presentationAliases])
+
+  // Equal-coverage edges target a canonical row, and other edges add results.
   const continuations = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   for (const copy of direct.keys()) {
     if (continuations.has(copy)) continue
