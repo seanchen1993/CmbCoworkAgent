@@ -384,50 +384,37 @@ function findReplayedResultRebindings<T extends TranscriptMessage>(
   owned: ReadonlySet<T>,
   ownedExecutionIds: ReadonlySet<string>
 ): { aliases: ReadonlyMap<string, string>; disputed: ReadonlySet<T> } {
-  const laterUnownedResult = new Map<string, number>()
-  const callsWithPageProof = new Set<string>()
-  for (const [index, row] of messages.entries()) {
-    if (row.role !== "tool" || !row.tool_call_id || !hasToolResultExecutionId(row)) continue
-    const call = getRawWorkerToolCallId(row.tool_call_id)
-    if (historicalReplayId(row)) callsWithPageProof.add(call)
-    else if (!ownedExecutionIds.has(getMessageProviderSourceId(row))) {
-      laterUnownedResult.set(call, index)
-    }
-  }
   const disputed = new Set<T>()
-  if (!laterUnownedResult.size) return { aliases: noAliases, disputed }
   const seen = new Map<string, T[]>()
   const payloadId = createPayloadIds()
   const proposals: AttachedToolReplay[] = []
-  const proposedCalls = new Set<string>()
+  const waitingForReplacement = new Map<string, AttachedToolReplay[]>()
   const keyFor = (row: T) => JSON.stringify([resultReplayKey(row), payloadId(row.content)])
   for (const row of historicalToolResults(messages).values()) {
     rememberVersion(seen, keyFor(row), row, sameRow)
   }
-  for (const [index, row] of messages.entries()) {
+  for (const row of messages) {
     if (!row.tool_call_id || !hasToolResultExecutionId(row)) continue
     const call = getRawWorkerToolCallId(row.tool_call_id)
     const key = keyFor(row)
-    const outsidePage = historicalReplayId(row)
-    if (!owned.has(row)) {
-      // This slot may receive a chain of copies from either side of the page.
-      // Use the same earlier-result evidence for every possible replacement.
-      const canonical = outsidePage ?? seen.get(key)?.find((earlier) => sameRow(earlier, row))?.id
-      if (
-        canonical &&
-        proposedCalls.has(call) &&
-        callsWithPageProof.has(call) &&
-        (laterUnownedResult.get(call) ?? -1) > index
-      ) {
-        proposals.push({ alias: row.id, canonical, call })
-      }
+    const attached = owned.has(row)
+    const original = attached
+      ? rememberVersion(seen, key, row, sameRow)
+      : seen.get(key)?.find((earlier) => sameRow(earlier, row))
+    const canonical = original && original.id !== row.id ? original.id : historicalReplayId(row)
+    const pending = waitingForReplacement.get(call)
+    if (canonical && (attached || pending)) {
+      const copies = pending ?? []
+      copies.push({ alias: row.id, canonical, call })
+      waitingForReplacement.set(call, copies)
       continue
     }
-    const original = rememberVersion(seen, key, row, sameRow)
-    const canonical = original.id !== row.id ? original.id : outsidePage
-    if (!canonical || (laterUnownedResult.get(call) ?? -1) <= index) continue
-    proposals.push({ alias: row.id, canonical, call })
-    proposedCalls.add(call)
+    if (pending && !attached && !ownedExecutionIds.has(getMessageProviderSourceId(row))) {
+      // Close the sequence at the first independently identified result.
+      // Later duplicate rows may belong to a different receiving call.
+      for (const copy of pending) proposals.push(copy)
+      waitingForReplacement.delete(call)
+    }
   }
   const validated = selectAttachedReplayAliases(messages, noAliases, ownership, proposals)
   if (!validated.size) return { aliases: noAliases, disputed }
@@ -455,7 +442,8 @@ function stageToolResultReplays<T extends TranscriptMessage>(
   messages: readonly T[],
   removedIds: ReadonlySet<string>,
   checkpointTurns?: CheckpointReplayTurns,
-  removedCallKeys?: ReadonlySet<string>
+  removedCallKeys?: ReadonlySet<string>,
+  inheritedBindings?: ReadonlyMap<string, T>
 ): { messages: T[]; checkpointTurns?: CheckpointReplayTurns } | undefined {
   if (!removedIds.size) return
   const retained = messages.filter(({ id }) => !removedIds.has(id))
@@ -476,10 +464,11 @@ function stageToolResultReplays<T extends TranscriptMessage>(
   const rawBefore = resolveToolResultOwnership(rawWithPayload(raw))
   const rawAfter = resolveToolResultOwnership(rawWithPayload(rawRetained))
   const visibleAfter = resolveToolResultOwnership(retained)
-  const retainedRawBindings = [...rawBefore].filter(([key]) => !removedCallKeys?.has(key))
+  const retainedRawBindings = new Map([...rawBefore].filter(([key]) => !removedCallKeys?.has(key)))
+  for (const [key, row] of inheritedBindings ?? []) retainedRawBindings.set(key, row)
   if (
-    retainedRawBindings.length !== rawAfter.size ||
-    retainedRawBindings.some(([key, row]) => {
+    retainedRawBindings.size !== rawAfter.size ||
+    [...retainedRawBindings].some(([key, row]) => {
       const wanted = removedIds.has(row.id) ? visibleAfter.get(key) : row
       return !wanted || !sameResultBinding(wanted, rawAfter.get(key))
     })
@@ -515,9 +504,26 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   const versions = new Map<string, SlotVersion[]>()
   const observed = new Map<string, SlotVersion[]>()
   const exactCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
-  const exactSlots = (subset: PartialToolExchange<T>, superset: PartialToolExchange<T>) =>
+  const extendedText = (candidate: T, original: T) =>
+    typeof candidate.content === "string" &&
+    typeof original.content === "string" &&
+    candidate.content.length > original.content.length &&
+    candidate.content.startsWith(original.content)
+  let rowPositions: Map<string, number> | undefined
+  const canReceiveResults = (recipient: PartialToolExchange<T>, donor: PartialToolExchange<T>) => {
+    rowPositions ??= new Map(messages.map(({ id }, index) => [id, index]))
+    const start = rowPositions.get(recipient.assistant.id) ?? Infinity
+    return donor.results.every(
+      (row, index) => !row || recipient.results[index] || (rowPositions?.get(row.id) ?? -1) > start
+    )
+  }
+  const exactSlots = (
+    subset: PartialToolExchange<T>,
+    superset: PartialToolExchange<T>,
+    comparePresentation: boolean
+  ) =>
     (subset.assistant.reasoning || "") === (superset.assistant.reasoning || "") &&
-    sameExchangeCalls(subset, superset, false, true) &&
+    sameExchangeCalls(subset, superset, false, comparePresentation) &&
     subset.results.every((row, index) => {
       const peer = superset.results[index]
       return (
@@ -527,7 +533,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     })
   for (const assistant of messages) {
     const scope = rawTurnByAssistant.get(assistant.id)
-    if (!scope) continue
+    if (scope === undefined) continue
     const batch = readToolExchangeSlots(assistant, ownership)
     if (
       !batch ||
@@ -536,7 +542,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       (checkpointTurns && !hasRawCheckpointToolBindings(batch, checkpointTurns))
     )
       continue
-    const scopeKey = [scope, exchangeKey(batch), payloadId(assistant.content)]
+    const scopeKey = [scope, exchangeKey(batch)]
     const keys = batch.results.flatMap((row, index) =>
       row
         ? [JSON.stringify([...scopeKey, index, resultReplayKey(row), payloadId(row.content)])]
@@ -546,8 +552,11 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (full && batch.calls.length === 1 && !Array.isArray(batch.results[0]?.content)) continue
     toolReplayAssistantIds?.add(assistant.id)
     const version = { batch, keys, complete: full }
-    const original = rememberVersion(versions, JSON.stringify(keys), version, (left, right) =>
-      exactSlots(left.batch, right.batch)
+    const original = rememberVersion(
+      versions,
+      JSON.stringify([payloadId(assistant.content), ...keys]),
+      version,
+      (left, right) => exactSlots(left.batch, right.batch, true)
     )
     if (original !== version) {
       if (!full || batch.results.some((row) => Array.isArray(row?.content))) {
@@ -575,12 +584,17 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       .reduce((smallest, group) => (group.length < smallest.length ? group : smallest))
     let target: PartialToolExchange<T> | undefined
     for (const candidate of candidates) {
+      if (candidate.keys.length <= version.keys.length) continue
+      const retained = containing.get(candidate.batch) ?? candidate.batch
+      const revised = extendedText(version.batch.assistant, retained.assistant)
       if (
-        candidate.keys.length <= version.keys.length ||
-        !exactSlots(version.batch, candidate.batch)
+        (!revised &&
+          !sameValue(retained.assistant.content, version.batch.assistant.content) &&
+          !extendedText(retained.assistant, version.batch.assistant)) ||
+        (revised && !canReceiveResults(version.batch, retained)) ||
+        !exactSlots(version.batch, retained, false)
       )
         continue
-      const retained = containing.get(candidate.batch) ?? candidate.batch
       if (target && retained !== target) {
         target = undefined
         break
@@ -590,23 +604,56 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (target) containing.set(version.batch, target)
   }
 
+  const groups = new Map<PartialToolExchange<T>, PartialToolExchange<T>[]>()
+  for (const [copy, original] of [...containing, ...exactCopies]) {
+    const canonical = containing.get(original) ?? original
+    const batchCopies = groups.get(canonical) ?? [canonical]
+    batchCopies.push(copy)
+    groups.set(canonical, batchCopies)
+  }
   const proposed = new Map<string, string>()
   const removedCallKeys = new Map<string, string[]>()
-  for (const [batch, duplicateOf] of [...containing, ...exactCopies]) {
-    const original = containing.get(duplicateOf) ?? duplicateOf
-    const assistant = batch.assistant
-    proposed.set(assistant.id, original.assistant.id)
-    removedCallKeys.set(
-      assistant.id,
-      batch.calls.map(({ id }, i) => getWorkerToolUiKey(assistant.id, id, i))
-    )
-    batch.results.forEach((row, index) => {
-      const peer = original.results[index]
-      if (row && peer && row.id !== peer.id) proposed.set(row.id, peer.id)
+  const inheritedBindings = new Map<string, T>()
+  for (const [canonical, copies] of groups) {
+    let retained = canonical
+    for (const copy of copies) {
+      if (!extendedText(copy.assistant, retained.assistant)) continue
+      if (canReceiveResults(copy, canonical)) retained = copy
+    }
+    canonical.results.forEach((row, index) => {
+      if (row && !retained.results[index]) {
+        inheritedBindings.set(
+          getWorkerToolUiKey(retained.assistant.id, retained.calls[index].id, index),
+          row
+        )
+      }
     })
+    for (const copy of copies) {
+      if (copy === retained) continue
+      const id = copy.assistant.id
+      proposed.set(id, retained.assistant.id)
+      removedCallKeys.set(
+        id,
+        copy.calls.map((call, index) => getWorkerToolUiKey(id, call.id, index))
+      )
+      copy.results.forEach((row, index) => {
+        const peer = retained.results[index] ?? canonical.results[index]
+        if (row && peer && row.id !== peer.id) proposed.set(row.id, peer.id)
+      })
+    }
   }
-  const verified = preserveReplayToolBindings(messages, proposed, ownership)
-  return { verified, removedCallKeys }
+  const verified = preserveReplayToolBindings(
+    messages,
+    proposed,
+    ownership,
+    undefined,
+    inheritedBindings
+  )
+  return {
+    verified,
+    removedCallKeys,
+    inheritedBindings: verified.size ? inheritedBindings : undefined
+  }
 }
 
 function foldInterruptedAndProjectedToolCopies<T extends TranscriptMessage>(
@@ -615,7 +662,7 @@ function foldInterruptedAndProjectedToolCopies<T extends TranscriptMessage>(
 ) {
   if (!hasToolReplayCandidates(messages)) return
   const ownership = resolveToolResultOwnership(messages)
-  const { verified, removedCallKeys } = findToolSlotCopyAliases(
+  const { verified, removedCallKeys, inheritedBindings } = findToolSlotCopyAliases(
     messages,
     ownership,
     checkpointTurns
@@ -624,7 +671,8 @@ function foldInterruptedAndProjectedToolCopies<T extends TranscriptMessage>(
     messages,
     new Set(verified.keys()),
     checkpointTurns,
-    new Set([...verified.keys()].flatMap((id) => removedCallKeys.get(id) ?? []))
+    new Set([...verified.keys()].flatMap((id) => removedCallKeys.get(id) ?? [])),
+    inheritedBindings
   )
 }
 
@@ -1719,7 +1767,8 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
   messages: readonly T[],
   aliases: ReadonlyMap<string, string>,
   original: ReadonlyMap<string, T> = resolveToolResultOwnership(messages),
-  unsafe?: UnsafeBindings
+  unsafe?: UnsafeBindings,
+  inheritedBindings?: ReadonlyMap<string, T>
 ): ReadonlyMap<string, string> {
   if (aliases.size === 0) return aliases
   const occurrences = new Set<string>()
@@ -1744,6 +1793,11 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
       const key = getWorkerToolUiKey(message.id, id, index)
       const previous = original.get(key)
       const next = after.get(key)
+      const inherited = inheritedBindings?.get(key)
+      if (inherited) {
+        if (!sameResultBinding(inherited, next)) return noAliases
+        continue
+      }
       if (previous === next) continue
       if (previous && next && hasToolResultExecutionId(previous) && sameRow(previous, next))
         continue
@@ -1911,8 +1965,20 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       })
     }
   }
-  const verified = preserveReplayToolBindings(messages, aliases, ownership)
-  const selected = selectAttachedReplayAliases(messages, verified, ownership, attachedDuplicates)
+  const verified = preserveReplayToolBindings(
+    messages,
+    aliases,
+    ownership,
+    undefined,
+    slotCopies.inheritedBindings
+  )
+  const selected = selectAttachedReplayAliases(
+    messages,
+    verified,
+    ownership,
+    attachedDuplicates,
+    verified.size ? slotCopies.inheritedBindings : undefined
+  )
   if (![...selected.values()].some((id) => selected.has(id))) return selected
   const canonical = new Map(selected)
   for (const [id, target] of canonical) {
@@ -1938,7 +2004,8 @@ function selectAttachedReplayAliases<T extends TranscriptMessage>(
   messages: readonly T[],
   verified: ReadonlyMap<string, string>,
   ownership: ReadonlyMap<string, T>,
-  proposals: AttachedToolReplay[]
+  proposals: AttachedToolReplay[],
+  inheritedBindings?: ReadonlyMap<string, T>
 ): ReadonlyMap<string, string> {
   // First exclude directly rejected slots, then fall back to independent call
   // IDs for ambiguous shifts. Every retained subset is checked end to end.
@@ -1951,7 +2018,8 @@ function selectAttachedReplayAliases<T extends TranscriptMessage>(
         ...proposals.map(({ alias, canonical }) => [alias, canonical] as const)
       ]),
       ownership,
-      unsafe
+      unsafe,
+      inheritedBindings
     )
     if (repaired.size) return repaired
     const precise = proposals.filter(({ alias }) => !unsafe.invalidResultIds.has(alias))

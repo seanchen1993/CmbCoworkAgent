@@ -1191,6 +1191,34 @@ describe("tool transcript replay", () => {
         ])
       )
     }
+    const otherOriginal = {
+      ...differentExecution,
+      id: differentExecution.historical_tool_replay_id,
+      provider_occurrence: 1,
+      historical_tool_replay_id: undefined
+    }
+    const residentCopy = { ...differentExecution, historical_tool_replay_id: undefined }
+    const earlierRows = [
+      { ...user, id: "earlier-user" },
+      olderAssistant,
+      original,
+      { ...olderAssistant, id: "another-assistant" },
+      otherOriginal
+    ]
+    for (const copies of [
+      [stale, residentCopy],
+      [residentCopy, stale],
+      [stale, next]
+    ]) {
+      const aliases = findReplayedToolExchangeAliases([
+        ...earlierRows,
+        user,
+        current,
+        ...copies,
+        latest
+      ])
+      expect(aliases).toEqual(new Map(copies.map((row) => [row.id, row.provider_source_id!])))
+    }
     expect(findReplayedToolExchangeAliases([user, current, stale, latest]).size).toBe(0)
     const changed = mergeCheckpointAuthorityTranscriptMessages(
       [{ ...proven, content: "" }],
@@ -1199,7 +1227,7 @@ describe("tool transcript replay", () => {
     expect(changed[0].historical_tool_replay_id).toBeUndefined()
   })
 
-  it.each(["pending", "resume-first", "resume-last", "different-execution"])(
+  it.each(["pending", "resume-first", "resume-last", "resumed-prose", "different-execution"])(
     "folds only the overlapping physical copies of an interrupted batch (%s)",
     (mode) => {
       const [first, read] = exchange()
@@ -1213,7 +1241,12 @@ describe("tool transcript replay", () => {
         content: "Current directory"
       }
       const a = { ...first, tool_calls: declarations }
-      const b = { ...second, tool_calls: declarations }
+      const b = {
+        ...second,
+        tool_calls: declarations,
+        content:
+          mode === "resumed-prose" ? `${first.content} and listing the directory` : second.content
+      }
       const addFirst = mode === "resume-first" || mode === "different-execution"
       const otherRead =
         mode === "different-execution"
@@ -1226,17 +1259,29 @@ describe("tool transcript replay", () => {
         ...(addFirst ? [directory] : []),
         b,
         otherRead,
-        ...(mode === "resume-last" ? [directory] : [])
+        ...(mode === "resume-last" || mode === "resumed-prose" ? [directory] : [])
       ]
       const aliases = findReplayedToolExchangeAliases(rows)
       expect(aliases).toEqual(
         mode === "different-execution"
           ? new Map()
-          : new Map([
-              [b.id, a.id],
-              [readCopy.id, read.id]
-            ])
+          : mode === "resumed-prose"
+            ? new Map([
+                [a.id, b.id],
+                [read.id, readCopy.id]
+              ])
+            : new Map([
+                [b.id, a.id],
+                [readCopy.id, read.id]
+              ])
       )
+      expect(findReplayedToolExchangeAliases(rows.slice(1))).toEqual(aliases)
+      if (mode === "resumed-prose") {
+        const visible = rows.filter(({ id }) => !aliases.has(id))
+        expect(
+          resolveToolResultOwnership(visible).get(getWorkerToolUiKey(b.id, "ls-call", 1))
+        ).toBe(directory)
+      }
       expect(
         rows.filter(({ id }) => !aliases.has(id)).filter(({ id }) => id === directory.id)
       ).toHaveLength(mode === "pending" ? 0 : 1)
@@ -1400,7 +1445,7 @@ describe("tool transcript replay", () => {
     expect(findReplayedToolExchangeAliases([...first, second[0], second[2], second[1]]).size).toBe(
       3
     )
-    expect(findReplayedToolExchangeAliases([...first, second[0], second[1]]).size).toBe(0)
+    expect(findReplayedToolExchangeAliases([...first, second[0], second[1]]).size).toBe(2)
   })
 
   it("does not scan payloads for 10,000 rows in distinctly anchored turns", () => {
