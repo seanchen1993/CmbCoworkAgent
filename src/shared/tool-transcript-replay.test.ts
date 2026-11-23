@@ -492,12 +492,19 @@ describe("tool transcript replay", () => {
     "annotation-only",
     "citation-before-existing",
     "new-index",
-    "string-to-indexed"
+    "string-to-indexed",
+    "added-image",
+    "added-tool-block",
+    "added-after-image"
   ])("retains the original row and exact structured continuation when proved (%s)", (mode) => {
     const [assistant, result] = exchange()
     const [revision, duplicate] = exchange(2)
     const image = { type: "image", source: { type: "url", url: "https://example.com/first.png" } }
     const hasImage = mode.endsWith("image")
+    const addsBlock = mode.startsWith("added-") && mode !== "added-annotation"
+    const appendedBlock = mode === "added-tool-block"
+      ? { type: "tool_use", id: "shared-call", name: "inspect", input: { path: "fixture" } }
+      : { ...image, source: { ...image.source, url: "https://example.com/appended.png" } }
     const gainsIndex = mode === "new-index" || mode === "string-to-indexed"
     const earlierCitation = mode === "citation-before-existing"
     const indexed =
@@ -514,7 +521,7 @@ describe("tool transcript replay", () => {
     }
     const oldText = mode === "equal-split-block" ? "Checking\nFile details" : "Checking"
     const nextText =
-      mode.startsWith("equal-") || mode === "annotation-only" || earlierCitation
+      mode.startsWith("equal-") || mode === "annotation-only" || earlierCitation || addsBlock
         ? "Checking"
         : "Checking version and status"
     const earlier = {
@@ -532,7 +539,7 @@ describe("tool transcript replay", () => {
                   ? { annotations: [{ ...annotations[0], url: "https://example.com/other" }] }
                   : {})
               },
-              ...(hasImage ? [image] : []),
+              ...(hasImage && mode !== "added-image" ? [image] : []),
               ...(hasLaterParagraph && !gainsIndex ? [laterParagraph] : [])
             ]
     }
@@ -549,7 +556,8 @@ describe("tool transcript replay", () => {
         },
         ...(mode === "different-image"
           ? [{ ...image, source: { ...image.source, url: "https://example.com/second.png" } }]
-          : hasImage ? [image] : []),
+          : hasImage && mode !== "added-image" ? [image] : []),
+        ...(addsBlock ? [appendedBlock] : []),
         ...(hasLaterParagraph || mode === "equal-split-block" ? [laterParagraph] : [])
       ],
       ...(mode === "different-reasoning" ? { reasoning: "Independent reasoning" } : {})
@@ -602,6 +610,29 @@ describe("tool transcript replay", () => {
               [first.id, alpha.content],
               [second.id, beta.content]
             ]
+      )
+    }
+  )
+
+  it.each([true, false])(
+    "matches equivalent assistant representations across user turns (physical %s)",
+    (sameExecution) => {
+      const [first, originalResult] = exchange()
+      const [later, replayedResult] = exchange(2)
+      const otherUser = { ...user, id: "next-user" }
+      const typed = { ...later, content: [{ type: "text", text: first.content }] }
+      const finalResult = sameExecution
+        ? replayedResult
+        : {
+            ...replayedResult,
+            id: "9c09fdd9-e146-4c2c-9b12-cac648551576",
+            provider_source_id: undefined
+          }
+      const rows = [user, first, originalResult, otherUser, typed, finalResult]
+      expect(findReplayedToolExchangeAliases(rows)).toEqual(
+        sameExecution
+          ? new Map([[typed.id, first.id], [finalResult.id, originalResult.id]])
+          : new Map()
       )
     }
   )
