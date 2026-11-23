@@ -34,6 +34,13 @@ interface ToolExchange<T> {
   results: T[]
 }
 
+interface AnchoredToolExchange<T> {
+  exchange: ToolExchange<T>
+  position: number
+  anchor?: T
+  hasPhysicalResults: boolean
+}
+
 const noAliases: ReadonlyMap<string, string> = new Map()
 const toolResultUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const langGraphToolResultPrefix =
@@ -147,6 +154,19 @@ function isSameExchange(
   )
 }
 
+function isExactToolExchangeReplay(
+  left: ToolExchange<TranscriptMessage>,
+  right: ToolExchange<TranscriptMessage>
+): boolean {
+  return (
+    (left.assistant.reasoning || "") === (right.assistant.reasoning || "") &&
+    left.results.every(
+      (result, index) => (result.reasoning || "") === (right.results[index]?.reasoning || "")
+    ) &&
+    isSameExchange(left, right)
+  )
+}
+
 function exchangeKey(exchange: ToolExchange<TranscriptMessage>): string {
   return JSON.stringify([
     getMessageProviderSourceId(exchange.assistant),
@@ -248,19 +268,16 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
   checkpointTurns?: CheckpointReplayTurns
 ) {
   const ownership = resolveToolResultOwnership(messages)
-  type Candidate = {
-    exchange: ToolExchange<T>
-    position: number
-    anchor: T | undefined
-    hasPhysicalResults: boolean
-  }
-  const byAnchor = new Map<string, Candidate[]>()
-  let hasCompetingPhysicalRows = false
-  const addCandidate = (key: string, candidate: Candidate) => {
-    const group = byAnchor.get(key) ?? []
-    if (candidate.hasPhysicalResults && group.length) hasCompetingPhysicalRows = true
+  const byAnchor = new Map<string, AnchoredToolExchange<T>[]>()
+  const byPhysicalGroup = new Map<string, AnchoredToolExchange<T>[]>()
+  const addCandidate = (
+    index: Map<string, AnchoredToolExchange<T>[]>,
+    key: string,
+    candidate: AnchoredToolExchange<T>
+  ) => {
+    const group = index.get(key) ?? []
     group.push(candidate)
-    byAnchor.set(key, group)
+    index.set(key, group)
   }
   let anchor: T | undefined
   let position = 0
@@ -290,24 +307,180 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
         requiresRawProof &&
         (!hasPhysicalResults || !hasRawCheckpointToolBindings(exchange, checkpointTurns))
       if (!unsafe) {
-        if (anchor) addCandidate(JSON.stringify([anchor.id, ...evidenceKey]), candidate)
+        if (anchor) addCandidate(byAnchor, JSON.stringify([anchor.id, ...evidenceKey]), candidate)
         if (
           includeLeadingHidden &&
           hasPhysicalResults &&
           (!checkpointTurns || (!anchor && checkpointTurns.leadingHiddenAssistants.has(message.id)))
         ) {
-          addCandidate(JSON.stringify([null, ...evidenceKey]), candidate)
+          addCandidate(byAnchor, JSON.stringify([null, ...evidenceKey]), candidate)
         }
+        if (hasPhysicalResults)
+          addCandidate(byPhysicalGroup, JSON.stringify(evidenceKey), candidate)
       }
     }
     position++
   }
-  return { byAnchor, hasCompetingPhysicalRows }
+  return { byAnchor, byPhysicalGroup, ownership }
+}
+
+function selectCheckpointReplayAliases<T extends TranscriptMessage>(
+  replay: readonly T[],
+  checkpoint: ReturnType<typeof indexAnchoredExchanges<T>>,
+  targets: ReadonlyMap<AnchoredToolExchange<T>, AnchoredToolExchange<T>>
+): ReadonlyMap<string, string> {
+  const groups: Array<{ ids: string[]; aliases: Array<[string, string]> }> = []
+  for (const copies of checkpoint.byPhysicalGroup.values()) {
+    const handled = new Set<AnchoredToolExchange<T>>()
+    for (const candidate of copies) {
+      if (!targets.has(candidate) || handled.has(candidate)) continue
+      const equivalent = copies.filter(
+        (copy) =>
+          copy !== candidate &&
+          !handled.has(copy) &&
+          isExactToolExchangeReplay(candidate.exchange, copy.exchange)
+      )
+      if (!equivalent.length) continue
+      const aliases: Array<[string, string]> = []
+      handled.add(candidate)
+      for (const { exchange } of equivalent) {
+        if (exchange.assistant.id === candidate.exchange.assistant.id) continue
+        aliases.push([exchange.assistant.id, candidate.exchange.assistant.id])
+        exchange.results.forEach(({ id }, index) => {
+          const retained = candidate.exchange.results[index].id
+          if (id !== retained) aliases.push([id, retained])
+        })
+      }
+      for (const copy of equivalent) handled.add(copy)
+      if (aliases.length)
+        groups.push({
+          ids: candidate.exchange.calls.map(({ id }) => getRawWorkerToolCallId(id)),
+          aliases
+        })
+    }
+  }
+  if (!groups.length) return noAliases
+  const proposed = new Map(groups.flatMap(({ aliases }) => aliases))
+  const unsafe: UnsafeBindings = { callIds: new Set(), invalidResultIds: new Set() }
+  const verified = preserveReplayToolBindings(replay, proposed, checkpoint.ownership, unsafe)
+  if (verified.size) return verified
+  if (!unsafe.callIds.size) return noAliases
+
+  // Tool bindings for unrelated call IDs cannot change each other. Retain
+  // independently verified groups without relaxing proof for a shared ID.
+  const groupsById = new Map<string, number[]>()
+  groups.forEach(({ ids }, index) => {
+    for (const id of ids) {
+      const sharingId = groupsById.get(id) ?? []
+      sharingId.push(index)
+      groupsById.set(id, sharingId)
+    }
+  })
+  const rejected = new Set<number>()
+  for (const id of unsafe.callIds) {
+    for (const index of groupsById.get(id) ?? []) {
+      if (rejected.has(index)) continue
+      rejected.add(index)
+      for (const adjacentId of groups[index].ids) unsafe.callIds.add(adjacentId)
+    }
+  }
+  const independent = new Map(
+    groups.flatMap(({ aliases }, index) => (rejected.has(index) ? [] : aliases))
+  )
+  return preserveReplayToolBindings(replay, independent, checkpoint.ownership)
+}
+
+type CheckpointAlignment<T> = Array<[copy: T, durable: T]>
+
+function reserveCheckpointVersionIds<T extends TranscriptMessage>(
+  canonical: readonly T[],
+  replay: readonly T[],
+  groups: CheckpointAlignment<T>[],
+  physicalGroups: ReturnType<typeof indexAnchoredExchanges<T>>["byPhysicalGroup"],
+  targets: ReadonlyMap<AnchoredToolExchange<T>, AnchoredToolExchange<T>>
+): void {
+  const byId = new Map(replay.map((message) => [message.id, message]))
+  const moving = new Set(
+    groups.flatMap((group) =>
+      group.flatMap(([copy, durable]) => (copy.id !== durable.id ? [copy.id] : []))
+    )
+  )
+  const matchedRows = new Set<T>()
+  const executionKey = ({ exchange }: AnchoredToolExchange<T>) =>
+    JSON.stringify([exchangeKey(exchange), exchange.results.map(resultReplayKey)])
+  const matchedExecutions = new Set<string>()
+  for (const candidate of targets.keys()) {
+    if (!candidate.hasPhysicalResults) continue
+    matchedExecutions.add(executionKey(candidate))
+    matchedRows.add(candidate.exchange.assistant)
+    for (const result of candidate.exchange.results) matchedRows.add(result)
+  }
+  const versions = new Set<T>()
+  for (const exchanges of physicalGroups.values()) {
+    for (const candidate of exchanges) {
+      if (!matchedExecutions.has(executionKey(candidate))) continue
+      versions.add(candidate.exchange.assistant)
+      for (const result of candidate.exchange.results) versions.add(result)
+    }
+  }
+  if (!versions.size) return
+  const canMove = (row: T) =>
+    versions.has(row) && !matchedRows.has(row) && !moving.has(row.id) && byId.get(row.id) === row
+  if (![...versions].some(canMove)) return
+  const usedIds = new Set<string>()
+  const providerOccurrences = new Map<string, number>()
+  for (const message of [...canonical, ...replay]) {
+    usedIds.add(message.id)
+    const source = getMessageProviderSourceId(message)
+    const key = `${message.role}\u0000${source}`
+    const occurrence = getMessageProviderOccurrence(message) ?? 1
+    providerOccurrences.set(key, Math.max(providerOccurrences.get(key) ?? 1, occurrence))
+  }
+  const nextOccurrence = (row: T, role: string, source: string): T => {
+    const key = `${role}\u0000${source}`
+    let occurrence = (providerOccurrences.get(key) ?? 1) + 1
+    let id = buildMessageSameRoleDuplicateId(source, role, occurrence)
+    while (usedIds.has(id)) {
+      occurrence++
+      id = buildMessageSameRoleDuplicateId(source, role, occurrence)
+    }
+    usedIds.add(id)
+    moving.add(row.id)
+    providerOccurrences.set(key, occurrence)
+    return { ...row, id, provider_source_id: source, provider_occurrence: occurrence }
+  }
+  for (const rows of groups) {
+    const displaced: CheckpointAlignment<T> = []
+    for (const [copy, durable] of rows) {
+      const blocker = byId.get(durable.id)
+      if (!blocker || copy.id === blocker.id || !canMove(blocker)) continue
+      const role = blocker.role
+      const source = getMessageProviderSourceId(blocker)
+      if (!role || role !== durable.role || source !== getMessageProviderSourceId(durable)) continue
+      displaced.push([blocker, nextOccurrence(blocker, role, source)])
+    }
+    rows.push(...displaced)
+  }
+  // A distinct version may still occupy the old raw ID even when the matched
+  // checkpoint version already has the correct durable ID.
+  const durableById = new Map(canonical.map((message) => [message.id, message]))
+  for (const row of versions) {
+    const existing = durableById.get(row.id)
+    const role = row.role
+    if (!existing || !role || existing.role !== role || !canMove(row)) continue
+    const source = getMessageProviderSourceId(row)
+    if (
+      source === getMessageProviderSourceId(existing) &&
+      (role === "assistant" || !sameRow(existing, row))
+    ) {
+      groups.push([[row, nextOccurrence(row, role, source)]])
+    }
+  }
 }
 
 function applyCheckpointAlignments<T extends TranscriptMessage>(
   replay: T[],
-  groups: Array<Array<[copy: T, durable: T]>>
+  groups: CheckpointAlignment<T>[]
 ): T[] {
   if (!groups.length) return replay
   const replayIdCounts = new Map<string, number>()
@@ -378,32 +551,9 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   const durable = indexSource(canonical)
   if (durable.byAnchor.size === 0) return replay
   const checkpoint = indexSource(replay, checkpointTurns)
-  const durableAliases = durable.hasCompetingPhysicalRows
-    ? findReplayedToolExchangeAliases(canonical, { completePhysicalExchangesOnly: true })
-    : noAliases
-  const checkpointAliases = checkpoint.hasCompetingPhysicalRows
-    ? findReplayedToolExchangeAliases(replay, {
-        completePhysicalExchangesOnly: true,
-        checkpointTurns
-      })
-    : noAliases
-  const canonicalWithoutCopies = durableAliases.size
-    ? canonical.filter(({ id }) => !durableAliases.has(id))
-    : canonical
-  const replayWithoutCopies = checkpointAliases.size
-    ? replay.filter(({ id }) => !checkpointAliases.has(id))
-    : replay
-  const targets =
-    canonicalWithoutCopies === canonical
-      ? durable.byAnchor
-      : indexSource(canonicalWithoutCopies).byAnchor
-  const incoming =
-    replayWithoutCopies === replay
-      ? checkpoint.byAnchor
-      : indexSource(replayWithoutCopies, checkpointTurns).byAnchor
-  const groups: Array<Array<[copy: T, durable: T]>> = []
-  for (const [key, copies] of incoming) {
-    const possible = targets.get(key)
+  const targets = new Map<AnchoredToolExchange<T>, AnchoredToolExchange<T>>()
+  for (const [key, copies] of checkpoint.byAnchor) {
+    const possible = durable.byAnchor.get(key)
     if (
       !possible ||
       (!copies[0].hasPhysicalResults && (copies.length !== 1 || possible.length !== 1))
@@ -420,22 +570,41 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
                 (getMessageProviderOccurrence(candidate.anchor) ?? 1))) &&
           isSameExchange(target.exchange, candidate.exchange, target.hasPhysicalResults)
       )
-      if (matches.length !== 1) continue
       const [target] = matches
-      const rows: Array<[copy: T, durable: T]> = [
-        [candidate.exchange.assistant, target.exchange.assistant]
-      ]
-      for (const [index, result] of candidate.exchange.results.entries()) {
-        rows.push([result, target.exchange.results[index]])
-      }
-      const changes = rows.filter(
-        ([copy, durable]) =>
-          copy.id !== durable.id ||
-          getMessageProviderOccurrence(copy) !== getMessageProviderOccurrence(durable)
+      if (
+        target &&
+        (matches.length === 1 ||
+          matches.every((match) => isExactToolExchangeReplay(target.exchange, match.exchange)))
       )
-      if (changes.length) groups.push(changes)
+        targets.set(candidate, target)
     }
   }
+  if (!targets.size) return replay
+  const checkpointAliases = selectCheckpointReplayAliases(replay, checkpoint, targets)
+  const replayWithoutCopies = checkpointAliases.size
+    ? replay.filter(({ id }) => !checkpointAliases.has(id))
+    : replay
+  const groups: CheckpointAlignment<T>[] = []
+  for (const [candidate, target] of targets) {
+    if (checkpointAliases.has(candidate.exchange.assistant.id)) continue
+    const rows: CheckpointAlignment<T> = [[candidate.exchange.assistant, target.exchange.assistant]]
+    for (const [index, result] of candidate.exchange.results.entries()) {
+      rows.push([result, target.exchange.results[index]])
+    }
+    const changes = rows.filter(
+      ([copy, durable]) =>
+        copy.id !== durable.id ||
+        getMessageProviderOccurrence(copy) !== getMessageProviderOccurrence(durable)
+    )
+    if (changes.length) groups.push(changes)
+  }
+  reserveCheckpointVersionIds(
+    canonical,
+    replayWithoutCopies,
+    groups,
+    checkpoint.byPhysicalGroup,
+    targets
+  )
   if (!groups.length) return replay
   // Only commit checkpoint removals if an alignment also succeeded. The full
   // durable transcript is still merged by the caller, retaining search IDs.
@@ -511,11 +680,7 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
 /** Identify copies using the same result bindings that are used in chat. */
 export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   messages: readonly T[],
-  options?: {
-    completedAssistantIds?: Set<string>
-    completePhysicalExchangesOnly?: boolean
-    checkpointTurns?: CheckpointReplayTurns
-  }
+  completedAssistantIds?: Set<string>
 ): ReadonlyMap<string, string> {
   if (!hasToolReplayCandidates(messages)) return noAliases
   const ownership = resolveToolResultOwnership(messages)
@@ -529,14 +694,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     const exchange = readExchange(message, ownership)
     if (!exchange || !hasExecutionIdentity(exchange)) continue
     const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
-    if (
-      options?.completePhysicalExchangesOnly &&
-      (!hasPhysicalResults ||
-        (options.checkpointTurns &&
-          !hasRawCheckpointToolBindings(exchange, options.checkpointTurns)))
-    )
-      continue
-    options?.completedAssistantIds?.add(message.id)
+    completedAssistantIds?.add(message.id)
 
     // Transport replay can append records after the next visible user turn.
     // Only separately generated result UUIDs support matching across that boundary.
@@ -561,8 +719,6 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       if (canonical.id !== result.id) aliases.set(result.id, canonical.id)
     }
   }
-  if (options?.completePhysicalExchangesOnly)
-    return preserveReplayToolBindings(messages, aliases, ownership)
 
   // Compare result identity independently of FIFO: a replay could have already
   // occupied a newer call that happened to reuse the original ID.

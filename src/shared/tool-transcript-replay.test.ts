@@ -228,6 +228,69 @@ describe("tool transcript replay", () => {
     expect(mergeCheckpointAuthorityTranscriptMessages(aligned, canonical)).toEqual(canonical)
   })
 
+  it("keeps matching evidence in a later visible turn even when an earlier turn has replay copies", () => {
+    const newerUser = { ...user, id: "current-user" }
+    const original = { ...exchange()[0], content: "Older reply", tool_calls: undefined }
+    const durable = [
+      { ...user, id: "earliest" },
+      original,
+      user,
+      ...exchange(2),
+      ...exchange(3),
+      newerUser,
+      ...exchange(4)
+    ]
+    const checkpoint = [newerUser, ...exchange()]
+    const raw = checkpointRows(checkpoint)
+    const turns = readCheckpointReplayTurns({
+      channel_values: { messages: [raw[0], hiddenTeam, ...raw.slice(1)] }
+    })
+    const aligned = alignReplayedToolExchanges(durable, checkpoint, turns)
+    expect(aligned.map(({ id }) => id)).toEqual([newerUser, ...exchange(4)].map(({ id }) => id))
+    const merged = mergeCheckpointAuthorityTranscriptMessages(aligned, durable, {
+      useStableProviderOccurrences: true
+    })
+    expect(merged.find(({ id }) => id === original.id)).toEqual(original)
+    const aliases = findReplayedToolExchangeAliases(merged)
+    expect(merged.filter(({ role, id }) => role === "tool" && !aliases.has(id))).toHaveLength(1)
+  })
+
+  it("removes the checkpoint copy that blocks a matched exchange across visible turns", () => {
+    const original = { ...exchange()[0], content: "Older reply", tool_calls: undefined }
+    const laterUser = { ...user, id: "later" }
+    const canonical = [{ ...user, id: "earlier" }, original, user, ...exchange(2)]
+    const checkpoint = [user, ...exchange(), laterUser, ...exchange(2)]
+    const aligned = alignReplayedToolExchanges(canonical, checkpoint)
+    expect(aligned.map(({ id }) => id)).toEqual(
+      [user, ...exchange(2), laterUser].map(({ id }) => id)
+    )
+    const merged = mergeCheckpointAuthorityTranscriptMessages(aligned, canonical, {
+      useStableProviderOccurrences: true
+    })
+    expect(merged.find(({ id }) => id === original.id)).toEqual(original)
+  })
+
+  it.each([true, false])(
+    "keeps distinct versions when one occupies the intended occurrence (%s)",
+    (matchesFirst) => {
+      const original = { ...exchange()[0], content: "Older reply", tool_calls: undefined }
+      const canonical = [{ ...user, id: "earlier" }, original, user, ...exchange(2)]
+      const first = exchange(1, { path: "fixture" }, matchesFirst ? "ok" : "Other version")
+      const second = exchange(2, { path: "fixture" }, matchesFirst ? "Other version" : "ok")
+      const aligned = alignReplayedToolExchanges(canonical, [user, ...first, ...second])
+      const merged = mergeCheckpointAuthorityTranscriptMessages(aligned, canonical, {
+        useStableProviderOccurrences: true
+      })
+      expect(merged.find(({ id }) => id === original.id)).toEqual(original)
+      expect(
+        merged
+          .filter(({ role }) => role === "tool")
+          .map(({ content }) => content)
+          .sort()
+      ).toEqual(["Other version", "ok"])
+    }
+  )
+
   it("does not align collapsed ownership that the raw hidden boundary disproves", () => {
     const [older, olderResult] = exchange()
     const newer = { ...older, id: "newer-call", provider_source_id: undefined }

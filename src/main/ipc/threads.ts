@@ -2859,7 +2859,9 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
     checkpointMessages,
     readCheckpointReplayTurns(checkpoint)
   )
-  const merged = mergeThreadMessageTranscripts(alignedCheckpoint, persistedMessages)
+  const merged = mergeCheckpointAuthorityTranscriptMessages(alignedCheckpoint, persistedMessages, {
+    useStableProviderOccurrences: true
+  })
   const aliases = findReplayedToolExchangeAliases(merged)
   return aliases.size ? merged.filter((message) => !aliases.has(message.id)) : merged
 }

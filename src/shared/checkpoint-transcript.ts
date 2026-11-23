@@ -353,7 +353,10 @@ export function mergeCheckpointAuthorityTranscriptMessages<
 >(
   baseMessages: readonly T[],
   incomingMessages: readonly T[],
-  options: { isSameMessage?: (left: T, right: T) => boolean } = {}
+  options: {
+    isSameMessage?: (left: T, right: T) => boolean
+    useStableProviderOccurrences?: boolean
+  } = {}
 ): T[] {
   const merged: T[] = []
   const indexById = new Map<string, number>()
@@ -388,6 +391,14 @@ export function mergeCheckpointAuthorityTranscriptMessages<
     }
   }
   let incomingSegmentStartsNewTurn = false
+  const readOccurrence = (message: T, sourceId: string) =>
+    getMessageProviderOccurrence(message) ??
+    // An unsuffixed provider ID is its first occurrence even when it is
+    // inserted after newer checkpoint occurrences during this merge.
+    (options.useStableProviderOccurrences &&
+    (message.role === "assistant" || message.role === "tool") && message.id === sourceId
+      ? 1
+      : undefined)
 
   // Callers provide transcript order explicitly (for example, the database
   // returns durable messages by ordinal). Provider timestamps can be missing or
@@ -410,8 +421,8 @@ export function mergeCheckpointAuthorityTranscriptMessages<
       rawExistingIndex === undefined || exactIdHasDifferentRole
         ? (normalizeMessageRoleCollisionIds(merged, [rawIncoming])[0] ?? rawIncoming)
         : rawIncoming
-    const incomingOccurrence = getMessageProviderOccurrence(incoming)
     const incomingSourceId = getMessageProviderSourceId(incoming)
+    const incomingOccurrence = readOccurrence(incoming, incomingSourceId)
     let highestProviderIdentityOccurrence = 0
     const providerIdentityCandidates = merged.flatMap((candidate, candidateIndex) => {
       if (
@@ -420,7 +431,7 @@ export function mergeCheckpointAuthorityTranscriptMessages<
       ) {
         return []
       }
-      const declaredOccurrence = getMessageProviderOccurrence(candidate)
+      const declaredOccurrence = readOccurrence(candidate, incomingSourceId)
       const effectiveOccurrence = declaredOccurrence ?? highestProviderIdentityOccurrence + 1
       highestProviderIdentityOccurrence = Math.max(
         highestProviderIdentityOccurrence,

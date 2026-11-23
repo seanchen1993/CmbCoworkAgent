@@ -336,7 +336,7 @@ async function main(): Promise<void> {
       assert.equal(result.success, true, result.error)
       const archive = new AdmZip(archivePath)
       const archived = JSON.parse(archive.readAsText("session.json")) as {
-        messages: { role: string; content: string; toolCallId?: string }[]
+        messages: { role: string; content: string; toolCallId?: string; toolCalls?: unknown[] }[]
       }
       const rows = await chat
         .locator('[data-chat-message-row][data-message-role="assistant"]')
@@ -387,6 +387,11 @@ async function main(): Promise<void> {
           assert.equal(rows.filter((row) => row.includes(content)).length, 1)
           assert.equal(archived.messages.filter((row) => row.content === content).length, 1)
         }
+        assert.equal(
+          archived.messages.find((row) => row.content === "Earlier response to preserve")
+            ?.toolCalls,
+          undefined
+        )
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)
         assert.equal(markdown.match(/Updated fourth result/g)?.length, 1)
         assert.match(markdown, /Readable legacy response/)

@@ -491,10 +491,12 @@ function rememberSearchGoalEvent(previous: readonly GoalEvent[], event: GoalEven
 
 const mergePersistedMessagesIntoTranscript = (
   baseMessages: Message[],
-  persistedMessages: Message[]
+  persistedMessages: Message[],
+  useStableProviderOccurrences = false
 ): Message[] => {
   return mergeCheckpointAuthorityTranscriptMessages(baseMessages, persistedMessages, {
-    isSameMessage: sameGoalCommandMessage
+    isSameMessage: sameGoalCommandMessage,
+    useStableProviderOccurrences
   })
 }
 
@@ -7091,7 +7093,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           checkpointTranscript,
           checkpointReplayTurns
         ),
-        visiblePersistedThreadMessages
+        visiblePersistedThreadMessages,
+        checkpointMessagesLoaded
       )
       const restoredTranscriptMessages = restoreVisibleCheckpointMessageTimes(
         restoredTranscript,
@@ -7105,7 +7108,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // legacy-checkpoint restoration.
       let hydratedTranscriptMessages = mergePersistedMessagesIntoTranscript(
         preserveBotNotices(restoredTranscriptMessages),
-        threadStatesRef.current[threadId]?.messages ?? []
+        threadStatesRef.current[threadId]?.messages ?? [],
+        checkpointMessagesLoaded
       )
       delete hydrationAttempt.botNotices
       const botHistoryOrigins = new Map(visiblePersistedThreadMessages.flatMap(message =>

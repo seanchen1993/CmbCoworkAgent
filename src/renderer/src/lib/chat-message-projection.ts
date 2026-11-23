@@ -99,7 +99,7 @@ export function createChatReplayAliasProjector(): (
     }
     if (rebuildSources || evidenceChanged) {
       completedAssistantIds = new Set()
-      const nextAliases = findReplayedToolExchangeAliases(messages, { completedAssistantIds })
+      const nextAliases = findReplayedToolExchangeAliases(messages, completedAssistantIds)
       if (nextAliases.size !== aliases.size ||
           [...nextAliases].some(([id, target]) => aliases.get(id) !== target)) {
         aliases = nextAliases
