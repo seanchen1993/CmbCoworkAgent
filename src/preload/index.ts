@@ -3321,6 +3321,11 @@ const api = {
     authoringInstall: createAuthoringInstallBridge((channel, payload) =>
       ipcRenderer.invoke(channel, payload)
     ),
+    trustedRelease: {
+      available: () => ipcRenderer.invoke("mods:trusted-release:available"),
+      install: (ref: import("../shared/mods/trusted-release").TrustedReleaseRef) =>
+        ipcRenderer.invoke("mods:trusted-release:install", ref)
+    },
     authoringPreview: createAuthoringPreviewBridge((channel, payload) =>
       ipcRenderer.invoke(channel, payload)
     ),

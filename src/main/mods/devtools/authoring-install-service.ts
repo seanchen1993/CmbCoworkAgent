@@ -468,6 +468,28 @@ export class AuthoringInstallService {
     return record
   }
 
+  async readSavedVersionForRelease(
+    input: { installationId: string; versionId: string },
+    binding: AuthoringInstallScope
+  ) {
+    const active = scope(binding)
+    const assertSaved = () => {
+      active.signal.throwIfAborted()
+      active.assertCurrent()
+      const installed = this.installed(active.workspace, input.installationId, this.deps.index.capture())
+      if (installed?.versionId !== input.versionId) throw Error("AUTHORING_VERSION_CHANGED")
+    }
+    const checked = await this.deps.versions.revalidate(input.versionId, {
+      signal: active.signal, assertCurrent: assertSaved
+    })
+    const assertCurrent = () => {
+      assertSaved()
+      this.deps.versions.assertPrepared(checked.token)
+    }
+    assertCurrent()
+    return { ...identity(checked.record), record: checked.record, assertCurrent }
+  }
+
   list(input: AuthoringInstallScope) {
     const active = scope(input),
       snapshot = this.deps.index.capture()

@@ -72,6 +72,9 @@ export type AuthoringInstallRollbackRequest = AuthoringScope & {
   restoreConfiguration: boolean
 }
 export interface AuthoringInstallApi {
+  exportReleaseCandidate?(
+    input: AuthoringScope & { installationId: string; versionId: string }
+  ): Promise<AuthoringInstallResult<{ packageSha256: string } | null>>
   inspectRetention(
     input: AuthoringScope
   ): Promise<AuthoringInstallResult<AuthoringRetentionInspection>>

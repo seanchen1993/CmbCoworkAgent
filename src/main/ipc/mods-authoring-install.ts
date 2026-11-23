@@ -43,6 +43,11 @@ export interface AuthoringInstallAccess {
   trusted(event: IpcMainInvokeEvent): void
   threadScope(threadId: string): string
   captureThreadFence(threadId: string): () => void
+  exportReleaseCandidate?(
+    event: IpcMainInvokeEvent,
+    input: { installationId: string; versionId: string },
+    scope: AuthoringInstallServiceScope
+  ): Promise<{ packageSha256: string } | null>
 }
 function object(input: unknown, keys: string[]): Record<string, unknown> {
   if (
@@ -292,6 +297,32 @@ export function registerAuthoringInstallHandlers(
     const result = installations((await service.list(scope)).installations)
     scope.assertCurrent()
     return { workspace, installations: result }
+  })
+  let exporting = false
+  const exportCandidate = access.exportReleaseCandidate
+  if (exportCandidate) handle("export-release-candidate", async (event, input) => {
+    const row = object(input, ["threadId", "expectedWorkspace", "installationId", "versionId"])
+    const controller = new AbortController()
+    const scope = createScope(event, text(row.threadId), text(row.expectedWorkspace, 4096), controller)
+    scope.assertCurrent()
+    if (exporting) throw Error("BUSY")
+    exporting = true
+    const abandon = () => controller.abort()
+    event.sender.on("did-start-navigation", abandon)
+    event.sender.on("render-process-gone", abandon)
+    event.sender.on("destroyed", abandon)
+    try {
+      const result = await exportCandidate(event, {
+        installationId: id(row.installationId), versionId: id(row.versionId)
+      }, scope)
+      scope.assertCurrent()
+      return result && { packageSha256: digest(result.packageSha256) }
+    } finally {
+      event.sender.removeListener("did-start-navigation", abandon)
+      event.sender.removeListener("render-process-gone", abandon)
+      event.sender.removeListener("destroyed", abandon)
+      exporting = false
+    }
   })
   handle("resolve-installed", async (event, input) => {
     const row = object(input, [

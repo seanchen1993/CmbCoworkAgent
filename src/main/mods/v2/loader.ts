@@ -112,7 +112,7 @@ async function read(root: string, path: string, limit: number) {
 /** Inspect and build an immutable snapshot; never executes the plugin or an install script. */
 export async function compileFunctionPlugin(
   directory: string,
-  tooling?: { captureSources: boolean }
+  tooling?: { captureSources: boolean; portablePaths?: true }
 ): Promise<CompiledFunctionPlugin> {
   const root = realpathSync(directory)
   const rootIdentity = lstatSync(root, { bigint: true })
@@ -278,6 +278,9 @@ export async function compileFunctionPlugin(
   const sourceScans = new Map<string, FunctionModuleScan>()
   const sourceClients = new Map<string, string[]>()
   const sourceImports = new Map<string, Set<string>>()
+  // Default namespace paths form part of existing runtime and grant digests.
+  // Release proofs use package-relative paths so the same bundle can be verified elsewhere.
+  const moduleFile = (path: string) => tooling?.portablePaths ? resolve(root, path) : path
   const buildModule = (contents: string, globalName: string, surface = false) =>
     build({
       stdin: {
@@ -309,7 +312,7 @@ export async function compileFunctionPlugin(
               if (args.kind !== "import-statement" || !args.path.startsWith("."))
                 throw Error("MODS_IMPORT_DENIED")
               const requested = resolve(
-                args.importer && args.importer !== "<stdin>" ? dirname(args.importer) : root,
+                args.importer && args.importer !== "<stdin>" ? dirname(moduleFile(args.importer)) : root,
                 args.path
               )
               const candidates = extname(requested)
@@ -321,13 +324,13 @@ export async function compileFunctionPlugin(
                   if (componentEntries.has(pathKey(path)) && pathKey(path) !== activeComponentEntry)
                     throw Error("CLAW_COMPONENT_CROSS_ENTRY_IMPORT")
                   if (args.importer && args.importer !== "<stdin>") {
-                    const importer = relative(root, args.importer).replaceAll("\\", "/")
+                    const importer = relative(root, moduleFile(args.importer)).replaceAll("\\", "/")
                     const imports = sourceImports.get(importer) ?? new Set<string>()
                     imports.add(relative(root, path).replaceAll("\\", "/"))
                     sourceImports.set(importer, imports)
                   }
                   return {
-                    path,
+                    path: tooling?.portablePaths ? relative(root, path).replaceAll("\\", "/") : path,
                     namespace: "function-mod"
                   }
                 } catch (error) {
@@ -343,7 +346,7 @@ export async function compileFunctionPlugin(
               const extension = extname(args.path)
               if (![".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"].includes(extension))
                 throw Error("MODS_IMPORT_TYPE")
-              const file = resolveModFile(root, relative(root, args.path))
+              const file = resolveModFile(root, relative(root, moduleFile(args.path)))
               const key = relative(root, file).replace(/\\/g, "/")
               let content = captured.get(key)
               if (content === undefined) {

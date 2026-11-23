@@ -62,7 +62,7 @@ function Installation({
   const [selected, setSelected] = useState("")
   const [restoreConfiguration, setRestoreConfiguration] = useState(false)
   const [candidate, setCandidate] = useState<AuthoringPreparedInstallation | null>(null)
-  const [phase, setPhase] = useState<"idle" | "reading" | "preparing" | "cancelling" | "applying">(
+  const [phase, setPhase] = useState<"idle" | "reading" | "preparing" | "cancelling" | "applying" | "exporting">(
     "idle"
   )
   const [notice, setNotice] = useState("")
@@ -117,6 +117,12 @@ function Installation({
       if (value.workspace !== workspace) throw Error("STALE")
       setRows(value.installations)
       setOpened(true)
+    })
+  const exportReleaseCandidate = (installationId: string, versionId: string) =>
+    perform("exporting", async () => {
+      const result = unwrap(await api!.exportReleaseCandidate!({ ...scope, installationId, versionId }))
+      if (alive.current && result)
+        setNotice("已导出发布候选包。包 SHA-256 为 " + result.packageSha256)
     })
   const prepare = (rollback: boolean) =>
     perform("preparing", async () => {
@@ -299,6 +305,12 @@ function Installation({
                     />
                   )}
                   <p>已保留 {row.versions.length} 个历史版本</p>
+                  {api?.exportReleaseCandidate && row.currentVersionId && !row.pending && (
+                    <button className={button} disabled={busy || !!candidate}
+                      onClick={() => void exportReleaseCandidate(row.installationId, row.currentVersionId!)}>
+                      导出已安装版本的发布候选包…
+                    </button>
+                  )}
                 </article>
               ))}
               <label className="block space-y-1 text-sm">

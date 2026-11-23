@@ -44,6 +44,16 @@ import { registerAuthoringReconcileHandlers } from "./mods-authoring-reconcile"
 import { registerAuthoringInstallHandlers } from "./mods-authoring-install"
 import { registerAuthoringRetentionHandlers } from "./mods-authoring-retention"
 import { createAuthoringInstallService } from "../mods/devtools/authoring-install-factory"
+import {
+  TrustedReleaseAuthority, type TrustedReleaseSession
+} from "../mods/devtools/trusted-release-authority"
+import {
+  compileTrustedReleaseSource, TrustedReleaseDelivery, writeReleaseCandidate
+} from "../mods/devtools/trusted-release-delivery"
+import { TrustedReleaseInstaller } from "../mods/devtools/trusted-release-install"
+import { createTrustedReleasePackage } from "../mods/devtools/trusted-release-package"
+import { PluginCatalogIndex } from "../plugins/catalog-index"
+import { registerTrustedReleaseHandlers } from "./mods-trusted-releases"
 import { FunctionPromptBroker } from "../mods/v2/prompt-broker"
 import { FunctionConversationCoordinator } from "../mods/v2/conversation-coordinator"
 import { readNativeChildModsContext, readNativeChildModsThread } from "../agent/native-child-mods-context"
@@ -228,7 +238,11 @@ import { projectBuiltinRunOverview } from "../mods/builtins/overview"
 import { describeDevClawBuiltins } from "../mods/builtins/registry"
 import { readBuiltinProjectBinding, readBuiltinProjectFacts } from "../mods/builtins/project-facts"
 
-export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
+export function registerModsHandlers(
+  ipcMain: IpcMain,
+  window: () => BrowserWindow | null,
+  captureReleaseSession?: () => TrustedReleaseSession | undefined
+): void {
   const siteReadRequests = new FunctionSiteReadRequests()
   const approvalInbox = new ModApprovalInbox(() => {
     const owner = window()
@@ -1358,6 +1372,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     )
   }
   const authoringInstall = createAuthoringInstallService(manager, functions)
+  const releasesRoot = join(getOpenworkDir(), "trusted-releases")
+  const releases = new TrustedReleaseDelivery(
+    new TrustedReleaseAuthority(captureReleaseSession),
+    new TrustedReleaseInstaller({
+      root: releasesRoot, index: new PluginCatalogIndex(join(releasesRoot, "installations.json"))
+    })
+  )
+  registerTrustedReleaseHandlers(ipcMain, releases, window, trusted)
+  // Recovery validates committed receipts and removes interrupted staging.
+  // A fresh account confirmation is required to finish uncommitted installations.
+  void releases.recover().catch(() => {
+    console.warn("[Mods] Trusted release storage needs recovery")
+  })
   registerAuthoringRetentionHandlers(ipcMain, authoringInstall, {
     trusted,
     threadScope: writableThreadScope,
@@ -1373,6 +1400,40 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   registerAuthoringInstallHandlers(ipcMain, authoringInstall, {
     trusted,
     threadScope: writableThreadScope,
+    exportReleaseCandidate: async (event, input, scope) => {
+      const owner = window()
+      if (!owner || owner.isDestroyed() || owner.webContents !== event.sender) throw Error("STALE")
+      const saved = await authoringInstall.readSavedVersionForRelease(input, scope)
+      const assertCurrent = () => {
+        if (owner !== window() || owner.isDestroyed()) throw Error("STALE")
+        saved.assertCurrent()
+      }
+      const compiled = await compileTrustedReleaseSource(saved.record.source, assertCurrent)
+      assertCurrent()
+      const prepare = createTrustedReleasePackage(saved.record.source, compiled.digest)
+      const review = await dialog.showMessageBox(owner, {
+        type: "question", title: "核对发布候选包",
+        message: "导出 " + saved.name + " " + saved.version + "？",
+        detail: [
+          "包 SHA-256 " + prepare.packageSha256,
+          "源码 SHA-256 " + prepare.sourceDigest,
+          "编译 SHA-256 " + prepare.compiledDigest,
+          "导出只保存本地文件。正式发布需要由市场校验发布者身份。"
+        ].join("\n"),
+        buttons: ["取消", "选择保存位置"], cancelId: 0, defaultId: 0, noLink: true
+      })
+      assertCurrent()
+      if (review.response !== 1) return null
+      const choice = await dialog.showSaveDialog(owner, {
+        title: "保存新的发布候选包",
+        defaultPath: saved.name + "-release-candidate.zip",
+        filters: [{ name: "发布候选包", extensions: ["zip"] }]
+      })
+      assertCurrent()
+      if (choice.canceled || !choice.filePath) return null
+      await writeReleaseCandidate(choice.filePath, prepare)
+      return { packageSha256: prepare.packageSha256 }
+    },
     captureThreadFence: (threadId) => {
       const thread = getThreadCore(threadId)
       if (!thread) throw Error("STALE")

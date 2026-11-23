@@ -4,6 +4,10 @@ export function createAuthoringInstallBridge(
   invoke: (channel: string, input: unknown) => Promise<unknown>
 ): AuthoringInstallApi {
   return {
+    exportReleaseCandidate: (input) =>
+      invoke("mods:authoring-install:export-release-candidate", input) as ReturnType<
+        NonNullable<AuthoringInstallApi["exportReleaseCandidate"]>
+      >,
     inspectRetention: (input) =>
       invoke("mods:authoring-install:inspect-retention", input) as ReturnType<
         AuthoringInstallApi["inspectRetention"]

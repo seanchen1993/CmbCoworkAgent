@@ -101,6 +101,22 @@ afterEach(() => {
 })
 
 describe("creator installation through real index and control store", () => {
+  it("exports only an applied version still owned by the current workspace", async () => {
+    const candidate = await service.prepare(draft(), binding())
+    const input = { installationId: candidate.installationId, versionId: candidate.versionId }
+    await expect(service.readSavedVersionForRelease(input, binding())).rejects.toThrow()
+    expect((await apply(candidate)).state).toBe("settled")
+    const saved = await service.readSavedVersionForRelease(input, binding())
+    expect(saved.record.source.digest).toBe(candidate.sourceDigest)
+    expect(saved.record.compiledDigest).toBe(candidate.compiledDigest)
+    await expect(service.readSavedVersionForRelease(input, {
+      ...binding(), workspace: "other-workspace"
+    })).rejects.toThrow()
+    const replacement = await service.prepare(draft(1, "new"), binding())
+    await apply(replacement)
+    expect(saved.assertCurrent).toThrow("AUTHORING_VERSION_CHANGED")
+  })
+
   it("retires an old terminal self-observation after later current and rollback versions exist", async () => {
     const request = draft()
     const first = await service.prepare(request, binding())

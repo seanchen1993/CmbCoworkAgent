@@ -1122,6 +1122,7 @@ interface CustomAPI {
     skillEvaluation: import("../shared/mods/skill-evaluation").SkillEvaluationApi
     evaluation: import("../shared/mods/evaluation-api").EvaluationApi
     communityExamples: import("../shared/mods/community-examples").CommunityExamplesApi
+    trustedRelease: import("../shared/mods/trusted-release").TrustedReleaseApi
     authoringInstall: import("../shared/mods/authoring-install").AuthoringInstallApi; authoringPreview: import("../shared/mods/authoring-preview").AuthoringPreviewApi; authoring: import("../shared/mods/authoring").AuthoringApi } & import("../shared/mods/flows/types").FlowApi & import("../shared/mods/claw").ClawApi & import("../shared/mods/v2/prompt-composer").PromptComposerApi & import("../shared/mods/v2/desktop-actions").DesktopApi & import("../shared/mods/v2/presentation").FunctionPresentationApi & import("../shared/mods/v2/config-api").FunctionConfigApi & {
     peerMessages(threadId: string): Promise<import("../shared/mods/v2/peer").FunctionPeerRecord[]>
     mcpConnections: import("../shared/mods/v2/mcp-connections").McpConnectionsApi["mcpConnections"]
