@@ -211,6 +211,76 @@ describe("tool transcript replay", () => {
     expect(findReplayedToolExchangeAliases([multipleOwners, separator, tool, copy]).size).toBe(0)
   })
 
+  it("folds exact tool-only replays of a later payload without erasing the earlier version", () => {
+    const [assistant, tool] = exchange(1, { path: "fixture" }, "Partial output")
+    const [, final] = exchange(2)
+    const [, replay] = exchange(3)
+    expect(findReplayedToolExchangeAliases([assistant, tool, final, replay])).toEqual(
+      new Map([[replay.id, final.id]])
+    )
+  })
+
+  it("keeps Bot delivery cards on the receipt selected by persisted batch authorization", () => {
+    const [assistant, tool] = exchange()
+    const calls = assistant.tool_calls!.map((call) => ({ ...call, name: "bot_deliver_files" }))
+    const oldResult = { ...tool, name: "bot_deliver_files", content: "Old receipt" }
+    const newResult = {
+      ...oldResult,
+      id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      provider_source_id: undefined,
+      content: "New receipt"
+    }
+    const [, copy] = exchange(2)
+    const replay = { ...oldResult, id: copy.id, provider_occurrence: 2 }
+    const rows = [
+      user,
+      { ...assistant, tool_calls: calls },
+      oldResult,
+      { ...user, id: "new-user" },
+      { ...assistant, id: "new-batch", tool_calls: calls },
+      replay,
+      newResult
+    ]
+    expect(findReplayedToolExchangeAliases(rows).size).toBe(0)
+  })
+
+  it("repairs a replay even when another proposal temporarily displaces its canonical result", () => {
+    const [assistant, tool] = exchange()
+    const withCall = (id: string) => ({ ...assistant, id, provider_source_id: undefined })
+    const withPrompt = (id: string) => ({ ...user, id })
+    const withResult = (id: string, content: string) => ({
+      ...tool,
+      id,
+      provider_source_id: undefined,
+      content
+    })
+    const copy = (result: Message) => ({
+      ...result,
+      id: `${result.id}::cmb-same-role-duplicate:tool:2`,
+      provider_occurrence: 2
+    })
+    const earlierResult = withResult(resultId, "Earlier completed result")
+    const veryLateResult = withResult("89668b32-971a-43fa-81aa-ce014c243774", "Late first result")
+    const newResult = withResult("ad506755-5e42-4cef-834f-eb1be0f11d27", "New result")
+    const rows = [
+      withPrompt("first-user"),
+      withCall("first-call"),
+      withPrompt("second-user"),
+      withCall("second-call"),
+      earlierResult,
+      withCall("third-call"),
+      copy(earlierResult),
+      veryLateResult,
+      withPrompt("third-user"),
+      withCall("fourth-call"),
+      copy(veryLateResult),
+      newResult
+    ]
+    expect(findReplayedToolExchangeAliases(rows)).toEqual(
+      new Map([[copy(veryLateResult).id, veryLateResult.id]])
+    )
+  })
+
   it("recognizes full replays of a late completed call", () => {
     const [assistant, tool] = exchange()
     const [replay, replayTool] = exchange(2)
@@ -403,5 +473,25 @@ describe("tool transcript replay", () => {
     expect(argumentReads).toBe(0)
     expect(alignReplayedToolExchanges(messages, messages)).toBe(messages)
     expect(argumentReads).toBe(0)
+  })
+
+  it("indexes many versions of one result without comparing every payload pair", () => {
+    const [assistant, tool] = exchange()
+    let payloadReads = 0
+    const versions = Array.from({ length: 1_000 }, (_, index) =>
+      [index * 2 + 2, index * 2 + 3].map((occurrence) => ({
+        ...tool,
+        id: `${resultId}::cmb-same-role-duplicate:tool:${occurrence}`,
+        provider_occurrence: occurrence,
+        get content() {
+          payloadReads++
+          return `Saved version ${index}`
+        }
+      }))
+    )
+    const aliases = findReplayedToolExchangeAliases([assistant, tool, ...versions.flat()])
+    expect(aliases.size).toBe(1_000)
+    expect(aliases.get(versions[999][1].id)).toBe(versions[999][0].id)
+    expect(payloadReads).toBeLessThan(16_000)
   })
 })

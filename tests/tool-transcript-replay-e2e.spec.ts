@@ -89,6 +89,7 @@ async function seedHistory(): Promise<number> {
   const repeated = [2, 3].flatMap((occurrence) =>
     first.slice(1).map((row) => setOccurrence(row, occurrence))
   )
+  const updatedResult = { ...nextAfterReplay[2], content: "Updated fourth result" }
   const firstFinal: Message = {
     id: "first-final",
     role: "assistant",
@@ -119,6 +120,8 @@ async function seedHistory(): Promise<number> {
     nextAfterReplay[2],
     setOccurrence(first[2], 7),
     setOccurrence(nextAfterReplay[2], 2),
+    setOccurrence(updatedResult, 3),
+    setOccurrence(updatedResult, 4),
     legacy
   ]
   await db.initializeDatabase()
@@ -291,10 +294,12 @@ async function main(): Promise<void> {
             ["Fixture result 0", callId],
             ["Fixture result 1", callId],
             ["Fixture result 2", callId],
-            ["Fixture result 3", callId]
+            ["Fixture result 3", callId],
+            ["Updated fourth result", callId]
           ]
         )
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)
+        assert.equal(markdown.match(/Updated fourth result/g)?.length, 1)
         assert.match(markdown, /Readable legacy response/)
         assert.equal(stored.length, rawRowCount)
         assert.equal(await chat.getByText("INTERRUPTED", { exact: true }).count(), 0)
@@ -324,7 +329,11 @@ async function main(): Promise<void> {
           request?.target?.messageId ?? "",
           /^provider-0::cmb-same-role-duplicate:assistant:/
         )
-        await page.screenshot({ path: path.join(output, `${phase}.png`) })
+        await page.screenshot({
+          animations: "disabled",
+          path: path.join(output, `${phase}.png`),
+          timeout: 60_000
+        })
       } catch (error) {
         failures.push(`${phase}: ${String(error)}`)
       }

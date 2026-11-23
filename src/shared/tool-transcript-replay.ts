@@ -249,7 +249,7 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
 
 interface UnsafeBindings {
   callIds: Set<string>
-  resultIds: Set<string>
+  invalidResultIds: Set<string>
 }
 
 /** Existing tool cards and archives must keep the same results for every surviving call. */
@@ -272,23 +272,6 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
     [...original.values()].filter(hasToolResultExecutionId).map(getMessageProviderSourceId)
   )
   const ownerByResultId = new Map([...original].map(([owner, result]) => [result.id, owner]))
-  const keptBinding = (previous: T | undefined, next: T | undefined): boolean => {
-    if (previous === next) return true
-    if (!previous || !next || !hasToolResultExecutionId(previous)) return false
-    if (sameRow(previous, next)) return true
-    // A delayed result copy can occupy a new same-ID call before that call's
-    // own result arrives. Replace it only with a distinct, otherwise unowned
-    // result while the original physical result stays bound to its owner.
-    const duplicateOf = aliases.get(previous.id)
-    const originalOwner = duplicateOf && ownerByResultId.get(duplicateOf)
-    return Boolean(
-      originalOwner &&
-      after.get(originalOwner)?.id === duplicateOf &&
-      !previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) &&
-      hasToolResultExecutionId(next) &&
-      resultReplayKey(previous) !== resultReplayKey(next)
-    )
-  }
   let bindingsPreserved = true
   for (const message of retained) {
     if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue
@@ -297,11 +280,31 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
       if (!id) continue
       const key = getWorkerToolUiKey(message.id, id, index)
       const previous = original.get(key)
-      if (keptBinding(previous, after.get(key))) continue
+      const next = after.get(key)
+      if (previous === next) continue
+      if (previous && next && hasToolResultExecutionId(previous) && sameRow(previous, next))
+        continue
+      const duplicateOf = previous && aliases.get(previous.id)
+      const originalOwner = duplicateOf && ownerByResultId.get(duplicateOf)
+      // Bot delivery authorizes a receipt from the persisted batch. Its card
+      // must keep displaying that receipt until the batch itself changes.
+      const canRebind = Boolean(
+        originalOwner &&
+        next &&
+        previous &&
+        (call as { name?: unknown }).name !== "bot_deliver_files" &&
+        hasToolResultExecutionId(previous) &&
+        hasToolResultExecutionId(next) &&
+        !previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) &&
+        resultReplayKey(previous) !== resultReplayKey(next)
+      )
+      if (canRebind && originalOwner && after.get(originalOwner)?.id === duplicateOf) continue
       if (!unsafe) return noAliases
       bindingsPreserved = false
       unsafe.callIds.add(getRawWorkerToolCallId(id))
-      if (previous) unsafe.resultIds.add(previous.id)
+      // A displaced canonical owner can recover once a different, invalid
+      // proposal is removed. Avoid rejecting that dependent repair first.
+      if (!canRebind && previous) unsafe.invalidResultIds.add(previous.id)
     }
   }
   return bindingsPreserved ? aliases : noAliases
@@ -346,20 +349,38 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   // occupied a newer call that happened to reuse the original ID.
   const owned = new Set(ownership.values())
   const ownedExecutionIds = new Set<string>()
-  const knownResults = new Map<string, T>()
+  const knownResults = new Map<string, Map<unknown, T[]>>()
+  const structuredContent = Symbol()
+  const resultsWithContent = (row: T) => {
+    const key = resultReplayKey(row)
+    const content = row.content
+    const contentKey = content !== null && typeof content === "object" ? structuredContent : content
+    const byContent = knownResults.get(key) ?? new Map<unknown, T[]>()
+    const versions = byContent.get(contentKey) ?? []
+    byContent.set(contentKey, versions)
+    knownResults.set(key, byContent)
+    return versions
+  }
+  const rememberResult = (row: T) => {
+    const versions = resultsWithContent(row)
+    if (!versions.some((result) => sameRow(result, row))) versions.push(row)
+  }
   for (const row of owned) {
     if (!hasToolResultExecutionId(row)) continue
     ownedExecutionIds.add(getMessageProviderSourceId(row))
-    if (aliases.has(row.id)) continue
-    const key = resultReplayKey(row)
-    if (!knownResults.has(key)) knownResults.set(key, row)
+    if (!aliases.has(row.id)) rememberResult(row)
   }
   // Prefer a bound result as the canonical row. A delayed genuine result may
   // still be unbound while a replay occupies its receiving call.
   for (const row of messages) {
-    if (row.role !== "tool" || aliases.has(row.id) || !hasToolResultExecutionId(row)) continue
-    const key = resultReplayKey(row)
-    if (!knownResults.has(key)) knownResults.set(key, row)
+    if (
+      row.role === "tool" &&
+      !owned.has(row) &&
+      !aliases.has(row.id) &&
+      hasToolResultExecutionId(row)
+    ) {
+      rememberResult(row)
+    }
   }
   const callsWithUnownedResults = new Set<string>()
   const attachedDuplicates: Array<{ alias: string; canonical: string; call: string }> = []
@@ -370,8 +391,8 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     if (row.tool_call_id && !ownedExecutionIds.has(getMessageProviderSourceId(row))) {
       callsWithUnownedResults.add(row.tool_call_id)
     }
-    const original = knownResults.get(resultReplayKey(row))
-    if (!original || original.id === row.id || !sameRow(original, row)) continue
+    const original = resultsWithContent(row).find((result) => sameRow(result, row))
+    if (!original || original.id === row.id) continue
     if (!owned.has(row)) {
       aliases.set(row.id, original.id)
       continue
@@ -389,7 +410,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   // First exclude directly rejected slots, then fall back to independent call
   // IDs for ambiguous shifts. Every retained subset is checked end to end.
   for (let attempt = 0; attempt < 3 && proposals.length; attempt++) {
-    const unsafe: UnsafeBindings = { callIds: new Set(), resultIds: new Set() }
+    const unsafe: UnsafeBindings = { callIds: new Set(), invalidResultIds: new Set() }
     const repaired = preserveReplayToolBindings(
       messages,
       new Map([
@@ -400,7 +421,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       unsafe
     )
     if (repaired.size) return repaired
-    const precise = proposals.filter(({ alias }) => !unsafe.resultIds.has(alias))
+    const precise = proposals.filter(({ alias }) => !unsafe.invalidResultIds.has(alias))
     const remaining =
       precise.length < proposals.length
         ? precise
