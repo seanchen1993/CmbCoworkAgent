@@ -2014,6 +2014,11 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     toolReplayAssistantIds
   )
   const aliases = new Map(slotCopies.verified)
+  const assistantsById = new Map<string, T>()
+  if (aliases.size) {
+    for (const row of messages) if (row.role === "assistant") assistantsById.set(row.id, row)
+  }
+  const assistantContent = getAssistantReplayContent(aliases, (id) => assistantsById.get(id))
   const payloadId = createPayloadIds()
   const resultVersionKey = (result: T) => [resultReplayKey(result), payloadId(result.content)]
   const sameTurn = new Map<string, ToolExchange<T>[]>()
@@ -2021,8 +2026,13 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   for (const message of messages) {
     if (message.role === "user" || message.role === "system") sameTurn.clear()
     if (aliases.has(message.id)) continue
-    const exchange = readExchange(message, ownership)
-    if (!exchange || !hasExecutionIdentity(exchange)) continue
+    const batch = readExchange(message, ownership)
+    if (!batch || !hasExecutionIdentity(batch)) continue
+    // The local copy plan may have already established a distinct continuation.
+    // Whole-batch matching must compare that text when it crosses turns.
+    const content = assistantContent.get(message.id)
+    const exchange =
+      content === undefined ? batch : { ...batch, assistant: { ...message, content } }
     const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
     toolReplayAssistantIds?.add(message.id)
 

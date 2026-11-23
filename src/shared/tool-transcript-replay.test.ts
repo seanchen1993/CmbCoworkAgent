@@ -474,6 +474,44 @@ describe("tool transcript replay", () => {
   )
 
   it.each([false, true])(
+    "uses the proven continuation to compare replay across turns (match %s)",
+    (sameText) => {
+      const [first, firstResult] = exchange()
+      const [firstRevision, firstCopy] = exchange(2)
+      const [second, secondResult] = exchange(3)
+      const [secondRevision, secondCopy] = exchange(4)
+      const alpha = { ...firstRevision, content: "Checking alpha" }
+      const beta = { ...secondRevision, content: sameText ? alpha.content : "Checking beta" }
+      const rows = [
+        user,
+        first,
+        firstResult,
+        alpha,
+        firstCopy,
+        { ...user, id: "user-2" },
+        second,
+        secondResult,
+        beta,
+        secondCopy
+      ]
+      const aliases = findReplayedToolExchangeAliases(rows)
+      const content = getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))
+      expect(
+        rows
+          .filter(({ role, id }) => role === "assistant" && !aliases.has(id))
+          .map((row) => [row.id, content.get(row.id) ?? row.content])
+      ).toEqual(
+        sameText
+          ? [[first.id, alpha.content]]
+          : [
+              [first.id, alpha.content],
+              [second.id, beta.content]
+            ]
+      )
+    }
+  )
+
+  it.each([false, true])(
     "finds the correct structured result variant for a prose revision (trimmed %s)",
     (trimmed) => {
       const structured = (content: string) => [{ type: "text", text: content }]
