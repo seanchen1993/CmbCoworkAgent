@@ -309,9 +309,28 @@ async function main(): Promise<void> {
       await page.evaluate(() =>
         (window as unknown as FixtureWindow).modelSwitcherFixture.readSettingsWrites()
       ),
-      { names: ["未保存的模型名称"], defaults: [] }
+      { names: ["未保存的模型名称"], defaults: [], maxTokens: [128_000] }
     )
     console.log("PASS Pro model: selection, identity checks, locked context, and settings save")
+
+    await page.evaluate(() => {
+      const fixture = (window as unknown as FixtureWindow).modelSwitcherFixture
+      fixture.idleCatalog(true)
+      fixture.showIdleSettings(true)
+    })
+    await page.getByText("当前使用 UAT 测试环境。").waitFor()
+    const contextWindow = page.locator('input[value="128000"]')
+    assert.equal(await contextWindow.isEnabled(), true)
+    await contextWindow.fill("256000")
+    await page.getByRole("button", { name: "保存", exact: true }).click()
+    await settle()
+    assert.deepEqual(
+      await page.evaluate(() =>
+        (window as unknown as FixtureWindow).modelSwitcherFixture.readSettingsWrites().maxTokens
+      ),
+      [128_000, 256_000]
+    )
+    console.log("PASS Pro model: editable UAT context")
   } finally {
     await app.close()
   }
