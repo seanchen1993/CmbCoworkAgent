@@ -338,6 +338,10 @@ describe("tool transcript replay", () => {
     const messages = [user, invalid, ...exchange()]
     expect(findReplayedToolExchangeAliases(messages).size).toBe(0)
     expect(alignReplayedToolExchanges(messages, messages)).toBe(messages)
+    const [assistant, result] = exchange()
+    const malformedResult = { ...result, tool_call_id: 17 } as unknown as Message
+    const malformed = [user, assistant, malformedResult]
+    expect(alignReplayedToolExchanges(malformed, malformed)).toBe(malformed)
   })
 
   it("keeps independent turns, result IDs, error states and unseen payloads", () => {

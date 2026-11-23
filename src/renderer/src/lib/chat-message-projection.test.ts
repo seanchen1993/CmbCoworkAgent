@@ -171,6 +171,47 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     expect(findDisplayedReplayAliases(rows).size).toBe(0)
     expect(preserveReplayToolBindings(rows, new Map([[replay.id, done.id]])).size).toBe(0)
   })
+
+  it("lets a new call receive its own result after an old exact replay claimed its slot", () => {
+    const resultId = "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465"
+    const oldCall = assistant({ id: "older-call", tool_calls: [executeCall] })
+    const current = assistant({
+      id: "next-call",
+      tool_calls: [{ ...executeCall, args: { command: "echo another fixture" } }]
+    })
+    const oldResult: Message = {
+      id: resultId,
+      role: "tool",
+      tool_call_id: executeCall.id,
+      content: "Old output",
+      created_at: new Date(1)
+    }
+    const replay = { ...oldResult, id: `${resultId}::cmb-same-role-duplicate:tool:2` }
+    const currentResult = {
+      ...oldResult,
+      id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      content: "Current output"
+    }
+    const rows = [
+      assistant({ id: "u1", role: "user" }),
+      oldCall,
+      oldResult,
+      assistant({ id: "u2", role: "user" }),
+      current,
+      replay,
+      currentResult
+    ]
+    expect(findDisplayedReplayAliases(rows.slice(0, -1)).size).toBe(0)
+    const aliases = findDisplayedReplayAliases(rows)
+    expect(aliases).toEqual(new Map([[replay.id, oldResult.id]]))
+    const results = buildToolResultAssociations(rows.filter(({ id }) => !aliases.has(id)))
+    expect(results.get(getWorkerToolUiKey(oldCall.id, executeCall.id, 0))?.content).toBe(
+      "Old output"
+    )
+    expect(results.get(getWorkerToolUiKey(current.id, executeCall.id, 0))?.content).toBe(
+      "Current output"
+    )
+  })
   it("keeps a replay row visible when only it has the live reasoning", () => {
     const original = assistant()
     const replay = assistant({ id: "replay" })

@@ -183,7 +183,12 @@ export function resolveToolResultOwnership<T extends ToolOwnershipMessage>(
       continue
     }
 
-    if (message.role !== "tool" || !message.tool_call_id) continue
+    if (
+      message.role !== "tool" ||
+      typeof message.tool_call_id !== "string" ||
+      !message.tool_call_id
+    )
+      continue
     const identity = getWorkerToolResultKey(message.id, message.tool_call_id)
     if (!identity) continue
     const rawToolCallId = getRawWorkerToolCallId(message.tool_call_id)

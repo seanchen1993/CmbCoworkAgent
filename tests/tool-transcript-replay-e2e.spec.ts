@@ -19,7 +19,8 @@ const callId = "reused-provider-tool-call"
 const resultIds = [
   "1445a579-bd96-4e17-a5dd-91c06f999933",
   "edd6a76e-803b-4d4a-91b5-8bcd33ba0d7f",
-  "11e6a77f-e4f6-460a-915f-fb932922bb7c"
+  "11e6a77f-e4f6-460a-915f-fb932922bb7c",
+  "08dec078-5601-43c6-b93d-6ad1713864a4"
 ]
 
 function makeExchange(index: number): Message[] {
@@ -67,6 +68,7 @@ async function seedHistory(): Promise<number> {
   const first = makeExchange(0)
   const next = makeExchange(1)
   const mismatch = makeExchange(2)
+  const nextAfterReplay = makeExchange(3)
   const final: Message = {
     id: "final",
     role: "assistant",
@@ -112,6 +114,9 @@ async function seedHistory(): Promise<number> {
     setOccurrence(first[2], 5),
     ...mismatch.slice(1).map((row) => setOccurrence(row, 2)),
     final,
+    ...nextAfterReplay.slice(0, 2),
+    setOccurrence(first[2], 6),
+    nextAfterReplay[2],
     legacy
   ]
   await db.initializeDatabase()
@@ -275,14 +280,16 @@ async function main(): Promise<void> {
         assert.deepEqual(visible, [
           "Checking fixture 0",
           "Checking fixture 1",
-          "Checking fixture 2"
+          "Checking fixture 2",
+          "Checking fixture 3"
         ])
         assert.deepEqual(
           exported.map(({ content, toolCallId }) => [content, toolCallId]),
           [
             ["Fixture result 0", callId],
             ["Fixture result 1", callId],
-            ["Fixture result 2", callId]
+            ["Fixture result 2", callId],
+            ["Fixture result 3", callId]
           ]
         )
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)

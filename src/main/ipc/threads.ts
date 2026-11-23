@@ -2489,7 +2489,8 @@ function getCheckpointMessageToolCalls(msg: CheckpointMessage): CheckpointMessag
 }
 
 function getCheckpointMessageToolCallId(msg: CheckpointMessage): string | undefined {
-  return msg.tool_call_id ?? msg.kwargs?.tool_call_id
+  const callId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
+  return typeof callId === "string" ? callId : undefined
 }
 
 function getCheckpointMessageName(msg: CheckpointMessage): string | undefined {

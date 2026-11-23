@@ -261,6 +261,8 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
   }
   const retained = messages.filter((message) => !aliases.has(message.id))
   const after = resolveToolResultOwnership(retained)
+  const beforeResults = new Set(original.values())
+  const ownerByResultId = new Map([...original].map(([owner, result]) => [result.id, owner]))
   for (const message of retained) {
     if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue
     for (const [index, call] of message.tool_calls.entries()) {
@@ -268,8 +270,22 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
       const previous = original.get(key)
       const next = after.get(key)
       if (previous === next) continue
-      if (!previous || !next || !hasToolResultExecutionId(previous) || !sameRow(previous, next))
+      if (!previous || !next || !hasToolResultExecutionId(previous)) return noAliases
+      if (sameRow(previous, next)) continue
+      // A delayed result copy can occupy a new same-ID call before that call's
+      // own result arrives. Replace it only with a distinct, otherwise unowned
+      // result while the original physical result stays bound to its owner.
+      const duplicateOf = aliases.get(previous.id)
+      const originalOwner = duplicateOf && ownerByResultId.get(duplicateOf)
+      if (
+        !originalOwner ||
+        after.get(originalOwner)?.id !== duplicateOf ||
+        beforeResults.has(next) ||
+        !hasToolResultExecutionId(next) ||
+        resultReplayKey(previous) === resultReplayKey(next)
+      ) {
         return noAliases
+      }
     }
   }
   return aliases
@@ -310,25 +326,48 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     }
   }
 
-  // An extra result with no receiving call can be a late copy of a known result.
-  // Results that actually serve a retained call never enter this orphan check.
+  // Compare result identity independently of FIFO: a replay could have already
+  // occupied a newer call that happened to reuse the original ID.
   const owned = new Set(ownership.values())
   const knownResults = new Map<string, T>()
   for (const row of owned) {
-    if (!aliases.has(row.id) && hasToolResultExecutionId(row))
-      knownResults.set(resultReplayKey(row), row)
+    if (aliases.has(row.id) || !hasToolResultExecutionId(row)) continue
+    const key = resultReplayKey(row)
+    if (!knownResults.has(key)) knownResults.set(key, row)
   }
+  const detachedByCall = new Map<string, T>()
   for (const row of messages) {
     if (
-      row.role !== "tool" ||
-      owned.has(row) ||
-      aliases.has(row.id) ||
-      !hasToolResultExecutionId(row)
-    )
-      continue
-    const original = knownResults.get(resultReplayKey(row))
-    if (original && original.id !== row.id && sameRow(original, row))
-      aliases.set(row.id, original.id)
+      row.role === "tool" &&
+      row.tool_call_id &&
+      !owned.has(row) &&
+      hasToolResultExecutionId(row)
+    ) {
+      detachedByCall.set(row.tool_call_id, row)
+    }
   }
-  return preserveReplayToolBindings(messages, aliases, ownership)
+  const attachedDuplicates = new Map<string, string>()
+  for (const row of messages) {
+    if (row.role !== "tool" || aliases.has(row.id) || !hasToolResultExecutionId(row)) continue
+    const original = knownResults.get(resultReplayKey(row))
+    if (!original || original.id === row.id || !sameRow(original, row)) continue
+    if (!owned.has(row)) {
+      aliases.set(row.id, original.id)
+      continue
+    }
+    const potentialResult = row.tool_call_id && detachedByCall.get(row.tool_call_id)
+    if (potentialResult && resultReplayKey(potentialResult) !== resultReplayKey(row)) {
+      attachedDuplicates.set(row.id, original.id)
+    }
+  }
+  const verified = preserveReplayToolBindings(messages, aliases, ownership)
+  if (attachedDuplicates.size) {
+    const repaired = preserveReplayToolBindings(
+      messages,
+      new Map([...verified, ...attachedDuplicates]),
+      ownership
+    )
+    if (repaired.size) return repaired
+  }
+  return verified
 }
