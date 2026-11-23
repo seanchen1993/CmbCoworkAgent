@@ -592,14 +592,84 @@
   padding: 40px;
   text-align: center;
 }
-.bot-empty h1 {
-  font-size: 23px;
-  font-weight: 550;
-  margin-top: 8px;
-}
 .bot-empty p {
   font-size: 14px;
   color: var(--bot-muted);
+}
+.bot-welcome {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: clamp(16px, 4vw, 48px);
+}
+.bot-welcome-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(100%, 420px);
+  margin: auto;
+  padding: clamp(24px, 3vw, 36px) clamp(16px, 3vw, 28px);
+  border: 1px solid var(--bot-line);
+  border-radius: 24px;
+  background: var(--bot-elevated);
+  text-align: center;
+}
+.bot-welcome-art {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  place-items: center;
+  width: 132px;
+  height: 96px;
+  margin-bottom: 20px;
+}
+.bot-welcome-art::before,
+.bot-welcome-art::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  width: 72px;
+  height: 72px;
+  border: 1px solid var(--bot-line);
+  border-radius: 20px;
+  background: var(--bot-panel);
+  transform: translateX(-25px) rotate(-12deg);
+}
+.bot-welcome-art::after {
+  transform: translateX(25px) rotate(12deg);
+}
+.bot-welcome-avatar {
+  display: grid;
+  place-items: center;
+  width: 86px;
+  height: 86px;
+  border: 1px solid color-mix(in srgb, #9159fe 18%, var(--bot-line));
+  border-radius: 22px;
+  background: color-mix(in srgb, #9159fe 10%, var(--bot-elevated));
+}
+.bot-welcome-card h1 {
+  font-size: clamp(20px, 2.4vw, 26px);
+  font-weight: 600;
+  line-height: 1.35;
+}
+.bot-welcome-card p {
+  margin-top: 8px;
+  color: color-mix(in srgb, var(--bot-text) 25%, var(--bot-muted));
+  font-size: 14px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+.bot-welcome-create {
+  margin-top: 24px;
+  background: var(--bot-text);
+  color: var(--bot-canvas);
+}
+.bot-welcome-create:hover {
+  background: color-mix(in srgb, var(--bot-text) 86%, var(--bot-canvas));
+}
+.bots-workspace .bot-welcome-create:focus-visible {
+  outline-color: var(--bot-text);
 }
 .bot-details {
   --bot-details-size: var(--bot-detail-width, 320px);

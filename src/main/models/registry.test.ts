@@ -81,6 +81,7 @@ import {
   getModelConfigs,
   getModelByTier,
   refreshBuiltinModelCatalog,
+  resetBuiltinModelOverride,
   startBuiltinModelCatalogRefresh,
   stopBuiltinModelCatalogRefresh,
   updateBuiltinModelOverride
@@ -224,6 +225,38 @@ describe("builtin model registry", () => {
     configureIdleModel()
     vi.stubEnv("MAIN_VITE_IDLE_MODEL_PROD_API_KEY", "")
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBeUndefined()
+  })
+
+  it("saves an editable UAT context window separately from production's fixed window", () => {
+    configureIdleModel()
+    const id = "idle-ultra"
+    const ref = "builtin:idle-ultra"
+    state.idleModelUseUat = true
+    expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)).toMatchObject({
+      maxTokens: 128_000,
+      lockedFields: ["baseUrl", "model", "apiKey"]
+    })
+    expect(() => updateBuiltinModelOverride(id, { maxTokens: 31_999 })).toThrow("32000~1000000")
+    expect(() =>
+      updateBuiltinModelOverride(id, { maxTokens: 32_000, maxOutputTokens: 28_000 })
+    ).toThrow("compaction trigger")
+    updateBuiltinModelOverride(id, { maxTokens: 256_000 })
+    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
+
+    state.idleModelUseUat = false
+    expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)).toMatchObject({
+      maxTokens: 128_000,
+      lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"]
+    })
+    updateBuiltinModelOverride(id, { maxTokens: 128_000, temperature: 0.3 })
+    expect(state.overrides[id]).toEqual({ maxTokens: 256_000, temperature: 0.3 })
+    resetBuiltinModelOverride(id)
+    expect(state.overrides[id]).toEqual({ maxTokens: 256_000 })
+
+    state.idleModelUseUat = true
+    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
+    resetBuiltinModelOverride(id)
+    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(128_000)
   })
 
   it("prefers Pro before MiniMax while honoring saved defaults and availability", async () => {

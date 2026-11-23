@@ -314,11 +314,12 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     const body = components.slice(0, formIndex).find(
       (component) => component.type === "content" && component.list?.[0]?.content === "导出格式用哪种？"
     )
-    assert.deepEqual(body?.list, [
-      { content: "导出格式用哪种？" },
-      { content: "1. CSV (Recommended)（兼容性最好。）" },
-      { content: "2. Excel（保留表格格式。）" },
-      { content: "3. JSON（便于程序读取。）" }
+    // The client renders the list as adjacent rich-text spans, with no implicit line break.
+    assert.deepEqual(body?.list?.map((span) => span.content).join("").split("\n"), [
+      "导出格式用哪种？",
+      "1. CSV (Recommended)（兼容性最好。）",
+      "2. Excel（保留表格格式。）",
+      "3. JSON（便于程序读取。）"
     ])
     assert(!card.includes("A1B2C3"), card)
 

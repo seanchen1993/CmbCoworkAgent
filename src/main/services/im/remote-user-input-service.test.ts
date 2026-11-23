@@ -118,8 +118,10 @@ it("shows every full option under its question before the group form, with match
     expect(card[4 + 2 * index].list).toEqual([{ type: [1], content: `${index + 1}. ${question.header}` }])
     expect(card[5 + 2 * index].list).toEqual([
       { content: question.question },
-      { content: `1. 周期可含未来日期（${question.options[0].description}）` },
-      { content: "2. 仅统计已发生数据" }
+      { type: [1], content: "\n1. " },
+      { content: `周期可含未来日期（${question.options[0].description}）` },
+      { type: [1], content: "\n2. " },
+      { content: "仅统计已发生数据" }
     ])
     const control = (form.inputControlArray as Record<string, unknown>[])[index * 2]
     expect(control.feedbackKey).toBe(question.key)

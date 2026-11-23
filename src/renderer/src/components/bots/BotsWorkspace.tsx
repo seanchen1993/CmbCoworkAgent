@@ -142,7 +142,6 @@ import {
 } from "./view-store"
 import "./bots.css"
 
-const COLORS = ["#ed2040", "#168bea", "#ffb800", "#9a65ee", "#37b897", "#f07e4a"]
 const PENDING_NEW_CHAT_RECIPIENT =
   "这位 Bot 正在创建，请等待原创建结果后再重试。文字和附件仍可编辑。"
 const STATE_LABELS: Record<BotTask["state"], string> = {
@@ -1496,6 +1495,24 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
           (query.trim() || hiddenGroupIds.includes(group.id) === showHidden) &&
           group.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
       )
+  const hasVisibleConversation = Boolean(
+    visible.length || visibleGroups.length || visibleImConversations.length
+  )
+  const showBotWelcome =
+    snapshot &&
+    snapshot.bots.length === 0 &&
+    snapshot.groups.length === 0 &&
+    !snapshot.imConversations?.length &&
+    !showArchived &&
+    !showHidden &&
+    !query.trim()
+  const emptyListMessage = query.trim()
+    ? "没有匹配的会话"
+    : showArchived
+      ? "没有已归档的 Bot"
+      : showHidden
+        ? "没有隐藏的会话"
+        : "暂无会话"
   const pinOrder = botPinnedConversationIds(
     view,
     snapshot?.groups.map((group) => group.id)
@@ -2255,19 +2272,10 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               />
             )}
             {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
-            {snapshot &&
-              !visible.length &&
-              !visibleGroups.length &&
-              !visibleImConversations.length &&
-              !showCreateGroupAction && (
+            {snapshot && !hasVisibleConversation && !showCreateGroupAction &&
+              (newChat || selected || selectedGroup) && (
                 <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-                  {query.trim()
-                    ? "没有匹配的会话"
-                    : showArchived
-                      ? "没有已归档的 Bot"
-                      : showHidden
-                        ? "没有隐藏的会话"
-                        : "创建你的第一个 Bot"}
+                  {emptyListMessage}
                 </p>
               )}
           </BotConversationList>
@@ -2495,18 +2503,30 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 />
               )}
             </>
+          ) : showBotWelcome ? (
+            <div className="bot-welcome">
+              <section className="bot-welcome-card" aria-labelledby="bot-welcome-title">
+                <div className="bot-welcome-art" aria-hidden="true">
+                  <div className="bot-welcome-avatar">
+                    <BotAvatar color="#9159fe" shape="squircle" size={60} animated={false} />
+                  </div>
+                </div>
+                <h1 id="bot-welcome-title">创建你的第一个 Bot</h1>
+                <p>给它起个名字，就能开始聊天、交办任务。</p>
+                <Button
+                  type="button"
+                  size="lg"
+                  className="bot-welcome-create rounded-full focus-visible:ring-0"
+                  onClick={(event) => openNewBot("", event.currentTarget)}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  创建 Bot
+                </Button>
+              </section>
+            </div>
           ) : (
             <div className="bot-empty">
-              <BotAvatar color={COLORS[0]} size={110} />
-              <h1>把工作交给 Bot</h1>
-              <p>交代目标，随时回来查看进展。</p>
-              <Button
-                className="rounded-full px-6"
-                onClick={(event) => openNewBot("", event.currentTarget)}
-              >
-                <Plus size={16} className="mr-2" />
-                创建 Bot
-              </Button>
+              <p>{hasVisibleConversation ? "从侧栏选择一个会话" : emptyListMessage}</p>
             </div>
           )}
         </main>

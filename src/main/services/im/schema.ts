@@ -1,3 +1,4 @@
+import { observeImDeliveryOrder } from "./delivery-order"
 import type { Database as SqlJsDatabase } from "sql.js"
 
 function ensureColumn(
@@ -319,6 +320,8 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     response TEXT, receipt_id TEXT, update_pending INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
   )`)
   ensureColumn(database, "im_session_switch_cards", "receipt_id", "TEXT")
+  database.run("CREATE INDEX IF NOT EXISTS idx_im_session_link_route ON im_session_links(conversation_key,code)")
+  database.run("CREATE INDEX IF NOT EXISTS idx_im_pending_switch_link ON im_session_switch_cards(code) WHERE state='pending'")
   database.run(
     "CREATE INDEX IF NOT EXISTS idx_im_session_cards_due ON im_session_switch_cards(state, next_attempt_at)"
   )
@@ -428,6 +431,7 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     create: createReplyOutboxTable
   })
   ensureColumn(database, "im_reply_outbox", "content_format", REPLY_CONTENT_FORMAT_DECLARATION)
+  ensureColumn(database, "im_reply_outbox", "delivery_order", "INTEGER")
 
   createSelectionContextsTable(database)
   ensureSelectionContextsSupportRemoteTargets(database)
@@ -486,6 +490,13 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     "CREATE INDEX IF NOT EXISTS idx_im_events_conversation_queue ON im_events(conversation_key, state, conversation_seq)"
   )
   database.run("CREATE INDEX IF NOT EXISTS idx_im_events_state ON im_events(state, updated_at)")
+  database.run(
+    "CREATE INDEX IF NOT EXISTS idx_im_outbox_active_route ON im_reply_outbox(conversation_key) WHERE state IN ('pending','sending')"
+  )
+  const durableOrder = database.exec(
+    "SELECT MAX(delivery_order) FROM im_reply_outbox WHERE state IN ('pending','sending')"
+  )[0]
+  observeImDeliveryOrder(Number(durableOrder?.values[0]?.[0] ?? 0))
   database.run(
     "CREATE INDEX IF NOT EXISTS idx_im_outbox_due ON im_reply_outbox(state, next_attempt_at, created_at)"
   )

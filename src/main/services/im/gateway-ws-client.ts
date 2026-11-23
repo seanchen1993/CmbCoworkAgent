@@ -1,4 +1,5 @@
-import { BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION, type BotImFileCommand, type BotImFileResult } from "../../../shared/bots/im-file"
+import { ImDeliveryOrder, nextImDeliveryOrder } from "./delivery-order"
+import { BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION, BOT_IM_FILE_PARALLEL_EXTENSION, type BotImFileCommand, type BotImFileResult } from "../../../shared/bots/im-file"
 import {
   BOT_IM_EXTENSION,
   assertBotImEvent,
@@ -90,6 +91,7 @@ export interface ImGatewayWsClientOptions {
   ) => void | Promise<void>
   isProactiveRouteConfirmed?: (conversationKey: string, principalId: string) => boolean
   onStatusChange?: (status: ImGatewayWsStatus) => void
+  deliveryOrder?: ImDeliveryOrder
   now?: () => number
 }
 
@@ -191,6 +193,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private markdownReplies = false
   private botChannel = false
   private botCards = false
+  private parallelBotFiles = false
   private botFileReceipts = false
   private botFiles = false
   private readonly fileCommands = new Map<string, PendingCommand<BotImFileResult>>()
@@ -222,6 +225,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     routes: []
   }
 
+  get deliveryOrder(): ImDeliveryOrder | undefined {
+    return this.options.deliveryOrder
+  }
+
   constructor(private readonly options: ImGatewayWsClientOptions) {
     this.now = options.now ?? Date.now
   }
@@ -242,6 +249,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     return this.supportsBotChannel() && this.botCards
   }
 
+  supportsParallelBotFiles(): boolean { return this.supportsBotFiles() && this.parallelBotFiles }
   supportsBotFileReceipts(): boolean { return this.supportsBotFiles() && this.botFileReceipts }
 
   supportsBotFiles(): boolean { return this.supportsBotChannel() && this.botFiles }
@@ -330,6 +338,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.botChannel = false
     this.botCards = false
     this.botFiles = false
+    this.parallelBotFiles = false
     this.botFileReceipts = false
     this.clearTimers()
     this.rejectPending(
@@ -372,11 +381,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
    * short code that actually answer the request — a thrown error would only
    * tempt a caller into treating a cosmetic failure as a fatal one.
    */
-  sendCard(card: RemoteImCardSendV1): Promise<ImCardSubmissionResult> {
+  sendCard(card: RemoteImCardSendV1, switchCardOrder?: number): Promise<ImCardSubmissionResult> {
     return this.submitCard(
       "CARD_SEND",
       card.interactionId,
-      card as unknown as Record<string, unknown>
+      card as unknown as Record<string, unknown>,
+      switchCardOrder
     )
   }
 
@@ -395,7 +405,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private submitCard(
     type: "CARD_SEND" | "CARD_UPDATE",
     interactionId: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    switchCardOrder?: number
   ): Promise<ImCardSubmissionResult> {
     if (!this.isAuthenticated()) {
       return Promise.resolve({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" })
@@ -406,14 +417,23 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     // the update dropped it for good, leaving a decided request showing live
     // buttons in Zhaohu forever.
     const previous = this.cardChains.get(interactionId) ?? Promise.resolve()
-    const chained = previous
-      .catch(() => undefined)
-      .then(async () => {
-        const result = await this.sendCardCommand(type, interactionId, payload)
+    const admission = type === "CARD_SEND" && this.deliveryOrder
+      ? this.deliveryOrder.acquire(String(payload.conversationKey), switchCardOrder === undefined ? "card" : "switch", switchCardOrder ?? nextImDeliveryOrder())
+      : undefined
+    const chained = Promise.all([previous.catch(() => undefined), admission])
+      .then(async ([, release]) => {
+        let result: ImCardSubmissionResult
+        try {
+          result = await this.sendCardCommand(type, interactionId, payload)
+        } finally {
+          // The gateway now owns platform delivery and its retries. Only the card's
+          // own update needs the platform receipt; other messages can be admitted.
+          release?.()
+        }
         if (type !== "CARD_SEND" || result.state !== "accepted" || !this.supportsBotCards())
           return result
         return this.waitForCardDelivery(interactionId)
-      })
+      }, (): ImCardSubmissionResult => ({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" }))
     const link = chained.then(
       () => undefined,
       () => undefined
@@ -672,6 +692,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.botChannel = false
     this.botCards = false
     this.botFiles = false
+    this.parallelBotFiles = false
     this.botFileReceipts = false
     const url = this.options.url()?.trim()
     const token = this.options.token()?.trim()
@@ -750,7 +771,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         protocolExtensions: [
           DEFAULT_ROUTE_SYNC_EXTENSION,
           IM_MARKDOWN_REPLY_EXTENSION,
-          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1", BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION] : [])
+          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1", BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION, BOT_IM_FILE_PARALLEL_EXTENSION] : [])
         ]
       })
     })
@@ -909,6 +930,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           Array.isArray(extensions) &&
           extensions.includes(BOT_IM_EXTENSION)
         )
+        this.parallelBotFiles = Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_PARALLEL_EXTENSION)
         this.botFileReceipts = Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_RECEIPTS_EXTENSION)
         this.botFiles = this.botChannel && Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_EXTENSION)
         this.botCards =
@@ -1596,6 +1618,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   }
 
   private rejectPending(error: Error): void {
+    this.deliveryOrder?.disconnect(error)
     for (const pending of [
       ...this.permitCommands.values(),
       ...this.replyCommands.values(),

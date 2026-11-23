@@ -355,7 +355,9 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
     try {
       const stored = overrides[base.id]
       override = normalizeOverride(
-        isIdle && stored ? { ...stored, maxTokens: IDLE_MODEL_MAX_TOKENS } : stored,
+        base.idleModelEnvironment === "production" && stored
+          ? { ...stored, maxTokens: IDLE_MODEL_MAX_TOKENS }
+          : stored,
         base
       )
     } catch (error) {
@@ -387,7 +389,7 @@ export function getBuiltinModelPublicConfigs(): BuiltinModelPublicConfig[] {
       "baseUrl",
       "model",
       "apiKey",
-      ...(config.transport === "idle-gateway" ? ["maxTokens" as const] : [])
+      ...(config.idleModelEnvironment === "production" ? ["maxTokens" as const] : [])
     ]
   }))
 }
@@ -494,11 +496,11 @@ export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverri
   const base = getBaseDefinitions().find((item) => item.id === id)
   if (!base) throw new Error("未找到内置模型")
   if (
-    base.transport === "idle-gateway" &&
+    base.idleModelEnvironment === "production" &&
     input.maxTokens !== undefined &&
     input.maxTokens !== IDLE_MODEL_MAX_TOKENS
   ) {
-    throw new Error(`${IDLE_MODEL_NAME}的上下文窗口固定为 128k，不能修改`)
+    throw new Error(`${IDLE_MODEL_NAME}在生产环境的上下文窗口固定为 128k，不能修改`)
   }
   const normalized = normalizeOverride(input, base)
   const diff: BuiltinModelOverride = {}
@@ -520,18 +522,30 @@ export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverri
       ;(diff as Record<string, unknown>)[key] = normalized[key]
     }
   }
-  if (Object.keys(diff).length === 0) {
-    resetStoredBuiltinModelOverride(id)
+  persistBuiltinModelOverride(base, diff)
+}
+
+function persistBuiltinModelOverride(
+  base: BuiltinModelDefinition,
+  override: BuiltinModelOverride
+): void {
+  if (base.idleModelEnvironment === "production") {
+    // Keep the UAT context override when saving or resetting production settings.
+    const uatMaxTokens = getBuiltinModelOverrides()[base.id]?.maxTokens
+    if (uatMaxTokens !== undefined) override.maxTokens = uatMaxTokens
+  }
+  if (Object.keys(override).length === 0) {
+    resetStoredBuiltinModelOverride(base.id)
   } else {
-    setStoredBuiltinModelOverride(id, diff)
+    setStoredBuiltinModelOverride(base.id, override)
   }
   notifyModelChanges()
 }
 
 export function resetBuiltinModelOverride(id: string): void {
-  if (!getBaseDefinitions().some((item) => item.id === id)) throw new Error("未找到内置模型")
-  resetStoredBuiltinModelOverride(id)
-  notifyModelChanges()
+  const base = getBaseDefinitions().find((item) => item.id === id)
+  if (!base) throw new Error("未找到内置模型")
+  persistBuiltinModelOverride(base, {})
 }
 
 function catalogSignature(): string {

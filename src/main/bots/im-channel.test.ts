@@ -1,3 +1,9 @@
+import { ImDeliveryOrder, nextImDeliveryOrder } from "../services/im/delivery-order"
+import { ImEventStore } from "../services/im/event-store"
+import { ensureImServiceSchema } from "../services/im/schema"
+import { ImReplyClient } from "../services/im/reply-client"
+import { unavailableImGatewayClient } from "../services/im/gateway-client"
+import { buildImProactiveReplies } from "../services/im/reply-segmentation"
 import type { BotWorkHistoryPort } from "../../shared/bots/work-history"
 import { botMemoryContext } from "../../shared/bots/memory-scope"
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises"
@@ -3884,7 +3890,40 @@ it("retains uncertain file receipts without automatic or manual resend", async (
   expect(f.host.beginImDelivery("file")).toBeNull()
 })
 
-it("backs off only a transiently failed file while the next file can be delivered", async () => {
+it.each([true, false])("keeps group and DM uploads independent when negotiated (parallel=%s)", async parallel => {
+  const file = { name: "report.txt", filePath: "/workspace/report.txt", size: 1,
+    attachmentPath: join(tmpdir(), ".bot-deliveries", "a".repeat(64), "report.txt") }
+  const f = fixture(async (task, host) => {
+    if (task.message === "file") host.publishImFiles(task.id, "call", [file])
+    return { state: "completed", result: task.message }
+  })
+  const group1 = await f.binding("group"), group2 = await f.binding("group"), dm = await f.binding("dm")
+  let release!: () => void
+  const slow = new Promise<void>(resolve => { release = resolve })
+  const started: string[] = []
+  Object.assign(f.client, {
+    supportsBotFiles: () => true, supportsParallelBotFiles: () => parallel,
+    botFileCommand: async (request: import("../../shared/bots/im-file").BotImFileCommand) => {
+      if (request.action !== "begin") throw new Error("unexpected command")
+      started.push(request.conversationKey)
+      if (request.conversationKey === group1.conversationKey) await slow
+      return { state: "accepted" }
+    }
+  })
+  try {
+    await f.service.receive(f.event(group1, "a", "file"))
+    await eventually(() => started.length === 1)
+    await f.service.receive(f.event(group2, "b", "file"))
+    await f.service.receive(f.event(dm, "c", "private text"))
+    await eventually(() => f.client.submitReply.mock.calls.some(([m]) => m.message.content.includes("private text")))
+    if (parallel) await eventually(() => started.length === 2)
+    else expect(started).toEqual([group1.conversationKey])
+  } finally { release() }
+  await eventually(() => started.length === 2)
+  expect(started).toEqual([group1.conversationKey, group2.conversationKey])
+})
+
+it("holds later files in the same group until the first retry is accepted", async () => {
   const files = ["a.txt", "b.txt"].map(name=>({name,filePath:`/workspace/${name}`,size:1,
     attachmentPath:join(tmpdir(),".bot-deliveries","a".repeat(64),name)}))
   const f=fixture(async(task,host)=>{
@@ -3894,18 +3933,21 @@ it("backs off only a transiently failed file while the next file can be delivere
   })
   const command=vi.fn(async(request:import("../../shared/bots/im-file").BotImFileCommand)=>{
     if (request.action!=="begin") throw Error("unexpected transfer")
-    if (request.name==="a.txt") throw Error("temporary network failure")
+    if (request.name==="a.txt" && command.mock.calls.length===1) throw Error("temporary network failure")
     return {state:"accepted" as const}
   })
   Object.assign(f.client,{supportsBotFiles:()=>true,botFileCommand:command})
   const binding=await f.binding("group")
   await f.service.receive(f.event(binding))
-  await eventually(()=>command.mock.calls.length===2)
+  await eventually(()=>f.errors.length===1)
   const statuses=f.host.imFileStatuses(f.bot.id,f.calls[0].threadId,"two-files")
   expect(statuses).toHaveLength(2)
-  expect(statuses.find(row=>row.file.name==="a.txt")?.state).toBe("pending")
-  expect(statuses.find(row=>row.file.name==="b.txt")?.state).toBe("accepted")
+  expect(statuses.every(row=>row.state==="pending")).toBe(true)
+  expect(command.mock.calls).toHaveLength(1)
   expect(f.host.beginImDelivery("file")).toBeNull()
+  f.db.run("UPDATE bot_im_outbox SET next_attempt_at=0 WHERE state='pending'")
+  await eventually(()=>command.mock.calls.length===3)
+  expect(command.mock.calls.map(([request])=>request.action==="begin" && request.name)).toEqual(["a.txt","a.txt","b.txt"])
   expect(f.errors).toHaveLength(1)
 })
 
@@ -4179,4 +4221,45 @@ describe("private Bot handoff to a Zhaohu group", () => {
     query.free()
     expect(f.errors).toEqual([])
   })
+})
+
+it("orders a Bot retry, interactive card and ordinary text notice for one audience across both desktop databases", async () => {
+  const f = fixture(async task => ({ state: "completed", result: task.message }))
+  const binding = await f.binding("group")
+  const key = binding.conversationKey!
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  ensureImServiceSchema(db)
+  const events = new ImEventStore({ getDatabase: () => db, markDirty: () => {}, flushStrict: async () => {}, now: Date.now })
+  const order = new ImDeliveryOrder((source, destination) => source === "bot" ? f.service.headDeliveryOrder(destination)
+    : source === "switch" ? events.sessionLinks.headCardOrder(destination) : events.headDeliveryOrder(destination))
+  Object.assign(f.client, { deliveryOrder: order })
+  const accepted: string[] = []
+  let fail = true
+  f.client.submitReply.mockImplementation(async message => {
+    if (fail) { fail = false; throw new Error("temporary") }
+    accepted.push(message.message.content)
+    return { state: "accepted" }
+  })
+  const client = new ImReplyClient({ ...unavailableImGatewayClient, deliveryOrder: order, submitReply: f.client.submitReply }, events)
+  const notify = async (destination: string, text: string) => {
+    await events.enqueueProactiveReplies(buildImProactiveReplies({ deliveryId: text, conversationKey: destination, text }))
+    await client.sendPending(destination)
+  }
+  try {
+    await f.service.receive(f.event(binding, "first", "first"))
+    await eventually(() => f.errors.length > 0)
+    const card = order.acquire(key, "card", nextImDeliveryOrder()).then(release => {
+      accepted.push("card")
+      release()
+    })
+    const later = notify(key, "same group text")
+    await notify("other-room", "other group")
+    expect(accepted).toEqual(["other group"])
+    f.db.run("UPDATE bot_im_outbox SET next_attempt_at=0 WHERE state='pending'")
+    await Promise.all([card, later])
+    expect(accepted).toEqual(["other group", "first", "card", "same group text"])
+  } finally {
+    order.disconnect(new Error("test closed"))
+    db.close()
+  }
 })

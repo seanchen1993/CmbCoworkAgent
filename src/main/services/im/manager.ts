@@ -1,3 +1,4 @@
+import { ImDeliveryOrder } from "./delivery-order"
 import { BotImChannelService } from "./bot-channel-service"
 import type { LocalBotHost } from "../../bots/host"
 import { botImScopeId } from "../../bots/im-gateway-store"
@@ -382,6 +383,11 @@ export class BuiltinRobotManager {
     const identity = currentIdentity()
     this.managerError = null
     const client = new ImGatewayWsClient({
+      deliveryOrder: new ImDeliveryOrder((source, key) => {
+        if (source === "switch") return imEventStore.sessionLinks.headCardOrder(key)
+        if (source === "reply") return imEventStore.headDeliveryOrder(key)
+        return this.botChannel?.headDeliveryOrder(key) ?? null
+      }),
       url: configuredGatewayUrl,
       token: () => currentIdentity().token,
       appVersion: this.appVersion,
@@ -540,8 +546,9 @@ export class BuiltinRobotManager {
     this.activeIdentityToken = null
     this.confirmedRoute = null
     this.routeReconciliation = Promise.resolve()
-    if (service) await service.stop().catch(() => undefined)
+    const stopping = service?.stop()
     client?.stop()
+    await stopping?.catch(() => undefined)
     this.gatewayStatus = {
       ...this.gatewayStatus,
       connectionState: "offline",
