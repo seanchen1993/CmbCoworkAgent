@@ -291,7 +291,8 @@ const OTHER_INPUT_FIX_LINE = 3
 export const QUESTION_OTHER_SUFFIX = "__other"
 
 function questionTitle(header: string, index: number): string {
-  return `${index + 1}. ${header}`
+  const ordinal = "一二三四五六七八九十"[index] ?? String(index + 1)
+  return `问题${ordinal}：${header}`
 }
 
 export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
