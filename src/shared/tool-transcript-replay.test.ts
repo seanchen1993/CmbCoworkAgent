@@ -223,7 +223,7 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each(["durable-view", "checkpoint-only", "fresh-result"])(
+  it.each(["durable-view", "checkpoint-only", "fresh-result", "stale-before-fresh"])(
     "reconciles old observed drafts before checkpoint ordering (%s)",
     (mode) => {
       const [assistant, result] = exchange()
@@ -240,7 +240,9 @@ describe("tool transcript replay", () => {
       const fresh = {
         ...replayedResult,
         id: "9c09fdd9-e146-4c2c-9b12-cac648551576",
-        provider_source_id: undefined
+        provider_source_id: undefined,
+        provider_occurrence: 1,
+        content: "A new physical execution result"
       }
       const durable = [
         user,
@@ -255,7 +257,12 @@ describe("tool transcript replay", () => {
       ]
       const checkpoint = mode === "durable-view"
         ? durable
-        : [nextUser, replay, mode === "fresh-result" ? fresh : replayedResult]
+        : [
+            nextUser,
+            replay,
+            ...(mode !== "fresh-result" ? [replayedResult] : []),
+            ...(mode === "fresh-result" || mode === "stale-before-fresh" ? [fresh] : [])
+          ]
       const turns = mode === "durable-view"
         ? undefined
         : readCheckpointReplayTurns({ channel_values: { messages: checkpointRows(checkpoint) } })
@@ -266,12 +273,16 @@ describe("tool transcript replay", () => {
       const aliases = findReplayedToolExchangeAliases(merged)
       const visible = merged.filter(({ id }) => !aliases.has(id))
       expect(visible.map(({ role }) => role)).toEqual(
-        mode === "fresh-result"
+        mode === "fresh-result" || mode === "stale-before-fresh"
           ? ["user", "assistant", "tool", "user", "assistant", "tool"]
           : ["user", "assistant", "tool", "user"]
       )
       expect(visible[1].content).toEqual(final.content)
       expect(visible[3].id).toBe(nextUser.id)
+      if (mode === "stale-before-fresh") {
+        const bindings = resolveToolResultOwnership(visible)
+        expect(bindings.get(getWorkerToolUiKey(visible[4].id, "shared-call", 0))?.id).toBe(fresh.id)
+      }
     }
   )
 
@@ -2326,7 +2337,7 @@ describe("tool transcript replay", () => {
     expect(payloadReads).toBeLessThan(16_000)
   })
 
-  it("keeps a stable prefix chain indexed when a late snapshot adds a citation", () => {
+  it.each([false, true])("keeps mixed prefix histories indexed (interleaved %s)", (interleaved) => {
     let reads = 0
     const cite = (url: string) => ({ type: "citation", url })
     const snapshotCount = 500
@@ -2340,14 +2351,19 @@ describe("tool transcript replay", () => {
       return [
         {
           ...assistant,
-          content: [{
-            type: "text",
-            text: "Checking" + ".".repeat(index),
-            annotations: [
-              cite("https://example.com/first"),
-              ...(index === snapshotCount - 1 ? [cite("https://example.com/last")] : [])
-            ]
-          }]
+          content: interleaved
+            ? [
+                { type: "text", index: 0, text: "Directory" + ".".repeat(Math.ceil(index / 2)) },
+                { type: "text", index: 1, text: "Contents" + ".".repeat(Math.floor(index / 2)) }
+              ]
+            : [{
+                type: "text",
+                text: "Checking" + ".".repeat(index),
+                annotations: [
+                  cite("https://example.com/first"),
+                  ...(index === snapshotCount - 1 ? [cite("https://example.com/last")] : [])
+                ]
+              }]
         },
         result
       ]

@@ -28,7 +28,6 @@ type TranscriptMessage = CheckpointAuthorityTranscriptMessage & {
   content_preview_notice?: string
   content_is_projection?: boolean
   [checkpointToolTurn]?: string
-  [toolReplayObservations]?: readonly ToolExchange<TranscriptMessage>[]
 }
 
 interface Call {
@@ -717,7 +716,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       const second = part(right)
       return first < second ? -1 : first > second ? 1 : left.length - right.length
     })
-    const prefixes: { variant: (typeof variants)[number]; state: string }[] = []
+    const prefixes: { variant: (typeof variants)[number]; state: string; ordered: boolean }[] = []
     const groups = new Map<string, typeof variants>()
     for (const variant of variants) {
       while (
@@ -736,15 +735,21 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       const parents: typeof variants = []
       // Within a group the other spans and citations agree. Only the
       // closest matching prefix can be a predecessor from that group.
-      for (const group of groups.values()) {
-        const prefix = group.findLast(matches)
-        if (!prefix || parents.some((parent) => isReplayProseExtension(parent.prose, prefix.prose)))
-          continue
-        for (let index = parents.length - 1; index >= 0; index--) {
-          if (isReplayProseExtension(prefix.prose, parents[index].prose))
-            parents.splice(index, 1)
+      const latest = prefixes.at(-1)
+      if (latest?.ordered) {
+        const prefix = prefixes.findLast(({ variant: earlier }) => matches(earlier))
+        if (prefix) parents.push(prefix.variant)
+      } else {
+        for (const group of groups.values()) {
+          const prefix = group.findLast(matches)
+          if (!prefix || parents.some((parent) => isReplayProseExtension(parent.prose, prefix.prose)))
+            continue
+          for (let index = parents.length - 1; index >= 0; index--) {
+            if (isReplayProseExtension(prefix.prose, parents[index].prose))
+              parents.splice(index, 1)
+          }
+          parents.push(prefix)
         }
-        parents.push(prefix)
       }
       if (parents.length) {
         const candidates = parentCandidates.get(variant.batch) ?? new Set()
@@ -759,7 +764,12 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
         const group = groups.get(state) ?? []
         group.push(variant)
         groups.set(state, group)
-        prefixes.push({ variant, state })
+        const ordered = !latest || (
+          latest.ordered &&
+          isReplayProseExtension(variant.prose, latest.variant.prose) &&
+          exactSlots(variant.batch, latest.variant.batch, false)
+        )
+        prefixes.push({ variant, state, ordered })
       }
     }
   }
@@ -1157,6 +1167,26 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
 ) {
   const aliases = new Map<string, string>()
   const removedCallKeys = new Set<string>()
+  const owned = new Set(checkpoint.ownership.values())
+  const ownedExecutions = new Set([...owned].map(resultReplayKey))
+  const positions = new Map<T, number>()
+  const latestUnowned = new Map<string, Map<string, number>>()
+  for (const [index, row] of messages.entries()) {
+    if (row.role !== "tool" || !row.tool_call_id || !hasToolResultExecutionId(row)) continue
+    positions.set(row, index)
+    if (ownedExecutions.has(resultReplayKey(row))) continue
+    const byName = latestUnowned.get(row.tool_call_id) ?? new Map()
+    byName.set(row.name ?? "", index)
+    latestUnowned.set(row.tool_call_id, byName)
+  }
+  const mayReceiveFreshResult = ({ calls, results }: ToolExchange<T>) =>
+    results.some((result, index) => {
+      const call = calls[index]
+      const position = positions.get(result)
+      const candidates = latestUnowned.get(call.id)
+      return position !== undefined &&
+        Math.max(candidates?.get(call.name) ?? -1, candidates?.get("") ?? -1) > position
+    })
   const agreesWithCurrentTurn = (copy: AnchoredToolExchange<T>) =>
     Boolean(
       copy.outcomeKey &&
@@ -1194,7 +1224,8 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
       if (
         !anchor ||
         !current ||
-        !sameReplayAnchor(current.message, anchor, true)
+        !sameReplayAnchor(current.message, anchor, true) ||
+        mayReceiveFreshResult(exchange)
       )
         continue
       const predatesTurn = (candidate: AnchoredToolExchange<T>) => {

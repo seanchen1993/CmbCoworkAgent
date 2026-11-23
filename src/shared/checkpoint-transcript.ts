@@ -90,6 +90,12 @@ export interface FilteredThreadValuesInput {
 
 export const toolReplayObservations = Symbol("toolReplayObservations")
 
+export interface CompletedToolReplayObservation {
+  assistant: CheckpointAuthorityTranscriptMessage
+  calls: Array<{ id: string; name: string; args?: unknown }>
+  results: CheckpointAuthorityTranscriptMessage[]
+}
+
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
   historical_tool_replay_id?: string
@@ -100,7 +106,7 @@ export interface CheckpointAuthorityTranscriptMessage {
   reasoning?: string
   tool_calls?: unknown[]
   tool_call_id?: string
-  [toolReplayObservations]?: readonly unknown[]
+  [toolReplayObservations]?: readonly CompletedToolReplayObservation[]
   name?: string
   status?: string
   is_error?: boolean
