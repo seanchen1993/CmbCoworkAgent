@@ -133,7 +133,7 @@ describe("Bot event context and reporting boundary", () => {
     const event = model.calls[0].find(HumanMessage.isInstance)
     expect(event?.content).toContain('<bot_runtime_context event="task_result">')
     expect(result.messages.find(m => ToolMessage.isInstance(m) && m.tool_call_id === "attempt"))
-      .toMatchObject({ status: "error", content: expect.stringContaining("bot_work_result_read") })
+      .toMatchObject({ status: "error", id: expect.stringMatching(/^bot-control-/), content: expect.stringContaining("bot_work_result_read") })
     expect(result.messages.filter(AIMessage.isInstance).map(m => m.content)).toEqual(["", "Checked"])
     expect(write).not.toHaveBeenCalled()
     expect(read).toHaveBeenCalledTimes(1)

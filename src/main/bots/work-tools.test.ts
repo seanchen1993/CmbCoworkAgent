@@ -60,6 +60,23 @@ function fixture(history?: BotRunPort["workHistory"], messageOrThreads: string |
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 15))
 describe("work Runtime tools", () => {
+  it("confirms a successful retry against the original work without treating another work as recovered", async () => {
+    const query = vi.fn(async (work) => ({ work: { id: work.id, title: work.title, goal: work.goal },
+      entries: [], nextCursor: null, scanned: 0, truncated: false, coverage: "exhausted" as const }))
+    const f = fixture({ query, resolve: async () => { throw Error("unused") } })
+    await tick()
+    const make = (id: string) => f.store.createWork({ botId: f.bot.id, operationId: id, title: id, goal: id }).work
+    const first = make("original"), other = make("different")
+    const tool = createBotWorkTools(f.source, () => f.host, new AbortController().signal).find(t => t.name === "bot_work_read")!
+    const read = (id: string, workId: string) => tool.invoke({ type: "tool_call", id, name: tool.name, args: { workId } })
+    query.mockRejectedValueOnce(Error("temporary error"))
+    const failed = await read("first", first.id)
+    expect(failed).toMatchObject({ status: "error", id: expect.stringMatching(/^bot-attempt-/) })
+    expect(String((await read("other", other.id)).id)).not.toMatch(/^bot-recovery-/)
+    const recovered = await read("again", first.id)
+    expect(recovered.id).toBe(failed.id.replace("bot-attempt-", "bot-recovery-"))
+    expect(JSON.parse(recovered.content).receipt.work.id).toBe(first.id)
+  })
   it("reads bounded current work delegations independently of old chat pages using live and archive indexes", async () => {
     const query = vi.fn(async (work) => ({ work: { id: work.id, title: work.title, goal: work.goal },
       entries: [], nextCursor: null, scanned: 0, truncated: false, coverage: "exhausted" as const }))
@@ -829,6 +846,26 @@ it("binds result continuation to the current task without accepting a model targ
   const ordinary = createBotWorkResultTools(source, () => host, new AbortController().signal)
   expect(ordinary.map(t => t.name)).toEqual(tools.map(t => t.name))
   const rejected = await ordinary.find(t => t.name === tool.name)!.invoke({ type: "tool_call", id: "ordinary", name: tool.name, args })
-  expect(rejected.status).toBe("error")
+  expect(rejected).toMatchObject({ status: "error", id: expect.stringMatching(/^bot-control-/) })
+  expect(JSON.parse(rejected.content)).toMatchObject({ executed: false, reason: "result_tool_outside_review" })
   expect(commit).toHaveBeenCalledTimes(1)
+})
+
+it("only a successful read of that review's evidence settles a failed attempt", async () => {
+  const { source, host } = fixture()
+  const task = { ...source, origin: { kind: "work_result" as const, workId: "work", workThreadId: "worker",
+    workTitle: "Report", executionTaskId: "execution", executionState: "completed" as const,
+    review: { requestTaskId: "original", phase: "review" as const } } }
+  const read = vi.fn()
+    .mockRejectedValueOnce(Error("evidence temporarily unavailable"))
+    .mockResolvedValueOnce({ status: "unavailable", reason: "missing_version" })
+    .mockResolvedValue({ status: "ok", evidence: { kind: "snapshot" }, text: "verified", truncated: false })
+  const access = { current: vi.fn(), reader: { read } } as unknown as Parameters<typeof createBotWorkResultTools>[3]
+  const tool = createBotWorkResultTools(task, () => host, new AbortController().signal, access).find(t => t.name === "bot_work_result_read")!
+  const invoke = (id: string, evidenceId: string) => tool.invoke({ type: "tool_call", id, name: tool.name, args: { kind: "evidence", evidenceId } })
+  const failed = await invoke("first", "a".repeat(64))
+  expect(failed.status).toBe("error")
+  expect(String((await invoke("missing", "a".repeat(64))).id)).not.toMatch(/^bot-recovery-/)
+  expect(String((await invoke("other-file", "b".repeat(64))).id)).not.toMatch(/^bot-recovery-/)
+  expect((await invoke("original", "a".repeat(64))).id).toBe(failed.id.replace("bot-attempt-", "bot-recovery-"))
 })

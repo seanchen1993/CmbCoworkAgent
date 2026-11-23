@@ -3943,11 +3943,15 @@ it("holds later files in the same group until the first retry is accepted", asyn
   const statuses=f.host.imFileStatuses(f.bot.id,f.calls[0].threadId,"two-files")
   expect(statuses).toHaveLength(2)
   expect(statuses.every(row=>row.state==="pending")).toBe(true)
+  expect(statuses.filter(row => row.retrying).map(row => row.file.name)).toEqual(["a.txt"])
+  const history = f.service.history(f.bot.id, binding.id).items
+  expect(history.filter(row => row.delivery?.retrying).map(row => row.delivery?.file.name)).toEqual(["a.txt"])
   expect(command.mock.calls).toHaveLength(1)
   expect(f.host.beginImDelivery("file")).toBeNull()
   f.db.run("UPDATE bot_im_outbox SET next_attempt_at=0 WHERE state='pending'")
   await eventually(()=>command.mock.calls.length===3)
   expect(command.mock.calls.map(([request])=>request.action==="begin" && request.name)).toEqual(["a.txt","a.txt","b.txt"])
+  expect(f.host.imFileStatuses(f.bot.id, f.calls[0].threadId, "two-files").some(row => row.retrying)).toBe(false)
   expect(f.errors).toHaveLength(1)
 })
 
@@ -4248,6 +4252,8 @@ it("orders a Bot retry, interactive card and ordinary text notice for one audien
   try {
     await f.service.receive(f.event(binding, "first", "first"))
     await eventually(() => f.errors.length > 0)
+    const botReply = () => f.service.history(f.bot.id, binding.id).items.find(row => row.kind === "bot" && row.text === "first")
+    expect(botReply()).toMatchObject({ state: "pending", retrying: true })
     const card = order.acquire(key, "card", nextImDeliveryOrder()).then(release => {
       accepted.push("card")
       release()
@@ -4258,6 +4264,8 @@ it("orders a Bot retry, interactive card and ordinary text notice for one audien
     f.db.run("UPDATE bot_im_outbox SET next_attempt_at=0 WHERE state='pending'")
     await Promise.all([card, later])
     expect(accepted).toEqual(["other group", "first", "card", "same group text"])
+    await eventually(() => botReply()?.state === "accepted" || botReply()?.state === "sent")
+    expect(botReply()?.retrying).toBeUndefined()
   } finally {
     order.disconnect(new Error("test closed"))
     db.close()

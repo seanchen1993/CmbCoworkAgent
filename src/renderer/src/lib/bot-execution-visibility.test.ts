@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { Message, ToolCallState } from "@/types"
 import type { BotWorkSummary } from "../../../shared/bots/work"
 import { isBotExecutionTool, projectBotExecution } from "./bot-execution-visibility"
-import { isBotContinuationReceipt } from "../../../shared/bots/turn-feedback"
+import { botToolControlReceipt, isBotContinuationReceipt } from "../../../shared/bots/turn-feedback"
 import { botWorkCardIds, botWorkReceipt, loadBotWorkCardTitles } from "./bot-work-receipt"
 import { getWorkerToolUiKey } from "./worker-tool-result-key"
 const created_at = new Date(2026, 9, 14)
@@ -24,6 +24,70 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
+  const a = "38607a85-e47b-4fcb-a144-abcca82a9991"
+  const b = "58fe9172-e236-4e3e-84ff-353b15cf1911"
+
+  it("folds only the host's bound control receipt or an exact historic guard, keeping mixed text, cards and approvals", () => {
+    const message = call("review", "execute")
+    const key = getWorkerToolUiKey(message.id, "call-review", 0)
+    const content = botToolControlReceipt("result_review_scope", message.tool_calls![0])
+    const control = { ...result("review", true, content), id: "bot-control-" + a }
+    const view = projectBotExecution([message, control], false)
+    expect([...view.foldedTools]).toEqual([key])
+    expect([...view.hiddenMessages]).toEqual(["review"])
+    const workerCall = { ...message, id: "worker-turn-test-2::review" }
+    const workerResult = { ...control, id: "worker-turn-test-2::" + control.id }
+    expect(projectBotExecution([workerCall, workerResult], false).hiddenMessages.has(workerCall.id)).toBe(true)
+    const historical = "Only the four scoped bot_work_result tools can run in a result review. This call did not execute."
+    expect(projectBotExecution([message, result("review", true, historical)], false).hiddenMessages.has("review")).toBe(true)
+    for (const unproven of [result("review", true, content), result("review", true, historical + " File not found."),
+      { ...control, content: botToolControlReceipt("result_review_scope", { name: "execute", id: "other" }) },
+      { ...control, content: botToolControlReceipt("result_review_scope", { name: "write_file", id: "call-review" }) }]) {
+      expect(projectBotExecution([message, unproven], false).foldedTools.size).toBe(0)
+    }
+    expect(projectBotExecution([call("review", "mcp__external"), result("review", true, historical)], false).foldedTools.size).toBe(0)
+    expect(projectBotExecution([{ ...message, content: "核对完成。" }, control], false).hiddenMessages.size).toBe(0)
+    expect(projectBotExecution([message, control], true, new Set(["call-review"])).foldedTools.size).toBe(0)
+    expect(projectBotExecution([message, control], true, new Set(), null, undefined, undefined, { approvalKeys: new Set([key]) }).foldedTools.size).toBe(0)
+  })
+
+  it("retires only attempts covered by the same native retry, even with competing operations and mixed outcomes", () => {
+    const name = "bot_browser"
+    const group = (id: string, op: string, index: number, failure: boolean, tool = name) =>
+      [call(id, tool), { ...result(id, failure, failure ? "page unavailable" : '{"ok":true}'),
+        id: `bot-${failure ? "attempt" : "recovery"}-${op}-${index}` }]
+    const messages = [...group("initial", a, 1, true), ...group("later-failure", a, 2, true),
+      ...group("another-page", b, 1, true), ...group("retried", a, 1, false)]
+    const projection = projectBotExecution(messages, false)
+    expect(projection.hiddenMessages.has("initial")).toBe(true)
+    expect(projection.hiddenMessages.has("later-failure")).toBe(false)
+    expect(projection.hiddenMessages.has("another-page")).toBe(false)
+    for (const extra of [
+      ...group("other-tool", b, 1, false, "bot_schedule"),
+      call("claimed", "bot_browser", "已经处理好了"),
+      result("claimed", false, '{"recoveredToolResults":["another-page"]}')
+    ]) messages.push(extra)
+    expect(projectBotExecution(messages, false).hiddenMessages.has("another-page")).toBe(false)
+    const failedRetry = group("rejected", b, 1, false)
+    failedRetry[1].is_error = true
+    expect(projectBotExecution([...messages, ...failedRetry], false).hiddenMessages.has("another-page")).toBe(false)
+  })
+
+  it("waits for the current step's receipt without flashing a raw error, restores an unconfirmed failure at end of turn", () => {
+    const start: Message = { id: "start", role: "user", content: "请核对", created_at }
+    const step = call("work", "bot_work_send")
+    const key = getWorkerToolUiKey("work", "call-work", 0)
+    const live = new Map([[key, { status: "failed" as const }]])
+    expect(projectBotExecution([start, step], true, new Set(), null, live).foldedTools.has(key)).toBe(true)
+    expect(projectBotExecution([start, step], false, new Set(), null, live).foldedTools.has(key)).toBe(false)
+    const failed = { ...result("work", true), id: `bot-attempt-${a}-1` }
+    expect(projectBotExecution([start, step, failed], true).hiddenMessages.has("work")).toBe(true)
+    expect(projectBotExecution([start, step, failed], false).hiddenMessages.has("work")).toBe(false)
+    expect(projectBotExecution([start, step, failed, { ...start, id: "next" }], true).hiddenMessages.has("work")).toBe(false)
+    expect(projectBotExecution([start, step, failed], true, new Set(), "needs-user").hiddenMessages.has("work")).toBe(false)
+    expect(projectBotExecution([start, step, failed], true, new Set(["call-work"])).hiddenMessages.has("work")).toBe(false)
+  })
+
   it("folds a structured nonexecuted continuation but never hides an errored receipt", () => {
     const content = JSON.stringify({ kind: "bot-foreground-continuation", version: 1,
       reason: "foreground_budget", executed: false, instruction: "continue the remaining work" })

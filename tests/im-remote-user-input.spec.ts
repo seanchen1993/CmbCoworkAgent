@@ -311,11 +311,13 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     const components: Array<{ type: string; list?: Array<{ content: string }> }> = JSON.parse(card)
     const formIndex = components.findIndex((component) => component.type === "interactive")
     assert.ok(formIndex > 0, "the standard robot sends an answer form below the question")
-    const body = components.slice(0, formIndex).find(
+    const bodyIndex = components.slice(0, formIndex).findIndex(
       (component) => component.type === "content" && component.list?.[0]?.content === "导出格式用哪种？"
     )
+    assert.ok(bodyIndex > 0, "the question title precedes the body")
+    assert.deepEqual(components[bodyIndex - 1].list, [{ type: [1], content: "问题一：格式" }])
     // The client renders the list as adjacent rich-text spans, with no implicit line break.
-    assert.deepEqual(body?.list?.map((span) => span.content).join("").split("\n"), [
+    assert.deepEqual(components[bodyIndex].list?.map((span) => span.content).join("").split("\n"), [
       "导出格式用哪种？",
       "1. CSV (Recommended)（兼容性最好。）",
       "2. Excel（保留表格格式。）",
@@ -574,6 +576,7 @@ async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promis
     assert.equal(context.cardUpdates.length, 1, "the card must be closed exactly once")
     const rendered = JSON.stringify(context.cardUpdates[0]!.content)
     assert(rendered.includes("已回答"), rendered)
+    assert(rendered.includes("问题一：格式："), "the answered card uses the same question title")
     assert(
       !rendered.includes("已在桌面处理"),
       "a Zhaohu answer must not be credited to the desktop"

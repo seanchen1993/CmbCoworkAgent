@@ -245,7 +245,7 @@ describe("formal group delivery", () => {
         { configurable: { thread_id: task.threadId } }
       )
       expect(result?.jumpTo).toBe("model")
-      expect(onRecovery).toHaveBeenCalledWith(expect.objectContaining({ kind: "todo" }))
+      expect(onRecovery).toHaveBeenCalledWith(expect.objectContaining({ kind: "todo" }), undefined)
     } finally {
       clearTurnCompletionGateState(task.threadId, run)
     }

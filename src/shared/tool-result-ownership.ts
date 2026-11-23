@@ -6,6 +6,7 @@ export interface ToolOwnershipMessage {
 }
 
 type PendingToolCall = {
+  name: string
   identity: string
   rawToolCallId: string
   key: string
@@ -134,11 +135,21 @@ export function getWorkerToolUiKey(
   return `${messageId}::cmb-tool-call:${index}:${resultIdentity ?? "id-less"}`
 }
 
+type ProjectToolResult<T, R> = (message: T, toolName: string, nativeMessageId: string) => R
+
 export function resolveToolResultOwnership<T extends ToolOwnershipMessage>(
   messages: readonly T[]
-): Map<string, T> {
+): Map<string, T>
+export function resolveToolResultOwnership<T extends ToolOwnershipMessage, R>(
+  messages: readonly T[],
+  projectResult: ProjectToolResult<T, R>
+): Map<string, R>
+export function resolveToolResultOwnership<T extends ToolOwnershipMessage, R>(
+  messages: readonly T[],
+  projectResult?: ProjectToolResult<T, R>
+): Map<string, T | R> {
   const pendingCallsByRawId = new Map<string, PendingToolCallBucket>()
-  const results = new Map<string, T>()
+  const results = new Map<string, T | R>()
   let currentTurn = 0
 
   for (const message of messages) {
@@ -155,7 +166,9 @@ export function resolveToolResultOwnership<T extends ToolOwnershipMessage>(
         const identity = getWorkerToolResultKey(message.id, callId)
         if (!identity) return
         const rawToolCallId = getRawWorkerToolCallId(callId)
+        const name = (toolCall as { name?: unknown }).name
         const pendingCall: PendingToolCall = {
+          name: typeof name === "string" ? name : "",
           identity,
           rawToolCallId,
           key: getWorkerToolUiKey(message.id, callId, index),
@@ -216,7 +229,16 @@ export function resolveToolResultOwnership<T extends ToolOwnershipMessage>(
     if (nextTurnCount > 0) bucket.activeCountByTurn.set(pendingCall.turn, nextTurnCount)
     else bucket.activeCountByTurn.delete(pendingCall.turn)
     if (bucket.activeCount === 0) pendingCallsByRawId.delete(rawToolCallId)
-    results.set(pendingCall.key, message)
+    results.set(
+      pendingCall.key,
+      projectResult
+        ? projectResult(
+            message,
+            pendingCall.name,
+            messageScope ? message.id.slice(messageScope.prefix.length) : message.id
+          )
+        : message
+    )
   }
 
   return results
