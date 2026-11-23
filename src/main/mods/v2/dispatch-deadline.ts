@@ -56,7 +56,7 @@ export class FunctionDispatchDeadline {
   private failure(): ModFunctionError {
     return this.controller.signal.reason instanceof ModFunctionError
       ? this.controller.signal.reason
-      : new ModFunctionError("MODS_CANCELLED", "MODS_CANCELLED", true)
+      : new ModFunctionError("MODS_CANCELLED", "MODS_CANCELLED", true, { cause: this.signal.reason })
   }
 
   assertLive(): void {

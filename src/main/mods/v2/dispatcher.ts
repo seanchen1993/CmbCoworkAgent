@@ -192,7 +192,7 @@ export class FunctionDispatcher {
     ): Promise<ModJson> => {
       deadline?.assertLive()
       if (options.signal?.aborted)
-        throw new ModFunctionError("MODS_CANCELLED", "MODS_CANCELLED", true)
+        throw new ModFunctionError("MODS_CANCELLED", "MODS_CANCELLED", true, { cause: options.signal.reason })
       received = options.normalizeInput?.(event, received) ?? received
       options.validateInput?.(event, received)
       if (options.protectInput) {

@@ -126,9 +126,10 @@ export class ModFunctionError extends Error {
   constructor(
     readonly code: string,
     message = code,
-    readonly downstream = false
+    readonly downstream = false,
+    options?: ErrorOptions
   ) {
-    super(message)
+    super(message, options)
     this.name = "ModFunctionError"
   }
 }

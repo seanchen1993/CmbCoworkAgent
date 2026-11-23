@@ -26,6 +26,7 @@ import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModFunctionError, MODS_COMPOSITION_REVIEW_REQUIRED } from "../../shared/mods/v2/contracts"
 import { nativeChildThreadReaders } from "./native-child-mods.test-helper"
 import { FunctionSiteReadRequests } from "./function-site-read-requests"
+import { FunctionDispatchDeadline } from "../mods/v2/dispatch-deadline"
 import { createFunctionSiteReadBridge } from "../../preload/function-site-read"
 
 const channels = ["mods:function-panes", "mods:function-site-mount",
@@ -583,9 +584,14 @@ it("authenticates cancellation before aborting the exact current native display 
   let signal!: AbortSignal
   f.operation.mockImplementationOnce(async (...args: unknown[]) => {
     signal = args.at(-1) as AbortSignal
+    const deadline = new FunctionDispatchDeadline(10_000, signal)
     entered.resolve()
-    await wake.promise
-    return { state: "inactive" } as never
+    try {
+      await deadline.wait(wake.promise)
+      return { state: "inactive" } as never
+    } finally {
+      deadline.close()
+    }
   })
   const readId = `${f.readNamespace(f.event)}:1`
   const pending = f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId })
