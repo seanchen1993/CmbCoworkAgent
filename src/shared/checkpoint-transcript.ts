@@ -620,6 +620,7 @@ export interface CheckpointReplayTurns {
   leadingHiddenAssistants: ReadonlySet<string>
   uniqueMessageIds: ReadonlySet<string>
   rawResultByCall: ReadonlyMap<string, string>
+  rawToolTranscript: readonly ToolOwnershipMessage[]
 }
 
 /** Use original user turns to confirm ownership when their visible projection omits a boundary. */
@@ -680,7 +681,8 @@ export function readCheckpointReplayTurns(checkpoint: unknown): CheckpointReplay
     hiddenAssistants,
     leadingHiddenAssistants,
     uniqueMessageIds,
-    rawResultByCall: resolveToolResultOwnership(rawRows, (message) => message.id)
+    rawResultByCall: resolveToolResultOwnership(rawRows, (message) => message.id),
+    rawToolTranscript: rawRows
   }
 }
 

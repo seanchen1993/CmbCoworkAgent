@@ -894,6 +894,120 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it("keeps a truthful result when an older owner sits outside the loaded page", () => {
+    const [, originalResult] = exchange()
+    const [current, stale] = exchange(2)
+    const currentResult = {
+      ...originalResult,
+      id: "1c711082-5111-4632-976d-7c05ee064c33",
+      provider_source_id: undefined,
+      content: "New tool output"
+    }
+    const loaded = [originalResult, user, current, stale, currentResult]
+    const aliases = findReplayedToolExchangeAliases(loaded)
+    expect(aliases).toEqual(new Map([[stale.id, originalResult.id]]))
+    const ownership = resolveToolResultOwnership(loaded.filter(({ id }) => !aliases.has(id)))
+    expect(ownership.get(getWorkerToolUiKey(current.id, "shared-call", 0))).toBe(currentResult)
+    expect(findReplayedToolExchangeAliases(loaded.slice(0, -1)).has(stale.id)).toBe(false)
+  })
+
+  it.each([false, true])(
+    "reconciles a clipped stale checkpoint against both durable tool executions (hidden %s)",
+    (hidden) => {
+      const [earlier, originalResult] = exchange()
+      const [current, stale] = exchange(2)
+      const newUser = { ...user, id: "current-user" }
+      const currentResult = {
+        ...originalResult,
+        id: "1c711082-5111-4632-976d-7c05ee064c33",
+        provider_source_id: undefined,
+        content: "New tool output"
+      }
+      const canonical = [user, earlier, originalResult, newUser, current, currentResult]
+      const newAssistant = { ...earlier, content: "" }
+      const checkpoint = hidden
+        ? [newAssistant, originalResult, currentResult]
+        : [newUser, newAssistant, stale, currentResult]
+      const turns = hidden
+        ? readCheckpointReplayTurns({
+            channel_values: { messages: [hiddenTeam, ...checkpointRows(checkpoint)] }
+          })
+        : undefined
+      const prepared = prepareToolTranscriptReplayMerge(canonical, checkpoint, turns)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(
+        prepared.checkpoint,
+        prepared.durable,
+        { useStableProviderOccurrences: true }
+      )
+      expect(merged.map(({ id }) => id)).toEqual(canonical.map(({ id }) => id))
+      expect(merged.find(({ id }) => id === current.id)?.content).toBe("")
+      expect(
+        resolveToolResultOwnership(merged).get(getWorkerToolUiKey(current.id, "shared-call", 0))
+          ?.content
+      ).toBe("New tool output")
+    }
+  )
+
+  it("repairs both tool bindings before aligning offset checkpoint occurrences", () => {
+    const [raw, originalResult] = exchange()
+    const [one, stale] = exchange(2)
+    const [two] = exchange(3)
+    const older = { ...raw, content: "Earlier valid reply", tool_calls: undefined }
+    const currentUser = { ...user, id: "current-user" }
+    const currentResult = {
+      ...originalResult,
+      id: "1c711082-5111-4632-976d-7c05ee064c33",
+      provider_source_id: undefined,
+      content: "New tool output"
+    }
+    const canonical = [
+      { ...user, id: "older-user" },
+      older,
+      user,
+      one,
+      originalResult,
+      currentUser,
+      two,
+      currentResult
+    ]
+    const checkpoint = [user, raw, originalResult, currentUser, one, stale, currentResult]
+    const prepared = prepareToolTranscriptReplayMerge(canonical, checkpoint)
+    const merged = mergeCheckpointAuthorityTranscriptMessages(
+      prepared.checkpoint,
+      prepared.durable,
+      { useStableProviderOccurrences: true }
+    )
+    expect(merged.map(({ id }) => id)).toEqual(canonical.map(({ id }) => id))
+    expect(merged[1]).toEqual(older)
+  })
+
+  it("repairs a stale durable binding before matching a clean hidden checkpoint", () => {
+    const [earlier, originalResult] = exchange()
+    const [current, stale] = exchange(2)
+    const newUser = { ...user, id: "current-user" }
+    const currentResult = {
+      ...originalResult,
+      id: "1c711082-5111-4632-976d-7c05ee064c33",
+      provider_source_id: undefined,
+      content: "New tool output"
+    }
+    const canonical = [user, earlier, originalResult, newUser, current, stale, currentResult]
+    const checkpoint = [{ ...earlier, content: "" }, currentResult]
+    const turns = readCheckpointReplayTurns({
+      channel_values: { messages: [hiddenTeam, ...checkpointRows(checkpoint)] }
+    })
+    const prepared = prepareToolTranscriptReplayMerge(canonical, checkpoint, turns)
+    const merged = mergeCheckpointAuthorityTranscriptMessages(
+      prepared.checkpoint,
+      prepared.durable,
+      { useStableProviderOccurrences: true }
+    )
+    expect(merged.map(({ id }) => id)).toEqual(
+      canonical.filter(({ id }) => id !== stale.id).map(({ id }) => id)
+    )
+    expect(merged.find(({ id }) => id === current.id)?.content).toBe("")
+  })
+
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")
     const final = exchange(2)
