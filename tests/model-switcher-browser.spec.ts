@@ -319,7 +319,7 @@ async function main(): Promise<void> {
       fixture.showIdleSettings(true)
     })
     await page.getByText("当前使用 UAT 测试环境。").waitFor()
-    const contextWindow = page.locator('input[value="128000"]')
+    const contextWindow = page.locator('input[value="200000"]')
     assert.equal(await contextWindow.isEnabled(), true)
     await contextWindow.fill("256000")
     await page.getByRole("button", { name: "保存", exact: true }).click()
