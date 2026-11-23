@@ -2519,7 +2519,9 @@ describe("tool transcript replay", () => {
     expect(argumentReads).toBeLessThan(3_000)
   })
 
-  it.each([false, true])("indexes distinct structured outcomes (projected %s)", (projected) => {
+  it.each(["exact", "projected", "projected-with-unrelated-result"])(
+    "indexes distinct structured outcomes (%s)",
+    (mode) => {
     let payloadReads = 0
     const versionCount = 180
     const build = (checkpoint = false) => [user, ...Array.from({ length: versionCount }, (_, index) => {
@@ -2536,7 +2538,7 @@ describe("tool transcript replay", () => {
                 return `Result version ${index}`
               }
             },
-            ...(checkpoint && projected
+            ...(checkpoint && mode !== "exact"
               ? [{ type: "resource_link", uri: `https://example.com/results/${index}` }]
               : [])
           ]
@@ -2544,10 +2546,22 @@ describe("tool transcript replay", () => {
       ]
     }).flat()]
     const durable = build()
-    const prepared = prepareToolTranscriptReplayMerge(durable, build(true))
+    const checkpoint = build(true)
+    const unrelated: Message = {
+      id: "81cbcdce-733b-4d6f-86b5-261cb3d89d22",
+      role: "tool",
+      tool_call_id: "another-call",
+      content: "An independent result"
+    }
+    if (mode === "projected-with-unrelated-result") checkpoint.push(unrelated)
+    const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint)
     const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable)
-    expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
+    expect(merged.map(({ id }) => id)).toEqual([
+      ...durable.map(({ id }) => id),
+      ...(mode === "projected-with-unrelated-result" ? [unrelated.id] : [])
+    ])
     expect(findReplayedToolExchangeAliases(merged).size).toBe(0)
     expect(payloadReads).toBeLessThan(versionCount * 50)
-  })
+    }
+  )
 })

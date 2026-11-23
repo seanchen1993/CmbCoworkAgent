@@ -1620,44 +1620,66 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
   const payloadId = createPayloadIds()
   const projectedDonors = new Map<
     Set<AnchoredToolSlots<T>>,
-    Map<string, AnchoredToolSlots<T>[]> | undefined
+    {
+      slots: Map<string, AnchoredToolSlots<T>[]>
+      withPendingResults: Set<AnchoredToolSlots<T>>
+      physicalBatch?: string
+    }
   >()
-  const outcomeKey = (rows: readonly T[], project: boolean) => JSON.stringify(
-    rows.map((row) => [
-      resultReplayKey(row),
-      payloadId(project ? extractPersistedMessageContent(row.content) : row.content)
-    ])
+  const resultKey = (row: T, project: boolean) => JSON.stringify([
+    resultReplayKey(row),
+    payloadId(project ? extractPersistedMessageContent(row.content) : row.content)
+  ])
+  const slotKey = (slot: number, result: string) => JSON.stringify([slot, result])
+  const physicalBatchKey = (rows: readonly (T | undefined)[]) =>
+    JSON.stringify(rows.map((row) => row && resultReplayKey(row)))
+  const pendingResultKeys = new Set(
+    [...unbound.values()].flatMap((rows) => rows.flatMap((row) =>
+      [resultKey(row, false), resultKey(row, true)]
+    ))
   )
   const selectDonors = (batch: PartialToolExchange<T>, anchor?: T) => {
     const candidates = durableBatches.get(JSON.stringify([anchor?.id ?? "", exchangeKey(batch)]))
-    if (!candidates || unbound.size || !batch.results.every(
+    if (!candidates || !batch.results.every(
       (row): row is T => Boolean(row && Array.isArray(row.content))
     )) return candidates ?? []
     let index = projectedDonors.get(candidates)
-    if (!projectedDonors.has(candidates)) {
-      index = new Map()
-      const physicalBatches = new Set<string>()
+    if (!index) {
+      const slots = new Map<string, AnchoredToolSlots<T>[]>()
+      const withPendingResults = new Set<AnchoredToolSlots<T>>()
+      const batches = new Set<string>()
       for (const candidate of candidates) {
-        if (!candidate.exchange.results.every((row): row is T => row !== undefined)) {
-          index = undefined
-          break
-        }
-        physicalBatches.add(JSON.stringify(candidate.exchange.results.map(resultReplayKey)))
-        if (batch.calls.length > 1 && physicalBatches.size > 1) {
-          index = undefined
-          break
-        }
-        const key = outcomeKey(candidate.exchange.results, false)
-        const group = index.get(key) ?? []
-        group.push(candidate)
-        index.set(key, group)
+        batches.add(physicalBatchKey(candidate.exchange.results))
+        candidate.exchange.results.forEach((row, slot) => {
+          if (!row) return
+          const result = resultKey(row, false)
+          const key = slotKey(slot, result)
+          const group = slots.get(key) ?? []
+          group.push(candidate)
+          slots.set(key, group)
+          if (pendingResultKeys.has(result)) withPendingResults.add(candidate)
+        })
+      }
+      index = {
+        slots,
+        withPendingResults,
+        physicalBatch: batches.size === 1 ? batches.values().next().value : undefined
       }
       projectedDonors.set(candidates, index)
     }
-    // These batches already have all results. A projected payload match
-    // narrows discovery only; normal slot verification and ID alignment follow.
-    const matching = index?.get(outcomeKey(batch.results, true))
-    return matching?.length ? matching : candidates
+    const matching = batch.results.map((row, slot) => {
+      const raw = index.slots.get(slotKey(slot, resultKey(row, false))) ?? []
+      const projected = index.slots.get(slotKey(slot, resultKey(row, true))) ?? []
+      return raw === projected ? raw : [...raw, ...projected]
+    })
+    // With the same physical slots, every occupied slot has to match.
+    if (index.physicalBatch === physicalBatchKey(batch.results)) {
+      const smallest = matching.reduce((left, right) => left.length <= right.length ? left : right)
+      return new Set(smallest)
+    }
+    // Reconciliation requires at least one observed result. Include any
+    // donor that can cite an exact current or pending result as that witness.
+    return new Set([...matching.flat(), ...index.withPendingResults])
   }
   const removed = new Set<string>()
   const replaced = new Map<string, T>()
