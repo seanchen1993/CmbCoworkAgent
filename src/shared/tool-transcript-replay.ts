@@ -20,7 +20,7 @@ import { extractPersistedMessageContent } from "./stream-transcript-content"
 import { getComparablePersistedMessageContent } from "./thread-message-content"
 
 const checkpointToolTurn = Symbol("checkpointToolTurn")
-const replayTextBlockIndex = Symbol("replayTextBlockIndex")
+const replayTextBlockMetadata = Symbol("replayTextBlockMetadata")
 
 type TranscriptMessage = CheckpointAuthorityTranscriptMessage & {
   botHistoryDeliveryScope?: unknown
@@ -569,6 +569,17 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     indexedProseByAssistant.set(assistant, content)
     return content
   }
+  const indexPresentation = (
+    keys: readonly string[],
+    batch: PartialToolExchange<T>,
+    layout: ReplayProse,
+    indexed: boolean
+  ) => {
+    const outcome = JSON.stringify([indexed, layout.text.length, ...keys])
+    const revisions = textVersionsByResults.get(outcome) ?? []
+    revisions.push({ batch, prose: layout, length: replayProseLength(layout) })
+    textVersionsByResults.set(outcome, revisions)
+  }
   const extendedText = (candidate: T, original: T) =>
     hasReplayProse(candidate.content) &&
     hasReplayProse(original.content) &&
@@ -581,7 +592,11 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (!hasReplayProse(left.content) || !hasReplayProse(right.content)) return false
     const before = prose(left)
     const after = prose(right)
-    return sameValue(before.text, after.text) && sameValue(before.blocks, after.blocks)
+    return (
+      sameValue(before.text, after.text) &&
+      sameValue(before.blocks, after.blocks) &&
+      sameValue(before.annotations, after.annotations)
+    )
   }
   const textDistance = (left: T, right: T) =>
     Math.abs(replayProseLength(prose(left)) - replayProseLength(prose(right)))
@@ -639,10 +654,8 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (hasReplayProse(assistant.content)) {
       replayOrder.set(batch, position)
       const layout = indexedProse(assistant)
-      const outcome = JSON.stringify([layout.text.length, ...keys])
-      const revisions = textVersionsByResults.get(outcome) ?? []
-      revisions.push({ batch, prose: layout, length: replayProseLength(layout) })
-      textVersionsByResults.set(outcome, revisions)
+      indexPresentation(keys, batch, body, false)
+      if (layout !== body) indexPresentation(keys, batch, layout, true)
     }
     for (const key of keys) {
       const byResultCount = observed.get(key) ?? new Map<number, SlotVersion[]>()
@@ -655,6 +668,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
 
   const presentationAliases = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const continuedText = new Map<PartialToolExchange<T>, T>()
+  const parentCandidates = new Map<PartialToolExchange<T>, Set<PartialToolExchange<T>>>()
   for (const variants of textVersionsByResults.values()) {
     if (variants.length < 2) continue
     const span = findReplayProseIndexSpan(variants.map(({ prose }) => prose))
@@ -669,20 +683,18 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       return first < second ? -1 : first > second ? 1 : left.length - right.length
     })
     const prefixes: typeof variants = []
-    const parentByVersion = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
-    const childrenByVersion = new Map<PartialToolExchange<T>, number>()
     for (const variant of variants) {
       while (prefixes.length && !part(variant).startsWith(part(prefixes.at(-1)!))) prefixes.pop()
       const matches = ({ batch, prose }: (typeof variants)[number]) =>
         isReplayProseExtension(variant.prose, prose) &&
         exactSlots(variant.batch, batch, false)
-      let previous: (typeof variants)[number] | undefined
+      const parents: typeof variants = []
       if (!varyAcrossSpans) {
-        previous = prefixes.findLast(matches)
+        const previous = prefixes.findLast(matches)
+        if (previous) parents.push(previous)
       } else {
         // A retained block separates text spans, and a provider can extend
         // either span independently. Reject incomparable parent claims.
-        const parents: typeof variants = []
         for (const prefix of prefixes) {
           if (!matches(prefix)) continue
           if (parents.some((parent) => isReplayProseExtension(parent.prose, prefix.prose)))
@@ -693,18 +705,37 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
           }
           parents.push(prefix)
         }
-        if (parents.length === 1) previous = parents[0]
       }
-      if (previous) {
-        parentByVersion.set(variant.batch, previous.batch)
-        childrenByVersion.set(previous.batch, (childrenByVersion.get(previous.batch) ?? 0) + 1)
+      if (parents.length) {
+        const candidates = parentCandidates.get(variant.batch) ?? new Set()
+        for (const { batch } of parents) candidates.add(batch)
+        parentCandidates.set(variant.batch, candidates)
       }
       prefixes.push(variant)
+    }
+  }
+  if (parentCandidates.size) {
+    const parentByVersion = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+    const childrenByVersion = new Map<PartialToolExchange<T>, number>()
+    const continuations = new Set<PartialToolExchange<T>>()
+    for (const [batch, candidates] of parentCandidates) {
+      // Indexing ordinary spans and provider-indexed blocks can admit
+      // different predecessors. Choose one only if it follows all others.
+      const predecessors = [...candidates]
+      const parent = predecessors.find((candidate) => predecessors.every((other) =>
+        candidate === other || extendedText(candidate.assistant, other.assistant)
+      ))
+      if (!parent) continue
+      parentByVersion.set(batch, parent)
+      childrenByVersion.set(parent, (childrenByVersion.get(parent) ?? 0) + 1)
+      continuations.add(batch)
+      continuations.add(parent)
     }
     // Keep each line of continuation independent below a shared prefix.
     const rootByVersion = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
     const chains = new Map<PartialToolExchange<T>, PartialToolExchange<T>[]>()
-    for (const { batch } of variants.sort((left, right) => left.length - right.length)) {
+    const length = (batch: PartialToolExchange<T>) => replayProseLength(prose(batch.assistant))
+    for (const batch of [...continuations].sort((left, right) => length(left) - length(right))) {
       const parent = parentByVersion.get(batch)
       const root =
         parent && childrenByVersion.get(parent) === 1
@@ -1583,6 +1614,7 @@ function keepDistinctCheckpointTurns<T extends TranscriptMessage>(
 interface ReplayProse {
   text: string[]
   blocks: unknown[]
+  annotations: Array<{ span: number; block: number; value: unknown }>
 }
 
 function readIndexedReplayProse(content: unknown, fallback: ReplayProse): ReplayProse {
@@ -1594,24 +1626,37 @@ function readIndexedReplayProse(content: unknown, fallback: ReplayProse): Replay
 }
 
 function readReplayProse(content: unknown, preserveTextIndices = false): ReplayProse {
-  if (typeof content === "string") return { text: [content], blocks: [] }
-  if (!Array.isArray(content)) return { text: [""], blocks: [] }
+  if (typeof content === "string") return { text: [content], blocks: [], annotations: [] }
+  if (!Array.isArray(content)) return { text: [""], blocks: [], annotations: [] }
   const text: string[] = []
   const blocks: unknown[] = []
+  const annotations: ReplayProse["annotations"] = []
   let parts: string[] = []
   for (const block of content) {
-    if (
-      typeof block === "string" ||
-      (block?.type === "text" && typeof block.text === "string" &&
-        Object.keys(block).every((key) => key === "type" || key === "text" || key === "index"))
-    ) {
-      if (preserveTextIndices && typeof block !== "string" && typeof block.index === "number") {
+    if (typeof block === "string") {
+      if (block) parts.push(block)
+    } else if (block?.type === "text" && typeof block.text === "string") {
+      const { text: content, index, ...metadata } = block
+      delete metadata.type
+      const citations = Array.isArray(metadata.annotations) &&
+        metadata.annotations.every((annotation) => annotation?.type === "citation")
+        ? metadata.annotations
+        : undefined
+      if (citations) delete metadata.annotations
+      const indexed = preserveTextIndices && typeof index === "number"
+      if (indexed || Object.keys(metadata).length > 0) {
         text.push(parts.join("\n"))
-        blocks.push({ type: replayTextBlockIndex, index: block.index })
+        blocks.push({
+          type: replayTextBlockMetadata,
+          ...(indexed ? { index } : {}),
+          metadata
+        })
         parts = []
       }
-      const value = typeof block === "string" ? block : block.text
-      if (value) parts.push(value)
+      for (const value of citations ?? []) {
+        annotations.push({ span: text.length, block: parts.length, value })
+      }
+      if (content) parts.push(content)
     } else {
       text.push(parts.join("\n"))
       blocks.push(block)
@@ -1619,7 +1664,7 @@ function readReplayProse(content: unknown, preserveTextIndices = false): ReplayP
     }
   }
   text.push(parts.join("\n"))
-  return { text, blocks }
+  return { text, blocks, annotations }
 }
 
 function findReplayProseIndexSpan(prose: readonly ReplayProse[]): number {
@@ -1637,7 +1682,13 @@ function findReplayProseIndexSpan(prose: readonly ReplayProse[]): number {
 }
 
 function replayProseLength(prose: ReplayProse): number {
-  return prose.text.reduce((length, text) => length + text.length, 0)
+  return prose.text.reduce((length, text) => length + text.length, prose.annotations.length)
+}
+
+function sameAnnotationPrefix(complete: ReplayProse, prefix: ReplayProse): boolean {
+  return prefix.annotations.every((annotation, index) =>
+    sameValue(annotation, complete.annotations[index])
+  )
 }
 
 function hasReplayProse(content: unknown): content is string | unknown[] {
@@ -1664,15 +1715,22 @@ function isReplayProseExtension(after: ReplayProse, before: ReplayProse): boolea
     replayProseLength(after) > replayProseLength(before) &&
     before.text.length === after.text.length &&
     before.text.every((part, index) => after.text[index].startsWith(part)) &&
-    sameValue(before.blocks, after.blocks)
+    sameValue(before.blocks, after.blocks) &&
+    sameAnnotationPrefix(after, before)
   )
 }
 
 function getReplayProseMatch(stored: ReplayProse, source: ReplayProse): number {
   if (!sameValue(stored.blocks, source.blocks)) return 0
-  let shorter = false
-  let longer = false
-  let length = 0
+  const sourceHasFewerAnnotations = source.annotations.length < stored.annotations.length
+  if (
+    sourceHasFewerAnnotations
+      ? !sameAnnotationPrefix(stored, source)
+      : !sameAnnotationPrefix(source, stored)
+  ) return 0
+  let shorter = sourceHasFewerAnnotations
+  let longer = source.annotations.length > stored.annotations.length
+  let length = source.annotations.length
   let hasStoredText = false
   for (const [index, part] of stored.text.entries()) {
     const known = part.trimEnd()

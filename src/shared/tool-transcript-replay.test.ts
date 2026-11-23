@@ -486,26 +486,42 @@ describe("tool transcript replay", () => {
     "early-indexed-block",
     "indexed-before-image",
     "unindexed-before-image",
-    "different-annotation"
+    "different-annotation",
+    "stable-annotation",
+    "added-annotation",
+    "annotation-only",
+    "new-index",
+    "string-to-indexed"
   ])("retains the original row and exact structured continuation when proved (%s)", (mode) => {
     const [assistant, result] = exchange()
     const [revision, duplicate] = exchange(2)
     const image = { type: "image", source: { type: "url", url: "https://example.com/first.png" } }
     const hasImage = mode.endsWith("image")
-    const indexed = mode === "early-indexed-block" || mode === "indexed-before-image"
+    const gainsIndex = mode === "new-index" || mode === "string-to-indexed"
+    const indexed = mode === "early-indexed-block" || mode === "indexed-before-image" || gainsIndex
     const hasLaterParagraph = indexed || mode.endsWith("before-image")
+    const annotations = [{ type: "citation", source: "url_citation", url: "https://example.com" }]
     const laterParagraph = { type: "text", index: 2, text: "File details" }
     const oldText = mode === "equal-split-block" ? "Checking\nFile details" : "Checking"
-    const nextText = mode.startsWith("equal-") ? "Checking" : "Checking version and status"
+    const nextText =
+      mode.startsWith("equal-") || mode === "annotation-only" ? "Checking" : "Checking version and status"
     const earlier = {
       ...assistant,
       content:
-        mode === "mixed-string" || mode === "equal-string-block"
+        mode === "mixed-string" || mode === "equal-string-block" || mode === "string-to-indexed"
           ? oldText
           : [
-              { type: "text", text: oldText, ...(indexed ? { index: 0 } : {}) },
+              {
+                type: "text",
+                text: oldText,
+                ...(indexed ? { index: 0 } : {}),
+                ...(mode === "stable-annotation" ? { annotations } : {}),
+                ...(mode === "different-annotation"
+                  ? { annotations: [{ ...annotations[0], url: "https://example.com/other" }] }
+                  : {})
+              },
               ...(hasImage ? [image] : []),
-              ...(hasLaterParagraph ? [laterParagraph] : [])
+              ...(hasLaterParagraph && !gainsIndex ? [laterParagraph] : [])
             ]
     }
     const later = {
@@ -515,9 +531,7 @@ describe("tool transcript replay", () => {
           type: "text",
           text: nextText,
           ...(indexed ? { index: 0 } : {}),
-          ...(mode === "different-annotation"
-            ? { annotations: [{ type: "citation", text: "Source A" }] }
-            : {})
+          ...(mode.endsWith("annotation") || mode === "annotation-only" ? { annotations } : {})
         },
         ...(mode === "different-image"
           ? [{ ...image, source: { ...image.source, url: "https://example.com/second.png" } }]
@@ -662,7 +676,8 @@ describe("tool transcript replay", () => {
     "bounded-image",
     "bounded-tool-use",
     "bounded-array-tool-use",
-    "bounded-object-tool-use"
+    "bounded-object-tool-use",
+    "annotated-continuation"
   ])("keeps separate hidden replies with sparse checkpoint results (%s)", (mode) => {
     const lateEmpty = mode !== "missing-first"
     const [older, olderResult] = exchange()
@@ -700,7 +715,14 @@ describe("tool transcript replay", () => {
           : undefined
     const conflictingImage = mode === "different-image" || mode === "moved-image"
     const blocks = (text: string, stage: "first" | "saved" | "later") => {
-      const display = text.split("\n").map((text) => ({ type: "text", text }))
+      const annotations = mode === "annotated-continuation" && stage !== "first"
+        ? [{ type: "citation", source: "url_citation", url: "https://example.com" }]
+        : undefined
+      const display = text.split("\n").map((text) => ({
+        type: "text",
+        text,
+        ...(annotations ? { annotations } : {})
+      }))
       const reasoning = { type: "reasoning", reasoning: `Reasoning for ${stage}` }
       if (
         includesReasoning &&
@@ -727,11 +749,11 @@ describe("tool transcript replay", () => {
     }
     const savedBlocks =
       mode.startsWith("structured") || mode === "saved-blocks" || includesReasoning ||
-      mode === "bounded-block" || Boolean(retained)
+      mode === "bounded-block" || mode === "annotated-continuation" || Boolean(retained)
     const checkpointBlocks =
       mode.startsWith("structured") || mode === "checkpoint-blocks" ||
       mode === "multiple-text-blocks" || includesReasoning || mode === "bounded-block" ||
-      Boolean(retained)
+      mode === "annotated-continuation" || Boolean(retained)
     const first = {
       ...older,
       tool_calls: calls,
@@ -752,7 +774,8 @@ describe("tool transcript replay", () => {
         "structured-continuation",
         "saved-blocks",
         "checkpoint-blocks",
-        "multiple-text-blocks"
+        "multiple-text-blocks",
+        "annotated-continuation"
       ].includes(mode)
     const suffix =
       mode === "newline-prose" || mode === "structured-newline"
