@@ -132,7 +132,8 @@ export class FunctionSiteReadRequests {
     sender: SiteReadSender,
     readId: unknown,
     work: (signal?: AbortSignal) => Promise<T>,
-    failed?: () => Promise<void>
+    failed?: () => Promise<void>,
+    cancelled?: () => T
   ): Promise<T> {
     // Legacy peers keep the original bounded host lifecycle and cannot cancel by ID.
     if (readId === undefined) {
@@ -172,6 +173,8 @@ export class FunctionSiteReadRequests {
       // A mounted owner may have been allocated before the publication envelope
       // rejects. Retire it before acknowledging this physical read as finished.
       await failed?.()
+      if (cancelled && controller.signal.aborted && (error === controller.signal.reason ||
+        (error instanceof Error && error.cause === controller.signal.reason))) return cancelled()
       throw error
     } finally {
       owner.requests.delete(readId as string)

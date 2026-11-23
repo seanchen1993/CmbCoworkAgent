@@ -245,10 +245,13 @@ function FunctionSiteSurface({
     chatScope.prefetchHistory === true
   const initialHistory = chatScope?.threadId === threadId && chatScope.prioritizeInitialHistory === true
   const probe = useContext(FunctionSiteProbeContext)
-  const positionedTailText = typeof probe === "object" && probe.messageId === firstTextMessageId
-  const holdInitialHistoryRead = probe === "position-pending" && retainInactiveHistory === true &&
+  const tailText = typeof probe === "object" && firstTextMessageId !== undefined &&
+    probe.messageId === firstTextMessageId
+  const awaitingPosition = typeof probe === "object" && probe.pending === true
+  const holdInitialHistoryRead = awaitingPosition && retainInactiveHistory === true &&
     (component === "UserMessage" || component === "AssistantMessage")
   const holdInitialHistoryReadRef = useRef(holdInitialHistoryRead)
+  const earlyTailReadRef = useRef(holdInitialHistoryRead && tailText)
   const prefetchHistoryRef = useRef(prefetchHistory)
   const initialHistoryRef = useRef(initialHistory)
   useLayoutEffect(() => {
@@ -489,9 +492,12 @@ function FunctionSiteSurface({
   const refreshRef = useRef<(coldVisible?: boolean) => void>(() => {})
   useLayoutEffect(() => {
     const wasHeld = holdInitialHistoryReadRef.current
+    const wasEarly = earlyTailReadRef.current
     holdInitialHistoryReadRef.current = holdInitialHistoryRead
-    if (wasHeld && !holdInitialHistoryRead) refreshRef.current(positionedTailText)
-  }, [holdInitialHistoryRead, positionedTailText])
+    earlyTailReadRef.current = holdInitialHistoryRead && tailText
+    if (wasHeld && !holdInitialHistoryRead) refreshRef.current(tailText)
+    else if (!wasEarly && earlyTailReadRef.current) refreshRef.current(true)
+  }, [holdInitialHistoryRead, tailText])
   const inputRefreshRef = useRef<() => void>(() => {})
   const retryRef = useRef<() => void>(() => {})
   const live = useRef(false)
@@ -512,9 +518,11 @@ function FunctionSiteSurface({
     const node = cachedSection.current
     const presentation = cachedPresentation?.presentation
     if (!acceptedLayout() || !node || !presentation || snapshot) return
+    const messageViewport = presentation.messageViewport
+    if (!messageViewport && presentation.height <= 0) return
     // A retained reading window is positioned only at its exact allocated width.
     // Establish that geometry before paint, then observe subsequent reflow.
-    if (presentation.messageViewport) {
+    if (messageViewport) {
       const width = node.getBoundingClientRect().width
       const layoutWidth = functionSiteLayoutContainer(node)?.clientWidth ?? width
       setCachedGeometry(previous => previous?.presentation === presentation && previous.width === width &&
@@ -525,7 +533,8 @@ function FunctionSiteSurface({
       const entry = entries.find(value => value.target === node)
       if (!entry) return
       const width = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width
-      const layoutWidth = functionSiteLayoutContainer(node)?.clientWidth ?? width
+      // Only a retained long-message excerpt needs the allocated row width.
+      const layoutWidth = messageViewport ? functionSiteLayoutContainer(node)?.clientWidth ?? width : width
       setCachedGeometry((previous) => previous?.presentation === presentation && previous.width === width
         && previous.layoutWidth === layoutWidth ? previous : { presentation, width, layoutWidth })
     })
@@ -692,15 +701,16 @@ function FunctionSiteSurface({
     const deferInitialDurationRead = component === "TurnDuration" &&
       typeof IntersectionObserver !== "undefined" && section.current?.isConnected === true
     let firstReadStarted = false
-    let wakeVisibleDuration: (() => void) | undefined
+    let wakeVisibleRead: (() => void) | undefined
     const siteVisibility = observeFunctionSiteVisibility(section.current, () => {
       functionSiteQueue.refresh()
-      wakeVisibleDuration?.()
+      wakeVisibleRead?.()
     })
     const waitingForDurationVisibility = (): boolean =>
       deferInitialDurationRead && !firstReadStarted && !siteVisibility.visible()
     const waitingForFirstRead = (): boolean =>
-      (!firstReadStarted && holdInitialHistoryReadRef.current) || waitingForDurationVisibility()
+      (!firstReadStarted && holdInitialHistoryReadRef.current &&
+        !(earlyTailReadRef.current && siteVisibility.visible())) || waitingForDurationVisibility()
     lifetimeRef.current = lifetime
     let stopped = false
     let owner: string | null = null
@@ -1002,11 +1012,17 @@ function FunctionSiteSurface({
     }
     // Offscreen elapsed-time labels can wait without occupying the shared background slot.
     if (component === "TurnDuration") setInitialDurationDeferred(waitingForDurationVisibility())
-    if (deferInitialDurationRead) wakeVisibleDuration = () => {
+    wakeVisibleRead = () => {
       if (firstReadStarted) return
-      const waiting = waitingForDurationVisibility()
-      setInitialDurationDeferred(waiting)
-      if (queued && !waiting) update()
+      if (deferInitialDurationRead) {
+        const waiting = waitingForDurationVisibility()
+        setInitialDurationDeferred(waiting)
+        if (queued && !waiting) update()
+      } else if (earlyTailReadRef.current && siteVisibility.visible()) {
+        // The target is already on screen. Read its first text before the
+        // list's position confirmation releases the remaining history sites.
+        startColdVisible()
+      }
     }
     const reset = (): void => {
       sourceRetiring = false

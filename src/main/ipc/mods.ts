@@ -2762,12 +2762,15 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     event: IpcMainInvokeEvent,
     threadId: string,
     draw: (workspace: string, signal?: AbortSignal) => Promise<T>,
-    read?: { readId?: unknown }
+    read?: { readId?: unknown; cancelled: () => T }
   ): Promise<T> {
     trusted(event)
     const register = siteReadRequests.captureSiteRegistration(event.sender)
     let site: FunctionSiteDocumentOwner | undefined
-    const retire = () => site?.retire()
+    const retire = () => {
+      site?.retire()
+      site = undefined
+    }
     const render = (signal?: AbortSignal) => withDisplayExecution(event, threadId, async workspace => {
       const result = await draw(workspace, signal)
       const owner = typeof result === "string" ? result : result?.state === "mounted"
@@ -2781,7 +2784,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     })
     try {
       const result = read
-        ? await siteReadRequests.run(event.sender, read.readId, render, async () => { retire() })
+        ? await siteReadRequests.run(event.sender, read.readId, render, async () => { retire() }, read.cancelled)
         : await render()
       if (site) register(site)
       return result
@@ -2836,7 +2839,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       functions.siteRead(workspace, input.threadId, input.component,
           parseModJson(encodeModJson(input.props)) as ModObject, input.presentationId,
           input.messageId, input.expectedRequestId, input.protocol, input.ownerRequired === true,
-          ...(signal ? [signal] as const : [])), { readId: input?.readId })
+          ...(signal ? [signal] as const : [])), {
+        readId: input?.readId,
+        cancelled: (): FunctionSiteReadOutcome => ({ state: "retired" })
+      })
   )
   ipcMain.on("mods:function-site-read-scope", event => {
     try {

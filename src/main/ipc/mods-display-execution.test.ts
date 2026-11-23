@@ -589,7 +589,7 @@ it("authenticates cancellation before aborting the exact current native display 
   })
   const readId = `${f.readNamespace(f.event)}:1`
   const pending = f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId })
-  const assertion = expect(pending).rejects.toThrow("MODS_DISPLAY_READ_CANCELLED")
+  const assertion = expect(pending).resolves.toEqual({ state: "retired" })
   await entered.promise
   expect(() => f.handlers.get("mods:function-site-read-cancel")!(
     { ...f.event, senderFrame: { ...f.event.senderFrame } }, { readId }))
@@ -616,7 +616,18 @@ it("releases an allocated native owner when cancellation wins the final publicat
     return { state: "mounted", owner: "fresh-undelivered-owner" } as never
   })
   await expect(f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId }))
-    .rejects.toThrow("MODS_DISPLAY_READ_CANCELLED")
+    .resolves.toEqual({ state: "retired" })
   expect(f.retireSite).toHaveBeenCalledExactlyOnceWith(
     f.facts.workspace, f.facts.threadId, "fresh-undelivered-owner")
+})
+
+it("preserves an unrelated display failure that races a cancelled read", async () => {
+  const f = fixture(), readId = f.readNamespace(f.event) + ":1"
+  const failure = new Error("worker read failed")
+  f.operation.mockImplementationOnce(async () => {
+    await f.handlers.get("mods:function-site-read-cancel")!(f.event, { readId })
+    throw failure
+  })
+  await expect(f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId }))
+    .rejects.toBe(failure)
 })

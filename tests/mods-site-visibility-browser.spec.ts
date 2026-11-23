@@ -430,13 +430,18 @@ async function main() {
       function TailFixture({phase}) {
         const [position, setPosition] = useState(phase);
         window.initialTail = { reads, release, maxActive:() => maxActive,
+          showHiddenProbe:() => setPosition("hidden"),
+          startEarly:() => setPosition("early"),
           position:() => setPosition("positioned"), takeover:() => setPosition("takeover"),
           reset:() => { reads.length=0; maxActive=0; host.render(<TailFixture key="takeover" phase="pending"/>); } };
         return <ModsChatScope.Provider value={{threadId:"tail",enabled:true,ready:true,
           isCurrent:() => true,prioritizeInitialHistory:true}}>
           <div data-radix-scroll-area-viewport style={{height:240,width:320,overflow:"auto"}}>
-            <ChatVirtualPrependLayout forwardedRef={null} context={{windowKey:"tail",firstItemIndex:0,
-              scrollParent:null,initialHistoryReadPending:position==="pending",
+            <ChatVirtualPrependLayout forwardedRef={null}
+              style={position==="hidden" ? {visibility:"hidden"} : undefined}
+              context={{windowKey:"tail",firstItemIndex:0,
+              scrollParent:null,initialHistoryReadPending:["pending","hidden","early"].includes(position),
+              initialHistoryTailId:["hidden","early"].includes(position) ? tail.messageId : undefined,
               positionedHistoryTail:position==="positioned" ? tail : undefined}}>
               {["before-1","before-2","before-3","before-4","tail"].map(id =>
                 <div key={id} data-chat-message-row style={{height:32,width:300}}>
@@ -451,6 +456,16 @@ async function main() {
     await page.locator("[data-chat-message-row] [data-function-site-pending]").last().waitFor({ state: "attached" })
     await settle()
     assert.deepEqual(await page.evaluate("window.initialTail.reads"), [])
+    await page.evaluate("window.initialTail.showHiddenProbe()")
+    await settle()
+    assert.deepEqual(await page.evaluate("window.initialTail.reads"), [],
+      "The hidden probe stays inert even when it contains the expected tail")
+    await page.evaluate("window.initialTail.startEarly()")
+    await page.waitForFunction("window.initialTail.reads.length===1")
+    await settle()
+    assert.deepEqual(await page.evaluate("window.initialTail.reads"), ["tail:0"],
+      "Only the visible tail's first protected text can begin before position confirmation")
+    assert.equal(await page.getByText("RAW", { exact: false }).count(), 0)
     await page.evaluate("window.initialTail.position()")
     await page.waitForFunction("window.initialTail.reads.length===4")
     assert.deepEqual(await page.evaluate("window.initialTail.reads"),
@@ -476,7 +491,7 @@ async function main() {
     await page.evaluate("window.initialTail.reads.slice(4).forEach(window.initialTail.release)")
     await page.getByText("SAFE tail:1", { exact: true }).waitFor()
     assert.deepEqual(errors, [])
-    console.log("PASS only the positioned tail's first static text leads cold display admission")
+    console.log("PASS only the visible tail's first static text leads cold display admission")
   } finally {
     await browser.close()
   }

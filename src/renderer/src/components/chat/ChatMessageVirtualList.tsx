@@ -967,6 +967,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
           windowKey: virtualWindow.key, firstItemIndex: virtualWindow.firstItemIndex,
           scrollParent: customScrollParent, virtuosoRef,
           initialHistoryReadPending: waitingForInitialPosition,
+          initialHistoryTailId: initialTailId,
           positionedHistoryTail: !waitingForInitialPosition && initialTailId === positionedHistoryTail?.messageId
             ? positionedHistoryTail : undefined,
           checkInitialHistoryPosition }}

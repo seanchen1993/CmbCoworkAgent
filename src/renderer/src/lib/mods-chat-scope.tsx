@@ -8,7 +8,7 @@ import { parseThreadDirectoryChange } from "../../../shared/thread-directory-cha
 import { sameThreadDirectoryScope, type ThreadDirectoryScope } from "./thread-directory-scope"
 
 export const FunctionSiteProbeContext = createContext<
-  "ready" | "hidden" | "position-pending" | { messageId: string }
+  "ready" | "hidden" | { messageId?: string; pending?: true }
 >("ready")
 
 export const ModsChatScope = createContext<{

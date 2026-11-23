@@ -11,6 +11,7 @@ export interface ChatVirtualPrependLayoutContext {
   scrollParent: HTMLElement | null
   virtuosoRef?: React.RefObject<VirtuosoHandle | null>
   initialHistoryReadPending?: boolean
+  initialHistoryTailId?: string
   positionedHistoryTail?: { messageId: string }
   checkInitialHistoryPosition?: () => void
 }
@@ -339,7 +340,8 @@ export class ChatVirtualPrependLayout extends React.Component<Props> {
     return (
       <div {...props} ref={this.setRoot}>
         <FunctionSiteProbeContext.Provider value={props.style?.visibility === "hidden" ? "hidden"
-          : _context?.initialHistoryReadPending ? "position-pending"
+          : _context?.initialHistoryReadPending
+            ? { pending: true, messageId: _context.initialHistoryTailId }
             : _context?.positionedHistoryTail ?? "ready"}>
           {children}
         </FunctionSiteProbeContext.Provider>
