@@ -236,6 +236,14 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       priorFull
     ]
     expect(findDisplayedReplayAliases(noCurrentResult).size).toBe(0)
+
+    const waiting = assistant({
+      id: "waiting-call",
+      tool_calls: [{ ...executeCall, args: { command: "echo still waiting" } }]
+    })
+    const waitingReplay = { ...replay, id: `${resultId}::cmb-same-role-duplicate:tool:4` }
+    const withWaiting = [...rows, assistant({ id: "u3", role: "user" }), waiting, waitingReplay]
+    expect(findDisplayedReplayAliases(withWaiting)).toEqual(aliases)
   })
   it("keeps a replay row visible when only it has the live reasoning", () => {
     const original = assistant()

@@ -341,19 +341,14 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     if (!knownResults.has(key)) knownResults.set(key, row)
   }
   const callsWithUnownedResults = new Set<string>()
-  for (const row of messages) {
-    if (
-      row.role === "tool" &&
-      row.tool_call_id &&
-      hasToolResultExecutionId(row) &&
-      !ownedExecutionIds.has(getMessageProviderSourceId(row))
-    ) {
+  const attachedDuplicates = new Map<string, string>()
+  // A replacement must arrive after the replay that occupied its call's slot.
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const row = messages[index]
+    if (row.role !== "tool" || aliases.has(row.id) || !hasToolResultExecutionId(row)) continue
+    if (row.tool_call_id && !ownedExecutionIds.has(getMessageProviderSourceId(row))) {
       callsWithUnownedResults.add(row.tool_call_id)
     }
-  }
-  const attachedDuplicates = new Map<string, string>()
-  for (const row of messages) {
-    if (row.role !== "tool" || aliases.has(row.id) || !hasToolResultExecutionId(row)) continue
     const original = knownResults.get(resultReplayKey(row))
     if (!original || original.id === row.id || !sameRow(original, row)) continue
     if (!owned.has(row)) {
