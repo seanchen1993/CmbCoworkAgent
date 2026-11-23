@@ -551,6 +551,12 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     typeof original.content === "string" &&
     candidate.content.length > original.content.length &&
     candidate.content.startsWith(original.content)
+  const compatibleText = (left: T, right: T) =>
+    sameValue(left.content, right.content) || extendedText(left, right) || extendedText(right, left)
+  const textDistance = (left: T, right: T) =>
+    typeof left.content === "string" && typeof right.content === "string"
+      ? Math.abs(left.content.length - right.content.length)
+      : 0
   const exactSlots = (
     subset: PartialToolExchange<T>,
     superset: PartialToolExchange<T>,
@@ -680,24 +686,33 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       })
       .reduce((smallest, group) => (group.count < smallest.count ? group : smallest))
     let target: PartialToolExchange<T> | undefined
+    let targetPresentation: T | undefined
+    const copyPresentation = continuedText.get(version.batch) ?? version.batch.assistant
     for (const group of candidates.groups) {
       for (const candidate of group) {
         const sameVersion = samePresentation.get(candidate.batch) ?? candidate.batch
         const presentationVersion = presentationAliases.get(sameVersion) ?? sameVersion
-        const retained = exactPresentation
-          ? sameVersion
-          : (containing.get(presentationVersion) ?? presentationVersion)
-        const retainedPresentation = continuedText.get(retained) ?? retained.assistant
-        const copyPresentation = continuedText.get(version.batch) ?? version.batch.assistant
+        const retained = exactPresentation ? sameVersion : presentationVersion
+        const retainedPresentation =
+          continuedText.get(presentationVersion) ?? presentationVersion.assistant
         if (
-          (!sameValue(retainedPresentation.content, copyPresentation.content) &&
-            !extendedText(copyPresentation, retainedPresentation) &&
-            !extendedText(retainedPresentation, copyPresentation)) ||
+          !compatibleText(retainedPresentation, copyPresentation) ||
           !exactSlots(version.batch, retained, exactPresentation)
         )
           continue
-        if (target && retained !== target) return undefined
+        if (target && targetPresentation && retained !== target) {
+          if (
+            exactPresentation ||
+            !compatibleText(targetPresentation, retainedPresentation) ||
+            (!exactSlots(retained, target, false) && !exactSlots(target, retained, false))
+          )
+            return undefined
+          const distance = textDistance(copyPresentation, retainedPresentation)
+          const targetDistance = textDistance(copyPresentation, targetPresentation)
+          if (distance >= targetDistance) continue
+        }
         target = retained
+        targetPresentation = retainedPresentation
       }
     }
     return target
@@ -739,15 +754,20 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       containing.delete(copy)
     }
   }
-  // Rejected cross-presentation transitions leave the proved continuity
-  // inside each unchanged presentation intact.
-  for (const [copy, original] of samePresentation) {
-    const presentation = presentationAliases.get(original) ?? original
-    containing.set(copy, containing.get(presentation) ?? presentation)
-  }
-  const continuations = new Map(containing)
-  for (const [copy, original] of presentationAliases) {
-    continuations.set(copy, containing.get(original) ?? original)
+  // Resolve the surviving edges after checking each fork. The equal-coverage
+  // edges point to their own canonical row and every other edge adds results.
+  const direct = new Map([...containing, ...samePresentation, ...presentationAliases])
+  const continuations = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+  for (const copy of direct.keys()) {
+    if (continuations.has(copy)) continue
+    const path = [copy]
+    let target = direct.get(copy)!
+    while (direct.has(target) && !continuations.has(target)) {
+      path.push(target)
+      target = direct.get(target)!
+    }
+    const retained = continuations.get(target) ?? target
+    for (const alias of path) continuations.set(alias, retained)
   }
   const withVerifiedText = new Set([...continuations].flat())
   for (const [copy, original] of exactSingleToolCopies) {

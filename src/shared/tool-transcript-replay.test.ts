@@ -1471,9 +1471,10 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each([false, true])(
-    "keeps divergent presentations and folds copies within each (more results %s)",
-    (moreResults) => {
+  it.each(["equal", "mixed", "mixed-prefix"])(
+    "keeps divergent presentations and folds copies within each (%s)",
+    (mode) => {
+      const moreResults = mode !== "equal"
       const [earlier, initialRead] = exchange()
       const declarations = [...earlier.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
       if (moreResults) declarations.push({ id: "grep-call", name: "grep", args: {} })
@@ -1487,7 +1488,14 @@ describe("tool transcript replay", () => {
         tool_calls: declarations,
         content: "Checking the directory"
       }
-      const repeatedLeft = { ...repeat, tool_calls: declarations, content: leftRevision.content }
+      const repeatedLeft = {
+        ...repeat,
+        tool_calls: declarations,
+        content:
+          mode === "mixed-prefix"
+            ? `${leftRevision.content} and reporting status`
+            : leftRevision.content
+      }
       const directory = {
         id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
         role: "tool",
@@ -1528,7 +1536,49 @@ describe("tool transcript replay", () => {
         expect(
           resolveToolResultOwnership(retained).get(getWorkerToolUiKey(short.id, "ls-call", 1))
         ).toBe(directory)
+        if (mode === "mixed-prefix") {
+          expect(
+            getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))
+          ).toEqual(new Map([[leftRevision.id, repeatedLeft.content]]))
+        }
       }
+    }
+  )
+
+  it.each([false, true])(
+    "keeps a divergent partial continuation beside a full replay (reversed %s)",
+    (reversed) => {
+      const texts = reversed
+        ? ["Checking alpha", "Checking", "Checking", "Checking beta"]
+        : ["Checking", "Checking alpha", "Checking", "Checking beta"]
+      const batches = texts.map((content, index) => {
+        const [assistant, result] = exchange(index + 1)
+        const toolId = "ad506755-5e42-4cef-834f-eb1be0f11d27"
+        const directory = {
+          id: index ? `${toolId}::cmb-same-role-duplicate:tool:${index + 1}` : toolId,
+          role: "tool",
+          name: "ls",
+          tool_call_id: "ls-call",
+          content: "Directory output"
+        }
+        return [
+          {
+            ...assistant,
+            content,
+            tool_calls: [...assistant.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+          },
+          result,
+          ...(index < 2 ? [directory] : [])
+        ]
+      })
+      const rows = [user, ...batches.flat()]
+      const aliases = findReplayedToolExchangeAliases(rows)
+      expect(
+        rows.filter(({ id, role }) => role === "assistant" && !aliases.has(id)).map(({ id }) => id)
+      ).toEqual([batches[0][0].id, batches[2][0].id])
+      const content = getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))
+      expect(content.get(batches[0][0].id) ?? batches[0][0].content).toBe("Checking alpha")
+      expect(content.get(batches[2][0].id)).toBe("Checking beta")
     }
   )
 
