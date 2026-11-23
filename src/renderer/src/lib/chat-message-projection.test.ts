@@ -85,7 +85,7 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     const deriveTools = createIncrementalToolDerivationProjector()
     const indexById = new Map(history.map((message, index) => [message.id, index]))
     const display = { messages: rows, indexById, structureVersion: 1 }
-    const aliases = project({ ...display, contentVersion: 1, changedMessages: rows })
+    const { aliases } = project({ ...display, contentVersion: 1, changedMessages: rows })
     expect(aliases.get(copy.id)).toBe(original.id)
     expect(aliases.get(toolCopy.id)).toBe(tool.id)
     deriveTools(rows, rows, 1, aliases)
@@ -96,7 +96,9 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
         content: `Streaming ${frame}`
       }))
       for (const changed of changedMessages) history[indexById.get(changed.id)!] = changed
-      expect(project({ ...display, contentVersion: frame + 2, changedMessages })).toBe(aliases)
+      expect(project({ ...display, contentVersion: frame + 2, changedMessages }).aliases).toBe(
+        aliases
+      )
       const toolRows = deriveTools(rows, changedMessages, 1, aliases).messages
       expect(toolRows.map(({ id }) => id)).toEqual([
         original.id,
@@ -108,7 +110,11 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     forbidHistoryReads = false
     const distinct = { ...copy, reasoning: "Keep this distinct reasoning" }
     history[2] = distinct
-    const nextAliases = project({ ...display, contentVersion: 302, changedMessages: [distinct] })
+    const { aliases: nextAliases } = project({
+      ...display,
+      contentVersion: 302,
+      changedMessages: [distinct]
+    })
     expect(nextAliases.size).toBe(0)
     expect(deriveTools(rows, [distinct], 1, nextAliases).messages.map(({ id }) => id)).toEqual([
       original.id,
@@ -140,6 +146,55 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       "Result for first"
     )
     expect(associations.has(getWorkerToolUiKey(second.id, executeCall.id, 0))).toBe(false)
+  })
+
+  it("updates the visible replay text without changing its tool owner or alias", () => {
+    const original = assistant({
+      id: "reply",
+      content: "Checking",
+      tool_calls: [
+        executeCall,
+        {
+          id: "directory-call",
+          name: "ls",
+          args: {}
+        }
+      ]
+    })
+    const check = assistant({
+      id: "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465",
+      role: "tool",
+      name: executeCall.name,
+      tool_call_id: executeCall.id
+    })
+    const directory = assistant({
+      id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      role: "tool",
+      name: "ls",
+      tool_call_id: "directory-call"
+    })
+    const copy = {
+      ...original,
+      id: "reply::cmb-same-role-duplicate:assistant:2",
+      content: "Checking again"
+    }
+    const checkCopy = { ...check, id: `${check.id}::cmb-same-role-duplicate:tool:2` }
+    const messages = [original, check, directory, copy, checkCopy]
+    const display = {
+      messages,
+      structureVersion: 1,
+      indexById: new Map(messages.map(({ id }, index) => [id, index]))
+    }
+    const project = createChatReplayAliasProjector()
+    const first = project({ ...display, contentVersion: 1, changedMessages: messages })
+    expect(first.aliases.get(copy.id)).toBe(original.id)
+    expect(first.assistantContent.get(original.id)).toBe(copy.content)
+    const revised = { ...copy, content: "Checking again before reporting" }
+    messages[3] = revised
+    const second = project({ ...display, contentVersion: 2, changedMessages: [revised] })
+    expect(second.aliases).toBe(first.aliases)
+    expect(second.assistantContent.get(original.id)).toBe(revised.content)
+    expect(original.content).toBe("Checking")
   })
 
   it.each([
@@ -177,11 +232,11 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       }
       const project = createChatReplayAliasProjector()
       expect(
-        project({ ...display, contentVersion: 1, changedMessages: messages }).has(copy.id)
+        project({ ...display, contentVersion: 1, changedMessages: messages }).aliases.has(copy.id)
       ).toBe(before)
       const labeled = { ...unlabeled, name: resultName }
       messages[messages.length - 1] = labeled
-      const aliases = project({ ...display, contentVersion: 2, changedMessages: [labeled] })
+      const { aliases } = project({ ...display, contentVersion: 2, changedMessages: [labeled] })
       expect(aliases.has(copy.id)).toBe(!before)
       expect(aliases).toEqual(findDisplayedReplayAliases(messages))
     }

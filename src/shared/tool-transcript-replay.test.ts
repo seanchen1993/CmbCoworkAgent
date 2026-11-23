@@ -7,6 +7,7 @@ import type { CheckpointAuthorityTranscriptMessage as Message } from "./checkpoi
 import {
   alignReplayedToolExchanges,
   findReplayedToolExchangeAliases,
+  getAssistantReplayContent,
   prepareToolTranscriptReplayMerge
 } from "./tool-transcript-replay"
 import { getWorkerToolUiKey, resolveToolResultOwnership } from "./tool-result-ownership"
@@ -1227,66 +1228,78 @@ describe("tool transcript replay", () => {
     expect(changed[0].historical_tool_replay_id).toBeUndefined()
   })
 
-  it.each(["pending", "resume-first", "resume-last", "resumed-prose", "different-execution"])(
-    "folds only the overlapping physical copies of an interrupted batch (%s)",
-    (mode) => {
-      const [first, read] = exchange()
-      const [second, readCopy] = exchange(2)
-      const declarations = [...first.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
-      const directory = {
-        id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
-        role: "tool",
-        name: "ls",
-        tool_call_id: "ls-call",
-        content: "Current directory"
-      }
-      const a = { ...first, tool_calls: declarations }
-      const b = {
-        ...second,
-        tool_calls: declarations,
-        content:
-          mode === "resumed-prose" ? `${first.content} and listing the directory` : second.content
-      }
-      const addFirst = mode === "resume-first" || mode === "different-execution"
-      const otherRead =
-        mode === "different-execution"
-          ? { ...read, id: "1c711082-5111-4632-976d-7c05ee064c33", provider_source_id: undefined }
-          : readCopy
-      const rows = [
-        user,
-        a,
-        read,
-        ...(addFirst ? [directory] : []),
-        b,
-        otherRead,
-        ...(mode === "resume-last" || mode === "resumed-prose" ? [directory] : [])
-      ]
-      const aliases = findReplayedToolExchangeAliases(rows)
-      expect(aliases).toEqual(
-        mode === "different-execution"
-          ? new Map()
-          : mode === "resumed-prose"
-            ? new Map([
-                [a.id, b.id],
-                [read.id, readCopy.id]
-              ])
-            : new Map([
-                [b.id, a.id],
-                [readCopy.id, read.id]
-              ])
-      )
-      expect(findReplayedToolExchangeAliases(rows.slice(1))).toEqual(aliases)
-      if (mode === "resumed-prose") {
-        const visible = rows.filter(({ id }) => !aliases.has(id))
-        expect(
-          resolveToolResultOwnership(visible).get(getWorkerToolUiKey(b.id, "ls-call", 1))
-        ).toBe(directory)
-      }
-      expect(
-        rows.filter(({ id }) => !aliases.has(id)).filter(({ id }) => id === directory.id)
-      ).toHaveLength(mode === "pending" ? 0 : 1)
+  it.each([
+    "pending",
+    "resume-first",
+    "resume-last",
+    "resumed-prose",
+    "prose-after-results",
+    "full-copy",
+    "different-execution"
+  ])("folds only the overlapping physical copies of an interrupted batch (%s)", (mode) => {
+    const [first, read] = exchange()
+    const [second, readCopy] = exchange(2)
+    const declarations = [...first.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+    const directory = {
+      id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      role: "tool",
+      name: "ls",
+      tool_call_id: "ls-call",
+      content: "Current directory"
     }
-  )
+    const a = { ...first, tool_calls: declarations }
+    const revised = ["resumed-prose", "prose-after-results", "full-copy"].includes(mode)
+    const b = {
+      ...second,
+      tool_calls: declarations,
+      content: revised ? `${first.content} and listing the directory` : second.content
+    }
+    const addFirst = [
+      "resume-first",
+      "prose-after-results",
+      "full-copy",
+      "different-execution"
+    ].includes(mode)
+    const otherRead =
+      mode === "different-execution"
+        ? { ...read, id: "1c711082-5111-4632-976d-7c05ee064c33", provider_source_id: undefined }
+        : readCopy
+    const rows = [
+      user,
+      a,
+      read,
+      ...(addFirst ? [directory] : []),
+      b,
+      otherRead,
+      ...(mode === "resume-last" || mode === "resumed-prose" ? [directory] : []),
+      ...(mode === "full-copy"
+        ? [{ ...directory, id: `${directory.id}::cmb-same-role-duplicate:tool:2` }]
+        : [])
+    ]
+    const aliases = findReplayedToolExchangeAliases(rows)
+    const expected =
+      mode === "different-execution"
+        ? new Map()
+        : new Map([
+            [b.id, a.id],
+            [readCopy.id, read.id]
+          ])
+    if (mode === "full-copy") expected.set(rows.at(-1)!.id, directory.id)
+    expect(aliases).toEqual(expected)
+    expect(findReplayedToolExchangeAliases(rows.slice(1))).toEqual(aliases)
+    if (revised) {
+      const visible = rows.filter(({ id }) => !aliases.has(id))
+      expect(resolveToolResultOwnership(visible).get(getWorkerToolUiKey(a.id, "ls-call", 1))).toBe(
+        directory
+      )
+      expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))).toEqual(
+        new Map([[a.id, b.content]])
+      )
+    }
+    expect(
+      rows.filter(({ id }) => !aliases.has(id)).filter(({ id }) => id === directory.id)
+    ).toHaveLength(mode === "pending" ? 0 : 1)
+  })
 
   it.each(["paused", "mcp", "checkpoint-only"])(
     "folds exact %s copies before combining sources",
@@ -1361,41 +1374,66 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it("keeps separate tool batch presentations when multiple revisions extend the same prefix", () => {
-    const [earlier, initialRead] = exchange()
-    const declarations = [...earlier.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
-    const short = { ...earlier, tool_calls: declarations }
-    const [left, leftRead] = exchange(2)
-    const [right, rightRead] = exchange(3)
-    const [repeat, repeatRead] = exchange(4)
-    const leftRevision = { ...left, tool_calls: declarations, content: "Checking the version" }
-    const rightRevision = { ...right, tool_calls: declarations, content: "Checking the directory" }
-    const repeatedLeft = { ...repeat, tool_calls: declarations, content: leftRevision.content }
-    const directory = {
-      id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
-      role: "tool",
-      name: "ls",
-      tool_call_id: "ls-call",
-      content: "Current directory"
+  it.each([false, true])(
+    "keeps divergent presentations and folds copies within each (more results %s)",
+    (moreResults) => {
+      const [earlier, initialRead] = exchange()
+      const declarations = [...earlier.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+      if (moreResults) declarations.push({ id: "grep-call", name: "grep", args: {} })
+      const short = { ...earlier, tool_calls: declarations }
+      const [left, leftRead] = exchange(2)
+      const [right, rightRead] = exchange(3)
+      const [repeat, repeatRead] = exchange(4)
+      const leftRevision = { ...left, tool_calls: declarations, content: "Checking the version" }
+      const rightRevision = {
+        ...right,
+        tool_calls: declarations,
+        content: "Checking the directory"
+      }
+      const repeatedLeft = { ...repeat, tool_calls: declarations, content: leftRevision.content }
+      const directory = {
+        id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+        role: "tool",
+        name: "ls",
+        tool_call_id: "ls-call",
+        content: "Current directory"
+      }
+      for (const revisions of [
+        [leftRevision, leftRead, rightRevision, rightRead],
+        [rightRevision, rightRead, leftRevision, leftRead]
+      ]) {
+        const lsCopy = { ...directory, id: `${directory.id}::cmb-same-role-duplicate:tool:2` }
+        const grep = {
+          id: "81cbcdce-733b-4d6f-86b5-261cb3d89d22",
+          role: "tool",
+          name: "grep",
+          tool_call_id: "grep-call",
+          content: "Search output"
+        }
+        const rows = [
+          user,
+          short,
+          initialRead,
+          ...revisions,
+          repeatedLeft,
+          repeatRead,
+          directory,
+          ...(moreResults ? [lsCopy, grep] : [])
+        ]
+        const aliases = findReplayedToolExchangeAliases(rows)
+        expect(aliases).toEqual(
+          new Map([
+            [repeatedLeft.id, leftRevision.id],
+            [repeatRead.id, leftRead.id]
+          ])
+        )
+        const retained = rows.filter(({ id }) => !aliases.has(id))
+        expect(
+          resolveToolResultOwnership(retained).get(getWorkerToolUiKey(short.id, "ls-call", 1))
+        ).toBe(directory)
+      }
     }
-    for (const revisions of [
-      [leftRevision, leftRead, rightRevision, rightRead],
-      [rightRevision, rightRead, leftRevision, leftRead]
-    ]) {
-      const rows = [user, short, initialRead, ...revisions, repeatedLeft, repeatRead, directory]
-      const aliases = findReplayedToolExchangeAliases(rows)
-      expect(aliases).toEqual(
-        new Map([
-          [repeatedLeft.id, leftRevision.id],
-          [repeatRead.id, leftRead.id]
-        ])
-      )
-      const retained = rows.filter(({ id }) => !aliases.has(id))
-      expect(
-        resolveToolResultOwnership(retained).get(getWorkerToolUiKey(short.id, "ls-call", 1))
-      ).toBe(directory)
-    }
-  })
+  )
 
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")

@@ -4,7 +4,10 @@ import {
   getMessageProviderSourceId
 } from "../../../shared/message-role-collision"
 import { readToolOwnershipId } from "../../../shared/tool-result-ownership"
-import { findReplayedToolExchangeAliases } from "../../../shared/tool-transcript-replay"
+import {
+  findReplayedToolExchangeAliases,
+  getAssistantReplayContent
+} from "../../../shared/tool-transcript-replay"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
 
 export {
@@ -32,6 +35,7 @@ export interface ChatLiveMessageProjectionMetadata {
 }
 
 const noReplayAliases: ReadonlyMap<string, string> = new Map()
+export const noReplayAssistantContent: ReadonlyMap<string, string> = new Map()
 
 function replaySourceKey(message: Message): string | undefined {
   if (message.role === "assistant" || message.role === "tool") {
@@ -53,13 +57,13 @@ function sameToolSlots(before: Message["tool_calls"], after: Message["tool_calls
 /** Recheck replay proof on order, ownership or evidence changes, including live reasoning. */
 export function createChatReplayAliasProjector(): (
   display: ChatMessageProjection
-) => ReadonlyMap<string, string> {
+) => { aliases: ReadonlyMap<string, string>; assistantContent: ReadonlyMap<string, string> } {
   let previousMessages: readonly Message[] | undefined
   let previousStructureVersion = -1
   let previousById = new Map<string, Message>()
   let repeatedSources = new Set<string>()
   let toolReplayAssistantIds = new Set<string>()
-  let aliases = noReplayAliases
+  let projection = { aliases: noReplayAliases, assistantContent: noReplayAssistantContent }
 
   return ({ messages, changedMessages, structureVersion }) => {
     let rebuildSources = messages !== previousMessages || structureVersion !== previousStructureVersion
@@ -101,13 +105,20 @@ export function createChatReplayAliasProjector(): (
     if (rebuildSources || evidenceChanged) {
       toolReplayAssistantIds = new Set()
       const nextAliases = findReplayedToolExchangeAliases(messages, toolReplayAssistantIds)
-      if (nextAliases.size !== aliases.size ||
-          [...nextAliases].some(([id, target]) => aliases.get(id) !== target)) {
-        aliases = nextAliases
+      const assistantContent = getAssistantReplayContent(nextAliases, (id) => previousById.get(id))
+      const aliasesChanged = !mapsEqual(nextAliases, projection.aliases)
+      if (aliasesChanged || !mapsEqual(assistantContent, projection.assistantContent)) {
+        projection = { aliases: aliasesChanged ? nextAliases : projection.aliases, assistantContent }
       }
     }
-    return aliases
+    return projection
   }
+}
+
+function mapsEqual(left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>): boolean {
+  if (left.size !== right.size) return false
+  for (const [id, value] of left) if (right.get(id) !== value) return false
+  return true
 }
 
 /** A live row may have the only surviving copy of renderer-only reasoning. */

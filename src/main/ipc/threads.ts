@@ -166,7 +166,8 @@ import {
 } from "../../shared/checkpoint-transcript"
 import {
   prepareToolTranscriptReplayMerge,
-  findReplayedToolExchangeAliases
+  findReplayedToolExchangeAliases,
+  getAssistantReplayContent
 } from "../../shared/tool-transcript-replay"
 import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
 import {
@@ -2863,7 +2864,14 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
     useStableProviderOccurrences: true
   })
   const aliases = findReplayedToolExchangeAliases(merged)
-  return aliases.size ? merged.filter((message) => !aliases.has(message.id)) : merged
+  if (!aliases.size) return merged
+  const byId = new Map(merged.map((message) => [message.id, message]))
+  const content = getAssistantReplayContent(aliases, (id) => byId.get(id))
+  return merged.flatMap((message) => {
+    if (aliases.has(message.id)) return []
+    const text = content.get(message.id)
+    return [text === undefined ? message : { ...message, content: text }]
+  })
 }
 
 function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {

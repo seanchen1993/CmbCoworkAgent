@@ -296,6 +296,7 @@ import {
 } from "@/lib/chat-search-matches"
 import {
   createChatMessageProjector,
+  noReplayAssistantContent,
   resolveChatReplayAliases
 } from "@/lib/chat-message-projection"
 import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
@@ -3646,12 +3647,16 @@ export function ChatContainer({
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
   // Values hints can reorder results sharing one provider call ID. Prove the
   // pairs on the same order used by the tool cards before filtering any rows.
+  const replayProjection = threadProjectionRuntime.projectReplayAliases(displayMessageProjection)
   const replayAliases = resolveChatReplayAliases(
-    threadProjectionRuntime.projectReplayAliases(displayMessageProjection),
+    replayProjection.aliases,
     liveDisplayMessages,
     displayMessageProjection,
     liveDisplayProjection.messageIds
   )
+  const assistantReplayContent = replayAliases === replayProjection.aliases
+    ? replayProjection.assistantContent
+    : noReplayAssistantContent
   const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
     displayMessages,
     displayMessageProjection.changedMessages,
@@ -3981,7 +3986,9 @@ export function ChatContainer({
       : (displayMessages[lastVisibleMessageIndex]?.id ?? null)
 
   const buildSearchDocument = useCallback(
-    (message: Message, sortIndex: number): ChatSearchDocument | null => {
+    (row: Message, sortIndex: number): ChatSearchDocument | null => {
+      const content = assistantReplayContent.get(row.id)
+      const message = content === undefined ? row : { ...row, content }
       const hookLogBucket =
         hookLogConfig.enabled && message.role === "user"
           ? hookLogBucketByTurnId.get(message.id)
@@ -4021,7 +4028,7 @@ export function ChatContainer({
         sortIndex
       }
     },
-    [hookLogBucketByTurnId, hookLogConfig.enabled, searchBodyOnly, surface, replySource]
+    [assistantReplayContent, hookLogBucketByTurnId, hookLogConfig.enabled, searchBodyOnly, surface, replySource]
   )
   const stableSearchDocumentsRef = useRef<{
     baseline: readonly Message[]
@@ -9083,6 +9090,7 @@ export function ChatContainer({
                         messageAttempts={streamData.messageAttempts}
                         searchReveal={searchOpen || externalNavigation ? searchReveal : null}
                         messages={displayMessages}
+                        assistantReplayContent={assistantReplayContent}
                         visibleMessageIndexes={visibleMessageIndexes}
                         lastUserMessageIndex={lastUserMessageIndex}
                         contentVersion={displayMessagesContentVersion}
