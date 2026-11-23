@@ -67,13 +67,13 @@ function clampJsonForTranscript(
     arrayLimit: number
     objectKeyLimit: number
     depthLimit: number
-    omitTruncationNotice?: boolean
+    omitTruncationNotices?: boolean
   },
   depth = 0,
   seen = new WeakSet<object>()
 ): unknown {
   if (typeof value === "string") {
-    return options.omitTruncationNotice
+    return options.omitTruncationNotices
       ? value.slice(0, options.stringLimit)
       : truncateTranscriptString(value, options.stringLimit)
   }
@@ -99,7 +99,7 @@ function clampJsonForTranscript(
       const values = value
         .slice(0, options.arrayLimit)
         .map((item) => clampJsonForTranscript(item, options, depth + 1, seen))
-      if (value.length > options.arrayLimit) {
+      if (!options.omitTruncationNotices && value.length > options.arrayLimit) {
         values.push(`[truncated ${value.length - options.arrayLimit} items]`)
       }
       return values
@@ -112,7 +112,7 @@ function clampJsonForTranscript(
     }
 
     const keyCount = Object.keys(value).length
-    if (keyCount > options.objectKeyLimit) {
+    if (!options.omitTruncationNotices && keyCount > options.objectKeyLimit) {
       output.__truncated_keys = keyCount - options.objectKeyLimit
     }
     return output
@@ -125,7 +125,7 @@ export function normalizeMessageContent(content: unknown): Message["content"] {
   return normalizeMessageContentWithinLimits(content, false)
 }
 
-// Omitted character counts vary between snapshots and repeated DB reads.
+// Omitted item counts vary between snapshots and repeated DB reads.
 // Use the same storage bounds when verifying provenance of a saved draft.
 export function getComparablePersistedMessageContent(content: unknown): Message["content"] {
   return normalizeMessageContentWithinLimits(content, true)
@@ -133,10 +133,10 @@ export function getComparablePersistedMessageContent(content: unknown): Message[
 
 function normalizeMessageContentWithinLimits(
   content: unknown,
-  omitTruncationNotice: boolean
+  omitTruncationNotices: boolean
 ): Message["content"] {
   if (typeof content === "string")
-    return omitTruncationNotice
+    return omitTruncationNotices
       ? content.slice(0, THREAD_MESSAGE_TEXT_LIMIT)
       : truncateTranscriptString(content, THREAD_MESSAGE_TEXT_LIMIT)
   if (Array.isArray(content)) {
@@ -146,7 +146,7 @@ function normalizeMessageContentWithinLimits(
         arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
         objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
         depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT,
-        omitTruncationNotice
+        omitTruncationNotices
       })
     ) as Message["content"]
   }

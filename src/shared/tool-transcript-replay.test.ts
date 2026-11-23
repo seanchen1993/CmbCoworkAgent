@@ -480,26 +480,49 @@ describe("tool transcript replay", () => {
     "same-image",
     "different-image",
     "different-execution",
-    "different-reasoning"
+    "different-reasoning",
+    "equal-string-block",
+    "equal-split-block",
+    "early-indexed-block",
+    "indexed-before-image",
+    "unindexed-before-image",
+    "different-annotation"
   ])("retains the original row and exact structured continuation when proved (%s)", (mode) => {
     const [assistant, result] = exchange()
     const [revision, duplicate] = exchange(2)
     const image = { type: "image", source: { type: "url", url: "https://example.com/first.png" } }
     const hasImage = mode.endsWith("image")
+    const indexed = mode === "early-indexed-block" || mode === "indexed-before-image"
+    const hasLaterParagraph = indexed || mode.endsWith("before-image")
+    const laterParagraph = { type: "text", index: 2, text: "File details" }
+    const oldText = mode === "equal-split-block" ? "Checking\nFile details" : "Checking"
+    const nextText = mode.startsWith("equal-") ? "Checking" : "Checking version and status"
     const earlier = {
       ...assistant,
-      content: mode === "mixed-string" ? "Checking" : [
-        { type: "text", text: "Checking" },
-        ...(hasImage ? [image] : [])
-      ]
+      content:
+        mode === "mixed-string" || mode === "equal-string-block"
+          ? oldText
+          : [
+              { type: "text", text: oldText, ...(indexed ? { index: 0 } : {}) },
+              ...(hasImage ? [image] : []),
+              ...(hasLaterParagraph ? [laterParagraph] : [])
+            ]
     }
     const later = {
       ...revision,
       content: [
-        { type: "text", text: "Checking version and status" },
+        {
+          type: "text",
+          text: nextText,
+          ...(indexed ? { index: 0 } : {}),
+          ...(mode === "different-annotation"
+            ? { annotations: [{ type: "citation", text: "Source A" }] }
+            : {})
+        },
         ...(mode === "different-image"
           ? [{ ...image, source: { ...image.source, url: "https://example.com/second.png" } }]
-          : hasImage ? [image] : [])
+          : hasImage ? [image] : []),
+        ...(hasLaterParagraph || mode === "equal-split-block" ? [laterParagraph] : [])
       ],
       ...(mode === "different-reasoning" ? { reasoning: "Independent reasoning" } : {})
     }
@@ -512,9 +535,8 @@ describe("tool transcript replay", () => {
       expect(aliases.size).toBe(0)
     } else {
       expect(aliases).toEqual(new Map([[later.id, earlier.id], [duplicate.id, result.id]]))
-      expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id)).get(
-        earlier.id
-      )).toBe(later.content)
+      const content = getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))
+      expect(content.get(earlier.id)).toBe(mode.startsWith("equal-") ? undefined : later.content)
     }
   })
 
@@ -638,7 +660,9 @@ describe("tool transcript replay", () => {
     "bounded-text",
     "bounded-block",
     "bounded-image",
-    "bounded-tool-use"
+    "bounded-tool-use",
+    "bounded-array-tool-use",
+    "bounded-object-tool-use"
   ])("keeps separate hidden replies with sparse checkpoint results (%s)", (mode) => {
     const lateEmpty = mode !== "missing-first"
     const [older, olderResult] = exchange()
@@ -660,7 +684,16 @@ describe("tool transcript replay", () => {
             type: "tool_use",
             id: "ls-call",
             name: "ls",
-            input: mode === "bounded-tool-use" ? { value: "a".repeat(70_000) } : {}
+            input:
+              mode === "bounded-tool-use"
+                ? { value: "a".repeat(70_000) }
+                : mode === "bounded-array-tool-use"
+                  ? { selections: Array.from({ length: 300 }, (_, index) => index) }
+                  : mode === "bounded-object-tool-use"
+                    ? { options: Object.fromEntries(
+                        Array.from({ length: 200 }, (_, index) => [`option_${index}`, index])
+                      ) }
+                    : {}
           }
         : mode.includes("image") || mode === "interleaved-blocks"
           ? image

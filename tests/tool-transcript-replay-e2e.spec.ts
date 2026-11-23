@@ -469,7 +469,7 @@ async function main(): Promise<void> {
       page.on("pageerror", (error) => pageErrors.push(error.message))
       await page.getByText(title, { exact: true }).first().click({ timeout: 30_000 })
       const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
-      await chat.getByText(lastReply, { exact: true }).waitFor({ timeout: 30_000 })
+      await chat.getByText(structuredReplayReply, { exact: true }).waitFor({ timeout: 30_000 })
       // Resize the mounted fixture viewport without changing the sidebar hit targets.
       const browserWindow = await app.browserWindow(page)
       await browserWindow.evaluate((window) => window.webContents.setZoomFactor(0.35))

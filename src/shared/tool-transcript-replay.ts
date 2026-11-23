@@ -20,6 +20,7 @@ import { extractPersistedMessageContent } from "./stream-transcript-content"
 import { getComparablePersistedMessageContent } from "./thread-message-content"
 
 const checkpointToolTurn = Symbol("checkpointToolTurn")
+const replayTextBlockIndex = Symbol("replayTextBlockIndex")
 
 type TranscriptMessage = CheckpointAuthorityTranscriptMessage & {
   botHistoryDeliveryScope?: unknown
@@ -547,12 +548,13 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   const observed = new Map<string, Map<number, SlotVersion[]>>()
   const textVersionsByResults = new Map<
     string,
-    Array<{ batch: PartialToolExchange<T>; text: string }>
+    Array<{ batch: PartialToolExchange<T>; prose: ReplayProse; length: number }>
   >()
   const replayOrder = new Map<PartialToolExchange<T>, number>()
   const exactCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const exactSingleToolCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const proseByAssistant = new Map<T, ReplayProse>()
+  const indexedProseByAssistant = new Map<T, ReplayProse>()
   const prose = (assistant: T) => {
     const indexed = proseByAssistant.get(assistant)
     if (indexed) return indexed
@@ -560,12 +562,27 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     proseByAssistant.set(assistant, content)
     return content
   }
+  const indexedProse = (assistant: T) => {
+    const indexed = indexedProseByAssistant.get(assistant)
+    if (indexed) return indexed
+    const content = readIndexedReplayProse(assistant.content, prose(assistant))
+    indexedProseByAssistant.set(assistant, content)
+    return content
+  }
   const extendedText = (candidate: T, original: T) =>
     hasReplayProse(candidate.content) &&
     hasReplayProse(original.content) &&
-    isReplayProseExtension(prose(candidate), prose(original))
+    (isReplayProseExtension(prose(candidate), prose(original)) ||
+      isReplayProseExtension(indexedProse(candidate), indexedProse(original)))
   const compatibleText = (left: T, right: T) =>
-    sameValue(left.content, right.content) || extendedText(left, right) || extendedText(right, left)
+    equivalentPresentation(left, right) || extendedText(left, right) || extendedText(right, left)
+  const equivalentPresentation = (left: T, right: T): boolean => {
+    if (sameValue(left.content, right.content)) return true
+    if (!hasReplayProse(left.content) || !hasReplayProse(right.content)) return false
+    const before = prose(left)
+    const after = prose(right)
+    return sameValue(before.text, after.text) && sameValue(before.blocks, after.blocks)
+  }
   const textDistance = (left: T, right: T) =>
     Math.abs(replayProseLength(prose(left)) - replayProseLength(prose(right)))
   const exactSlots = (
@@ -604,24 +621,27 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       full && batch.calls.length === 1 && !Array.isArray(batch.results[0]?.content)
     if (plainSingleTool && !hasDifferentText.has(assistantTextKey(assistant))) continue
     toolReplayAssistantIds?.add(assistant.id)
-    const text = prose(assistant).text.filter(Boolean).join("\n")
+    const body = prose(assistant)
     const version = { batch, keys, complete: full }
     const original = rememberVersion(
       versions,
-      JSON.stringify([payloadId(text), ...keys]),
+      JSON.stringify([...body.text.map(payloadId), ...keys]),
       version,
-      (left, right) => exactSlots(left.batch, right.batch, true)
+      (left, right) => equivalentPresentation(left.batch.assistant, right.batch.assistant) &&
+        exactSlots(left.batch, right.batch, false)
     )
     if (original !== version) {
-      const copies = plainSingleTool ? exactSingleToolCopies : exactCopies
+      const identical = sameValue(assistant.content, original.batch.assistant.content)
+      const copies = plainSingleTool && identical ? exactSingleToolCopies : exactCopies
       copies.set(batch, original.batch)
       continue
     }
     if (hasReplayProse(assistant.content)) {
       replayOrder.set(batch, position)
-      const outcome = JSON.stringify(keys)
+      const layout = indexedProse(assistant)
+      const outcome = JSON.stringify([layout.text.length, ...keys])
       const revisions = textVersionsByResults.get(outcome) ?? []
-      revisions.push({ batch, text })
+      revisions.push({ batch, prose: layout, length: replayProseLength(layout) })
       textVersionsByResults.set(outcome, revisions)
     }
     for (const key of keys) {
@@ -637,18 +657,44 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   const continuedText = new Map<PartialToolExchange<T>, T>()
   for (const variants of textVersionsByResults.values()) {
     if (variants.length < 2) continue
-    variants.sort((left, right) => (left.text < right.text ? -1 : Number(left.text > right.text)))
+    const span = findReplayProseIndexSpan(variants.map(({ prose }) => prose))
+    const part = (variant: (typeof variants)[number]) => variant.prose.text[span]
+    const initial = variants[0].prose.text
+    const varyAcrossSpans = initial.length > 1 && variants.some(({ prose }) =>
+      prose.text.some((text, index) => index !== span && text !== initial[index])
+    )
+    variants.sort((left, right) => {
+      const first = part(left)
+      const second = part(right)
+      return first < second ? -1 : first > second ? 1 : left.length - right.length
+    })
     const prefixes: typeof variants = []
     const parentByVersion = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
     const childrenByVersion = new Map<PartialToolExchange<T>, number>()
     for (const variant of variants) {
-      while (prefixes.length && !variant.text.startsWith(prefixes.at(-1)!.text)) prefixes.pop()
-      const previous = prefixes.findLast(
-        ({ batch, text }) =>
-          text !== variant.text &&
-          extendedText(variant.batch.assistant, batch.assistant) &&
-          exactSlots(variant.batch, batch, false)
-      )
+      while (prefixes.length && !part(variant).startsWith(part(prefixes.at(-1)!))) prefixes.pop()
+      const matches = ({ batch, prose }: (typeof variants)[number]) =>
+        isReplayProseExtension(variant.prose, prose) &&
+        exactSlots(variant.batch, batch, false)
+      let previous: (typeof variants)[number] | undefined
+      if (!varyAcrossSpans) {
+        previous = prefixes.findLast(matches)
+      } else {
+        // A retained block separates text spans, and a provider can extend
+        // either span independently. Reject incomparable parent claims.
+        const parents: typeof variants = []
+        for (const prefix of prefixes) {
+          if (!matches(prefix)) continue
+          if (parents.some((parent) => isReplayProseExtension(parent.prose, prefix.prose)))
+            continue
+          for (let index = parents.length - 1; index >= 0; index--) {
+            if (isReplayProseExtension(prefix.prose, parents[index].prose))
+              parents.splice(index, 1)
+          }
+          parents.push(prefix)
+        }
+        if (parents.length === 1) previous = parents[0]
+      }
       if (previous) {
         parentByVersion.set(variant.batch, previous.batch)
         childrenByVersion.set(previous.batch, (childrenByVersion.get(previous.batch) ?? 0) + 1)
@@ -658,7 +704,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     // Keep each line of continuation independent below a shared prefix.
     const rootByVersion = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
     const chains = new Map<PartialToolExchange<T>, PartialToolExchange<T>[]>()
-    for (const { batch } of variants) {
+    for (const { batch } of variants.sort((left, right) => left.length - right.length)) {
       const parent = parentByVersion.get(batch)
       const root =
         parent && childrenByVersion.get(parent) === 1
@@ -1539,14 +1585,31 @@ interface ReplayProse {
   blocks: unknown[]
 }
 
-function readReplayProse(content: unknown): ReplayProse {
+function readIndexedReplayProse(content: unknown, fallback: ReplayProse): ReplayProse {
+  if (!Array.isArray(content)) return fallback
+  const indexedBlocks = content.filter((block) =>
+    block?.type === "text" && typeof block.text === "string" && typeof block.index === "number"
+  )
+  return indexedBlocks.length > 1 ? readReplayProse(content, true) : fallback
+}
+
+function readReplayProse(content: unknown, preserveTextIndices = false): ReplayProse {
   if (typeof content === "string") return { text: [content], blocks: [] }
   if (!Array.isArray(content)) return { text: [""], blocks: [] }
   const text: string[] = []
   const blocks: unknown[] = []
   let parts: string[] = []
   for (const block of content) {
-    if (typeof block === "string" || (block?.type === "text" && typeof block.text === "string")) {
+    if (
+      typeof block === "string" ||
+      (block?.type === "text" && typeof block.text === "string" &&
+        Object.keys(block).every((key) => key === "type" || key === "text" || key === "index"))
+    ) {
+      if (preserveTextIndices && typeof block !== "string" && typeof block.index === "number") {
+        text.push(parts.join("\n"))
+        blocks.push({ type: replayTextBlockIndex, index: block.index })
+        parts = []
+      }
       const value = typeof block === "string" ? block : block.text
       if (value) parts.push(value)
     } else {
@@ -1557,6 +1620,20 @@ function readReplayProse(content: unknown): ReplayProse {
   }
   text.push(parts.join("\n"))
   return { text, blocks }
+}
+
+function findReplayProseIndexSpan(prose: readonly ReplayProse[]): number {
+  const spans = prose[0].text.length
+  if (spans === 1) return 0
+  let best = 0
+  let diversity = 0
+  for (let index = 0; index < spans; index++) {
+    const size = new Set(prose.map(({ text }) => text[index])).size
+    if (size <= diversity) continue
+    best = index
+    diversity = size
+  }
+  return best
 }
 
 function replayProseLength(prose: ReplayProse): number {
@@ -1570,18 +1647,24 @@ function hasReplayProse(content: unknown): content is string | unknown[] {
 function isReplayContentExtension(candidate: unknown, original: unknown): boolean {
   if (typeof candidate === "string" && typeof original === "string")
     return candidate.length > original.length && candidate.startsWith(original)
+  if (!hasReplayProse(candidate) || !hasReplayProse(original)) return false
+  const before = readReplayProse(original)
+  const after = readReplayProse(candidate)
   return (
-    hasReplayProse(candidate) &&
-    hasReplayProse(original) &&
-    isReplayProseExtension(readReplayProse(candidate), readReplayProse(original))
+    isReplayProseExtension(after, before) ||
+    isReplayProseExtension(
+      readIndexedReplayProse(candidate, after),
+      readIndexedReplayProse(original, before)
+    )
   )
 }
 
 function isReplayProseExtension(after: ReplayProse, before: ReplayProse): boolean {
   return (
-    sameValue(before.blocks, after.blocks) &&
     replayProseLength(after) > replayProseLength(before) &&
-    before.text.every((part, index) => after.text[index].startsWith(part))
+    before.text.length === after.text.length &&
+    before.text.every((part, index) => after.text[index].startsWith(part)) &&
+    sameValue(before.blocks, after.blocks)
   )
 }
 
@@ -1616,15 +1699,25 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
   const byPresentation = new Map<string, Array<AnchoredToolSlots<T>>>()
   const key = (exchange: PartialToolExchange<T>, anchor?: T) =>
     JSON.stringify([anchor?.id ?? null, exchangeKey(exchange)])
-  const checkpointProse = new Map<T, ReplayProse>()
+  const checkpointProse = new Map<T, readonly [ReplayProse, ReplayProse]>()
+  const readPersistedProse = (content: unknown) => {
+    const normalized = getComparablePersistedMessageContent(content)
+    const prose = readReplayProse(normalized)
+    return [prose, readIndexedReplayProse(normalized, prose)] as const
+  }
+  const matchPersistedProse = (
+    stored: readonly [ReplayProse, ReplayProse],
+    source: readonly [ReplayProse, ReplayProse]
+  ) => Math.max(
+    getReplayProseMatch(stored[0], source[0]),
+    getReplayProseMatch(stored[1], source[1])
+  )
   const readCheckpointProse = (assistant: T) => {
     const existing = checkpointProse.get(assistant)
     if (existing) return existing
     // Apply the Values writer's projection only to the evidence. It omits
     // provider-only blocks such as inline reasoning from the durable body.
-    const prose = readReplayProse(
-      getComparablePersistedMessageContent(extractPersistedMessageContent(assistant.content))
-    )
+    const prose = readPersistedProse(extractPersistedMessageContent(assistant.content))
     checkpointProse.set(assistant, prose)
     return prose
   }
@@ -1647,8 +1740,8 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
     )
       continue
     const stored = target.exchange.assistant.content
-    const storedProse = readReplayProse(getComparablePersistedMessageContent(stored))
-    const ownerMatch = getReplayProseMatch(storedProse, readCheckpointProse(copy.exchange.assistant))
+    const storedProse = readPersistedProse(stored)
+    const ownerMatch = matchPersistedProse(storedProse, readCheckpointProse(copy.exchange.assistant))
     const otherClaim = byPresentation.get(key(target.exchange, copy.anchor))?.some((other) => {
       const turn = rawTurns.get(other.exchange.assistant.id)
       return (
@@ -1657,7 +1750,7 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
         sameReplayAnchor(copy.anchor, other.anchor, true) &&
         sameExchangeCalls(target.exchange, other.exchange, true, false) &&
         (sameValue(stored, other.exchange.assistant.content) ||
-          getReplayProseMatch(storedProse, readCheckpointProse(other.exchange.assistant)) >
+          matchPersistedProse(storedProse, readCheckpointProse(other.exchange.assistant)) >
             ownerMatch)
       )
     })
@@ -1936,13 +2029,11 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   const keepHiddenToolScope = (rows: T[], sources: readonly T[]): T[] => {
     if (!rawAssistantTurns || !rawCheckpointTurns?.hiddenAssistants.size) return rows
     const visibleTurns = indexAssistantTurns(sources)
-    type Declaration = { id: string; text: string; rawTurn: string; hidden: boolean }
+    type Declaration = { id: string; rawTurn: string; hidden: boolean }
     const groups = new Map<string, Declaration[]>()
     for (const [index, row] of rows.entries()) {
       if (row.role !== "assistant" || !Array.isArray(row.tool_calls) || !row.tool_calls.length)
         continue
-      const { text, blocks } = readReplayProse(extractPersistedMessageContent(row.content))
-      if (blocks.length) continue
       const sourceId = sources[index].id
       const rawTurn = rawAssistantTurns.get(sourceId)
       if (rawTurn === undefined) continue
@@ -1954,7 +2045,6 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
       const group = groups.get(key) ?? []
       group.push({
         id: row.id,
-        text: text[0],
         rawTurn,
         hidden: rawCheckpointTurns.hiddenAssistants.has(sourceId)
       })
@@ -1968,26 +2058,9 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
         new Set(group.map(({ rawTurn }) => rawTurn)).size < 2
       )
         continue
-      group.sort((left, right) => (left.text < right.text ? -1 : Number(left.text > right.text)))
-      const prefixes: Declaration[] = []
-      for (const declaration of group) {
-        while (prefixes.length && !declaration.text.startsWith(prefixes.at(-1)!.text))
-          prefixes.pop()
-        if (
-          prefixes.some(
-            (earlier) =>
-              earlier.text !== declaration.text &&
-              earlier.rawTurn !== declaration.rawTurn &&
-              (earlier.hidden || declaration.hidden)
-          )
-        ) {
-          // The merge can restore tool results missing from the checkpoint.
-          // Protect the raw distinction before result coverage becomes visible.
-          for (const { id, rawTurn } of group) protectedTurns.set(id, rawTurn)
-          break
-        }
-        prefixes.push(declaration)
-      }
+      // Local partial-result and prose continuations need their original raw
+      // turn. Full exact physical replays can still be matched across turns.
+      for (const { id, rawTurn } of group) protectedTurns.set(id, rawTurn)
     }
     if (!protectedTurns.size) return rows
     // Keep the raw boundary in memory through ID alignment and final replay
