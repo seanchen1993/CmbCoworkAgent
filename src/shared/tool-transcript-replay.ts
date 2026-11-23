@@ -360,16 +360,34 @@ function historicalReplayId(row: TranscriptMessage): string | undefined {
 }
 
 function createPayloadIds(): (value: unknown) => number {
-  // Intern scalar values so keys need not serialize full tool output.
-  const ids = new Map<unknown, number>()
-  return (value) => {
-    if (value !== null && typeof value === "object") return 0
-    const existing = ids.get(value)
+  const scalars = new Map<unknown, number>()
+  const structures = new Map<string, number>()
+  const objects = new WeakMap<object, number>()
+  let nextId = 1
+  const intern = <K>(index: Map<K, number>, key: K): number => {
+    const existing = index.get(key)
     if (existing !== undefined) return existing
-    const id = ids.size + 1
-    ids.set(value, id)
+    const id = nextId++
+    index.set(key, id)
     return id
   }
+  const read = (value: unknown, depth: number): number => {
+    if (value === null || typeof value !== "object") return intern(scalars, value)
+    if (depth > 32) return 0
+    const existing = objects.get(value)
+    if (existing !== undefined) return existing
+    // Index structured payloads by their shape and interned child values.
+    // Candidate verification still checks the exact stored payload.
+    const object = value as Record<string, unknown>
+    const key = JSON.stringify([
+      Array.isArray(value),
+      Object.keys(object).sort().map((field) => [field, read(object[field], depth + 1)])
+    ])
+    const id = intern(structures, key)
+    objects.set(value, id)
+    return id
+  }
+  return (value) => read(value, 0)
 }
 
 function hasRawCheckpointToolBindings(
@@ -1535,13 +1553,25 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
       .filter((row) => row.role === "tool" && Array.isArray(row.content))
       .map((row) => row.tool_call_id)
   )
+  const mayNeedReconciliation = ({ calls }: PartialToolExchange<T>) =>
+    calls.length > 1 || calls.some(({ id }) => structuredCalls.has(id))
+  const knownComplete = new Set<T>()
+  for (const copies of checkpoint.byPhysicalGroup.values()) {
+    for (const copy of copies) {
+      if (
+        mayNeedReconciliation(copy.exchange) &&
+        copy.outcomeKey &&
+        durable.byOutcome.get(copy.outcomeKey)?.some((target) =>
+          sameReplayAnchor(target.anchor, copy.anchor, true) &&
+          isSameCompletedExecution(target.exchange, copy.exchange, true)
+        )
+      ) knownComplete.add(copy.exchange.assistant)
+    }
+  }
   const partial = messages.flatMap((assistant) => {
-    if (assistant.role !== "assistant") return []
+    if (assistant.role !== "assistant" || knownComplete.has(assistant)) return []
     const batch = readToolExchangeSlots(assistant, checkpoint.ownership)
-    return batch &&
-      (batch.calls.length > 1 || batch.calls.some(({ id }) => structuredCalls.has(id)))
-      ? [batch]
-      : []
+    return batch && mayNeedReconciliation(batch) ? [batch] : []
   })
   if (!partial.length || (!durable.incomplete.length && !durable.byOutcome.size)) return
   const durableResults = new Map<string, T[]>()

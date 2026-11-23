@@ -2502,4 +2502,31 @@ describe("tool transcript replay", () => {
     expect(aligned.map(({ id }) => id)).toEqual(durable.slice(0, 3).map(({ id }) => id))
     expect(argumentReads).toBeLessThan(3_000)
   })
+
+  it("indexes distinct structured outcomes without reconciling unchanged complete batches", () => {
+    let payloadReads = 0
+    const versionCount = 180
+    const build = () => [user, ...Array.from({ length: versionCount }, (_, index) => {
+      const [assistant, result] = exchange(index + 1)
+      return [
+        { ...assistant, content: `Checking version ${index}` },
+        {
+          ...result,
+          content: [{
+            type: "text",
+            get text() {
+              payloadReads++
+              return `Result version ${index}`
+            }
+          }]
+        }
+      ]
+    }).flat()]
+    const durable = build()
+    const prepared = prepareToolTranscriptReplayMerge(durable, build())
+    const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable)
+    expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
+    expect(findReplayedToolExchangeAliases(merged).size).toBe(0)
+    expect(payloadReads).toBeLessThan(versionCount * 50)
+  })
 })
