@@ -136,9 +136,10 @@ export function resolveChatReplayAliases(
   const carriesUniqueReasoning = (id: string, canonical: string): boolean => {
     const index = display.indexById.get(id)
     const canonicalIndex = display.indexById.get(canonical)
-    if (index === undefined || canonicalIndex === undefined) return false
+    if (index === undefined) return false
     const reasoning = display.messages[index].reasoning
-    return Boolean(reasoning && display.messages[canonicalIndex].reasoning !== reasoning)
+    return Boolean(reasoning &&
+      (canonicalIndex === undefined || display.messages[canonicalIndex].reasoning !== reasoning))
   }
   if (liveMessageIds && replayAliases.size < liveMessages.length) {
     for (const [id, canonical] of replayAliases) {

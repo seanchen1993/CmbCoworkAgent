@@ -55,6 +55,7 @@ import {
   CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
   CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED,
   CHECKPOINT_RUNTIME_PROJECTION_RESUME_REQUIRED,
+  LEGACY_TOOL_REPLAY_SOURCE_BYTE_BUDGET,
   SEARCH_BACKFILL_METADATA_BYTE_LIMIT,
   CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
 } from "./runtime-projection-protocol"
@@ -773,53 +774,138 @@ function checkpointSnapshotChainFitsPresenceBudget(
 }
 
 export function readLegacyReplayCheckpoint(
-  path: string, threadId: string, checkpointId: string, cancellation: Int32Array
-): unknown {
+  path: string, threadId: string, checkpointId: string | undefined, cancellation: Int32Array
+): { id: string; checkpoint: Record<string, unknown> } | undefined {
   const source = resolveForegroundCheckpointReadPath(path)
   if (!existsSync(source)) return
   const database = new DatabaseSync(source, { readOnly: true, timeout: 100 })
   try {
     database.exec("BEGIN")
     throwIfCancelled(cancellation)
-    const selected = database.prepare(`SELECT length(CAST(checkpoint AS BLOB)) AS bytes
-      FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`)
-      .get(threadId, checkpointId)
-    if (typeof selected?.bytes !== "number" || selected.bytes > CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET)
+    const layout = assertCheckpointSchemaIsPublished(database)
+    const selected = database.prepare(`SELECT checkpoint_id, length(CAST(checkpoint AS BLOB)) AS bytes
+      FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ''${checkpointId ? " AND checkpoint_id = ?" : ""}
+      ORDER BY ${checkpointTimestampExpression(layout)} DESC, checkpoint_id DESC LIMIT 1`)
+      .get(threadId, ...(checkpointId ? [checkpointId] : []))
+    if (typeof selected?.bytes !== "number" || selected.bytes > LEGACY_TOOL_REPLAY_SOURCE_BYTE_BUDGET)
       return
-    const row = readStoredCheckpointRow(database, threadId, "", false, undefined, checkpointId)
+    if (typeof selected.checkpoint_id !== "string") return
+    const row = readStoredCheckpointRow(database, threadId, "", false, layout, selected.checkpoint_id)
     if (!row) return
     const checkpoint = objectRecord(parseTypedJson(row.type, row.checkpoint, "checkpoint"))
     if (!checkpoint) return
     const reference = objectRecord(objectRecord(checkpoint.channel_values)?.messages)
     if (reference?.[EXTERNAL_MESSAGES_MARKER] === true &&
         !checkpointSnapshotChainFitsPresenceBudget(database, row, cancellation)) return
-    return hydrateRawCheckpointMessages(database, row, checkpoint, cancellation)
+    return { id: row.checkpointId, checkpoint: hydrateRawCheckpointMessages(database, row, checkpoint, cancellation) }
   } finally {
     database.close()
   }
 }
 
 export function readLegacyReplayCheckpointAncestors(
-  path: string, threadId: string, checkpointId: string, sources: readonly string[]
+  path: string, messageDatabasePath: string, threadId: string, checkpointId: string, sources: readonly string[]
 ): Set<string> {
   const source = resolveForegroundCheckpointReadPath(path)
   if (!existsSync(source)) return new Set()
   const database = new DatabaseSync(source, { readOnly: true, timeout: 100 })
+  let ledger: DatabaseSync | undefined
   try {
-    const rows = database.prepare(`WITH RECURSIVE lineage(id) AS (
-      SELECT ?
-      UNION
-      SELECT checkpoint.parent_checkpoint_id FROM checkpoints AS checkpoint
-      JOIN lineage ON checkpoint.checkpoint_id = lineage.id
-      WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
-        AND checkpoint.parent_checkpoint_id IS NOT NULL
-      LIMIT ${CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT}
-    ) SELECT id FROM lineage WHERE id IN (SELECT value FROM json_each(?))`)
-      .all(checkpointId, threadId, JSON.stringify(sources))
-    return new Set(rows.flatMap(({ id }) => typeof id === "string" ? [id] : []))
+    database.exec("BEGIN")
+    const root = database.prepare(`SELECT parent_checkpoint_id FROM checkpoints
+      WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`).get(threadId, checkpointId)
+    if (!root) return new Set()
+    if (existsSync(messageDatabasePath))
+      ledger = new DatabaseSync(messageDatabasePath, { readOnly: true, timeout: 100 })
+    const descendsFrom = createLegacyCheckpointAncestry(database, ledger, threadId, "", {
+      checkpointId,
+      parentCheckpointId: typeof root.parent_checkpoint_id === "string" ? root.parent_checkpoint_id : null
+    })
+    return new Set(descendsFrom ? sources.filter(descendsFrom) : [])
   } finally {
+    ledger?.close()
     database.close()
   }
+}
+
+function createLegacyCheckpointAncestry(
+  checkpointDatabase: DatabaseSync,
+  lineageDatabase: DatabaseSync | undefined,
+  threadId: string,
+  checkpointNs: string,
+  row: Pick<StoredCheckpointRow, "checkpointId" | "parentCheckpointId">,
+  cancellation?: Int32Array
+) {
+  const parent = checkpointDatabase.prepare(`SELECT parent_checkpoint_id FROM checkpoints
+    WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`)
+  const lineageColumns = checkpointDatabase.prepare("PRAGMA table_info(checkpoint_lineage)").all()
+  const hasSpans = lineageColumns.some((column) => column.name === "ancestor_span_depth")
+  const spanColumns = hasSpans ? "lineage_depth, ancestor_span_id, ancestor_span_depth" :
+    "NULL AS lineage_depth, NULL AS ancestor_span_id, NULL AS ancestor_span_depth"
+  const recordedParent = lineageColumns.length ? checkpointDatabase.prepare(`
+    SELECT parent_checkpoint_id, conflicting_parent, ${spanColumns} FROM checkpoint_lineage
+    WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`) : undefined
+  const knownParent = lineageDatabase?.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'legacy_checkpoint_transcript_parents'`).get()
+    ? lineageDatabase.prepare(`SELECT parent_checkpoint_id FROM legacy_checkpoint_transcript_parents
+      WHERE thread_id = ? AND checkpoint_id = ?`) : undefined
+  const savedRoot = knownParent?.get(threadId, row.checkpointId)
+  const recordedRoot = recordedParent?.get(threadId, checkpointNs, row.checkpointId)
+  if ((savedRoot && savedRoot.parent_checkpoint_id !== row.parentCheckpointId) ||
+      (recordedRoot && (recordedRoot.conflicting_parent === 1 ||
+        recordedRoot.parent_checkpoint_id !== row.parentCheckpointId))) return undefined
+  const skipConflicts = hasSpans && checkpointDatabase.prepare(`SELECT 1 FROM checkpoint_lineage
+    WHERE thread_id = ? AND checkpoint_ns = ? AND conflicting_parent = 1
+      AND lineage_depth BETWEEN ? AND ? LIMIT 1`)
+  const changedLiveParents = hasSpans && checkpointDatabase.prepare(`
+    SELECT 1 FROM checkpoints AS live JOIN checkpoint_lineage AS lineage
+      USING (thread_id, checkpoint_ns, checkpoint_id)
+    WHERE live.thread_id = ? AND live.checkpoint_ns = ?
+      AND live.parent_checkpoint_id IS NOT lineage.parent_checkpoint_id LIMIT 1
+  `).get(threadId, checkpointNs)
+  const checkpoints = new Map<string, { parent: string | null; spanId?: string; spanDepth?: number } | null>()
+  const lookup = (id: string) => {
+    if (checkpoints.has(id)) return checkpoints.get(id)
+    const available = parent.get(threadId, checkpointNs, id)
+    const recorded = recordedParent?.get(threadId, checkpointNs, id)
+    const remembered = knownParent?.get(threadId, id)
+    const row = available ?? recorded
+    const conflicted = recorded?.conflicting_parent === 1 ||
+      (recorded && available && available.parent_checkpoint_id !== recorded.parent_checkpoint_id) ||
+      (remembered && row && remembered.parent_checkpoint_id !== row.parent_checkpoint_id)
+    const node = conflicted ? null : {
+      parent: typeof row?.parent_checkpoint_id === "string" ? row.parent_checkpoint_id : null,
+      ...(skipConflicts && !changedLiveParents && typeof recorded?.ancestor_span_id === "string" &&
+        typeof recorded.ancestor_span_depth === "number" && typeof recorded.lineage_depth === "number" &&
+        !skipConflicts.get(threadId, checkpointNs, recorded.ancestor_span_depth, recorded.lineage_depth)
+        ? { spanId: recorded.ancestor_span_id, spanDepth: recorded.ancestor_span_depth } : {})
+    }
+    checkpoints.set(id, node)
+    return node
+  }
+  const ancestry = new Map<string, boolean>()
+  const descendsFrom = (previousId: string) => {
+    const cached = ancestry.get(previousId)
+    if (cached !== undefined) return cached
+    const depth = recordedParent?.get(threadId, checkpointNs, previousId)?.lineage_depth
+    const visited = new Set<string>([row.checkpointId])
+    let id = row.parentCheckpointId
+    while (id !== null && !visited.has(id) && visited.size <= CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT) {
+      throwIfCancelled(cancellation)
+      const node = lookup(id)
+      if (!node) break
+      if (id === previousId) {
+        ancestry.set(previousId, true)
+        return true
+      }
+      visited.add(id)
+      id = node.spanId && node.spanDepth !== undefined &&
+        (typeof depth !== "number" || depth <= node.spanDepth) ? node.spanId : node.parent
+    }
+    ancestry.set(previousId, false)
+    return false
+  }
+  return descendsFrom
 }
 
 function isVisibleSerializedCheckpointMessage(raw: unknown): boolean {
@@ -7289,78 +7375,13 @@ function bootstrapLegacyTranscript(
     const reference = objectRecord(objectRecord(rawCheckpoint.channel_values)?.messages)
     const transcriptRevision = reference?.[EXTERNAL_MESSAGES_MARKER] === true &&
       typeof reference.transcriptRevision === "string" ? reference.transcriptRevision : null
-    const parent = checkpointDatabase.prepare(`SELECT parent_checkpoint_id FROM checkpoints
-      WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`)
-    const lineageColumns = checkpointDatabase.prepare("PRAGMA table_info(checkpoint_lineage)").all()
-    const hasSpans = lineageColumns.some((column) => column.name === "ancestor_span_depth")
-    const spanColumns = hasSpans ? "lineage_depth, ancestor_span_id, ancestor_span_depth" :
-      "NULL AS lineage_depth, NULL AS ancestor_span_id, NULL AS ancestor_span_depth"
-    const recordedParent = lineageColumns.length ? checkpointDatabase.prepare(`
-      SELECT parent_checkpoint_id, conflicting_parent, ${spanColumns} FROM checkpoint_lineage
-      WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`) : undefined
     if (existsSync(messageDatabasePath)) {
       lineageDatabase = new DatabaseSync(messageDatabasePath, { readOnly: true, timeout: searchGuard ? 100 : 5_000 })
     }
-    const knownParent = lineageDatabase?.prepare(`SELECT 1 FROM sqlite_master
-      WHERE type = 'table' AND name = 'legacy_checkpoint_transcript_parents'`).get()
-      ? lineageDatabase.prepare(`SELECT parent_checkpoint_id FROM legacy_checkpoint_transcript_parents
-        WHERE thread_id = ? AND checkpoint_id = ?`) : undefined
-    const savedRoot = knownParent?.get(threadId, row.checkpointId)
-    const recordedRoot = recordedParent?.get(threadId, checkpointNs, row.checkpointId)
-    if ((savedRoot && savedRoot.parent_checkpoint_id !== row.parentCheckpointId) ||
-        (recordedRoot && (recordedRoot.conflicting_parent === 1 ||
-          recordedRoot.parent_checkpoint_id !== row.parentCheckpointId))) throw searchBootstrapNeedsForeground()
-    const skipConflicts = hasSpans && checkpointDatabase.prepare(`SELECT 1 FROM checkpoint_lineage
-      WHERE thread_id = ? AND checkpoint_ns = ? AND conflicting_parent = 1
-        AND lineage_depth BETWEEN ? AND ? LIMIT 1`)
-    const changedLiveParents = hasSpans && checkpointDatabase.prepare(`
-      SELECT 1 FROM checkpoints AS live JOIN checkpoint_lineage AS lineage
-        USING (thread_id, checkpoint_ns, checkpoint_id)
-      WHERE live.thread_id = ? AND live.checkpoint_ns = ?
-        AND live.parent_checkpoint_id IS NOT lineage.parent_checkpoint_id LIMIT 1
-    `).get(threadId, checkpointNs)
-    const checkpoints = new Map<string, { parent: string | null; spanId?: string; spanDepth?: number } | null>()
-    const lookup = (id: string) => {
-      if (checkpoints.has(id)) return checkpoints.get(id)
-      const available = parent.get(threadId, checkpointNs, id)
-      const recorded = recordedParent?.get(threadId, checkpointNs, id)
-      const remembered = knownParent?.get(threadId, id)
-      const row = available ?? recorded
-      const conflicted = recorded?.conflicting_parent === 1 ||
-        (recorded && available && available.parent_checkpoint_id !== recorded.parent_checkpoint_id) ||
-        (remembered && row && remembered.parent_checkpoint_id !== row.parent_checkpoint_id)
-      const node = conflicted ? null : {
-        parent: typeof row?.parent_checkpoint_id === "string" ? row.parent_checkpoint_id : null,
-        ...(skipConflicts && !changedLiveParents && typeof recorded?.ancestor_span_id === "string" &&
-          typeof recorded.ancestor_span_depth === "number" && typeof recorded.lineage_depth === "number" &&
-          !skipConflicts.get(threadId, checkpointNs, recorded.ancestor_span_depth, recorded.lineage_depth)
-          ? { spanId: recorded.ancestor_span_id, spanDepth: recorded.ancestor_span_depth } : {})
-      }
-      checkpoints.set(id, node)
-      return node
-    }
-    const ancestry = new Map<string, boolean>()
-    const descendsFrom = (previousId: string) => {
-      const cached = ancestry.get(previousId)
-      if (cached !== undefined) return cached
-      const depth = recordedParent?.get(threadId, checkpointNs, previousId)?.lineage_depth
-      const visited = new Set<string>([row.checkpointId])
-      let id = row.parentCheckpointId
-      while (id !== null && !visited.has(id) && visited.size <= CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT) {
-        throwIfCancelled(cancellation)
-        const node = lookup(id)
-        if (!node) break
-        if (id === previousId) {
-          ancestry.set(previousId, true)
-          return true
-        }
-        visited.add(id)
-        id = node.spanId && node.spanDepth !== undefined &&
-          (typeof depth !== "number" || depth <= node.spanDepth) ? node.spanId : node.parent
-      }
-      ancestry.set(previousId, false)
-      return false
-    }
+    const descendsFrom = createLegacyCheckpointAncestry(
+      checkpointDatabase, lineageDatabase, threadId, checkpointNs, row, cancellation
+    )
+    if (!descendsFrom) throw searchBootstrapNeedsForeground()
     const stats = migrateLegacyMessagesIntoDurableRows({
       databasePath: messageDatabasePath,
       threadId,

@@ -2,7 +2,7 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
 import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
-import { readLegacyReplayCheckpoint } from "../checkpointer/runtime-projection-store"
+import { readLegacyReplayCheckpoint, readLegacyReplayCheckpointAncestors } from "../checkpointer/runtime-projection-store"
 import {
   beginLegacyCheckpointRecoveryHash, legacyCheckpointReplayRowSql, NATIVE_DURABLE_CHECKPOINT_ID
 } from "../checkpointer/legacy-checkpoint-source"
@@ -1131,7 +1131,7 @@ function readPageLegacyReplayAliases(
   const after = visible.at(-1)
   const prior = before.role === "user" ? [] :
     readLegacyReplayPageContext(database, threadId, before.ordinal, "before", cancellation)
-  const later = !after || after.role === "user" ? [] :
+  const later = !after ? [] :
     readLegacyReplayPageContext(database, threadId, after.ordinal, "after", cancellation)
   const ordered = [...prior, ...visible, ...later]
   const supplementalIds = [...prior, ...later].filter((row) => (row.provider_occurrence ?? 1) > 1)
@@ -1168,13 +1168,23 @@ function readPageLegacyReplayAliases(
   }
   const checkpointPath = join(checkpointDirectory, `${threadId}.sqlite`)
   const visibleIds = new Set(ids)
+  let latest: ReturnType<typeof readLegacyReplayCheckpoint>
+  let ancestors: ReadonlySet<string> | undefined
   let inspected = 0
   for (const [source, group] of groups) {
     if (!group.assistant) continue
     if (inspected++ === 4) break
     try {
-      const checkpoint = readLegacyReplayCheckpoint(checkpointPath, threadId, source, cancellation)
-      for (const [id, retained] of readLegacyImportedCheckpointReplayAliases(ordered, checkpoint, group.ids)) {
+      const original = readLegacyReplayCheckpoint(checkpointPath, threadId, source, cancellation)
+      if (!original && !ancestors) {
+        latest = readLegacyReplayCheckpoint(checkpointPath, threadId, undefined, cancellation)
+        ancestors = latest ? readLegacyReplayCheckpointAncestors(
+          checkpointPath, request.databasePath, threadId, latest.id, [...groups.keys()]
+        ) : new Set()
+      }
+      const checkpoint = original ?? (ancestors?.has(source) ? latest : undefined)
+      if (!checkpoint) continue
+      for (const [id, retained] of readLegacyImportedCheckpointReplayAliases(ordered, checkpoint.checkpoint, group.ids)) {
         if (visibleIds.has(id)) aliases.set(id, retained)
       }
     } catch {
@@ -1206,7 +1216,7 @@ function readLegacyReplayPageContext(
     bytes += Number(row.bytes) + 128
     if (typeof row.message_id !== "string" || bytes > 512 * 1024) break
     ids.push(row.message_id)
-    if (row.role === "user" || row.role === "system") break
+    if (before && (row.role === "user" || row.role === "system")) break
   }
   if (!ids.length) return []
   const rows = readRowsById(database, threadId, ids, cancellation)

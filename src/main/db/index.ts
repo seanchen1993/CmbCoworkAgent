@@ -2058,39 +2058,31 @@ export function getThreadMessages(threadId: string): Message[] {
   })
 }
 
-export function getLegacyImportedToolOccurrenceIds(
-  threadId: string, checkpointId: string, readAncestors?: (ids: readonly string[]) => ReadonlySet<string>
-): Set<string> {
+export function getLegacyImportedToolOccurrenceSources(
+  threadId: string, assistantsOnly = false
+): Map<string, Set<string>> {
   const stmt = getDb().prepare(`SELECT message_id, i.published_checkpoint_id FROM legacy_checkpoint_transcript_imports AS i
     JOIN thread_messages AS m USING (thread_id, message_id)
     WHERE i.thread_id = ? AND i.owned_by_migration = 1
       AND i.partial_version IS NULL AND i.rewrite_progress IS NULL
       AND COALESCE(m.stream_authority, 0) = 0 AND m.provider_occurrence > 1
       AND m.goal_id IS NULL AND m.active_window_id IS NULL
-      AND m.role IN ('assistant', 'tool')`)
-  const ids = new Set<string>()
-  const candidates = new Map<string, string[]>()
+      AND ((m.role = 'assistant' AND m.tool_calls_json IS NOT NULL AND m.tool_calls_json <> '[]')
+        ${assistantsOnly ? "" : "OR (m.role = 'tool' AND m.tool_call_id IS NOT NULL)"})`)
+  const candidates = new Map<string, Set<string>>()
   try {
     stmt.bind([threadId])
     while (stmt.step()) {
       const { message_id: id, published_checkpoint_id: source } = stmt.getAsObject()
       if (typeof id !== "string" || typeof source !== "string" || source === NATIVE_DURABLE_CHECKPOINT_ID) continue
-      if (source === checkpointId) ids.add(id)
-      else if (readAncestors) {
-        const group = candidates.get(source) ?? []
-        group.push(id)
-        candidates.set(source, group)
-      }
+      const group = candidates.get(source) ?? new Set<string>()
+      group.add(id)
+      candidates.set(source, group)
     }
   } finally {
     stmt.free()
   }
-  if (readAncestors && candidates.size) {
-    for (const source of readAncestors([...candidates.keys()])) {
-      for (const id of candidates.get(source) ?? []) ids.add(id)
-    }
-  }
-  return ids
+  return candidates
 }
 
 function normalizeThreadMessagesPageLimit(limit: number | undefined): number {

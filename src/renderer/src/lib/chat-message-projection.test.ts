@@ -495,12 +495,12 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     }))
     expect(findDisplayedReplayAliases([...rows, ...sameCallBucket])).toEqual(aliases)
   })
-  it("keeps a replay row visible when only it has the live reasoning", () => {
+  it.each([true, false])("keeps live reasoning when the replay target is resident (%s)", (resident) => {
     const original = assistant()
     const replay = assistant({ id: "replay" })
     const live = { ...replay, reasoning: "Unique live reasoning" }
     const aliases = new Map([[replay.id, original.id]])
-    const display = createChatMessageProjector()([original, replay], [live], undefined)
+    const display = createChatMessageProjector()(resident ? [original, replay] : [replay], [live], undefined)
     expect(resolveChatReplayAliases(aliases, [live], display).size).toBe(0)
     expect(resolveChatReplayAliases(aliases, [], display)).toBe(aliases)
   })

@@ -30,7 +30,7 @@ import {
   getThreadValuesJson,
   getThreadValuesJsonPage,
   getThreadMessages,
-  getLegacyImportedToolOccurrenceIds,
+  getLegacyImportedToolOccurrenceSources,
   getThreadMessageCount,
   getThreadMessageOrdinalBoundary,
   getThreadMessageIdentityContext,
@@ -167,6 +167,7 @@ import {
 } from "../../shared/checkpoint-transcript"
 import {
   prepareToolTranscriptReplayMerge,
+  readLegacyImportedCheckpointReplayAliases,
   findReplayedToolExchangeAliases,
   getAssistantReplayContent
 } from "../../shared/tool-transcript-replay"
@@ -250,7 +251,10 @@ import {
   readLatestCheckpointRuntimeTupleInWorker,
   readLatestCheckpointTupleInWorker
 } from "../checkpointer/runtime-projection-client"
-import { readLegacyReplayCheckpointAncestors } from "../checkpointer/runtime-projection-store"
+import {
+  readLegacyReplayCheckpoint,
+  readLegacyReplayCheckpointAncestors
+} from "../checkpointer/runtime-projection-store"
 import { readThreadConversationPresenceForMutation } from "../services/thread-conversation-presence"
 import {
   cancelLegacySubagentTranscriptMigration,
@@ -2848,7 +2852,8 @@ function buildExportMessagesFromThreadMessages(messages: Message[]): ExportMessa
 export function mergeCheckpointAndPersistedThreadMessagesForSession(
   checkpoint: unknown,
   persistedMessages: Message[],
-  legacyImportedIds?: ReadonlySet<string>
+  legacyImportedIds?: ReadonlySet<string>,
+  verifiedLegacyAliases?: ReadonlyMap<string, string>
 ): Message[] {
   const checkpointTranscriptIndex = checkpoint ? deriveCheckpointTranscriptIndex(checkpoint) : null
   const rawCheckpointMessages = getCheckpointChannelMessages(checkpoint)
@@ -2863,7 +2868,8 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
     persistedMessages,
     checkpointMessages,
     readCheckpointReplayTurns(checkpoint),
-    legacyImportedIds
+    legacyImportedIds,
+    verifiedLegacyAliases
   )
   const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable, {
     useStableProviderOccurrences: true
@@ -2877,6 +2883,41 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
     const text = content.get(message.id)
     return [text === undefined ? message : { ...message, content: text }]
   })
+}
+
+function readSessionLegacyReplayEvidence(threadId: string, checkpointId: string, durable: Message[]) {
+  const sources = getLegacyImportedToolOccurrenceSources(threadId)
+  const ids = new Set(sources.get(checkpointId))
+  const aliases = new Map<string, string>()
+  sources.delete(checkpointId)
+  if (!sources.size) return { ids, aliases }
+
+  const checkpointPath = getThreadCheckpointPath(threadId)
+  let ancestors: Set<string>
+  try {
+    ancestors = readLegacyReplayCheckpointAncestors(
+      checkpointPath, getDbPath(), threadId, checkpointId, [...sources.keys()]
+    )
+  } catch {
+    return { ids, aliases }
+  }
+
+  const cancellation = new Int32Array(1)
+  for (const source of ancestors) {
+    const imported = sources.get(source)
+    if (!imported) continue
+    for (const id of imported) ids.add(id)
+    try {
+      // The current head can omit this raw replay after retaining its earlier
+      // exchange. Audit the exact source that published the durable copy.
+      const original = readLegacyReplayCheckpoint(checkpointPath, threadId, source, cancellation)
+      for (const [id, canonical] of readLegacyImportedCheckpointReplayAliases(durable, original?.checkpoint, imported))
+        aliases.set(id, canonical)
+    } catch {
+      // Export can still reconcile evidence present in the latest checkpoint.
+    }
+  }
+  return { ids, aliases }
 }
 
 function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
@@ -4445,23 +4486,16 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       const rawApiCall = captured?.rawApiCall ?? getCapturedRawApiCall(threadId)
       const latestCheckpoint = target ? null : await getLatestCheckpoint(threadId)
       const checkpointId = latestCheckpoint?.checkpoint?.id
+      const persisted = captured ? [] : getThreadMessages(threadId)
+      const legacy = checkpointId ? readSessionLegacyReplayEvidence(threadId, checkpointId, persisted) : undefined
       const messages = captured
         ? buildExportMessages(captured.messages as CheckpointMessage[], true)
         : buildExportMessagesFromThreadMessages(
             mergeCheckpointAndPersistedThreadMessagesForSession(
               latestCheckpoint?.checkpoint,
-              getThreadMessages(threadId),
-              checkpointId
-                ? getLegacyImportedToolOccurrenceIds(threadId, checkpointId, (sources) => {
-                    try {
-                      return readLegacyReplayCheckpointAncestors(
-                        getThreadCheckpointPath(threadId), threadId, checkpointId, sources
-                      )
-                    } catch {
-                      return new Set()
-                    }
-                  })
-                : undefined
+              persisted,
+              legacy?.ids,
+              legacy?.aliases
             )
           )
 

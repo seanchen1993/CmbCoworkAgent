@@ -2894,7 +2894,8 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   durableRows: readonly T[],
   checkpointRows: T[],
   rawCheckpointTurns?: CheckpointReplayTurns,
-  legacyImportedIds?: ReadonlySet<string>
+  legacyImportedIds?: ReadonlySet<string>,
+  verifiedLegacyAliases?: ReadonlyMap<string, string>
 ): { checkpoint: T[]; durable: readonly T[] } {
   const rawAssistantTurns =
     rawCheckpointTurns && indexAssistantTurns(rawCheckpointTurns.rawToolTranscript)
@@ -2942,11 +2943,15 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
       return turn === undefined ? row : { ...row, [checkpointToolTurn]: turn }
     })
   }
-  if (!durableRows.length || checkpointRows.length < 2)
-    return { checkpoint: keepHiddenToolScope(checkpointRows, checkpointRows), durable: durableRows }
+  const legacyAliases = verifiedLegacyAliases?.size
+    ? preserveReplayToolBindings(durableRows, verifiedLegacyAliases) : noAliases
+  const stored = legacyAliases.size
+    ? durableRows.filter(({ id }) => !legacyAliases.has(id)) : durableRows
+  if (!stored.length || checkpointRows.length < 2)
+    return { checkpoint: keepHiddenToolScope(checkpointRows, checkpointRows), durable: stored }
   const checkpointVersions = nameCheckpointReplayOccurrences(checkpointRows, rawCheckpointTurns)
   const reconciledDurable = reconcileExactCheckpointReplays(
-    durableRows, checkpointVersions.messages, legacyImportedIds, checkpointVersions.checkpointTurns
+    stored, checkpointVersions.messages, legacyImportedIds, checkpointVersions.checkpointTurns
   )
   const repairedDurable = repairLocalResultReplays(reconciledDurable.messages)?.messages ??
     reconciledDurable.messages
@@ -3066,11 +3071,18 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   const supplementalByTarget = new Map<string, CheckpointAlignment<T>>()
   const exactTargets = new Set([...targets.values()].map(({ exchange }) => exchange.assistant.id))
   const retained = new Set(replayWithoutCopies)
+  const sameOccurrence = (rows: CheckpointAlignment<T>) => rows.every(([source, destination]) =>
+    source.id === destination.id &&
+    (getMessageProviderOccurrence(source) ?? 1) === (getMessageProviderOccurrence(destination) ?? 1)
+  )
   for (const group of reconciledBatches?.alignments ?? []) {
     const [[copy, target]] = group
     if (!retained.has(copy) || exactTargets.has(target.id)) continue
     // The durable row can anchor only one presentation. Other real checkpoint
-    // variants still need occurrence reservations of their own.
+    // variants still need occurrence reservations of their own. A complete
+    // same-occurrence binding outranks a later copy with the same projection.
+    const prior = supplementalByTarget.get(target.id)
+    if (prior && sameOccurrence(prior) && !sameOccurrence(group)) continue
     supplementalByTarget.set(target.id, group)
   }
   const groups = [...supplementalByTarget.values()]

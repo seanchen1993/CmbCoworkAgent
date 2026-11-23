@@ -105,7 +105,9 @@ async function main(): Promise<void> {
     /threadDisplayBaseline\.findIndex/,
     "streaming search updates must reuse the lazy long-history id index"
   )
-  assert.match(search, /onRevealMessage\(match\.messageId\)/)
+  assert.match(search, /let messageId = match\.messageId/)
+  assert.match(search, /messageId = canonical/)
+  assert.match(search, /onRevealMessage\(messageId\)/)
   assert.match(search, /querySelectorAll<HTMLElement>\("\[data-chat-message-id\]"\)/)
 
   assert.match(container, /transitionChatScroll\(current, event\)/)

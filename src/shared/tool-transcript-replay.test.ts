@@ -112,6 +112,27 @@ describe("tool transcript replay", () => {
     expect(checkpoint[1].id).toBe("shared-response")
   })
 
+  it("keeps the existing occurrence when a later hidden turn matches the same projection", () => {
+    const [assistant, result] = exchange()
+    const [later, laterResult] = exchange(2)
+    const [copy, copyResult] = exchange(3)
+    const projected = [{ type: "text", text: "Identical persisted output" }]
+    const first = [...projected, { type: "resource_link", uri: "fixture://first" }]
+    const second = [...projected, { type: "resource_link", uri: "fixture://second" }]
+    const beforeHidden = [user, assistant, { ...result, content: first }]
+    const afterHidden = [later, { ...laterResult, content: second }, copy, { ...copyResult, content: second }]
+    const turns = readCheckpointReplayTurns({ channel_values: { messages: [
+      ...checkpointRows(beforeHidden), hiddenTeam, ...checkpointRows(afterHidden)
+    ] } })
+    const replay = prepareToolTranscriptReplayMerge(
+      [user, assistant, { ...result, content: projected }], [...beforeHidden, ...afterHidden], turns
+    )
+    const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
+    expect(merged.map(({ id }) => id)).toEqual([user.id, assistant.id, result.id, later.id, laterResult.id])
+    expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content))
+      .toEqual([first, second])
+  })
+
   it("aligns independent exchanges that reused both provider IDs in the same turn", () => {
     const otherResultId = "1c711082-5111-4632-976d-7c05ee064c33"
     const [first] = exchange()

@@ -4778,7 +4778,7 @@ export function ChatContainer({
   }, [navigation, navigationReady, historyRestorationFailed, historyRestorationPending, retryHistoryRestoration])
 
   const revealDurableMessage = useCallback(
-    async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal" | "externalNavigation">): Promise<void> => {
+    async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal" | "externalNavigation">): Promise<string | void> => {
       const request = match.externalNavigation
       if (request) {
         if (!isCurrentThreadSearchNavigation(request.id)) throw new Error("Search navigation superseded")
@@ -4814,7 +4814,7 @@ export function ChatContainer({
         if (resolved.status !== "resolved") return null
         if (request.onProjectAccessResolved) confirmedProjectTargetAccess.current = request.id
         return resolved
-      } : undefined)
+      } : undefined, setPendingDurableRevealMessageId)
       if (
         !chatViewMountedRef.current ||
         durableMessageWindowGenerationRef.current !== revealGeneration
@@ -4826,6 +4826,7 @@ export function ChatContainer({
         throw new Error("Unable to hydrate durable chat search result")
       }
       await waitForTranscriptCommit()
+      return loaded
     },
     [
       dispatchChatScrollEvent,

@@ -67,7 +67,7 @@ export type SearchDurableMessages = (
 
 export type RevealDurableMessage = (
   match: DurableChatSearchMatch
-) => Promise<void> | void
+) => Promise<string | void> | string | void
 
 interface ChatSearchOverlayProps {
   externalNavigation?: DurableSearchNavigation
@@ -628,6 +628,7 @@ export function ChatSearchOverlay({
   const validationAbortRef = useRef<AbortController | null>(null)
   const contextRevealRef = useRef<ChatSearchReveal | null>(null)
   const contextRefreshFrameRef = useRef<number | null>(null)
+  const loadedReplayTargetsRef = useRef(new Map<string, string>())
   const revealCallbacksRef = useRef({
     onRevealMessage,
     onRevealDurableMessage,
@@ -650,8 +651,10 @@ export function ChatSearchOverlay({
   }, [onRevealMessage, onRevealDurableMessage, onDurableRevealFinished, onRevealSearchContext,
     validateSearchLocation, resolveDisplayMessageId])
 
-  const displayIdFor = useCallback((messageId: string): string =>
-    revealCallbacksRef.current.resolveDisplayMessageId?.(messageId) ?? messageId, [])
+  const displayIdFor = useCallback((messageId: string): string => {
+    const target = loadedReplayTargetsRef.current.get(messageId) ?? messageId
+    return revealCallbacksRef.current.resolveDisplayMessageId?.(target) ?? target
+  }, [])
 
   const searchGenerationRef = useRef(0)
   const searchMatcherRef = useRef(createChatSearchMatcher(CHAT_SEARCH_RESULT_LIMIT + 1))
@@ -740,9 +743,10 @@ export function ChatSearchOverlay({
 
   const revealAndHighlight = useCallback(
     (match: OverlayChatSearchMatch, rawQuery: string, scroll: boolean): void => {
+      let messageId = match.messageId
       const findRow = (): { viewport: HTMLElement; row: HTMLElement } | null => {
         const viewport = getViewport()
-        const displayId = displayIdFor(match.messageId)
+        const displayId = displayIdFor(messageId)
         const row = viewport
           ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")).find(
               (candidate) => candidate.dataset.chatMessageId === displayId
@@ -786,7 +790,7 @@ export function ChatSearchOverlay({
 
       const finish = (success = false): void => {
         if (!success) clearHighlights()
-        if (match.durableMatch) revealCallbacksRef.current.onDurableRevealFinished?.(match.messageId)
+        if (match.durableMatch) revealCallbacksRef.current.onDurableRevealFinished?.(messageId)
         if (request) {
           if (match.durableMatch) match.durableMatch.externalNavigation = undefined
           if (!success) externalMatchRef.current = null
@@ -833,7 +837,7 @@ export function ChatSearchOverlay({
           if (viewport && (viewport.scrollTop !== previousSeekTop || viewport.scrollHeight !== previousSeekHeight)) {
             previousSeekTop = viewport.scrollTop
             previousSeekHeight = viewport.scrollHeight
-            revealCallbacksRef.current.onRevealMessage(match.messageId)
+            revealCallbacksRef.current.onRevealMessage(messageId)
           }
           highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
           return
@@ -867,7 +871,7 @@ export function ChatSearchOverlay({
           : null
         if (match.location && !locationRange && !contextRequested) {
           contextRequested = true
-          const reveal = { messageId: displayIdFor(match.messageId), location: match.location }
+          const reveal = { messageId: displayIdFor(messageId), location: match.location }
           contextRevealRef.current = reveal
           revealCallbacksRef.current.onRevealSearchContext?.(reveal)
           highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
@@ -910,10 +914,10 @@ export function ChatSearchOverlay({
 
       const revealMountedRow = (): void => {
         if (!isCurrent()) return
-        revealCallbacksRef.current.onRevealMessage(match.messageId)
+        revealCallbacksRef.current.onRevealMessage(messageId)
         const validate = revealCallbacksRef.current.validateSearchLocation
         if (match.location && validate) {
-          void validate({ messageId: displayIdFor(match.messageId), location: match.location }, validation.signal)
+          void validate({ messageId: displayIdFor(messageId), location: match.location }, validation.signal)
             .then((valid) => {
               if (!isCurrent() || validation.signal.aborted) return
               if (valid) tryHighlight(0)
@@ -943,7 +947,15 @@ export function ChatSearchOverlay({
       if (match.durableMatch && revealDurable) {
         void Promise.resolve()
           .then(() => isCurrent() && revealDurable(match.durableMatch as DurableChatSearchMatch))
-          .then(revealMountedRow)
+          .then((canonical) => {
+            if (typeof canonical === "string") {
+              messageId = canonical
+              if (canonical !== match.messageId) loadedReplayTargetsRef.current.set(match.messageId, canonical)
+              if (request && externalMatchRef.current?.messageId === match.messageId)
+                externalMatchRef.current = { ...externalMatchRef.current, messageId }
+            }
+            revealMountedRow()
+          })
           .catch(() => {
             if (isCurrent()) {
               clearHighlights()
@@ -1182,6 +1194,7 @@ export function ChatSearchOverlay({
     autoRevealedQueryRef.current = ""
     externalMatchRef.current = null
     externalMatchValidation.current?.abort()
+    loadedReplayTargetsRef.current.clear()
     localMatchesRef.current = []
     localOccurrenceCountsRef.current = new Map()
     localDocumentCoverageRef.current = new Map()

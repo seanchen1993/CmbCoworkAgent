@@ -17,8 +17,11 @@ const threadId = "tool-replay-e2e"
 const structuredThreadId = "structured-tool-replay-e2e"
 const projectedThreadId = "projected-tool-replay-e2e"
 const importedThreadId = "legacy-imported-tool-replay-e2e"
+const importedSearchThreadId = "legacy-imported-search-replay-e2e"
 const projectedTitle = "Projected tool transcript replay fixture"
 const importedTitle = "Legacy imported tool transcript replay fixture"
+const importedSearchTitle = "Legacy search across tool replay pages"
+const importedSearchText = "Checking the historical result across pages"
 const firstNoticeReply = "Checking current data"
 const storedNoticeDraft = `${firstNoticeReply} with beta findings`
 const finalNoticeReply = `${storedNoticeDraft} confirmed`
@@ -399,7 +402,7 @@ async function seedStructuredHistory(): Promise<void> {
   }
 }
 
-async function seedProjectedHistory(id = projectedThreadId, legacy = false): Promise<Message[]> {
+async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> {
   const db = await import("../src/main/db")
   const { getThreadCheckpointPath } = await import("../src/main/storage")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver")
@@ -407,24 +410,37 @@ async function seedProjectedHistory(id = projectedThreadId, legacy = false): Pro
   const body = [{ type: "text" as const, text: "The projected result is unchanged" }]
   const firstRaw = [...body, { type: "resource_link", uri: "https://example.com/first" }]
   const secondRaw = [...body, { type: "resource_link", uri: "https://example.com/second" }]
-  const revised = { ...assistant, content: "Checking the revised result" }
+  const splitSearch = id === importedSearchThreadId
+  const legacy = id !== projectedThreadId
+  const revised = { ...assistant, content: splitSearch ? importedSearchText : "Checking the revised result" }
   const end = { ...user, id: "after-projected-tools", content: "Continue with the next request" }
   const copy = setOccurrence(revised, 3)
+  const fill = (label: string, count: number) => Array.from({ length: count }, (_, index): Message => ({
+    ...assistant,
+    id: `${label}-${index}`,
+    content: "A separate history message",
+    tool_calls: undefined
+  }))
+  const beforeCopy = splitSearch ? fill("before-legacy-copy", 80) : []
+  const afterCopy = splitSearch ? fill("after-legacy-copy", 140) : []
   const durable = [
     user, assistant, { ...tool, content: body }, setOccurrence(revised, 2),
-    setOccurrence({ ...tool, content: body }, 2), ...(legacy ? [copy] : []), end
+    setOccurrence({ ...tool, content: body }, 2), ...beforeCopy,
+    ...(legacy ? [copy] : []), end, ...afterCopy
   ]
   const checkpointId = `${id}-checkpoint`
   await db.initializeDatabase()
   try {
     db.createThread(id, {
-      title: legacy ? importedTitle : projectedTitle, workspacePath: workspace, agentMode: "normal"
+      title: splitSearch ? importedSearchTitle : legacy ? importedTitle : projectedTitle,
+      workspacePath: workspace, agentMode: "normal"
     })
     db.upsertThreadMessages(id, durable)
     if (legacy) {
       db.getDb().run(`INSERT INTO legacy_checkpoint_transcript_migrations
         (thread_id, checkpoint_id, total_messages, next_index, status, updated_at, search_projection_state)
-        VALUES (?, ?, 8, 8, 'complete', ?, 'complete')`, [id, checkpointId, Date.now()])
+        VALUES (?, ?, ?, ?, 'complete', ?, 'complete')`,
+      [id, checkpointId, durable.length + 1, durable.length + 1, Date.now()])
       db.getDb().run(`INSERT INTO legacy_checkpoint_transcript_imports
         (thread_id, message_id, content_key, published_checkpoint_id)
         VALUES (?, ?, ?, ?)`, [id, copy.id, "test legacy assistant import", checkpointId])
@@ -433,19 +449,34 @@ async function seedProjectedHistory(id = projectedThreadId, legacy = false): Pro
   } finally {
     await db.closeDatabase()
   }
-  const saver = new SqlJsSaver(getThreadCheckpointPath(id))
+  const saver = new SqlJsSaver(getThreadCheckpointPath(id), undefined, {
+    readLegacyToolReplaySources: legacy ? () => new Set([checkpointId]) : undefined
+  })
   try {
-    await saver.put({ configurable: { thread_id: id, checkpoint_ns: "" } }, {
+    const visible = [
+      user, assistant, { ...tool, content: firstRaw }, revised, { ...tool, content: secondRaw },
+      ...beforeCopy
+    ]
+    const checkpoint: Checkpoint = {
       v: 1,
       id: checkpointId,
       ts: new Date().toISOString(),
-      channel_values: { messages: [
-        user, assistant, { ...tool, content: firstRaw },
-        revised, { ...tool, content: secondRaw },
-        revised, { ...tool, content: secondRaw }, end
-      ].map(toCheckpointMessage) },
+      channel_values: {
+        messages: [...visible, revised, { ...tool, content: secondRaw }, end, ...afterCopy]
+          .map(toCheckpointMessage)
+      },
       channel_versions: { messages: 1 }, versions_seen: {}, pending_sends: []
-    }, { source: "loop", step: 1, writes: {}, parents: {} })
+    }
+    const saved = await saver.put({ configurable: { thread_id: id, checkpoint_ns: "" } },
+      checkpoint, { source: "loop", step: 1, writes: {}, parents: {} })
+    if (legacy) {
+      await saver.put(saved, {
+        ...checkpoint,
+        id: `${checkpointId}-successor`,
+        channel_values: { messages: [...visible, end, ...afterCopy].map(toCheckpointMessage) },
+        channel_versions: { messages: 2 }
+      }, { source: "loop", step: 2, writes: {}, parents: {} })
+    }
   } finally {
     await saver.close()
   }
@@ -469,7 +500,8 @@ async function main(): Promise<void> {
   const rawRowCount = await seedHistory()
   await seedStructuredHistory()
   const projectedDurable = await seedProjectedHistory()
-  const importedDurable = await seedProjectedHistory(importedThreadId, true)
+  const importedDurable = await seedProjectedHistory(importedThreadId)
+  await seedProjectedHistory(importedSearchThreadId)
   const binary = createRequire(import.meta.url)("electron") as string
   const env: Record<string, string> = {
     CMB_E2E_ELECTRON_BIN: binary,
@@ -709,6 +741,29 @@ async function main(): Promise<void> {
           (id) => (window as unknown as TestWindow).api.threads.getMessages(id), importedThreadId
         )
         assert.deepEqual(oldRows.map(({ id }) => id), importedDurable.map(({ id }) => id))
+        const importedArchive = path.join(output, `${phase}-imported.zip`)
+        await app.evaluate(({ dialog }, filePath) => {
+          dialog.showSaveDialog = async () => ({ canceled: false, filePath })
+        }, importedArchive)
+        const imported = await page.evaluate(
+          (id) => (window as unknown as TestWindow).api.threads.exportSession(id), importedThreadId
+        )
+        assert.equal(imported.success, true, imported.error)
+        const canonical = JSON.parse(new AdmZip(importedArchive).readAsText("session.json")) as typeof archived
+        assert.deepEqual(canonical.messages.map(({ role }) => role), projectedDurable.map(({ role }) => role))
+        if (phase === "initial") {
+          await page.getByRole("button", { name: "搜索会话", exact: true }).click()
+          const search = page.getByRole("dialog", { name: "搜索会话" })
+          await search.getByRole("combobox", { name: "搜索会话" }).fill(importedSearchText)
+          await search.locator(`[data-search-thread="${importedSearchThreadId}"]`).first().click()
+          await page.waitForFunction(({ id, text }) => {
+            const ranges = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights
+              .get("chat-search-active")
+            const range = ranges && [...ranges][0]
+            const row = range?.startContainer.parentElement?.closest<HTMLElement>("[data-chat-message-id]")
+            return row?.dataset.chatMessageId === id && range?.toString() === text
+          }, { id: setOccurrence(projectedDurable[1], 2).id, text: importedSearchText })
+        }
         await page.screenshot({
           animations: "disabled",
           path: path.join(output, `${phase}.png`),

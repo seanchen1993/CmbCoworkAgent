@@ -995,8 +995,11 @@ export interface ThreadActions {
   loadEarlierMessages: () => Promise<number>
   loadMessageWindowAround: (
     target: { messageId: string; ordinal: number },
-    readPage?: (residentMessageIds: readonly string[]) => Promise<{ page: ThreadMessagesPage; goalEvent?: GoalEvent } | null>
-  ) => Promise<boolean>
+    readPage?: (residentMessageIds: readonly string[]) => Promise<{
+      page: ThreadMessagesPage; goalEvent?: GoalEvent; canonicalMessageId?: string
+    } | null>,
+    onTargetResolved?: (messageId: string) => void
+  ) => Promise<string | false>
   loadReleasedMessageWindow: () => Promise<{ revealMessageId: string | null } | false>
   restoreLatestMessageWindow: () => Promise<boolean>
   cancelMessageWindowLoad: () => void
@@ -5417,7 +5420,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return 0
           }
         },
-        loadMessageWindowAround: async (target, readPage) => {
+        loadMessageWindowAround: async (target, readPage, onTargetResolved) => {
           const state = threadStatesRef.current[threadId]
           if (!state) return false
           if (!target.messageId || !Number.isSafeInteger(target.ordinal) || target.ordinal < 0) {
@@ -5435,10 +5438,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const residentMessageIds = selectTargetedThreadMessageTail(
               state.messages, THREAD_MESSAGE_PROTECTED_TAIL, state.historyWindowGap
             ).filter((message) => message.ordinal !== undefined).map((message) => message.id)
-            const result = readPage ? await readPage(residentMessageIds) : { page: await window.api.threads.getMessagesPage(threadId, {
-              targetMessageId: target.messageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
-            }), goalEvent: undefined }
+            const readLocalPage = async () => {
+              const load = (targetMessageId: string) => window.api.threads.getMessagesPage(threadId, {
+                targetMessageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
+              })
+              const page = await load(target.messageId)
+              const canonicalMessageId = page.messages.find(({ id }) => id === target.messageId)
+                ?.legacy_checkpoint_replay_of
+              return {
+                page: canonicalMessageId && isCurrentLoad() ? await load(canonicalMessageId) : page,
+                goalEvent: undefined,
+                canonicalMessageId
+              }
+            }
+            const result = readPage ? await readPage(residentMessageIds) : await readLocalPage()
             const page = result?.page
+            const targetId = result?.canonicalMessageId ?? target.messageId
             await pendingGoalTranscriptEventsRef.current[threadId]
             if (!isCurrentLoad()) return false
             if (!page) {
@@ -5471,12 +5486,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const targetMessages = mergeGoalUserEventsIntoDurablePage(durableMessages, goalEvents, raw,
               getGoalTranscriptPageRange(raw, page.hasMore, page.hasNewerMessages === false ? undefined : { kind: "target" }),
               targetTail)
-            if (!targetMessages.some((message) => message.id === target.messageId)) {
+            if (!targetMessages.some((message) => message.id === targetId)) {
               updateThreadState(threadId, () => ({ historyPageLoading: false }))
               messageWindowIntentCoordinator.finish(intent)
               return false
             }
 
+            onTargetResolved?.(targetId)
             let loaded = false
             updateThreadState(threadId, (latest) => {
               const live = liveStreamAccumulatorsRef.current[threadId]
@@ -5488,7 +5504,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 latest.messages,
                 targetMessages,
                 {
-                  targetMessageId: target.messageId,
+                  targetMessageId: targetId,
                   maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
                   protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
                   existingGap: latest.historyWindowGap,
@@ -5499,7 +5515,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 }
               )
               const messages = windowResult.messages
-              loaded = windowResult.messages.some((message) => message.id === target.messageId)
+              loaded = windowResult.messages.some((message) => message.id === targetId)
               const nextToolCallStates = retainResidentToolCallStates(
                 upsertToolCallStatesFromMessages(latest.toolCallStates, targetMessages),
                 messages
@@ -5512,7 +5528,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   historyPageLoading: false
                 }
               }
-              const durableTarget = result?.goalEvent?.transcript_message_id ?? target.messageId
+              const durableTarget = result?.goalEvent?.transcript_message_id ?? targetId
               const targetPageWindow = createThreadMessagePageWindow(targetMessages, {
                 targetMessageId: durableTarget
               }, undefined, raw)
@@ -5549,7 +5565,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               }
             })
             messageWindowIntentCoordinator.finish(intent)
-            return loaded
+            return loaded ? targetId : false
           } catch (error) {
             if (!isCurrentLoad()) return false
             console.warn("[ThreadContext] Failed to load targeted message window:", error)
