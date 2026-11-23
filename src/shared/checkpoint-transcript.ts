@@ -88,6 +88,8 @@ export interface FilteredThreadValuesInput {
   internalGoalMessageTimeOrder?: unknown
 }
 
+export const toolReplayObservations = Symbol("toolReplayObservations")
+
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
   historical_tool_replay_id?: string
@@ -98,6 +100,7 @@ export interface CheckpointAuthorityTranscriptMessage {
   reasoning?: string
   tool_calls?: unknown[]
   tool_call_id?: string
+  [toolReplayObservations]?: readonly unknown[]
   name?: string
   status?: string
   is_error?: boolean
@@ -268,6 +271,13 @@ export function mergeCheckpointAuthorityTranscriptMessage<
     start_at: incoming.start_at ?? base.start_at,
     end_at: incoming.end_at ?? base.end_at
   } as T
+  const captured = incoming[toolReplayObservations]
+  if (captured?.length) {
+    const previous = base[toolReplayObservations]
+    merged[toolReplayObservations] = previous && previous !== captured
+      ? [...new Set([...previous, ...captured])]
+      : captured
+  }
   if (merged.role === "tool") {
     merged.historical_tool_replay_id = [base, incoming].find((row) =>
       row.historical_tool_replay_id && row.content === merged.content && row.tool_call_id === merged.tool_call_id &&

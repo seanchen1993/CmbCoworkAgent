@@ -223,6 +223,58 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it.each(["durable-view", "checkpoint-only", "fresh-result"])(
+    "reconciles old observed drafts before checkpoint ordering (%s)",
+    (mode) => {
+      const [assistant, result] = exchange()
+      const [typed, typedResult] = exchange(2)
+      const [grown, grownResult] = exchange(3)
+      const [replayed, replayedResult] = exchange(4)
+      const nextUser = { ...user, id: "next-user" }
+      const blocks = [
+        { type: "text", index: 0, text: "Directory listing" },
+        { type: "text", index: 1, text: "Read results" }
+      ]
+      const final = { ...grown, content: [{ ...blocks[0], text: "Directory listing checked" }, blocks[1]] }
+      const replay = { ...replayed, content: blocks }
+      const fresh = {
+        ...replayedResult,
+        id: "9c09fdd9-e146-4c2c-9b12-cac648551576",
+        provider_source_id: undefined
+      }
+      const durable = [
+        user,
+        { ...assistant, content: "Directory listing\nRead results" },
+        result,
+        { ...typed, content: blocks },
+        typedResult,
+        final,
+        grownResult,
+        nextUser,
+        ...(mode === "durable-view" ? [replay, replayedResult] : [])
+      ]
+      const checkpoint = mode === "durable-view"
+        ? durable
+        : [nextUser, replay, mode === "fresh-result" ? fresh : replayedResult]
+      const turns = mode === "durable-view"
+        ? undefined
+        : readCheckpointReplayTurns({ channel_values: { messages: checkpointRows(checkpoint) } })
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable, {
+        useStableProviderOccurrences: Boolean(turns)
+      })
+      const aliases = findReplayedToolExchangeAliases(merged)
+      const visible = merged.filter(({ id }) => !aliases.has(id))
+      expect(visible.map(({ role }) => role)).toEqual(
+        mode === "fresh-result"
+          ? ["user", "assistant", "tool", "user", "assistant", "tool"]
+          : ["user", "assistant", "tool", "user"]
+      )
+      expect(visible[1].content).toEqual(final.content)
+      expect(visible[3].id).toBe(nextUser.id)
+    }
+  )
+
   it("selects the exact matching payload when both sources retained different versions", () => {
     const original = exchange(2, { path: "fixture" }, "Earlier output")
     const updated = exchange(3)
@@ -2272,6 +2324,36 @@ describe("tool transcript replay", () => {
     expect(aliases.size).toBe(1_000)
     expect(aliases.get(versions[999][1].id)).toBe(versions[999][0].id)
     expect(payloadReads).toBeLessThan(16_000)
+  })
+
+  it("keeps a stable prefix chain indexed when a late snapshot adds a citation", () => {
+    let reads = 0
+    const cite = (url: string) => ({ type: "citation", url })
+    const snapshotCount = 500
+    const rows = [user, ...Array.from({ length: snapshotCount }, (_, index) => {
+      const [assistant, result] = exchange(index + 1, {
+        get path() {
+          reads++
+          return "fixture"
+        }
+      })
+      return [
+        {
+          ...assistant,
+          content: [{
+            type: "text",
+            text: "Checking" + ".".repeat(index),
+            annotations: [
+              cite("https://example.com/first"),
+              ...(index === snapshotCount - 1 ? [cite("https://example.com/last")] : [])
+            ]
+          }]
+        },
+        result
+      ]
+    }).flat()]
+    expect(findReplayedToolExchangeAliases(rows).size).toBe((snapshotCount - 1) * 2)
+    expect(reads).toBeLessThan(snapshotCount * 25)
   })
 
   it("compares replay-heavy durable groups once per checkpoint copy", () => {

@@ -1,6 +1,7 @@
 import { parseBotToolReceiptId } from "./bots/turn-feedback"
 import {
   mergeCheckpointAuthorityTranscriptMessage,
+  toolReplayObservations,
   type CheckpointAuthorityTranscriptMessage,
   type CheckpointReplayTurns
 } from "./checkpoint-transcript"
@@ -27,6 +28,7 @@ type TranscriptMessage = CheckpointAuthorityTranscriptMessage & {
   content_preview_notice?: string
   content_is_projection?: boolean
   [checkpointToolTurn]?: string
+  [toolReplayObservations]?: readonly ToolExchange<TranscriptMessage>[]
 }
 
 interface Call {
@@ -710,47 +712,55 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     if (variants.length < 2) continue
     const span = findReplayProseIndexSpan(variants.map(({ match }) => match))
     const part = (variant: (typeof variants)[number]) => variant.match.text[span]
-    const initial = variants[0]
-    const mayHaveMultipleParents = variants.some(({ prose, match }) =>
-      !sameValue(prose.annotations, initial.prose.annotations) ||
-      match.text.some((text, index) => index !== span && text !== initial.match.text[index])
-    )
     variants.sort((left, right) => {
       const first = part(left)
       const second = part(right)
       return first < second ? -1 : first > second ? 1 : left.length - right.length
     })
-    const prefixes: typeof variants = []
+    const prefixes: { variant: (typeof variants)[number]; state: string }[] = []
+    const groups = new Map<string, typeof variants>()
     for (const variant of variants) {
-      while (prefixes.length && !part(variant).startsWith(part(prefixes.at(-1)!))) prefixes.pop()
+      while (
+        prefixes.length &&
+        !part(variant).startsWith(part(prefixes.at(-1)!.variant))
+      ) {
+        const { state } = prefixes.pop()!
+        const group = groups.get(state)!
+        group.pop()
+        if (!group.length) groups.delete(state)
+      }
       const matches = ({ batch, prose, match }: (typeof variants)[number]) =>
         prose === match &&
         isReplayProseExtension(variant.prose, prose) &&
         exactSlots(variant.batch, batch, false)
       const parents: typeof variants = []
-      if (!mayHaveMultipleParents) {
-        const previous = prefixes.findLast(matches)
-        if (previous) parents.push(previous)
-      } else {
-        // A retained block separates text spans, and a provider can extend
-        // either span independently. Reject incomparable parent claims.
-        for (const prefix of prefixes) {
-          if (!matches(prefix)) continue
-          if (parents.some((parent) => isReplayProseExtension(parent.prose, prefix.prose)))
-            continue
-          for (let index = parents.length - 1; index >= 0; index--) {
-            if (isReplayProseExtension(prefix.prose, parents[index].prose))
-              parents.splice(index, 1)
-          }
-          parents.push(prefix)
+      // Within a group the other spans and citations agree. Only the
+      // closest matching prefix can be a predecessor from that group.
+      for (const group of groups.values()) {
+        const prefix = group.findLast(matches)
+        if (!prefix || parents.some((parent) => isReplayProseExtension(parent.prose, prefix.prose)))
+          continue
+        for (let index = parents.length - 1; index >= 0; index--) {
+          if (isReplayProseExtension(prefix.prose, parents[index].prose))
+            parents.splice(index, 1)
         }
+        parents.push(prefix)
       }
       if (parents.length) {
         const candidates = parentCandidates.get(variant.batch) ?? new Set()
         for (const { batch } of parents) candidates.add(batch)
         parentCandidates.set(variant.batch, candidates)
       }
-      prefixes.push(variant)
+      if (variant.prose === variant.match) {
+        const state = JSON.stringify([
+          variant.prose.text.map((text, index) => index === span ? 0 : payloadId(text)),
+          variant.prose.annotations
+        ])
+        const group = groups.get(state) ?? []
+        group.push(variant)
+        groups.set(state, group)
+        prefixes.push({ variant, state })
+      }
     }
   }
   if (parentCandidates.size) {
@@ -952,11 +962,44 @@ function foldInterruptedAndProjectedToolCopies<T extends TranscriptMessage>(
   if (!folded) return
   const byId = new Map(messages.map((row) => [row.id, row]))
   const content = getAssistantReplayContent(verified, (id) => byId.get(id))
-  if (content.size)
+  if (content.size) {
+    const completed = new Map<string, ToolExchange<T>>()
+    for (const id of content.keys()) {
+      const assistant = byId.get(id)
+      const exchange = assistant && readExchange(assistant, ownership)
+      if (exchange?.results.every(hasToolResultExecutionId)) completed.set(id, exchange)
+    }
+    const observations = new Map<string, ToolExchange<T>[]>()
+    for (const [id, canonicalId] of verified) {
+      const original = completed.get(canonicalId)
+      const assistant = byId.get(id)
+      if (!original || !assistant) continue
+      const copy = readExchange(assistant, ownership)
+      if (!copy || !hasSameReplayOutcome(original, copy)) continue
+      const copies = observations.get(canonicalId) ?? []
+      copies.push(copy)
+      observations.set(canonicalId, copies)
+    }
     folded.messages = folded.messages.map((row) => {
       const text = content.get(row.id)
-      return text === undefined ? row : { ...row, content: text }
+      if (text === undefined) return row
+      const original = completed.get(row.id)
+      if (!original) return { ...row, content: text }
+      // The folded row displays the latest body. Keep earlier complete
+      // snapshots available for exact replay proof during reconciliation.
+      return {
+        ...row,
+        content: text,
+        [toolReplayObservations]: [
+          ...(row[toolReplayObservations] ?? []),
+          ...[original, ...(observations.get(row.id) ?? [])].map((exchange) => ({
+            ...exchange,
+            assistant: { ...exchange.assistant, [toolReplayObservations]: undefined }
+          }))
+        ]
+      }
     })
+  }
   return folded
 }
 
@@ -1142,26 +1185,36 @@ function dropEarlierCheckpointCopies<T extends TranscriptMessage>(
   for (const [key, incoming] of checkpoint.byPhysicalGroup) {
     const earlier = durable.byPhysicalGroup.get(key)
     if (!earlier) continue
+    const withObservations = earlier.filter(({ exchange }) =>
+      exchange.assistant[toolReplayObservations]?.length
+    )
     for (const copy of incoming) {
       const { exchange, anchor } = copy
       const current = anchor && durable.visibleUsers.get(anchor.id)
       if (
         !anchor ||
         !current ||
-        !sameReplayAnchor(current.message, anchor, true) ||
-        agreesWithCurrentTurn(copy)
+        !sameReplayAnchor(current.message, anchor, true)
       )
         continue
-      const original = earlier.find((candidate) => {
+      const predatesTurn = (candidate: AnchoredToolExchange<T>) => {
         const previous = candidate.anchor && durable.visibleUsers.get(candidate.anchor.id)
-        return (
-          previous &&
-          previous.index < current.index &&
-          (isExactToolExchangeReplay(candidate.exchange, exchange) ||
-            (isSameCompletedExecution(candidate.exchange, exchange, true) &&
-              hasCurrentBatch(anchor, exchange)))
+        return previous && previous.index < current.index
+      }
+      const observed = withObservations.find((candidate) =>
+        predatesTurn(candidate) &&
+        hasSameReplayOutcome(candidate.exchange, exchange, true) &&
+        observedReplayBodies(candidate.exchange).some((body) =>
+          sameReplayBodies(body, exchange.assistant.content)
         )
-      })
+      )
+      const original = observed ?? (agreesWithCurrentTurn(copy)
+        ? undefined
+        : earlier.find((candidate) => predatesTurn(candidate) && (
+            isExactToolExchangeReplay(candidate.exchange, exchange) ||
+            (isSameCompletedExecution(candidate.exchange, exchange, true) &&
+              hasCurrentBatch(anchor, exchange))
+          )))
       if (!original) continue
       aliases.set(exchange.assistant.id, original.exchange.assistant.id)
       exchange.results.forEach((result, index) => {
@@ -1672,6 +1725,23 @@ function sameReplayBodies(left: unknown, right: unknown): boolean {
     hasReplayProse(right) &&
     sameReplayProse(readReplayProse(left), readReplayProse(right))
   )
+}
+
+function hasSameReplayOutcome(
+  left: ToolExchange<TranscriptMessage>,
+  right: ToolExchange<TranscriptMessage>,
+  checkpointScopeMayBeMissing = false
+): boolean {
+  return (
+    (left.assistant.reasoning || "") === (right.assistant.reasoning || "") &&
+    isSameExchange(left, right, checkpointScopeMayBeMissing, false)
+  )
+}
+
+function observedReplayBodies(exchange: ToolExchange<TranscriptMessage>): unknown[] {
+  return (exchange.assistant[toolReplayObservations] ?? [])
+    .filter((observed) => hasSameReplayOutcome(exchange, observed))
+    .map(({ assistant }) => assistant.content)
 }
 
 function readIndexedReplayProse(content: unknown, fallback: ReplayProse): ReplayProse {
@@ -2599,6 +2669,9 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       // Keep the exact presentations already seen for this completed batch.
       // A delayed replay can still carry a draft earlier than its continuation.
       if (content !== undefined) rememberPhysical(batch, previous)
+      for (const observed of observedReplayBodies(batch)) {
+        rememberPhysical({ ...batch, assistant: { ...message, content: observed } }, previous)
+      }
       canonicalByPresentation.set(message.id, previous)
     }
     if (previous.assistant.id === exchange.assistant.id) continue
