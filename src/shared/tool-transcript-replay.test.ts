@@ -1361,6 +1361,42 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it("keeps separate tool batch presentations when multiple revisions extend the same prefix", () => {
+    const [earlier, initialRead] = exchange()
+    const declarations = [...earlier.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+    const short = { ...earlier, tool_calls: declarations }
+    const [left, leftRead] = exchange(2)
+    const [right, rightRead] = exchange(3)
+    const [repeat, repeatRead] = exchange(4)
+    const leftRevision = { ...left, tool_calls: declarations, content: "Checking the version" }
+    const rightRevision = { ...right, tool_calls: declarations, content: "Checking the directory" }
+    const repeatedLeft = { ...repeat, tool_calls: declarations, content: leftRevision.content }
+    const directory = {
+      id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      role: "tool",
+      name: "ls",
+      tool_call_id: "ls-call",
+      content: "Current directory"
+    }
+    for (const revisions of [
+      [leftRevision, leftRead, rightRevision, rightRead],
+      [rightRevision, rightRead, leftRevision, leftRead]
+    ]) {
+      const rows = [user, short, initialRead, ...revisions, repeatedLeft, repeatRead, directory]
+      const aliases = findReplayedToolExchangeAliases(rows)
+      expect(aliases).toEqual(
+        new Map([
+          [repeatedLeft.id, leftRevision.id],
+          [repeatRead.id, leftRead.id]
+        ])
+      )
+      const retained = rows.filter(({ id }) => !aliases.has(id))
+      expect(
+        resolveToolResultOwnership(retained).get(getWorkerToolUiKey(short.id, "ls-call", 1))
+      ).toBe(directory)
+    }
+  })
+
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")
     const final = exchange(2)

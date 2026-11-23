@@ -502,7 +502,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   const payloadId = createPayloadIds()
   type SlotVersion = { batch: PartialToolExchange<T>; keys: string[]; complete: boolean }
   const versions = new Map<string, SlotVersion[]>()
-  const observed = new Map<string, SlotVersion[]>()
+  const observed = new Map<string, Map<number, SlotVersion[]>>()
   const exactCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const extendedText = (candidate: T, original: T) =>
     typeof candidate.content === "string" &&
@@ -565,9 +565,11 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       continue
     }
     for (const key of keys) {
-      const sharingResult = observed.get(key) ?? []
+      const byResultCount = observed.get(key) ?? new Map<number, SlotVersion[]>()
+      const sharingResult = byResultCount.get(keys.length) ?? []
       sharingResult.push(version)
-      observed.set(key, sharingResult)
+      byResultCount.set(keys.length, sharingResult)
+      observed.set(key, byResultCount)
     }
   }
 
@@ -580,28 +582,63 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     .sort((left, right) => right.keys.length - left.keys.length)
   for (const version of partials) {
     const candidates = version.keys
-      .map((key) => observed.get(key) ?? [])
-      .reduce((smallest, group) => (group.length < smallest.length ? group : smallest))
+      .map((key) => {
+        const groups: SlotVersion[][] = []
+        let count = 0
+        for (const [resultCount, group] of observed.get(key) ?? []) {
+          if (resultCount <= version.keys.length) continue
+          groups.push(group)
+          count += group.length
+        }
+        return { groups, count }
+      })
+      .reduce((smallest, group) => (group.count < smallest.count ? group : smallest))
     let target: PartialToolExchange<T> | undefined
-    for (const candidate of candidates) {
-      if (candidate.keys.length <= version.keys.length) continue
-      const retained = containing.get(candidate.batch) ?? candidate.batch
-      const revised = extendedText(version.batch.assistant, retained.assistant)
-      if (
-        (!revised &&
-          !sameValue(retained.assistant.content, version.batch.assistant.content) &&
-          !extendedText(retained.assistant, version.batch.assistant)) ||
-        (revised && !canReceiveResults(version.batch, retained)) ||
-        !exactSlots(version.batch, retained, false)
-      )
-        continue
-      if (target && retained !== target) {
-        target = undefined
-        break
+    let multipleTargets = false
+    for (const group of candidates.groups) {
+      for (const candidate of group) {
+        const retained = containing.get(candidate.batch) ?? candidate.batch
+        const revised = extendedText(version.batch.assistant, retained.assistant)
+        if (
+          (!revised &&
+            !sameValue(retained.assistant.content, version.batch.assistant.content) &&
+            !extendedText(retained.assistant, version.batch.assistant)) ||
+          (revised && !canReceiveResults(version.batch, retained)) ||
+          !exactSlots(version.batch, retained, false)
+        )
+          continue
+        if (target && retained !== target) {
+          multipleTargets = true
+          break
+        }
+        target = retained
       }
-      target = retained
+      if (multipleTargets) break
     }
-    if (target) containing.set(version.batch, target)
+    if (target && !multipleTargets) containing.set(version.batch, target)
+  }
+
+  // Independent revisions can extend the same prefix without extending one
+  // another. Keep those presentations and the original result owner.
+  const longestPresentation = new Map<PartialToolExchange<T>, T>()
+  const divergentPresentations = new Set<PartialToolExchange<T>>()
+  for (const [copy, original] of containing) {
+    const longest = longestPresentation.get(original) ?? original.assistant
+    if (extendedText(copy.assistant, longest)) longestPresentation.set(original, copy.assistant)
+    else if (
+      !sameValue(copy.assistant.content, longest.content) &&
+      !extendedText(longest, copy.assistant)
+    ) {
+      divergentPresentations.add(original)
+    }
+  }
+  for (const [copy, original] of containing) {
+    if (
+      divergentPresentations.has(original) &&
+      !sameValue(copy.assistant.content, original.assistant.content)
+    ) {
+      containing.delete(copy)
+    }
   }
 
   const groups = new Map<PartialToolExchange<T>, PartialToolExchange<T>[]>()
