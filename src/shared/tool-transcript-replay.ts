@@ -247,12 +247,17 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   return aligned.size ? replay.map((message) => aligned.get(message) ?? message) : replay
 }
 
+interface UnsafeBindings {
+  callIds: Set<string>
+  resultIds: Set<string>
+}
+
 /** Existing tool cards and archives must keep the same results for every surviving call. */
 export function preserveReplayToolBindings<T extends TranscriptMessage>(
   messages: readonly T[],
   aliases: ReadonlyMap<string, string>,
   original = resolveToolResultOwnership(messages),
-  unsafeCalls?: Set<string>
+  unsafe?: UnsafeBindings
 ): ReadonlyMap<string, string> {
   if (aliases.size === 0) return aliases
   const occurrences = new Set<string>()
@@ -291,10 +296,12 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
       const id = readToolOwnershipId(call)
       if (!id) continue
       const key = getWorkerToolUiKey(message.id, id, index)
-      if (keptBinding(original.get(key), after.get(key))) continue
-      if (!unsafeCalls) return noAliases
+      const previous = original.get(key)
+      if (keptBinding(previous, after.get(key))) continue
+      if (!unsafe) return noAliases
       bindingsPreserved = false
-      unsafeCalls.add(getRawWorkerToolCallId(id))
+      unsafe.callIds.add(getRawWorkerToolCallId(id))
+      if (previous) unsafe.resultIds.add(previous.id)
     }
   }
   return bindingsPreserved ? aliases : noAliases
@@ -378,30 +385,28 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     }
   }
   const verified = preserveReplayToolBindings(messages, aliases, ownership)
-  if (attachedDuplicates.length) {
-    const unsafeCalls = new Set<string>()
+  let proposals = attachedDuplicates
+  // First exclude directly rejected slots, then fall back to independent call
+  // IDs for ambiguous shifts. Every retained subset is checked end to end.
+  for (let attempt = 0; attempt < 3 && proposals.length; attempt++) {
+    const unsafe: UnsafeBindings = { callIds: new Set(), resultIds: new Set() }
     const repaired = preserveReplayToolBindings(
       messages,
       new Map([
         ...verified,
-        ...attachedDuplicates.map(({ alias, canonical }) => [alias, canonical] as const)
+        ...proposals.map(({ alias, canonical }) => [alias, canonical] as const)
       ]),
       ownership,
-      unsafeCalls
+      unsafe
     )
     if (repaired.size) return repaired
-    const independent = attachedDuplicates.filter(({ call }) => !unsafeCalls.has(call))
-    if (independent.length > 0 && independent.length < attachedDuplicates.length) {
-      const retainedRepairs = preserveReplayToolBindings(
-        messages,
-        new Map([
-          ...verified,
-          ...independent.map(({ alias, canonical }) => [alias, canonical] as const)
-        ]),
-        ownership
-      )
-      if (retainedRepairs.size) return retainedRepairs
-    }
+    const precise = proposals.filter(({ alias }) => !unsafe.resultIds.has(alias))
+    const remaining =
+      precise.length < proposals.length
+        ? precise
+        : proposals.filter(({ call }) => !unsafe.callIds.has(call))
+    if (remaining.length === proposals.length) break
+    proposals = remaining
   }
   return verified
 }

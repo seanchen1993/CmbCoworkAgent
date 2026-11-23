@@ -283,6 +283,14 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       independentResult("0e02e6a6-9b77-44cc-9bc1-04f4303e6d0e", "Unclear owner")
     ]
     expect(findDisplayedReplayAliases([...rows, ...ambiguousBucket])).toEqual(aliases)
+    const sameCallBucket = ambiguousBucket.map((row) => ({
+      ...row,
+      ...(row.tool_calls
+        ? { tool_calls: row.tool_calls.map((tool) => ({ ...tool, id: executeCall.id })) }
+        : {}),
+      ...(row.tool_call_id ? { tool_call_id: executeCall.id } : {})
+    }))
+    expect(findDisplayedReplayAliases([...rows, ...sameCallBucket])).toEqual(aliases)
   })
   it("keeps a replay row visible when only it has the live reasoning", () => {
     const original = assistant()
