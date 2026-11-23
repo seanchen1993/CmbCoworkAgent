@@ -104,7 +104,7 @@ import {
   isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
-import { alignReplayedToolExchanges } from "../../../shared/tool-transcript-replay"
+import { prepareToolTranscriptReplayMerge } from "../../../shared/tool-transcript-replay"
 import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
@@ -491,7 +491,7 @@ function rememberSearchGoalEvent(previous: readonly GoalEvent[], event: GoalEven
 
 const mergePersistedMessagesIntoTranscript = (
   baseMessages: Message[],
-  persistedMessages: Message[],
+  persistedMessages: readonly Message[],
   useStableProviderOccurrences = false
 ): Message[] => {
   return mergeCheckpointAuthorityTranscriptMessages(baseMessages, persistedMessages, {
@@ -7087,13 +7087,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ),
               goalTranscriptPageRange !== undefined
             )
-      const restoredTranscript = mergePersistedMessagesIntoTranscript(
-        alignReplayedToolExchanges(
-          visiblePersistedThreadMessages,
-          checkpointTranscript,
-          checkpointReplayTurns
-        ),
+      const replay = prepareToolTranscriptReplayMerge(
         visiblePersistedThreadMessages,
+        checkpointTranscript,
+        checkpointReplayTurns
+      )
+      const restoredTranscript = mergePersistedMessagesIntoTranscript(
+        replay.checkpoint,
+        replay.durable,
         checkpointMessagesLoaded
       )
       const restoredTranscriptMessages = restoreVisibleCheckpointMessageTimes(

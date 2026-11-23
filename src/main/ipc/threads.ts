@@ -165,7 +165,7 @@ import {
   truncateCheckpointMessagesAfter
 } from "../../shared/checkpoint-transcript"
 import {
-  alignReplayedToolExchanges,
+  prepareToolTranscriptReplayMerge,
   findReplayedToolExchangeAliases
 } from "../../shared/tool-transcript-replay"
 import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
@@ -2854,12 +2854,12 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
     rawCheckpointMessages,
     { visibleRawIndices, includeReplayToolMetadata: true }
   )
-  const alignedCheckpoint = alignReplayedToolExchanges(
+  const replay = prepareToolTranscriptReplayMerge(
     persistedMessages,
     checkpointMessages,
     readCheckpointReplayTurns(checkpoint)
   )
-  const merged = mergeCheckpointAuthorityTranscriptMessages(alignedCheckpoint, persistedMessages, {
+  const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable, {
     useStableProviderOccurrences: true
   })
   const aliases = findReplayedToolExchangeAliases(merged)

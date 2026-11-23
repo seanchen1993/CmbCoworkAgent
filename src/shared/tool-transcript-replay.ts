@@ -1,7 +1,8 @@
 import { parseBotToolReceiptId } from "./bots/turn-feedback"
-import type {
-  CheckpointAuthorityTranscriptMessage,
-  CheckpointReplayTurns
+import {
+  mergeCheckpointAuthorityTranscriptMessage,
+  type CheckpointAuthorityTranscriptMessage,
+  type CheckpointReplayTurns
 } from "./checkpoint-transcript"
 import {
   buildMessageSameRoleDuplicateId,
@@ -40,6 +41,7 @@ interface AnchoredToolExchange<T> {
   anchor?: T
   hasPhysicalResults: boolean
   outcomeKey?: string
+  physicalKey?: string
 }
 
 const noAliases: ReadonlyMap<string, string> = new Map()
@@ -297,6 +299,48 @@ export function hasToolReplayCandidates(messages: readonly TranscriptMessage[]):
   return false
 }
 
+function findDisputedReplayResults<T extends TranscriptMessage>(
+  messages: readonly T[],
+  ownership: ReadonlyMap<string, T>,
+  owned: ReadonlySet<T>,
+  ownedExecutionIds: ReadonlySet<string>
+): ReadonlySet<T> {
+  const laterUnownedResult = new Map<string, number>()
+  for (const [index, row] of messages.entries()) {
+    if (
+      row.role === "tool" &&
+      row.tool_call_id &&
+      hasToolResultExecutionId(row) &&
+      !ownedExecutionIds.has(getMessageProviderSourceId(row))
+    ) {
+      laterUnownedResult.set(getRawWorkerToolCallId(row.tool_call_id), index)
+    }
+  }
+  const disputed = new Set<T>()
+  if (!laterUnownedResult.size) return disputed
+  const seen = new Map<string, T[]>()
+  const payloadId = createPayloadIds()
+  const proposals: AttachedToolReplay[] = []
+  for (const [index, row] of messages.entries()) {
+    if (!owned.has(row) || !row.tool_call_id || !hasToolResultExecutionId(row)) continue
+    const key = JSON.stringify([resultReplayKey(row), payloadId(row.content)])
+    const original = rememberVersion(seen, key, row, sameRow)
+    const call = getRawWorkerToolCallId(row.tool_call_id)
+    if (original.id !== row.id && (laterUnownedResult.get(call) ?? -1) > index) {
+      proposals.push({ alias: row.id, canonical: original.id, call })
+    }
+  }
+  const validated = selectAttachedReplayAliases(messages, noAliases, ownership, proposals)
+  if (!validated.size) return disputed
+  const repaired = resolveToolResultOwnership(messages.filter((row) => !validated.has(row.id)))
+  for (const [owner, row] of ownership) {
+    if (!validated.has(row.id)) continue
+    const next = repaired.get(owner)
+    if (next && resultReplayKey(next) !== resultReplayKey(row)) disputed.add(row)
+  }
+  return disputed
+}
+
 function indexAnchoredExchanges<T extends TranscriptMessage>(
   messages: readonly T[],
   payloadId: (value: unknown) => number,
@@ -311,9 +355,18 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
   }
 ) {
   const ownership = resolveToolResultOwnership(messages)
+  const owned = new Set(ownership.values())
+  const disputed = hasToolReplayCandidates(messages)
+    ? findDisputedReplayResults(
+        messages,
+        ownership,
+        owned,
+        new Set([...owned].filter(hasToolResultExecutionId).map(getMessageProviderSourceId))
+      )
+    : new Set<T>()
   const byAnchor = new Map<string, AnchoredToolExchange<T>[]>()
   const byPhysicalGroup = new Map<string, AnchoredToolExchange<T>[]>()
-  const byOutcome = new Map<string, AnchoredToolExchange<T> | null>()
+  const byOutcome = new Map<string, AnchoredToolExchange<T>[]>()
   const assistantAnchors = new Map<string, T | undefined>()
   const addCandidate = (
     index: Map<string, AnchoredToolExchange<T>[]>,
@@ -335,12 +388,15 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
     const key = JSON.stringify([scope, ...evidence])
     if (foldEquivalentTargets && outcome) {
       const outcomeKey = JSON.stringify([scope, ...outcome])
-      const previous = byOutcome.get(outcomeKey)
-      const equivalent =
-        previous &&
-        (scope === null || sameReplayAnchor(previous.anchor, candidate.anchor)) &&
-        isSameCompletedExecution(previous.exchange, candidate.exchange)
-      byOutcome.set(outcomeKey, previous === undefined || equivalent ? candidate : null)
+      const group = byOutcome.get(outcomeKey) ?? []
+      const previous = group.findIndex(
+        (entry) =>
+          (scope === null || sameReplayAnchor(entry.anchor, candidate.anchor)) &&
+          isSameCompletedExecution(entry.exchange, candidate.exchange)
+      )
+      if (previous < 0) group.push(candidate)
+      else group[previous] = candidate
+      byOutcome.set(outcomeKey, group)
     }
     if (
       foldEquivalentTargets &&
@@ -366,7 +422,7 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
     assistantAnchors.set(message.id, assistantAnchors.has(message.id) ? undefined : anchor)
     if (!anchor && !includeLeadingHidden) continue
     const exchange = readExchange(message, ownership)
-    if (exchange) {
+    if (exchange && !exchange.results.some((result) => disputed.has(result))) {
       const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
       const identity = exchangeKey(exchange)
       const outcome = hasPhysicalResults
@@ -380,7 +436,8 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
         outcome ? [payloadId(exchange.assistant.content), outcome[1]] : null
       ]
       const outcomeKey = outcome ? JSON.stringify([anchor?.id ?? null, ...outcome]) : undefined
-      const candidate = { exchange, position, anchor, hasPhysicalResults, outcomeKey }
+      const physicalKey = outcome ? JSON.stringify(outcome) : undefined
+      const candidate = { exchange, position, anchor, hasPhysicalResults, outcomeKey, physicalKey }
       const requiresRawProof =
         checkpointTurns && (!anchor || checkpointTurns.hiddenAnchors.has(anchor.id))
       const unsafe =
@@ -395,7 +452,7 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
         ) {
           addAnchoredCandidate(null, evidenceKey, outcome, candidate)
         }
-        if (outcome) addCandidate(byPhysicalGroup, JSON.stringify(outcome), candidate)
+        if (physicalKey) addCandidate(byPhysicalGroup, physicalKey, candidate)
       }
     }
     position++
@@ -677,14 +734,55 @@ function applyCheckpointAlignments<T extends TranscriptMessage>(
   return aligned.size ? replay.map((message) => aligned.get(message) ?? message) : replay
 }
 
-/** A checkpoint and durable page may number the same complete exchange differently. */
-export function alignReplayedToolExchanges<T extends TranscriptMessage>(
+function projectDurableToolPresentations<T extends TranscriptMessage>(
+  durableMessages: readonly T[],
+  checkpointMessages: readonly T[],
+  durable: ReturnType<typeof indexAnchoredExchanges<T>>,
+  targets: ReadonlyMap<AnchoredToolExchange<T>, AnchoredToolExchange<T>>,
+  checkpointAliases: ReadonlyMap<string, string>
+): readonly T[] {
+  const revisions = [...targets].filter(([candidate, target]) => {
+    const key = target.physicalKey
+    return (
+      key &&
+      (durable.byPhysicalGroup.get(key)?.length ?? 0) > 1 &&
+      !checkpointAliases.has(candidate.exchange.assistant.id) &&
+      !isExactToolExchangeReplay(target.exchange, candidate.exchange)
+    )
+  })
+  if (!revisions.length) return durableMessages
+  const checkpointById = new Map(checkpointMessages.map((row) => [row.id, row]))
+  const ownership = resolveToolResultOwnership(checkpointMessages)
+  const projected = new Map<T, T>()
+  for (const [candidate, target] of revisions) {
+    const assistant = checkpointById.get(target.exchange.assistant.id)
+    const updated = assistant && readExchange(assistant, ownership)
+    if (!updated || !isSameExchange(candidate.exchange, updated)) continue
+    const presentation = mergeCheckpointAuthorityTranscriptMessage(
+      updated.assistant,
+      target.exchange.assistant
+    )
+    for (const copy of durable.byPhysicalGroup.get(target.physicalKey!) ?? []) {
+      if (!isExactToolExchangeReplay(target.exchange, copy.exchange)) continue
+      const row = copy.exchange.assistant
+      projected.set(row, {
+        ...row,
+        content: presentation.content,
+        reasoning: presentation.reasoning
+      })
+    }
+  }
+  return projected.size ? durableMessages.map((row) => projected.get(row) ?? row) : durableMessages
+}
+
+/** Both sources can number and render the same completed execution differently. */
+export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   canonical: readonly T[],
   replay: T[],
   checkpointTurns?: CheckpointReplayTurns
-): T[] {
+): { checkpoint: T[]; durable: readonly T[] } {
   const includeLeadingHidden = Boolean(checkpointTurns?.leadingHiddenAssistants.size)
-  if (!canonical.length || replay.length < 2) return replay
+  if (!canonical.length || replay.length < 2) return { checkpoint: replay, durable: canonical }
   const payloadId = createPayloadIds()
   const durable = indexAnchoredExchanges(canonical, payloadId, {
     includeLeadingHidden,
@@ -716,14 +814,14 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
         continue
       }
       if (!matches.length && candidate.outcomeKey) {
-        const sameOutcome = durable.byOutcome.get(candidate.outcomeKey)
-        if (
-          sameOutcome &&
-          (!candidate.anchor || sameReplayAnchor(sameOutcome.anchor, candidate.anchor, true)) &&
-          isSameCompletedExecution(sameOutcome.exchange, candidate.exchange, true)
-        ) {
-          targets.set(candidate, sameOutcome)
-        }
+        const equivalent = durable.byOutcome
+          .get(candidate.outcomeKey)
+          ?.filter(
+            (sameOutcome) =>
+              (!candidate.anchor || sameReplayAnchor(sameOutcome.anchor, candidate.anchor, true)) &&
+              isSameCompletedExecution(sameOutcome.exchange, candidate.exchange, true)
+          )
+        if (equivalent?.length === 1) targets.set(candidate, equivalent[0])
       }
     }
   }
@@ -755,15 +853,32 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
     checkpointTurns
   )
   // Checkpoint copies were validated independently of whether an ID needed a move.
-  const aligned = applyCheckpointAlignments(replayWithoutCopies, groups)
+  let aligned = applyCheckpointAlignments(replayWithoutCopies, groups)
   if (needsDurableTailAnchor && aligned !== replayWithoutCopies) {
     const durableIds = new Set(canonical.map(({ id }) => id))
     // A newly identified hidden suffix may have no shared row. Give the merge
     // a durable anchor so the suffix cannot jump ahead of earlier messages.
     if (!aligned.some(({ id }) => durableIds.has(id)))
-      return [canonical[canonical.length - 1], ...aligned]
+      aligned = [canonical[canonical.length - 1], ...aligned]
   }
-  return aligned
+  return {
+    checkpoint: aligned,
+    durable: projectDurableToolPresentations(
+      canonical,
+      aligned,
+      durable,
+      targets,
+      checkpointAliases
+    )
+  }
+}
+
+export function alignReplayedToolExchanges<T extends TranscriptMessage>(
+  canonical: readonly T[],
+  replay: T[],
+  checkpointTurns?: CheckpointReplayTurns
+): T[] {
+  return prepareToolTranscriptReplayMerge(canonical, replay, checkpointTurns).checkpoint
 }
 
 interface UnsafeBindings {
@@ -775,7 +890,7 @@ interface UnsafeBindings {
 export function preserveReplayToolBindings<T extends TranscriptMessage>(
   messages: readonly T[],
   aliases: ReadonlyMap<string, string>,
-  original = resolveToolResultOwnership(messages),
+  original: ReadonlyMap<string, T> = resolveToolResultOwnership(messages),
   unsafe?: UnsafeBindings
 ): ReadonlyMap<string, string> {
   if (aliases.size === 0) return aliases
@@ -838,6 +953,11 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
 ): ReadonlyMap<string, string> {
   if (!hasToolReplayCandidates(messages)) return noAliases
   const ownership = resolveToolResultOwnership(messages)
+  const owned = new Set(ownership.values())
+  const ownedExecutionIds = new Set(
+    [...owned].filter(hasToolResultExecutionId).map(getMessageProviderSourceId)
+  )
+  const disputed = findDisputedReplayResults(messages, ownership, owned, ownedExecutionIds)
   const aliases = new Map<string, string>()
   const payloadId = createPayloadIds()
   const resultVersionKey = (result: T) => [resultReplayKey(result), payloadId(result.content)]
@@ -867,6 +987,9 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
         isSameExchange(left, right)
     )
     if (previous.assistant.id === exchange.assistant.id) continue
+    // A replay occupying a new call can make the entire assistant look old.
+    // Keep that call until the separate physical result can claim its slot.
+    if (exchange.results.some((result) => disputed.has(result))) continue
     aliases.set(exchange.assistant.id, previous.assistant.id)
     for (const [index, result] of exchange.results.entries()) {
       const canonical = previous.results[index]
@@ -876,8 +999,6 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
 
   // Compare result identity independently of FIFO: a replay could have already
   // occupied a newer call that happened to reuse the original ID.
-  const owned = new Set(ownership.values())
-  const ownedExecutionIds = new Set<string>()
   const knownResults = new Map<string, T[]>()
   const duplicateResults = new Map<T, T>()
   const rememberResult = (row: T) => {
@@ -891,7 +1012,6 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   }
   for (const row of owned) {
     if (!hasToolResultExecutionId(row)) continue
-    ownedExecutionIds.add(getMessageProviderSourceId(row))
     if (!aliases.has(row.id)) rememberResult(row)
   }
   // Prefer a bound result as the canonical row. A delayed genuine result may
@@ -907,7 +1027,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     }
   }
   const callsWithUnownedResults = new Set<string>()
-  const attachedDuplicates: Array<{ alias: string; canonical: string; call: string }> = []
+  const attachedDuplicates: AttachedToolReplay[] = []
   // A replacement must arrive after the replay that occupied its call's slot.
   for (let index = messages.length - 1; index >= 0; index--) {
     const row = messages[index]
@@ -930,7 +1050,21 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     }
   }
   const verified = preserveReplayToolBindings(messages, aliases, ownership)
-  let proposals = attachedDuplicates
+  return selectAttachedReplayAliases(messages, verified, ownership, attachedDuplicates)
+}
+
+interface AttachedToolReplay {
+  alias: string
+  canonical: string
+  call: string
+}
+
+function selectAttachedReplayAliases<T extends TranscriptMessage>(
+  messages: readonly T[],
+  verified: ReadonlyMap<string, string>,
+  ownership: ReadonlyMap<string, T>,
+  proposals: AttachedToolReplay[]
+): ReadonlyMap<string, string> {
   // First exclude directly rejected slots, then fall back to independent call
   // IDs for ambiguous shifts. Every retained subset is checked end to end.
   for (let attempt = 0; attempt < 3 && proposals.length; attempt++) {

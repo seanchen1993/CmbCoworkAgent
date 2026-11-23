@@ -6,8 +6,10 @@ import {
 import type { CheckpointAuthorityTranscriptMessage as Message } from "./checkpoint-transcript"
 import {
   alignReplayedToolExchanges,
-  findReplayedToolExchangeAliases
+  findReplayedToolExchangeAliases,
+  prepareToolTranscriptReplayMerge
 } from "./tool-transcript-replay"
+import { getWorkerToolUiKey, resolveToolResultOwnership } from "./tool-result-ownership"
 
 const user: Message = { id: "user", role: "user", content: "Inspect the fixture" }
 const resultId = "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465"
@@ -399,6 +401,77 @@ describe("tool transcript replay", () => {
     expect(aligned[1].content).toBe(revised.content)
   })
 
+  it.each([false, true])(
+    "keeps durable exact copies folded after a checkpoint presentation revision (trimmed %s)",
+    (trimmed) => {
+      const older = { ...exchange()[0], content: "Unrelated earlier reply", tool_calls: undefined }
+      const [assistant, tool] = exchange()
+      const checkpoint = trimmed
+        ? [{ ...assistant, content: "Revised wording" }, tool]
+        : [user, { ...assistant, content: "Revised wording" }, tool]
+      const rows = checkpointRows(checkpoint)
+      const turns = readCheckpointReplayTurns({
+        channel_values: { messages: trimmed ? [hiddenTeam, ...rows] : rows }
+      })
+      const durable = [{ ...user, id: "older" }, older, user, ...exchange(2), ...exchange(3)]
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(
+        prepared.checkpoint,
+        prepared.durable,
+        { useStableProviderOccurrences: true }
+      )
+      const aliases = findReplayedToolExchangeAliases(merged)
+      const rendered = merged.filter(({ id }) => !aliases.has(id))
+      expect(rendered.filter(({ role }) => role === "tool")).toHaveLength(1)
+      expect(
+        rendered.filter(({ tool_calls }) => tool_calls?.length).map(({ content }) => content)
+      ).toEqual(["Revised wording"])
+      expect(rendered.find(({ id }) => id === older.id)).toEqual(older)
+      expect(
+        durable.filter(({ tool_calls }) => tool_calls?.length).map(({ content }) => content)
+      ).toEqual(["Checking", "Checking"])
+    }
+  )
+
+  it.each([false, true])(
+    "finds the correct structured result variant for a prose revision (trimmed %s)",
+    (trimmed) => {
+      const structured = (content: string) => [{ type: "text", text: content }]
+      const [partial, partialTool] = exchange(2)
+      const [final, finalTool] = exchange(3)
+      const durable = [
+        user,
+        partial,
+        { ...partialTool, content: structured("Partial") },
+        final,
+        { ...finalTool, content: structured("Final") }
+      ]
+      const [assistant, tool] = exchange()
+      const revision = [
+        { ...assistant, content: "Late checkpoint wording" },
+        { ...tool, content: structured("Final") }
+      ]
+      const checkpoint = trimmed ? revision : [user, ...revision]
+      const rows = checkpointRows(checkpoint)
+      const turns = readCheckpointReplayTurns({
+        channel_values: { messages: trimmed ? [hiddenTeam, ...rows] : rows }
+      })
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(
+        prepared.checkpoint,
+        prepared.durable,
+        { useStableProviderOccurrences: true }
+      )
+      expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content)).toEqual([
+        structured("Partial"),
+        structured("Final")
+      ])
+      expect(
+        merged.filter(({ tool_calls }) => tool_calls?.length).map(({ content }) => content)
+      ).toEqual(["Checking", "Late checkpoint wording"])
+    }
+  )
+
   it.each([true, false])(
     "keeps distinct versions when one occupies the intended occurrence (%s)",
     (matchesFirst) => {
@@ -781,6 +854,45 @@ describe("tool transcript replay", () => {
       ]).size
     ).toBe(0)
   })
+
+  it.each([false, true])(
+    "keeps a real repeated assistant when an old result arrives before its own (late %s)",
+    (late) => {
+      const [original, originalResult] = exchange()
+      const [current, stale] = exchange(2)
+      const currentResult = {
+        ...originalResult,
+        id: "1c711082-5111-4632-976d-7c05ee064c33",
+        provider_source_id: undefined,
+        content: "New tool execution"
+      }
+      const laterResult = {
+        ...currentResult,
+        id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+        content: "Another execution"
+      }
+      const rows = [
+        user,
+        original,
+        originalResult,
+        { ...user, id: "repeat" },
+        current,
+        stale,
+        ...(late
+          ? [
+              { ...user, id: "later" },
+              { ...original, id: "another-execution", provider_source_id: undefined },
+              laterResult
+            ]
+          : []),
+        currentResult
+      ]
+      const aliases = findReplayedToolExchangeAliases(rows)
+      expect(aliases).toEqual(new Map([[stale.id, originalResult.id]]))
+      const ownership = resolveToolResultOwnership(rows.filter(({ id }) => !aliases.has(id)))
+      expect(ownership.get(getWorkerToolUiKey(current.id, "shared-call", 0))).toBe(currentResult)
+    }
+  )
 
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")
