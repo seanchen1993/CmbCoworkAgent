@@ -1,4 +1,3 @@
-import { ThreadSearchButton } from "@/components/search/ThreadSearchDialog"
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, memo, lazy, Suspense } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
@@ -1378,7 +1377,6 @@ export const ThreadSidebar = memo(function ThreadSidebar({
         className="p-1 pb-0.5 space-y-1.5"
         style={{ paddingTop: "max(4px, var(--sidebar-safe-padding, 0px))" }}
       >
-        <ThreadSearchButton />
         <div
           role="tablist"
           aria-label="侧边栏模式"

@@ -1,5 +1,14 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
-import { Search } from "lucide-react"
+import {
+  ChevronDown,
+  CornerDownLeft,
+  FolderClosed,
+  ListFilter,
+  MessageSquare,
+  RotateCw,
+  Search,
+  SearchX
+} from "lucide-react"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { adoptThreadSearchSummary, isThreadDeletionPending, useAppStore } from "@/lib/store"
 import { useThreadStateSelector } from "@/lib/thread-context"
@@ -24,21 +33,31 @@ import {
 const threadSearchEnabled =
   import.meta.env.VITE_DISABLE_THREAD_SEARCH !== "1" &&
   (typeof window === "undefined" || window.api?.threads?.searchEnabled !== false)
+const MAX_INLINE_TITLE_MATCH_LENGTH = 32
 
 function openForCurrentView() {
   openThreadSearch(useAppStore.getState().mainView === "harness")
 }
 
-export function ThreadSearchButton() {
+export function ThreadSearchButton({ className }: { className: string }) {
   if (!threadSearchEnabled) return null
+  const isMac = globalThis.window?.electron?.process?.platform === "darwin"
   return (
     <button
       type="button"
-      className="flex h-8 w-full items-center gap-2 rounded px-2 text-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+      aria-label="搜索会话"
+      aria-haspopup="dialog"
+      aria-keyshortcuts={isMac ? "Meta+Shift+F" : "Control+Shift+F"}
+      title={`搜索会话（${isMac ? "⌘⇧F" : "Ctrl+Shift+F"}）`}
+      className={className}
       onClick={openForCurrentView}
     >
-      <Search className="size-4 shrink-0" aria-hidden="true" />
-      搜索会话
+      <Search
+        size={18}
+        strokeWidth={1.6}
+        className="shrink-0 transition-transform group-hover:scale-[1.04]"
+        aria-hidden="true"
+      />
     </button>
   )
 }
@@ -106,6 +125,19 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
   const visibleResults = executingKey === searchKey ? results : []
   const selectedResult =
     visibleResults.find((result) => result.threadId === selected) ?? visibleResults[0]
+  const hasQuery = Boolean(query.trim())
+  const isSearching = hasQuery && (pending || executingKey !== searchKey)
+  const searchError = executingKey === searchKey ? error : ""
+  const status =
+    failure ||
+    (restarting && executingKey === searchKey ? "搜索已过期，正在重新搜索…" : "") ||
+    searchError ||
+    (executingKey === searchKey && reasons) ||
+    (isSearching
+      ? "正在搜索已保存内容…"
+      : visibleResults.length
+        ? `已找到 ${visibleResults.length} 个会话`
+        : "未找到匹配的已保存内容")
   const openingThreadId =
     opening && isCurrentThreadSearchNavigation(opening.id) ? opening.threadId : null
 
@@ -316,7 +348,7 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
         }}
       >
         <DialogContent
-          className="sm:max-w-xl"
+          className="top-[10dvh] flex max-h-[min(32rem,80dvh)] w-[calc(100%-1.5rem)] max-w-[680px] translate-y-0 flex-col gap-0 rounded-xl p-0 shadow-2xl sm:rounded-xl"
           onOpenAutoFocus={(event) => {
             event.preventDefault()
             if (input.current && document.activeElement !== input.current) {
@@ -328,141 +360,246 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault()
-            if (!closedByNavigation.current && !useThreadSearch.getState().open) entry.current?.focus()
+            if (!closedByNavigation.current && !useThreadSearch.getState().open)
+              entry.current?.focus()
           }}
         >
-          <DialogTitle>搜索会话</DialogTitle>
-          <DialogDescription>搜索已保存内容，最新生成内容保存后可刷新。</DialogDescription>
-          <div className="flex gap-2">
-            <input
-              ref={input}
-              role="combobox"
-              aria-expanded={true}
-              aria-controls={resultsId}
-              aria-activedescendant={selectedResult ? `${resultsId}-${encodeURIComponent(selectedResult.threadId)}` : undefined}
-              aria-autocomplete="list"
-              aria-label="搜索会话"
-              placeholder="输入关键词"
-              value={query}
-              maxLength={THREAD_SEARCH_QUERY_LIMIT}
-              className="min-w-0 flex-1 rounded border bg-background px-3 py-2 text-sm"
-              onChange={(event) => {
-                if (opening) cancelThreadSearchNavigation()
-                useThreadSearch.setState({ failure: "" })
-                setQuery(event.target.value)
-                setSelected(null)
-              }}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing || event.keyCode === 229 || !selectedResult)
-                  return
-                const index = visibleResults.indexOf(selectedResult)
-                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                  event.preventDefault()
-                  const next = Math.min(
-                    visibleResults.length - 1,
-                    Math.max(0, index + (event.key === "ArrowDown" ? 1 : -1))
-                  )
-                  setSelected(visibleResults[next].threadId)
-                } else if (event.key === "Enter") {
-                  event.preventDefault()
-                  void navigate(selectedResult)
-                }
-              }}
-            />
-            <select
-              aria-label="搜索范围"
-              className="rounded border bg-background px-2 text-sm"
-              value={availableScope}
-              onChange={(event) => {
-                if (opening) cancelThreadSearchNavigation()
-                useThreadSearch.setState({ failure: "" })
-                setScopeSelection({ version: openingVersion, value: event.target.value })
-                setSelected(null)
-              }}
-            >
-              <option value="ordinary">普通会话</option>
-              <option value="project" disabled={!projectId}>当前项目</option>
-              <option value="projects">全部项目</option>
-              <option value="all">全部会话</option>
-              <option value="workspace" disabled={!currentWorkspace}>
-                当前工作区
-              </option>
-              <option value="none">无工作区</option>
-            </select>
+          <div className="shrink-0 px-4 pb-3 pt-4 sm:px-5">
+            <DialogTitle className="pr-8 text-sm leading-5">搜索会话</DialogTitle>
+            <DialogDescription className="sr-only">
+              搜索已保存内容，最新生成内容保存后可刷新。
+            </DialogDescription>
           </div>
-          {query.trim() && (
-            <div className="flex justify-between gap-2 text-xs text-muted-foreground">
-              <span role="status">
-                {failure ||
-                  (restarting && executingKey === searchKey ? "搜索已过期，正在重新搜索…" : "") ||
-                  (executingKey === searchKey && (error || reasons)) ||
-                  (pending || executingKey !== searchKey
-                    ? "正在搜索已保存内容…"
-                    : visibleResults.length
-                      ? `已找到 ${visibleResults.length} 个会话`
-                      : "未找到匹配的已保存内容")}
+          <div className="mx-4 mb-3 flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-input bg-muted/30 px-2 py-1 focus-within:border-ring sm:mx-5">
+            <div className="flex min-w-[10rem] flex-1 items-center gap-2 pl-1">
+              <Search className="size-4 shrink-0 text-primary" aria-hidden="true" />
+              <input
+                ref={input}
+                role="combobox"
+                aria-expanded={true}
+                aria-controls={resultsId}
+                aria-activedescendant={
+                  selectedResult
+                    ? `${resultsId}-${encodeURIComponent(selectedResult.threadId)}`
+                    : undefined
+                }
+                aria-autocomplete="list"
+                aria-label="搜索会话"
+                placeholder="搜索会话标题或内容"
+                value={query}
+                maxLength={THREAD_SEARCH_QUERY_LIMIT}
+                className="h-9 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-foreground/65"
+                onChange={(event) => {
+                  if (opening) cancelThreadSearchNavigation()
+                  useThreadSearch.setState({ failure: "" })
+                  setQuery(event.target.value)
+                  setSelected(null)
+                }}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing || event.keyCode === 229 || !selectedResult)
+                    return
+                  const index = visibleResults.indexOf(selectedResult)
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault()
+                    const next = Math.min(
+                      visibleResults.length - 1,
+                      Math.max(0, index + (event.key === "ArrowDown" ? 1 : -1))
+                    )
+                    setSelected(visibleResults[next].threadId)
+                  } else if (event.key === "Enter") {
+                    event.preventDefault()
+                    void navigate(selectedResult)
+                  }
+                }}
+              />
+            </div>
+            <div className="relative flex shrink-0 items-center">
+              <ListFilter
+                className="pointer-events-none absolute left-2 size-3.5 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <select
+                aria-label="搜索范围"
+                className="h-8 appearance-none rounded-md border border-border bg-background pl-7 pr-7 text-xs font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                value={availableScope}
+                onChange={(event) => {
+                  if (opening) cancelThreadSearchNavigation()
+                  useThreadSearch.setState({ failure: "" })
+                  setScopeSelection({ version: openingVersion, value: event.target.value })
+                  setSelected(null)
+                }}
+              >
+                <option value="ordinary">普通会话</option>
+                <option value="project" disabled={!projectId}>
+                  当前项目
+                </option>
+                <option value="projects">全部项目</option>
+                <option value="all">全部会话</option>
+                <option value="workspace" disabled={!currentWorkspace}>
+                  当前工作区
+                </option>
+                <option value="none">无工作区</option>
+              </select>
+              <ChevronDown
+                className="pointer-events-none absolute right-2 size-3.5 text-muted-foreground"
+                aria-hidden="true"
+              />
+            </div>
+          </div>
+          {hasQuery && (
+            <div className="flex shrink-0 items-start justify-between gap-2 border-t border-border/60 px-4 py-2 text-xs text-foreground/75 sm:px-5">
+              <span role="status" className="min-w-0 break-words py-1">
+                {status}
               </span>
               <button
                 type="button"
-                className="shrink-0 underline"
+                className="-mr-1 inline-flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => {
                   if (opening) cancelThreadSearchNavigation()
                   useThreadSearch.setState({ failure: "" })
                   setRetry((value) => value + 1)
                 }}
               >
+                <RotateCw className="size-3.5" aria-hidden="true" />
                 刷新
               </button>
             </div>
           )}
-          <div ref={list} id={resultsId} role="listbox" aria-label="会话搜索结果"
-            className="max-h-[55vh] overflow-auto">
-            {visibleResults.map((result) => {
-              const range = result.snippetRanges[0]
-              const workspaceLabel = result.route && result.route.kind !== "ordinary"
-                ? [result.projectLabel ?? result.route.projectId,
-                    result.route.kind === "featureSession" ? result.featureLabel ?? result.route.slug : null
-                  ].filter(Boolean).join(" / ")
-                : result.remoteInbox ? REMOTE_INBOX_WORKSPACE_NAME : result.workspacePath
-              return (
-                <button
-                  key={result.threadId}
-                  id={`${resultsId}-${encodeURIComponent(result.threadId)}`}
-                  data-search-thread={result.threadId}
-                  role="option"
-                  aria-selected={result === selectedResult}
-                  disabled={openingThreadId === result.threadId}
-                  type="button"
-                  onClick={() => void navigate(result)}
-                  className={`block w-full rounded px-3 py-2 text-left text-sm hover:bg-muted ${result === selectedResult ? "bg-muted" : ""}`}
-                >
-                  <span className="block truncate font-medium">{result.title}</span>
-                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <span className="min-w-0 truncate" title={workspaceLabel ?? undefined}>
-                      {workspaceLabel ?? "无工作区"}
-                    </span>
-                    <span className="shrink-0 whitespace-nowrap">
-                      · {new Date(result.frozenUpdatedAt).toLocaleString()} ·{" "}
-                      <span>{result.matchedBy === "title" ? "标题" : "正文"}</span>
-                      {result.navigation === "threadOnly" ? " · 打开会话" : ""}
-                    </span>
-                  </span>
-                  <span className="line-clamp-2 break-all">
-                    {range ? (
-                      <>
-                        {result.snippet.slice(0, range.start)}
-                        <mark className="rounded bg-amber-400/30 text-foreground">
-                          {result.snippet.slice(range.start, range.end)}
-                        </mark>
-                        {result.snippet.slice(range.end)}
-                      </>
+          <div className="flex min-h-0 flex-col">
+            {!visibleResults.length && !isSearching && !searchError && (
+              <div className="grid h-36 place-items-center overflow-y-auto px-4 py-3 text-center">
+                <div className="flex flex-col items-center gap-2">
+                  <div className="grid size-11 place-items-center rounded-xl bg-muted text-muted-foreground">
+                    {hasQuery ? (
+                      <SearchX className="size-5" aria-hidden="true" />
                     ) : (
-                      result.snippet
+                      <Search className="size-5" aria-hidden="true" />
                     )}
-                  </span>
-                </button>
-              )
-            })}
+                  </div>
+                  <p className="text-sm text-foreground/75">
+                    {hasQuery ? "试试其他关键词，或切换搜索范围" : "输入关键词，查找已保存的会话"}
+                  </p>
+                </div>
+              </div>
+            )}
+            <div
+              ref={list}
+              id={resultsId}
+              role="listbox"
+              aria-label="会话搜索结果"
+              className="min-h-0 overflow-y-auto overscroll-contain px-2 empty:pb-0 sm:px-3"
+            >
+              {visibleResults.map((result) => {
+                const range = result.snippetRanges[0]
+                const titleMatch = result.matchedBy === "title"
+                const highlightInTitle =
+                  titleMatch &&
+                  result.snippet === result.title &&
+                  result.title.length <= MAX_INLINE_TITLE_MATCH_LENGTH
+                const snippet = range ? (
+                  <>
+                    {result.snippet.slice(0, range.start)}
+                    <mark className="rounded-sm bg-primary/15 font-medium text-foreground">
+                      {result.snippet.slice(range.start, range.end)}
+                    </mark>
+                    {result.snippet.slice(range.end)}
+                  </>
+                ) : (
+                  result.snippet
+                )
+                const projectRoute = result.route?.kind === "ordinary" ? undefined : result.route
+                const workspaceLabel = projectRoute
+                  ? [
+                      result.projectLabel ?? projectRoute.projectId,
+                      projectRoute.kind === "featureSession"
+                        ? (result.featureLabel ?? projectRoute.slug)
+                        : null
+                    ]
+                      .filter(Boolean)
+                      .join(" / ")
+                  : result.remoteInbox
+                    ? REMOTE_INBOX_WORKSPACE_NAME
+                    : result.workspacePath
+                const workspaceName =
+                  projectRoute || result.remoteInbox
+                    ? workspaceLabel
+                    : (workspaceLabel?.split(/[\\/]/).filter(Boolean).at(-1) ?? workspaceLabel)
+                return (
+                  <button
+                    key={result.threadId}
+                    id={`${resultsId}-${encodeURIComponent(result.threadId)}`}
+                    data-search-thread={result.threadId}
+                    role="option"
+                    aria-selected={result === selectedResult}
+                    disabled={openingThreadId === result.threadId}
+                    type="button"
+                    onClick={() => void navigate(result)}
+                    className="group grid w-full grid-cols-[auto_minmax(0,1fr)] items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2 text-left text-sm hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-60 aria-selected:border-primary/20 aria-selected:bg-primary/10"
+                  >
+                    <span className="mt-0.5 grid size-8 place-items-center rounded-md bg-muted text-muted-foreground group-aria-selected:bg-primary/10 group-aria-selected:text-primary">
+                      {projectRoute ? (
+                        <FolderClosed className="size-4" aria-hidden="true" />
+                      ) : (
+                        <MessageSquare className="size-4" aria-hidden="true" />
+                      )}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="flex flex-wrap items-baseline justify-between gap-x-2">
+                        <span
+                          className={`min-w-0 max-w-full font-medium ${highlightInTitle ? "break-words" : "truncate"}`}
+                          title={result.title}
+                        >
+                          {highlightInTitle ? snippet : result.title}
+                        </span>
+                        <time className="text-xs tabular-nums text-foreground/70">
+                          {new Date(result.frozenUpdatedAt).toLocaleString()}
+                        </time>
+                      </span>
+                      <span className="flex flex-wrap items-center gap-x-2 text-xs text-foreground/70">
+                        <span
+                          aria-hidden={workspaceName !== workspaceLabel || undefined}
+                          className="min-w-0 truncate"
+                          title={workspaceLabel ?? undefined}
+                        >
+                          {workspaceName ?? "无工作区"}
+                        </span>
+                        {workspaceName !== workspaceLabel && (
+                          <span className="sr-only">{workspaceLabel}</span>
+                        )}
+                        <span>
+                          {titleMatch ? "标题匹配" : "正文匹配"}
+                          {!titleMatch && result.navigation === "threadOnly" ? " · 打开会话" : ""}
+                        </span>
+                      </span>
+                      {!highlightInTitle && (
+                        <span className="mt-1 line-clamp-2 break-words text-sm leading-snug text-foreground">
+                          {snippet}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <div
+            className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-border bg-muted/30 px-4 py-2 text-xs text-foreground/75 sm:px-5"
+            aria-hidden="true"
+          >
+            <span className="flex items-center gap-1.5">
+              <kbd className="rounded border border-border bg-background px-1 font-sans">↑ ↓</kbd>
+              选择
+            </span>
+            <span className="flex items-center gap-1.5">
+              <kbd className="grid h-5 min-w-5 place-items-center rounded border border-border bg-background px-1">
+                <CornerDownLeft className="size-3" />
+              </kbd>
+              打开
+            </span>
+            <span className="ml-auto flex items-center gap-1.5">
+              <kbd className="rounded border border-border bg-background px-1 font-sans">Esc</kbd>
+              关闭
+            </span>
           </div>
         </DialogContent>
       </Dialog>

@@ -6,7 +6,7 @@ import assert from "node:assert/strict"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import type {
@@ -346,7 +346,8 @@ async function runProjectSearchScenarios(
       const threadId = created.thread_id ?? created.id
       if (!threadId) throw new Error("Missing newer Feature fixture")
       ids["newer-feature-" + i] = threadId
-      await api.threads.create({ title: "Recent ordinary session " + i,
+      const ordinaryTitle = (i === 0 ? "很长".repeat(24) + " " : "") + "Recent ordinary session " + i
+      await api.threads.create({ title: ordinaryTitle,
         agentMode: "normal", workspacePath: workspace })
     }
 
@@ -437,8 +438,78 @@ async function runProjectSearchScenarios(
   })
   await page.getByRole("button", { name: "全部收起工作区", exact: true }).click()
   await page.getByRole("button", { name: "全部展开工作区", exact: true }).waitFor()
+  const precedingControl = () =>
+    searchButton.evaluate((button) => button.previousElementSibling?.getAttribute("aria-label"))
+  assert.equal(await precedingControl(), "隐藏侧边栏")
+  await searchButton.locator("..").screenshot({
+    path: join(artifacts, "thread-search-titlebar.png"), animations: "disabled"
+  })
+  await page.getByRole("button", { name: "隐藏侧边栏", exact: true }).click()
+  const showSidebar = page.getByRole("button", { name: "显示侧边栏", exact: true })
+  await showSidebar.waitFor()
+  assert.equal(await precedingControl(), "显示侧边栏")
+  await searchButton.locator("..").screenshot({
+    path: join(artifacts, "thread-search-titlebar-collapsed.png"), animations: "disabled"
+  })
+  await searchButton.click()
+  await globalInput.waitFor()
+  assert.equal(await searchScope.inputValue(), "ordinary")
+  await globalInput.press("Escape")
+  await dialog.waitFor({ state: "hidden" })
+  await page.waitForFunction(
+    () => document.activeElement?.getAttribute("aria-keyshortcuts")?.endsWith("+Shift+F"),
+    null,
+    { timeout: 5_000 }
+  )
+  await showSidebar.click()
+  await page.getByRole("button", { name: "隐藏侧边栏", exact: true }).waitFor()
   await page.keyboard.press(searchShortcut)
   assert.equal(await searchScope.inputValue(), "ordinary")
+  await page.waitForFunction(() =>
+    document.activeElement?.getAttribute("aria-label") === "搜索会话"
+  )
+  await dialog.screenshot({ path: join(artifacts, "thread-search-idle.png"), animations: "disabled" })
+  await globalInput.fill("Recent ordinary session")
+  const options = dialog.getByRole("listbox", { name: "会话搜索结果" }).getByRole("option")
+  await options.nth(7).waitFor({ timeout: 15_000 })
+  const shortTitleOption = options.filter({ hasText: "Recent ordinary session 7" })
+  const titleHighlight = shortTitleOption.locator("[title] > mark")
+  assert.equal(await titleHighlight.textContent(), "Recent ordinary session")
+  assert.equal(
+    await shortTitleOption.getByText(basename(workspace), { exact: true }).getAttribute("title"),
+    workspace
+  )
+  const longTitleOption = options.filter({ hasText: "Recent ordinary session 0" })
+  assert.equal(await longTitleOption.locator("[title] > mark").count(), 0)
+  assert.equal(await longTitleOption.locator("mark").textContent(), "Recent ordinary session")
+  const optionIds = await options.evaluateAll((rows) => rows.map((row) => row.id))
+  const selectedId = await globalInput.getAttribute("aria-activedescendant")
+  assert(selectedId, "a search result is selected")
+  const selectedIndex = optionIds.indexOf(selectedId)
+  assert(selectedIndex >= 0, "the active descendant is a rendered option")
+  const step = selectedIndex === optionIds.length - 1 ? -1 : 1
+  await globalInput.press(step === 1 ? "ArrowDown" : "ArrowUp")
+  assert.equal(await globalInput.getAttribute("aria-activedescendant"), optionIds[selectedIndex + step])
+  assert.equal(await options.nth(selectedIndex + step).getAttribute("aria-selected"), "true")
+  await globalInput.press(step === 1 ? "ArrowUp" : "ArrowDown")
+  assert.equal(await globalInput.getAttribute("aria-activedescendant"), selectedId)
+  await dialog.screenshot({ path: join(artifacts, "thread-search-results.png"), animations: "disabled" })
+  const savedTheme = await page.evaluate(() => {
+    const key = "cmb:theme-settings"
+    const previous = localStorage.getItem(key)
+    localStorage.setItem(key, JSON.stringify({ mode: "dark", darkTheme: "codex-dark" }))
+    window.dispatchEvent(new StorageEvent("storage", { key }))
+    return previous
+  })
+  await page.locator("html[data-color-scheme=dark]").waitFor({ timeout: 5_000 })
+  await dialog.screenshot({ path: join(artifacts, "thread-search-results-dark.png"), animations: "disabled" })
+  await page.evaluate((previous) => {
+    const key = "cmb:theme-settings"
+    if (previous === null) localStorage.removeItem(key)
+    else localStorage.setItem(key, previous)
+    window.dispatchEvent(new StorageEvent("storage", { key }))
+  }, savedTheme)
+  pass("search results support keyboard selection and both theme palettes")
   await searchScope.selectOption("projects")
   await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
   await dialog.locator('[data-search-thread="' + grouped.ids.project + '"]').click()
@@ -447,15 +518,17 @@ async function runProjectSearchScenarios(
   await projectHeading.waitFor()
   await projectSidebar.getByRole("button", { name: "项目列表", exact: true }).waitFor()
   assert.equal(await searchButton.count(), 1, "project mode exposes one search button")
+  assert.equal(await precedingControl(), "隐藏侧边栏")
   await expectSidebarAnchor(grouped.ids.project)
   await expectVisibleMatch(page, "PROJECT_SCOPE_SHARED_MARKER", "project-search-5")
   pass("global search opens an unloaded project after the first 64 and reveals its old message")
 
   await page.getByPlaceholder("在当前会话中搜索").press("Escape")
-  await page.keyboard.press(searchShortcut)
+  await searchButton.click()
   assert.equal(await searchScope.inputValue(), "project")
   await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
   await dialog.locator('[data-search-thread="' + grouped.ids.project + '"]').waitFor()
+  await dialog.screenshot({ path: join(artifacts, "thread-search-project-results.png"), animations: "disabled" })
   assert.equal(await dialog.locator('[data-search-thread="' + grouped.ids.other + '"]').count(), 0)
   await searchScope.selectOption("projects")
   await dialog.locator('[data-search-thread="' + grouped.ids.other + '"]').click()
