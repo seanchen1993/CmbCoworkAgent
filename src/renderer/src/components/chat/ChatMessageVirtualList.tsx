@@ -115,7 +115,7 @@ export interface ChatMessageVirtualListProps {
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
   messages: Message[]
-  assistantReplayContent?: ReadonlyMap<string, string>
+  assistantReplayContent?: ReadonlyMap<string, Message["content"]>
   visibleMessageIndexes: readonly number[]
   lastUserMessageIndex: number
   contentVersion: number

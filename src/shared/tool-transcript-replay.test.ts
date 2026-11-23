@@ -11,6 +11,7 @@ import {
   prepareToolTranscriptReplayMerge
 } from "./tool-transcript-replay"
 import { getWorkerToolUiKey, resolveToolResultOwnership } from "./tool-result-ownership"
+import { normalizeMessageContent } from "./thread-message-content"
 
 const user: Message = { id: "user", role: "user", content: "Inspect the fixture" }
 const resultId = "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465"
@@ -473,6 +474,50 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it.each([
+    "text-blocks",
+    "mixed-string",
+    "same-image",
+    "different-image",
+    "different-execution",
+    "different-reasoning"
+  ])("retains the original row and exact structured continuation when proved (%s)", (mode) => {
+    const [assistant, result] = exchange()
+    const [revision, duplicate] = exchange(2)
+    const image = { type: "image", source: { type: "url", url: "https://example.com/first.png" } }
+    const hasImage = mode.endsWith("image")
+    const earlier = {
+      ...assistant,
+      content: mode === "mixed-string" ? "Checking" : [
+        { type: "text", text: "Checking" },
+        ...(hasImage ? [image] : [])
+      ]
+    }
+    const later = {
+      ...revision,
+      content: [
+        { type: "text", text: "Checking version and status" },
+        ...(mode === "different-image"
+          ? [{ ...image, source: { ...image.source, url: "https://example.com/second.png" } }]
+          : hasImage ? [image] : [])
+      ],
+      ...(mode === "different-reasoning" ? { reasoning: "Independent reasoning" } : {})
+    }
+    const laterResult = mode === "different-execution"
+      ? { ...duplicate, id: "9c09fdd9-e146-4c2c-9b12-cac648551576", provider_source_id: undefined }
+      : duplicate
+    const rows = [user, earlier, result, later, laterResult]
+    const aliases = findReplayedToolExchangeAliases(rows)
+    if (mode.startsWith("different-")) {
+      expect(aliases.size).toBe(0)
+    } else {
+      expect(aliases).toEqual(new Map([[later.id, earlier.id], [duplicate.id, result.id]]))
+      expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id)).get(
+        earlier.id
+      )).toBe(later.content)
+    }
+  })
+
   it.each([false, true])(
     "uses the proven continuation to compare replay across turns (match %s)",
     (sameText) => {
@@ -589,7 +634,11 @@ describe("tool transcript replay", () => {
     "retained-tool-use",
     "interleaved-blocks",
     "different-image",
-    "moved-image"
+    "moved-image",
+    "bounded-text",
+    "bounded-block",
+    "bounded-image",
+    "bounded-tool-use"
   ])("keeps separate hidden replies with sparse checkpoint results (%s)", (mode) => {
     const lateEmpty = mode !== "missing-first"
     const [older, olderResult] = exchange()
@@ -602,10 +651,17 @@ describe("tool transcript replay", () => {
     }
     const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
     const includesReasoning = mode.endsWith("inline-reasoning")
-    const image = { type: "image", source: { type: "url", url: "https://example.com/status.png" } }
+    const image = mode === "bounded-image"
+      ? { type: "image", source: { type: "base64", data: "a".repeat(70_000) } }
+      : { type: "image", source: { type: "url", url: "https://example.com/status.png" } }
     const retained =
-      mode === "retained-tool-use"
-        ? { type: "tool_use", id: "ls-call", name: "ls", input: {} }
+      mode.endsWith("tool-use")
+        ? {
+            type: "tool_use",
+            id: "ls-call",
+            name: "ls",
+            input: mode === "bounded-tool-use" ? { value: "a".repeat(70_000) } : {}
+          }
         : mode.includes("image") || mode === "interleaved-blocks"
           ? image
           : undefined
@@ -621,6 +677,9 @@ describe("tool transcript replay", () => {
         return [reasoning, ...display]
       }
       if (!retained) return display
+      if (stage === "first" && mode === "bounded-image") {
+        return [...display, { ...image, source: { type: "url", url: "https://example.com/first.png" } }]
+      }
       if (stage === "later" && mode === "different-image") {
         return [...display, {
           ...image,
@@ -635,20 +694,24 @@ describe("tool transcript replay", () => {
     }
     const savedBlocks =
       mode.startsWith("structured") || mode === "saved-blocks" || includesReasoning ||
-      Boolean(retained)
+      mode === "bounded-block" || Boolean(retained)
     const checkpointBlocks =
       mode.startsWith("structured") || mode === "checkpoint-blocks" ||
-      mode === "multiple-text-blocks" || includesReasoning || Boolean(retained)
+      mode === "multiple-text-blocks" || includesReasoning || mode === "bounded-block" ||
+      Boolean(retained)
     const first = {
       ...older,
       tool_calls: calls,
       content: checkpointBlocks ? blocks("Checking", "first") : "Checking"
     }
-    const savedText =
-      mode === "multiple-text-blocks" || mode === "interleaved-blocks"
-        ? "Checking\nNew directory"
-        : "Checking the new directory"
+    const bounded = mode.startsWith("bounded-")
+    let savedText = mode === "multiple-text-blocks" || mode === "interleaved-blocks"
+      ? "Checking\nNew directory"
+      : "Checking the new directory"
+    if (mode === "bounded-block") savedText += "x".repeat(61_000)
+    if (mode === "bounded-text") savedText += "x".repeat(121_000)
     const continuation =
+      bounded ||
       includesReasoning ||
       Boolean(retained) ||
       [
@@ -685,6 +748,8 @@ describe("tool transcript replay", () => {
       name: "ls",
       content: "Listed files"
     }
+    const draft = savedBlocks ? blocks(savedText, "saved") : savedText
+    const persistedDraft = bounded ? normalizeMessageContent(normalizeMessageContent(draft)) : draft
     const durable = [
       user,
       older,
@@ -693,7 +758,7 @@ describe("tool transcript replay", () => {
       {
         ...current,
         tool_calls: calls,
-        content: lateEmpty ? (savedBlocks ? blocks(savedText, "saved") : savedText) : first.content
+        content: lateEmpty ? persistedDraft : first.content
       },
       read,
       ls,

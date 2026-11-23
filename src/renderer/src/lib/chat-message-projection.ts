@@ -35,7 +35,7 @@ export interface ChatLiveMessageProjectionMetadata {
 }
 
 const noReplayAliases: ReadonlyMap<string, string> = new Map()
-export const noReplayAssistantContent: ReadonlyMap<string, string> = new Map()
+export const noReplayAssistantContent: ReadonlyMap<string, Message["content"]> = new Map()
 
 function replaySourceKey(message: Message): string | undefined {
   if (message.role === "assistant" || message.role === "tool") {
@@ -57,7 +57,10 @@ function sameToolSlots(before: Message["tool_calls"], after: Message["tool_calls
 /** Recheck replay proof on order, ownership or evidence changes, including live reasoning. */
 export function createChatReplayAliasProjector(): (
   display: ChatMessageProjection
-) => { aliases: ReadonlyMap<string, string>; assistantContent: ReadonlyMap<string, string> } {
+) => {
+  aliases: ReadonlyMap<string, string>
+  assistantContent: ReadonlyMap<string, Message["content"]>
+} {
   let previousMessages: readonly Message[] | undefined
   let previousStructureVersion = -1
   let previousById = new Map<string, Message>()
@@ -115,7 +118,7 @@ export function createChatReplayAliasProjector(): (
   }
 }
 
-function mapsEqual(left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>): boolean {
+function mapsEqual<T>(left: ReadonlyMap<string, T>, right: ReadonlyMap<string, T>): boolean {
   if (left.size !== right.size) return false
   for (const [id, value] of left) if (right.get(id) !== value) return false
   return true

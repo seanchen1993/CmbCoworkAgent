@@ -19,6 +19,9 @@ const firstNoticeReply = "Checking current data"
 const storedNoticeDraft = `${firstNoticeReply} with beta findings`
 const finalNoticeReply = `${storedNoticeDraft} confirmed`
 const noticeSeparator = "A separate response between notices"
+const structuredReplayDraft = "Checking the structured result"
+const structuredReplayReply = `${structuredReplayDraft} and confirming it`
+const structuredReplayCallId = "structured-replay-call"
 const lastReply = "Replay fixture finished"
 const callId = "reused-provider-tool-call"
 const resultIds = [
@@ -143,6 +146,19 @@ async function seedHistory(): Promise<number> {
     first[2],
     ...repeated.filter((row) => row.role === "tool")
   ]
+  const structuredReplayUser: Message = { ...shiftedUser, id: "structured-replay-user" }
+  const structuredReplayAssistant: Message = {
+    ...versionedAssistant,
+    id: "structured-replay-assistant",
+    content: [{ type: "text", text: structuredReplayDraft }],
+    tool_calls: [{ id: structuredReplayCallId, name: "read_file", args: { file_path: "data.txt" } }]
+  }
+  const structuredReplayResult: Message = {
+    ...versionedResult,
+    id: "033c2ffb-7ed9-4d46-89b5-5ac5677b7b4d",
+    content: "Structured replay result",
+    tool_call_id: structuredReplayCallId
+  }
   const durable = [
     ...interleaved,
     firstFinal,
@@ -178,7 +194,18 @@ async function seedHistory(): Promise<number> {
     setOccurrence(shifted[1][0], 3),
     shifted[1][1],
     setOccurrence(shifted[0][0], 4),
-    setOccurrence(shifted[0][1], 2)
+    setOccurrence(shifted[0][1], 2),
+    structuredReplayUser,
+    structuredReplayAssistant,
+    structuredReplayResult,
+    setOccurrence(
+      {
+        ...structuredReplayAssistant,
+        content: [{ type: "text", text: structuredReplayReply }]
+      },
+      2
+    ),
+    setOccurrence(structuredReplayResult, 2)
   ]
   await db.initializeDatabase()
   try {
@@ -493,7 +520,8 @@ async function main(): Promise<void> {
             ["Earlier versioned result", "versioned-provider-tool-call"],
             ["Final versioned result", "versioned-provider-tool-call"],
             ["Shifted first result", "shifted-provider-tool-call"],
-            ["Shifted second result", "shifted-provider-tool-call"]
+            ["Shifted second result", "shifted-provider-tool-call"],
+            ["Structured replay result", structuredReplayCallId]
           ]
         )
         assert.equal(rows.filter((row) => row.includes("Checking versioned result")).length, 2)
@@ -509,6 +537,19 @@ async function main(): Promise<void> {
           archived.messages.find((row) => row.content === "Earlier response to preserve")
             ?.toolCalls,
           undefined
+        )
+        assert.deepEqual(
+          archived.messages
+            .filter(({ role, content }) =>
+              role === "assistant" && content.startsWith(structuredReplayDraft)
+            )
+            .map(({ content }) => content),
+          [structuredReplayReply]
+        )
+        assert.equal(rows.filter((row) => row.includes(structuredReplayDraft)).length, 1)
+        assert.match(
+          await chat.locator('[data-chat-message-id="structured-replay-assistant"]').innerText(),
+          /Checking the structured result and confirming it/
         )
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)
         assert.equal(markdown.match(/Updated fourth result/g)?.length, 1)

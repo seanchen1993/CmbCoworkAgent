@@ -67,11 +67,16 @@ function clampJsonForTranscript(
     arrayLimit: number
     objectKeyLimit: number
     depthLimit: number
+    omitTruncationNotice?: boolean
   },
   depth = 0,
   seen = new WeakSet<object>()
 ): unknown {
-  if (typeof value === "string") return truncateTranscriptString(value, options.stringLimit)
+  if (typeof value === "string") {
+    return options.omitTruncationNotice
+      ? value.slice(0, options.stringLimit)
+      : truncateTranscriptString(value, options.stringLimit)
+  }
   if (
     value === null ||
     value === undefined ||
@@ -117,15 +122,31 @@ function clampJsonForTranscript(
 }
 
 export function normalizeMessageContent(content: unknown): Message["content"] {
+  return normalizeMessageContentWithinLimits(content, false)
+}
+
+// Omitted character counts vary between snapshots and repeated DB reads.
+// Use the same storage bounds when verifying provenance of a saved draft.
+export function getComparablePersistedMessageContent(content: unknown): Message["content"] {
+  return normalizeMessageContentWithinLimits(content, true)
+}
+
+function normalizeMessageContentWithinLimits(
+  content: unknown,
+  omitTruncationNotice: boolean
+): Message["content"] {
   if (typeof content === "string")
-    return truncateTranscriptString(content, THREAD_MESSAGE_TEXT_LIMIT)
+    return omitTruncationNotice
+      ? content.slice(0, THREAD_MESSAGE_TEXT_LIMIT)
+      : truncateTranscriptString(content, THREAD_MESSAGE_TEXT_LIMIT)
   if (Array.isArray(content)) {
     return content.slice(0, THREAD_MESSAGE_BLOCK_LIMIT).map((block) =>
       clampJsonForTranscript(block, {
         stringLimit: THREAD_MESSAGE_BLOCK_TEXT_LIMIT,
         arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
         objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
-        depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
+        depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT,
+        omitTruncationNotice
       })
     ) as Message["content"]
   }
