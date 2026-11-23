@@ -1283,11 +1283,17 @@ function proveLaterToolResultOwners(
       CASE WHEN length(CAST(tool_calls_json AS BLOB)) <= 65536 THEN tool_calls_json END AS tool_calls,
       length(CAST(tool_calls_json AS BLOB)) > 65536 AS incomplete
     FROM thread_messages WHERE thread_id = ? AND ordinal BETWEEN ? AND ?
+      AND (role = 'user'
+        OR (message_id >= 'worker-turn-' AND message_id < 'worker-turn.')
+        OR (role = 'assistant' AND tool_calls_json IS NOT NULL AND tool_calls_json <> '[]')
+        OR (role = 'tool' AND (tool_call_id IN (?, ?)
+          OR (tool_call_id >= 'worker-turn-' AND tool_call_id < 'worker-turn.'
+            AND instr(tool_call_id, '::') > 0 AND substr(tool_call_id, instr(tool_call_id, '::') + 2) = ?))))
     ORDER BY ordinal, created_at, message_id LIMIT ?`)
   let remainingBytes = 512 * 1024
   for (const [user, { end, results: expected }] of turns) {
     throwIfCancelled(cancellation)
-    const rows = readTurn.all(threadId, user, end, limit + 1)
+    const rows = readTurn.all(threadId, user, end, callId, rawCallId, rawCallId, limit + 1)
     if (rows.length > limit || rows[0]?.role !== "user" ||
         rows.slice(1).some(({ incomplete, role }) => incomplete || role === "user")) return -Infinity
     remainingBytes -= rows.reduce((sum, row) => sum +

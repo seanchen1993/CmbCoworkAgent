@@ -2847,7 +2847,7 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
     if (!storedRow || !anchor || !sameReplayAnchor(anchor, rawAnchors.get(row), true)) continue
     const raw = readExchange(row, rawOwnership)
     const stored = readExchange(storedRow, storedOwnership)
-    if (!raw || !stored || !sameExchangeCalls(stored, raw, true, true) ||
+    if (!raw || !stored || !sameExchangeCalls(stored, raw, true, false) ||
         (checkpointTurns && !hasRawCheckpointToolBindings(raw, checkpointTurns)) ||
         !stored.results.every((result, index) =>
           result.id === raw.results[index].id && hasToolResultExecutionId(result) &&

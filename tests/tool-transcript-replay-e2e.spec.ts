@@ -425,10 +425,16 @@ async function seedProjectedHistory(id = projectedThreadId): Promise<Message[]> 
   const beforeResult = beforeCopy.slice(0, 78)
   const afterResult = beforeCopy.slice(78)
   const afterCopy = splitSearch ? fill("after-legacy-copy", 140) : []
+  const laterScope = "worker-turn-native-later-900::"
+  const laterCallId = `${laterScope}${callId}`
   const laterExecution: Message[] = splitSearch ? [
     { ...end, id: "native-later-tool-user", content: "Read the later file" },
-    { ...assistant, id: "native-later-tool-assistant", content: "Checking a different file" },
-    { ...tool, id: resultIds[1], content: "Independent later file contents" }
+    ...fill("within-independent-tool-turn", 75),
+    {
+      ...assistant, id: `${laterScope}assistant`, content: "Checking a different file",
+      tool_calls: assistant.tool_calls!.map((call) => ({ ...call, id: laterCallId }))
+    },
+    { ...tool, id: `${laterScope}${resultIds[1]}`, tool_call_id: laterCallId, content: "Independent later file contents" }
   ] : []
   const durable = [
     user, assistant, { ...tool, content: body }, setOccurrence(revised, 2), ...beforeResult,
