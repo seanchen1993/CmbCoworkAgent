@@ -22,17 +22,24 @@ const exactEarlierToolResult = `
   AND NOT EXISTS (SELECT 1 FROM thread_message_fragment_states AS fragment
     WHERE fragment.thread_id = earlier.thread_id AND fragment.message_id = earlier.message_id)`
 
+function toolResultSignature(alias: "copy" | "earlier"): string {
+  return `json_array(${alias}.content_json, ${alias}.tool_call_id, ${alias}.name,
+    ${alias}.reasoning, COALESCE(${alias}.status, 'success'), COALESCE(${alias}.is_error, 0),
+    ${alias}.goal_id, ${alias}.active_window_id)`
+}
+
 const TOOL_REPLAY_EVIDENCE_SQL = `
   WITH candidates AS MATERIALIZED (
-    SELECT copy.message_id, COALESCE(
+    SELECT copy.message_id, copy.provider_source_id, copy.provider_occurrence,
+      ${toolResultSignature("copy")} AS signature, COALESCE(
       (SELECT earlier.message_id FROM thread_messages AS earlier
        WHERE earlier.message_id = copy.provider_source_id AND ${exactEarlierToolResult}
          AND (earlier.provider_source_id IS NULL OR earlier.provider_source_id = copy.provider_source_id)
        LIMIT 1),
       (SELECT earlier.message_id FROM thread_messages AS earlier
        WHERE earlier.provider_source_id = copy.provider_source_id AND ${exactEarlierToolResult}
-         AND earlier.provider_occurrence < copy.provider_occurrence
-       ORDER BY earlier.provider_occurrence LIMIT 1)
+         AND earlier.provider_occurrence = 1
+       LIMIT 1)
     ) AS earlier_id
     FROM json_each(?2) AS requested
     CROSS JOIN thread_messages AS copy ON copy.thread_id = ?1 AND copy.message_id = requested.value
@@ -40,7 +47,27 @@ const TOOL_REPLAY_EVIDENCE_SQL = `
       AND copy.provider_source_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM thread_message_fragment_states AS fragment
         WHERE fragment.thread_id = copy.thread_id AND fragment.message_id = copy.message_id)
-  ) SELECT message_id, earlier_id FROM candidates WHERE earlier_id IS NOT NULL`
+  ), unresolved AS MATERIALIZED (
+    SELECT * FROM candidates WHERE earlier_id IS NULL
+  ), sources AS MATERIALIZED (
+    SELECT provider_source_id, MAX(provider_occurrence) AS last_occurrence
+    FROM unresolved GROUP BY provider_source_id
+  ), matches AS (
+    SELECT copy.message_id, earlier.message_id AS earlier_id, MIN(earlier.provider_occurrence)
+    FROM sources
+    CROSS JOIN thread_messages AS earlier ON earlier.thread_id = ?1
+      AND earlier.provider_source_id = sources.provider_source_id AND earlier.role = 'tool'
+      AND earlier.provider_occurrence > 1 AND earlier.provider_occurrence < sources.last_occurrence
+      AND earlier.ordinal < ?3
+    CROSS JOIN unresolved AS copy ON copy.provider_source_id = earlier.provider_source_id
+      AND copy.signature = ${toolResultSignature("earlier")}
+      AND earlier.provider_occurrence < copy.provider_occurrence
+    WHERE NOT EXISTS (SELECT 1 FROM thread_message_fragment_states AS fragment
+      WHERE fragment.thread_id = earlier.thread_id AND fragment.message_id = earlier.message_id)
+    GROUP BY copy.message_id
+  )
+  SELECT message_id, earlier_id FROM candidates WHERE earlier_id IS NOT NULL
+  UNION ALL SELECT message_id, earlier_id FROM matches`
 
 export function readPriorToolReplayIds(
   threadId: string,

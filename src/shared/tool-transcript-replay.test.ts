@@ -1155,6 +1155,21 @@ describe("tool transcript replay", () => {
         [nextCopy.id, original.id]
       ])
     )
+    const differentExecution = {
+      ...nextCopy,
+      provider_source_id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      id: "ad506755-5e42-4cef-834f-eb1be0f11d27::cmb-same-role-duplicate:tool:3",
+      historical_tool_replay_id: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      content: "Other older execution"
+    }
+    expect(
+      findReplayedToolExchangeAliases([user, current, proven, differentExecution, latest])
+    ).toEqual(
+      new Map([
+        [stale.id, original.id],
+        [differentExecution.id, differentExecution.historical_tool_replay_id]
+      ])
+    )
     expect(findReplayedToolExchangeAliases([user, current, stale, latest]).size).toBe(0)
     const changed = mergeCheckpointAuthorityTranscriptMessages(
       [{ ...proven, content: "" }],
@@ -1162,6 +1177,79 @@ describe("tool transcript replay", () => {
     )
     expect(changed[0].historical_tool_replay_id).toBeUndefined()
   })
+
+  it.each(["paused", "mcp", "checkpoint-only"])(
+    "folds exact %s copies before combining sources",
+    (kind) => {
+      const [earlier, oldResult] = exchange()
+      const [current, stale] = exchange(2)
+      const [duplicate] = exchange(3)
+      const currentUser = { ...user, id: "current-user" }
+      const currentResult = {
+        ...oldResult,
+        id: "1c711082-5111-4632-976d-7c05ee064c33",
+        provider_source_id: "1c711082-5111-4632-976d-7c05ee064c33",
+        content: kind === "mcp" ? [{ type: "text", text: "Current output" }] : "Current output"
+      }
+      const resultCopy = {
+        ...currentResult,
+        id: `${currentResult.id}::cmb-same-role-duplicate:tool:2`,
+        provider_occurrence: 2
+      }
+      const calls =
+        kind === "mcp"
+          ? current.tool_calls
+          : [...current.tool_calls!, { id: "pending", name: "ls", args: {} }]
+      const durable = [user, earlier, oldResult, currentUser]
+      if (kind !== "checkpoint-only")
+        durable.push(
+          { ...current, tool_calls: calls },
+          currentResult,
+          { ...duplicate, tool_calls: calls },
+          resultCopy
+        )
+      const latest = { ...earlier, tool_calls: calls, content: "Current checkpoint prose" }
+      const output =
+        kind === "mcp"
+          ? {
+              ...currentResult,
+              content: [
+                { type: "text", text: "Current output" },
+                { type: "file", source_type: "url", url: "file:///run.txt" }
+              ]
+            }
+          : currentResult
+      const checkpoint = [
+        currentUser,
+        latest,
+        stale,
+        output,
+        {
+          ...current,
+          tool_calls: calls,
+          content: latest.content
+        },
+        { ...resultCopy, content: output.content }
+      ]
+      if (kind === "checkpoint-only") checkpoint.splice(2, 1)
+      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(
+        prepared.checkpoint,
+        prepared.durable,
+        {
+          useStableProviderOccurrences: true
+        }
+      )
+      expect(merged.map(({ content }) => content)).toEqual([
+        user.content,
+        earlier.content,
+        oldResult.content,
+        currentUser.content,
+        latest.content,
+        output.content
+      ])
+    }
+  )
 
   it("retains partial evidence and folds subsequent exact complete copies", () => {
     const first = exchange(1, { path: "fixture" }, "partial data")

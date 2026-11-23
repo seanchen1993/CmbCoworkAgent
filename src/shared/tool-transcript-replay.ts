@@ -390,6 +390,7 @@ function findReplayedResultRebindings<T extends TranscriptMessage>(
       row.role === "tool" &&
       row.tool_call_id &&
       hasToolResultExecutionId(row) &&
+      !historicalReplayId(row) &&
       !ownedExecutionIds.has(getMessageProviderSourceId(row))
     ) {
       laterUnownedResult.set(getRawWorkerToolCallId(row.tool_call_id), index)
@@ -400,7 +401,7 @@ function findReplayedResultRebindings<T extends TranscriptMessage>(
   const seen = new Map<string, T[]>()
   const payloadId = createPayloadIds()
   const proposals: AttachedToolReplay[] = []
-  const proposedVersions = new Map<string, Array<{ row: T; canonical: string }>>()
+  const callsWithPageProof = new Set<string>()
   const keyFor = (row: T) => JSON.stringify([resultReplayKey(row), payloadId(row.content)])
   for (const row of historicalToolResults(messages).values()) {
     rememberVersion(seen, keyFor(row), row, sameRow)
@@ -409,22 +410,24 @@ function findReplayedResultRebindings<T extends TranscriptMessage>(
     if (!row.tool_call_id || !hasToolResultExecutionId(row)) continue
     const call = getRawWorkerToolCallId(row.tool_call_id)
     const key = keyFor(row)
+    const outsidePage = historicalReplayId(row)
     if (!owned.has(row)) {
-      // Equal later copies would otherwise take the same slot after the first
-      // copy is removed. Test the entire replay against the replacement.
-      const prior = proposedVersions.get(key)?.find((version) => sameRow(version.row, row))
-      if (prior && (laterUnownedResult.get(call) ?? -1) > index) {
-        proposals.push({ alias: row.id, canonical: prior.canonical, call })
+      // Independently verified page copies can occupy the same slot in turn.
+      // Test the entire sequence of proved copies against the replacement.
+      if (
+        outsidePage &&
+        callsWithPageProof.has(call) &&
+        (laterUnownedResult.get(call) ?? -1) > index
+      ) {
+        proposals.push({ alias: row.id, canonical: outsidePage, call })
       }
       continue
     }
     const original = rememberVersion(seen, key, row, sameRow)
-    const canonical = original.id !== row.id ? original.id : historicalReplayId(row)
+    const canonical = original.id !== row.id ? original.id : outsidePage
     if (!canonical || (laterUnownedResult.get(call) ?? -1) <= index) continue
     proposals.push({ alias: row.id, canonical, call })
-    const versions = proposedVersions.get(key) ?? []
-    versions.push({ row, canonical })
-    proposedVersions.set(key, versions)
+    if (outsidePage) callsWithPageProof.add(call)
   }
   const validated = selectAttachedReplayAliases(messages, noAliases, ownership, proposals)
   if (!validated.size) return { aliases: noAliases, disputed }
@@ -490,6 +493,80 @@ function stageToolResultReplays<T extends TranscriptMessage>(
       rawResultByCall: new Map([...rawAfter].map(([key, result]) => [key, result.id]))
     }
   }
+}
+
+function foldInterruptedAndProjectedToolCopies<T extends TranscriptMessage>(
+  messages: readonly T[],
+  checkpointTurns?: CheckpointReplayTurns
+) {
+  if (!hasToolReplayCandidates(messages)) return
+  const ownership = resolveToolResultOwnership(messages)
+  const rawRows = checkpointTurns?.rawToolTranscript ?? messages
+  const rawUserByAssistant = new Map<string, string>()
+  let anchor: string | undefined
+  for (const row of rawRows) {
+    if (row.role === "user" || row.role === "system")
+      anchor = row.role === "user" ? row.id : undefined
+    if (row.role === "assistant" && anchor) rawUserByAssistant.set(row.id, anchor)
+  }
+
+  const payloadId = createPayloadIds()
+  const versions = new Map<string, PartialToolExchange<T>[]>()
+  const proposed = new Map<string, string>()
+  const removedCallKeys = new Map<string, string[]>()
+  for (const assistant of messages) {
+    const scope = rawUserByAssistant.get(assistant.id)
+    if (!scope) continue
+    const batch = readToolExchangeSlots(assistant, ownership)
+    if (
+      !batch ||
+      !batch.results.some(Boolean) ||
+      batch.results.some((row) => row && !hasToolResultExecutionId(row)) ||
+      !batch.results.some((row) => !row || Array.isArray(row.content)) ||
+      (checkpointTurns && !hasRawCheckpointToolBindings(batch, checkpointTurns))
+    )
+      continue
+    const key = JSON.stringify([
+      scope,
+      exchangeKey(batch),
+      payloadId(assistant.content),
+      batch.results.map((row) => row && [resultReplayKey(row), payloadId(row.content)])
+    ])
+    const original = rememberVersion(
+      versions,
+      key,
+      batch,
+      (left, right) =>
+        (left.assistant.reasoning || "") === (right.assistant.reasoning || "") &&
+        sameExchangeCalls(left, right, false, true) &&
+        left.results.every((row, index) => {
+          const peer = right.results[index]
+          return (
+            row === peer ||
+            Boolean(
+              row && peer && sameRow(row, peer) && (row.reasoning || "") === (peer.reasoning || "")
+            )
+          )
+        })
+    )
+    if (original === batch) continue
+    proposed.set(assistant.id, original.assistant.id)
+    removedCallKeys.set(
+      assistant.id,
+      batch.calls.map(({ id }, i) => getWorkerToolUiKey(assistant.id, id, i))
+    )
+    batch.results.forEach((row, index) => {
+      const peer = original.results[index]
+      if (row && peer && row.id !== peer.id) proposed.set(row.id, peer.id)
+    })
+  }
+  const verified = preserveReplayToolBindings(messages, proposed, ownership)
+  return stageToolResultReplays(
+    messages,
+    new Set(verified.keys()),
+    checkpointTurns,
+    new Set([...verified.keys()].flatMap((id) => removedCallKeys.get(id) ?? []))
+  )
 }
 
 function repairLocalResultReplays<T extends TranscriptMessage>(
@@ -618,9 +695,10 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
         if (physicalKey) addCandidate(byPhysicalGroup, physicalKey, candidate)
       }
     } else if (
-      foldEquivalentTargets &&
       slots &&
-      slots.results.some((result) => result && hasToolResultExecutionId(result))
+      slots.results.some((result) => result && hasToolResultExecutionId(result)) &&
+      slots.results.every((result) => !result || hasToolResultExecutionId(result)) &&
+      (!checkpointTurns || hasRawCheckpointToolBindings(slots, checkpointTurns))
     ) {
       incomplete.push({ exchange: slots, anchor })
     }
@@ -820,11 +898,16 @@ function reconcileCheckpointToolBatches<T extends TranscriptMessage>(
   durable: ReturnType<typeof indexAnchoredExchanges<T>>,
   checkpointTurns?: CheckpointReplayTurns
 ) {
+  const structuredCalls = new Set(
+    messages
+      .filter((row) => row.role === "tool" && Array.isArray(row.content))
+      .map((row) => row.tool_call_id)
+  )
   const partial = messages.flatMap((assistant) => {
     if (assistant.role !== "assistant") return []
     const batch = readToolExchangeSlots(assistant, checkpoint.ownership)
     return batch &&
-      (batch.calls.length > 1 || batch.results.some((row) => Array.isArray(row?.content)))
+      (batch.calls.length > 1 || batch.calls.some(({ id }) => structuredCalls.has(id)))
       ? [batch]
       : []
   })
@@ -1154,8 +1237,11 @@ function reserveCheckpointVersionIds<T extends TranscriptMessage>(
   for (const group of groups) {
     for (const [row] of group) matchedRows.add(row)
   }
-  const executionKey = ({ exchange }: AnchoredToolExchange<T>) =>
-    JSON.stringify([exchangeKey(exchange), exchange.results.map(resultReplayKey)])
+  const executionKey = ({ exchange }: AnchoredToolSlots<T>) =>
+    JSON.stringify([
+      exchangeKey(exchange),
+      exchange.results.map((row) => row && resultReplayKey(row))
+    ])
   const matchedExecutions = new Set<string>()
   for (const candidate of targets.keys()) {
     if (!candidate.hasPhysicalResults) continue
@@ -1163,16 +1249,19 @@ function reserveCheckpointVersionIds<T extends TranscriptMessage>(
     matchedRows.add(candidate.exchange.assistant)
     for (const result of candidate.exchange.results) matchedRows.add(result)
   }
-  const unmatched = [...checkpoint.byPhysicalGroup.values()]
-    .flat()
-    .filter(
-      ({ exchange }) =>
-        !matchedRows.has(exchange.assistant) &&
-        byId.get(exchange.assistant.id) === exchange.assistant
-    )
+  const unmatched = [
+    ...[...checkpoint.byPhysicalGroup.values()].flat(),
+    ...checkpoint.incomplete
+  ].filter(
+    ({ exchange }) =>
+      !matchedRows.has(exchange.assistant) && byId.get(exchange.assistant.id) === exchange.assistant
+  )
   if (!unmatched.length) return false
   const versions = new Set(
-    unmatched.flatMap(({ exchange }) => [exchange.assistant, ...exchange.results])
+    unmatched.flatMap(({ exchange }) => [
+      exchange.assistant,
+      ...exchange.results.filter((row): row is T => row !== undefined)
+    ])
   )
   const canMove = (row: T) =>
     versions.has(row) && !matchedRows.has(row) && !moving.has(row.id) && byId.get(row.id) === row
@@ -1239,9 +1328,16 @@ function reserveCheckpointVersionIds<T extends TranscriptMessage>(
       checkpointTurns?.hiddenAssistants.has(assistant.id) &&
       assistant.id === source &&
       (durableOccurrences.get(`assistant\u0000${source}`) ?? 1) > 1
+    const currentExchange = currentExecution?.exchange
     const differentExecution =
-      currentExecution &&
-      !isSameCompletedExecution(currentExecution.exchange, candidate.exchange, true)
+      currentExchange &&
+      !(
+        sameExchangeCalls(currentExchange, candidate.exchange, true, false) &&
+        currentExchange.results.every((row, index) => {
+          const peer = results[index]
+          return peer && sameRow(row, peer, true)
+        })
+      )
     const matchedVersionExists = matchedExecutions.has(executionKey(candidate))
     if (!differentTurn && !earlierHiddenOccurrence && !differentExecution && !matchedVersionExists)
       continue
@@ -1255,6 +1351,7 @@ function reserveCheckpointVersionIds<T extends TranscriptMessage>(
       changes.push([assistant, nextOccurrence(assistant, "assistant", source)])
     }
     for (const result of results) {
+      if (!result) continue
       const stored = durableById.get(result.id)
       const resultSource = getMessageProviderSourceId(result)
       if (
@@ -1381,10 +1478,17 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
 ): { checkpoint: T[]; durable: readonly T[] } {
   if (!durableRows.length || checkpointRows.length < 2)
     return { checkpoint: checkpointRows, durable: durableRows }
-  const canonical = repairLocalResultReplays(durableRows)?.messages ?? durableRows
+  const repairedDurable = repairLocalResultReplays(durableRows)?.messages ?? durableRows
+  const canonical =
+    foldInterruptedAndProjectedToolCopies(repairedDurable)?.messages ?? repairedDurable
   const stagedCheckpoint = repairLocalResultReplays(checkpointRows, rawCheckpointTurns)
   let replay = stagedCheckpoint?.messages ?? checkpointRows
   let checkpointTurns = stagedCheckpoint?.checkpointTurns ?? rawCheckpointTurns
+  const foldedCheckpoint = foldInterruptedAndProjectedToolCopies(replay, checkpointTurns)
+  if (foldedCheckpoint) {
+    replay = foldedCheckpoint.messages
+    checkpointTurns = foldedCheckpoint.checkpointTurns
+  }
   const includeLeadingHidden = Boolean(checkpointTurns?.leadingHiddenAssistants.size)
   const payloadId = createPayloadIds()
   const durable = indexAnchoredExchanges(canonical, payloadId, {
@@ -1432,6 +1536,11 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   if (reconciledBatches) {
     replay = reconciledBatches.messages
     checkpointTurns = reconciledBatches.checkpointTurns
+    const folded = foldInterruptedAndProjectedToolCopies(replay, checkpointTurns)
+    if (folded) {
+      replay = folded.messages
+      checkpointTurns = folded.checkpointTurns
+    }
     checkpoint = indexAnchoredExchanges(replay, payloadId, {
       includeLeadingHidden,
       checkpointTurns
@@ -1474,9 +1583,17 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   const replayWithoutCopies = checkpointAliases.size
     ? replay.filter(({ id }) => !checkpointAliases.has(id))
     : replay
-  const groups: CheckpointAlignment<T>[] = (reconciledBatches?.alignments ?? []).filter(
-    ([assistant]) => !checkpointAliases.has(assistant[0].id)
-  )
+  const supplementalByTarget = new Map<string, CheckpointAlignment<T>>()
+  const exactTargets = new Set([...targets.values()].map(({ exchange }) => exchange.assistant.id))
+  const retained = new Set(replayWithoutCopies)
+  for (const group of reconciledBatches?.alignments ?? []) {
+    const [[copy, target]] = group
+    if (!retained.has(copy) || exactTargets.has(target.id)) continue
+    // The durable row can anchor only one presentation. Other real checkpoint
+    // variants still need occurrence reservations of their own.
+    supplementalByTarget.set(target.id, group)
+  }
+  const groups = [...supplementalByTarget.values()]
   const supplementallyAligned = new Set(groups.map(([assistant]) => assistant[0]))
   for (const [candidate, target] of targets) {
     if (
@@ -1592,6 +1709,7 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
         (!next.name || !callName || next.name === callName) &&
         hasToolResultExecutionId(previous) &&
         hasToolResultExecutionId(next) &&
+        !historicalReplayId(next) &&
         !previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) &&
         resultReplayKey(previous) !== resultReplayKey(next)
       )
@@ -1709,7 +1827,10 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     if (row.tool_call_id && !ownedExecutionIds.has(getMessageProviderSourceId(row))) {
       callsWithUnownedResults.add(row.tool_call_id)
     }
-    const canonical = repairs.get(row.id) ?? duplicateResults.get(row)?.id
+    const canonical =
+      (historicalReplayId(row) && repairs.get(row.id)) ??
+      duplicateResults.get(row)?.id ??
+      repairs.get(row.id)
     if (!canonical) continue
     if (!owned.has(row)) {
       aliases.set(row.id, canonical)

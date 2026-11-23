@@ -23,6 +23,8 @@ it("verifies exact older tool output outside the page, excluding variants and fr
     add.run("exact-replay", "older", 2, 12, '"Original output"')
     add.run("different-version", "older", 3, 13, '"Revised output"')
     add.run("fragment-replay", "older", 4, 14, '"Original output"')
+    add.run("prior-variant", "older", 5, 5, '"A second stored output"')
+    add.run("late-variant-replay", "older", 6, 15, '"A second stored output"')
     database
       .prepare("INSERT INTO thread_message_fragment_states VALUES ('thread', 'fragment-replay')")
       .run()
@@ -47,9 +49,15 @@ it("verifies exact older tool output outside the page, excluding variants and fr
     const page = [
       { id: "exact-replay", ordinal: 12, provider_occurrence: 2 },
       { id: "different-version", ordinal: 13, provider_occurrence: 3 },
-      { id: "fragment-replay", ordinal: 14, provider_occurrence: 4 }
+      { id: "fragment-replay", ordinal: 14, provider_occurrence: 4 },
+      { id: "late-variant-replay", ordinal: 15, provider_occurrence: 6 }
     ]
-    expect(lookup(page)).toEqual(new Map([["exact-replay", "older"]]))
+    expect(lookup(page)).toEqual(
+      new Map([
+        ["exact-replay", "older"],
+        ["late-variant-replay", "prior-variant"]
+      ])
+    )
     expect(lookup([{ id: "older", ordinal: 1 }, ...page]).size).toBe(0)
     const requested = plans.findIndex((detail) => detail.includes("SCAN requested"))
     const copy = plans.findIndex((detail) => detail.includes("SEARCH copy"))
