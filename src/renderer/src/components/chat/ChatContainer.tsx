@@ -263,8 +263,8 @@ import {
   isVisibleCheckpointTranscriptMessage
 } from "@/lib/goal-transcript"
 import {
-  canChangeReplayedToolTail,
-  findReplayedToolExchangeAliases
+  findReplayedToolExchangeAliases,
+  hasEarlierToolResultSource
 } from "../../../../shared/tool-transcript-replay"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
@@ -297,7 +297,7 @@ import {
   type ChatSearchCorpus,
   type ChatSearchDocument
 } from "@/lib/chat-search-matches"
-import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import { createChatMessageProjector, resolveChatReplayAliases } from "@/lib/chat-message-projection"
 import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
 import {
   createChatSearchPlan,
@@ -1191,6 +1191,7 @@ interface ThreadDisplayBaselineCacheEntry {
   sourceLength: number
   sourceTailSnapshot: Message | undefined
   sourceTailProjected: boolean
+  sourceTailMayReplay: boolean
   baseline: Message[]
   replayAliases: ReadonlyMap<string, string>
 }
@@ -1213,10 +1214,11 @@ function getThreadDisplayBaseline(
     cached.sourceTailSnapshot &&
     sourceTail &&
     sourceTail.role !== "user" &&
-    !canChangeReplayedToolTail(messages) &&
+    !cached.sourceTailMayReplay &&
     cached.sourceTailSnapshot.id === sourceTail.id &&
     cached.sourceTailSnapshot.role === sourceTail.role &&
-    cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
+    cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id &&
+    cached.sourceTailSnapshot.provider_source_id === sourceTail.provider_source_id
   ) {
     const projectedTail = filterCoordinatorNoiseMessages(
       isVisibleCheckpointTranscriptMessage(sourceTail)
@@ -1248,6 +1250,7 @@ function getThreadDisplayBaseline(
     sourceLength: messages.length,
     sourceTailSnapshot: sourceTail,
     sourceTailProjected: Boolean(sourceTail && baseline.at(-1)?.id === sourceTail.id),
+    sourceTailMayReplay: hasEarlierToolResultSource(messages),
     baseline,
     replayAliases: findReplayedToolExchangeAliases(messages)
   }
@@ -3623,13 +3626,9 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [appleIntelligenceGlowEnabled, isLoading])
 
-  const { baseline: threadDisplayBaseline, replayAliases } = useMemo(
+  const { baseline: threadDisplayBaseline, replayAliases: baselineReplayAliases } = useMemo(
     () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
     [messagesContentVersion, threadMessages]
-  )
-  const resolveDisplayMessageId = useCallback(
-    (messageId: string) => replayAliases.get(messageId) ?? messageId,
-    [replayAliases]
   )
   const liveDisplayProjection = threadProjectionRuntime.projectLiveDisplayMessages(
     threadMessages,
@@ -3651,6 +3650,15 @@ export function ChatContainer({
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  const replayAliases = resolveChatReplayAliases(
+    baselineReplayAliases,
+    liveDisplayMessages,
+    displayMessageProjection
+  )
+  const resolveDisplayMessageId = useCallback(
+    (messageId: string) => replayAliases.get(messageId) ?? messageId,
+    [replayAliases]
+  )
   const chatScrollQuestionStructureRevision =
     threadProjectionRuntime.projectChatScrollQuestionRevision({
       scopeKey: threadId,
@@ -3786,7 +3794,12 @@ export function ChatContainer({
   // Ordinary assistant tokens update only the changed display slot. Keep the
   // tool projection stable and replace a slot only when that changed row is
   // itself tool-relevant.
-  const toolDerivationMessages = toolDerivationProjection.messages
+  const toolDerivationMessages = useMemo(() =>
+    replayAliases.size
+      ? toolDerivationProjection.messages.filter((message) => !replayAliases.has(message.id))
+      : toolDerivationProjection.messages,
+    [replayAliases, toolDerivationProjection.messages, toolDerivationProjection.version]
+  )
   const toolResults = threadProjectionRuntime.projectToolResults(
     toolDerivationMessages,
     toolDerivationProjection.version

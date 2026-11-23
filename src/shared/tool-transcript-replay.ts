@@ -5,11 +5,16 @@ import {
   getMessageProviderSourceId
 } from "./message-role-collision"
 
-type TranscriptMessage = CheckpointAuthorityTranscriptMessage
+type TranscriptMessage = CheckpointAuthorityTranscriptMessage & {
+  botHistoryDeliveryScope?: unknown
+  content_preview_notice?: string
+  content_is_projection?: boolean
+}
 
 interface ToolExchange<T> {
   assistant: T
   results: ReadonlyMap<string, T>
+  replayResults?: ReadonlyMap<string, string>
   end: number
 }
 
@@ -19,11 +24,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function readExchange<T extends TranscriptMessage>(
-  messages: readonly T[],
-  start: number
-): ToolExchange<T> | undefined {
-  const assistant = messages[start]
+function readCallIds(assistant: TranscriptMessage): ReadonlySet<string> | undefined {
   if (assistant.role !== "assistant" || !assistant.tool_calls?.length) return
 
   const calls = new Set<string>()
@@ -32,16 +33,40 @@ function readExchange<T extends TranscriptMessage>(
     if (typeof call?.id !== "string" || !call.id || !call.name || calls.has(call.id)) return
     calls.add(call.id)
   }
+  return calls
+}
 
+function readExchange<T extends TranscriptMessage>(
+  messages: readonly T[],
+  start: number
+): ToolExchange<T> | undefined {
+  const assistant = messages[start]
+  const calls = readCallIds(assistant)
+  if (!calls) return
   const results = new Map<string, T>()
+  let replayResults: Map<string, string> | undefined
   let end = start + 1
   while (end < messages.length && messages[end].role === "tool") {
     const result = messages[end++]
     const id = result.tool_call_id
-    if (!id || !calls.has(id) || results.has(id)) return
-    results.set(id, result)
+    if (!id || !calls.has(id)) return
+    const original = results.get(id)
+    if (!original) {
+      results.set(id, result)
+      continue
+    }
+    const precedingCalls = start > 0 ? readCallIds(messages[start - 1]) : undefined
+    if (
+      precedingCalls?.has(id) ||
+      !hasToolResultExecutionId(original) ||
+      !sameRow(original, result) ||
+      original.id === result.id
+    )
+      return
+    replayResults ??= new Map()
+    replayResults.set(result.id, original.id)
   }
-  return results.size === calls.size ? { assistant, results, end } : undefined
+  return results.size === calls.size ? { assistant, results, replayResults, end } : undefined
 }
 
 function hasSameReplayId(left: TranscriptMessage, right: TranscriptMessage): boolean {
@@ -83,6 +108,11 @@ function sameRow(left: TranscriptMessage, right: TranscriptMessage): boolean {
     hasSameReplayId(left, right) &&
     left.goal_id === right.goal_id &&
     left.active_window_id === right.active_window_id &&
+    sameValue(left.botHistoryDeliveryScope, right.botHistoryDeliveryScope) &&
+    !left.content_preview_notice &&
+    !right.content_preview_notice &&
+    !left.content_is_projection &&
+    !right.content_is_projection &&
     (left.name || "") === (right.name || "") &&
     (left.status || "") === (right.status || "") &&
     Boolean(left.is_error) === Boolean(right.is_error) &&
@@ -99,6 +129,7 @@ function isSameExchange(
     return false
   const leftCalls = left.assistant.tool_calls!
   const rightCalls = right.assistant.tool_calls!
+  if (leftCalls.length !== rightCalls.length) return false
   return leftCalls.every((value, index) => {
     const call = record(value)!
     const other = record(rightCalls[index])!
@@ -167,7 +198,7 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
     if (
       !target ||
       !candidate ||
-      target.position !== candidate.position ||
+      (target.position !== candidate.position && !hasExecutionIdentity(target.exchange)) ||
       !sameRow(target.anchor, candidate.anchor) ||
       (getMessageProviderOccurrence(target.anchor) ?? 1) !==
         (getMessageProviderOccurrence(candidate.anchor) ?? 1) ||
@@ -201,61 +232,126 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
 const toolResultUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const generatedAssistantId = /^current-run-assistant:[0-9a-f-]{36}$/i
 
+function hasToolResultExecutionId(result: TranscriptMessage): boolean {
+  const source = getMessageProviderSourceId(result)
+  return source !== result.tool_call_id && toolResultUuid.test(source)
+}
+
 function hasExecutionIdentity(exchange: ToolExchange<TranscriptMessage>): boolean {
   return (
     generatedAssistantId.test(exchange.assistant.id) ||
-    [...exchange.results.values()].every((result) => {
-      const source = getMessageProviderSourceId(result)
-      return source !== result.tool_call_id && toolResultUuid.test(source)
-    })
+    [...exchange.results.values()].every(hasToolResultExecutionId)
   )
 }
 
-/** On an unchanged transcript array only adjacent tail exchanges can gain or
- * lose an alias when the final tool result is replaced in place. */
-export function canChangeReplayedToolTail(messages: readonly TranscriptMessage[]): boolean {
-  if (messages.at(-1)?.role !== "tool") return false
-  const limit = Math.max(0, messages.length - 128)
-  let index = messages.length - 1
-  while (index >= limit && messages[index].role === "tool") index--
-  if (index < limit) return limit > 0
-  const tailAssistant = messages[index--]
-  if (tailAssistant.role !== "assistant" || messages[index]?.role !== "tool") return false
-  while (index >= limit && messages[index].role === "tool") index--
-  if (index < limit) return limit > 0
-  return messages[index].role === "assistant" && hasSameReplayId(messages[index], tailAssistant)
+/** Whether a tail result content update can change an existing replay proof. */
+export function hasEarlierToolResultSource(messages: readonly TranscriptMessage[]): boolean {
+  const tail = messages.at(-1)
+  if (tail?.role !== "tool") return false
+  const source = getMessageProviderSourceId(tail)
+  return messages.some(
+    (message, index) =>
+      index + 1 < messages.length &&
+      message.role === "tool" &&
+      getMessageProviderSourceId(message) === source
+  )
 }
 
-/** Only adjacent complete copies with independent execution evidence are safe
- * to fold within a single source. The caller can redirect visible aliases. */
+/** A complete snapshot may group repeated assistants before their results. */
+function readInterleavedReplays<T extends TranscriptMessage>(
+  messages: readonly T[],
+  start: number
+): ToolExchange<T>[] | undefined {
+  const first = messages[start]
+  const next = messages[start + 1]
+  const predecessor = messages[start - 1]
+  if (
+    next?.role !== "assistant" ||
+    !hasSameReplayId(first, next) ||
+    (predecessor?.role === "assistant" &&
+      predecessor.tool_calls?.length &&
+      hasSameReplayId(predecessor, first))
+  )
+    return
+  const calls = readCallIds(first)
+  if (!calls) return
+
+  const assistants = [first]
+  let end = start + 1
+  while (messages[end]?.role === "assistant" && hasSameReplayId(first, messages[end])) {
+    assistants.push(messages[end++])
+  }
+  const results = new Map<string, T[]>()
+  while (messages[end]?.role === "tool") {
+    const result = messages[end++]
+    const id = result.tool_call_id
+    if (!id || !calls.has(id)) return
+    const rows = results.get(id) ?? []
+    rows.push(result)
+    results.set(id, rows)
+  }
+  if (
+    results.size !== calls.size ||
+    [...results.values()].some((rows) => rows.length !== assistants.length)
+  )
+    return
+  const exchanges = assistants.map((assistant, index) => ({
+    assistant,
+    results: new Map([...results].map(([id, rows]) => [id, rows[index]])),
+    end
+  }))
+  if (
+    !hasExecutionIdentity(exchanges[0]) ||
+    exchanges.some(
+      (exchange) => !readCallIds(exchange.assistant) || !isSameExchange(exchanges[0], exchange)
+    )
+  )
+    return
+  return exchanges
+}
+
+/** Fold complete copies with independent execution proof within a visible turn. */
 export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   messages: readonly T[]
 ): ReadonlyMap<string, string> {
   const aliases = new Map<string, string>()
-  let previous: ToolExchange<T> | undefined
+  const seen = new Map<string, ToolExchange<T>>()
   for (let index = 0; index < messages.length; ) {
-    const current = readExchange(messages, index)
-    if (!current) {
-      previous = undefined
+    const message = messages[index]
+    if (message.role === "user" || message.role === "system") seen.clear()
+    const exchange = readExchange(messages, index)
+    const exchanges = exchange ? [exchange] : readInterleavedReplays(messages, index)
+    if (!exchanges) {
       index++
       continue
     }
-    if (
-      previous &&
-      previous.assistant.id !== current.assistant.id &&
-      (previous.assistant.reasoning || "") === (current.assistant.reasoning || "") &&
-      hasExecutionIdentity(previous) &&
-      isSameExchange(previous, current)
-    ) {
+    for (const current of exchanges) {
+      for (const [alias, canonical] of current.replayResults ?? []) aliases.set(alias, canonical)
+      if (!hasExecutionIdentity(current)) continue
+      const key = JSON.stringify([
+        exchangeKey(current),
+        [...current.results.keys()]
+          .sort()
+          .map((id) => getMessageProviderSourceId(current.results.get(id)!))
+      ])
+      const previous = seen.get(key)
+      if (!previous) {
+        seen.set(key, current)
+        continue
+      }
+      if (
+        previous.assistant.id === current.assistant.id ||
+        (previous.assistant.reasoning || "") !== (current.assistant.reasoning || "") ||
+        !isSameExchange(previous, current)
+      )
+        continue
       aliases.set(current.assistant.id, previous.assistant.id)
       for (const [id, result] of current.results) {
         const canonical = previous.results.get(id)!
         if (canonical.id !== result.id) aliases.set(result.id, canonical.id)
       }
-    } else {
-      previous = current
     }
-    index = current.end
+    index = exchanges[0].end
   }
   if (aliases.size === 0) return aliases
   // Older input can reuse a raw ID in another turn. An alias is safe to hide
@@ -265,6 +361,10 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     if (!aliases.has(message.id)) continue
     if (encountered.has(message.id)) return new Map()
     encountered.add(message.id)
+  }
+  for (const [alias, canonical] of aliases) {
+    const original = aliases.get(canonical)
+    if (original) aliases.set(alias, original)
   }
   return aliases
 }

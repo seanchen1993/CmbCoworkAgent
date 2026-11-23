@@ -76,9 +76,15 @@ async function seedHistory(): Promise<number> {
   const repeated = [2, 3].flatMap((occurrence) =>
     first.slice(1).map((row) => setOccurrence(row, occurrence))
   )
+  const interleaved = [
+    first[0],
+    first[1],
+    ...repeated.filter((row) => row.role === "assistant"),
+    first[2],
+    ...repeated.filter((row) => row.role === "tool")
+  ]
   const durable = [
-    ...first,
-    ...repeated,
+    ...interleaved,
     ...next,
     mismatch[0],
     ...mismatch.slice(1).map((row) => setOccurrence(row, 2)),
@@ -99,7 +105,7 @@ async function seedHistory(): Promise<number> {
     ts: new Date().toISOString(),
     channel_values: {
       messages: [
-        ...[...first, ...repeated].map(toCheckpointMessage),
+        ...interleaved.map(toCheckpointMessage),
         {
           id: "hidden-team-turn",
           type: "human",
@@ -193,6 +199,7 @@ async function main(): Promise<void> {
         pipe?.on("data", (data) => appendFileSync(path.join(output, "electron.log"), data))
       }
       const archivePath = path.join(output, `${phase}.zip`)
+      const page = await app.firstWindow()
       await app.evaluate(({ dialog, ipcMain }, target) => {
         dialog.showSaveDialog = async () => ({ canceled: false, filePath: target })
         const channel = "threads:search-target-window"
@@ -201,7 +208,8 @@ async function main(): Promise<void> {
             _invokeHandlers: Map<string, (event: unknown, request: unknown) => unknown>
           }
         )._invokeHandlers
-        const open = handlers.get(channel)!
+        const open = handlers.get(channel)
+        if (!open) throw new Error(`Missing production search handler: ${channel}`)
         ipcMain.removeHandler(channel)
         ipcMain.handle(channel, (event, request) => {
           const state = globalThis as { replaySearchRequest?: unknown }
@@ -209,7 +217,6 @@ async function main(): Promise<void> {
           return open(event, request)
         })
       }, archivePath)
-      const page = await app.firstWindow()
       await page.route(/^https?:/, (route) => route.abort())
       page.on("pageerror", (error) => pageErrors.push(error.message))
       await page.getByText(title, { exact: true }).first().click({ timeout: 30_000 })

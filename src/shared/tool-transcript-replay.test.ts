@@ -43,11 +43,6 @@ describe("tool transcript replay", () => {
     for (const unmatched of [
       [...exchange(2)],
       [{ ...user, id: "hidden-goal-boundary" }, ...exchange(2)],
-      [
-        user,
-        { role: "assistant", id: "intervening", content: "separate invocation" },
-        ...exchange(2)
-      ],
       [user, ...exchange(2), ...exchange(3)],
       [user, ...exchange(2, { path: "different" })],
       [user, ...exchange(2, { path: "fixture" }, "new result")],
@@ -117,6 +112,82 @@ describe("tool transcript replay", () => {
         [third[1].id, first[1].id]
       ])
     )
+  })
+
+  it("retains surrounding reasoning and final replies when a strong execution moved slots", () => {
+    const reasoning: Message = {
+      id: "reasoning",
+      role: "assistant",
+      content: "",
+      reasoning: "Keep this"
+    }
+    const final: Message = { id: "final", role: "assistant", content: "Done" }
+    const checkpoint = [user, ...exchange(), final]
+    const durable = [user, reasoning, ...exchange(2), final]
+    const aligned = alignReplayedToolExchanges(durable, checkpoint)
+    expect(mergeCheckpointAuthorityTranscriptMessages(aligned, durable)).toEqual(durable)
+    const legacy = (rows: Message[]) =>
+      rows.map((row) => ({
+        ...row,
+        id: row.id.replace(resultId, "legacy-result"),
+        provider_source_id: row.provider_source_id?.replace(resultId, "legacy-result")
+      }))
+    const legacyCheckpoint = legacy(checkpoint)
+    expect(alignReplayedToolExchanges(legacy(durable), legacyCheckpoint)).toBe(legacyCheckpoint)
+  })
+
+  it("folds exact execution copies after another answer and in interleaved snapshots", () => {
+    const [assistant, tool] = exchange()
+    const [copy, copyTool] = exchange(2)
+    const [lastCopy, lastTool] = exchange(3)
+    const final: Message = { id: "final", role: "assistant", content: "Done" }
+    const expected = new Map([
+      [copy.id, assistant.id],
+      [copyTool.id, tool.id],
+      [lastCopy.id, assistant.id],
+      [lastTool.id, tool.id]
+    ])
+    expect(
+      findReplayedToolExchangeAliases([assistant, tool, final, copy, copyTool, lastCopy, lastTool])
+    ).toEqual(expected)
+    expect(
+      findReplayedToolExchangeAliases([assistant, copy, lastCopy, tool, copyTool, lastTool])
+    ).toEqual(expected)
+    expect(
+      findReplayedToolExchangeAliases([
+        assistant,
+        copy,
+        tool,
+        lastTool,
+        { ...copyTool, content: "Different" }
+      ]).size
+    ).toBe(0)
+  })
+
+  it("preserves exact-row Bot file delivery authorizations", () => {
+    const [assistant, tool] = exchange()
+    const [copy, copyTool] = exchange(2)
+    const first = { ...assistant, botHistoryDeliveryScope: { producerWorkId: "previous" } }
+    const second = {
+      ...copy,
+      botHistoryDeliveryScope: {
+        producerWorkId: "previous",
+        legacySnapshotPrefix: "authorized/path"
+      }
+    }
+    expect(findReplayedToolExchangeAliases([first, tool, second, copyTool]).size).toBe(0)
+    const checkpoint = [user, first, tool]
+    expect(alignReplayedToolExchanges([user, second, copyTool], checkpoint)).toBe(checkpoint)
+  })
+
+  it("collapses a result-only replay when its owning assistant is unambiguous", () => {
+    const [assistant, tool] = exchange()
+    const [, copy] = exchange(2)
+    expect(findReplayedToolExchangeAliases([assistant, tool, copy])).toEqual(
+      new Map([[copy.id, tool.id]])
+    )
+    const otherAssistant = { ...assistant, id: "other-execution" }
+    expect(findReplayedToolExchangeAliases([otherAssistant, assistant, tool, copy]).size).toBe(0)
   })
 
   it("keeps independent turns, result IDs, error states and unseen payloads", () => {

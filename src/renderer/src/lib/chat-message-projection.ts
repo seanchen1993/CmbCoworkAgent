@@ -20,6 +20,26 @@ export interface ChatLiveMessageProjectionMetadata {
   structureVersion: number
 }
 
+const noReplayAliases: ReadonlyMap<string, string> = new Map()
+
+/** A live row may have the only surviving copy of renderer-only reasoning. */
+export function resolveChatReplayAliases(
+  replayAliases: ReadonlyMap<string, string>,
+  liveMessages: readonly Message[],
+  display: ChatMessageProjection
+): ReadonlyMap<string, string> {
+  if (replayAliases.size === 0) return replayAliases
+  for (const live of liveMessages) {
+    const canonical = replayAliases.get(live.id)
+    if (!canonical || !live.reasoning) continue
+    const index = display.indexById.get(canonical)
+    if (index !== undefined && display.messages[index].reasoning !== live.reasoning) {
+      return noReplayAliases
+    }
+  }
+  return replayAliases
+}
+
 function liveStructureKey(messages: readonly Message[]): string {
   return messages
     .map(

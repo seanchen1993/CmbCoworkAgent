@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { Message, ToolCall } from "../types"
 import {
   createChatMessageProjector,
+  resolveChatReplayAliases,
   type ChatLiveMessageProjectionMetadata
 } from "./chat-message-projection"
 
@@ -34,6 +35,15 @@ function liveProjection(
 }
 
 describe("createChatMessageProjector tool-call reconciliation", () => {
+  it("keeps a replay row visible when only it has the live reasoning", () => {
+    const original = assistant()
+    const replay = assistant({ id: "replay" })
+    const live = { ...replay, reasoning: "Unique live reasoning" }
+    const aliases = new Map([[replay.id, original.id]])
+    const display = createChatMessageProjector()([original, replay], [live], undefined)
+    expect(resolveChatReplayAliases(aliases, [live], display).size).toBe(0)
+    expect(resolveChatReplayAliases(aliases, [], display)).toBe(aliases)
+  })
   it("fills missing durable tool calls from the matching live assistant", () => {
     const baseline = assistant()
     const live = assistant({ content: "", tool_calls: [executeCall] })
