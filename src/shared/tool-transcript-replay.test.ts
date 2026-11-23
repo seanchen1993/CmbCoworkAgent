@@ -332,7 +332,14 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each(["durable-view", "checkpoint-only", "fresh-result", "stale-before-fresh"])(
+  it.each([
+    "durable-view",
+    "checkpoint-only",
+    "fresh-result",
+    "stale-before-fresh",
+    "hidden-repeat-with-fresh",
+    "hidden-repeat-without-fresh"
+  ])(
     "reconciles old observed drafts before checkpoint ordering (%s)",
     (mode) => {
       const [assistant, result] = exchange()
@@ -340,6 +347,10 @@ describe("tool transcript replay", () => {
       const [grown, grownResult] = exchange(3)
       const [replayed, replayedResult] = exchange(4)
       const nextUser = { ...user, id: "next-user" }
+      const hiddenRepeat = mode.startsWith("hidden-repeat")
+      const staleBeforeFresh = mode === "stale-before-fresh" || hiddenRepeat
+      const hasFresh =
+        mode === "fresh-result" || mode === "stale-before-fresh" || mode === "hidden-repeat-with-fresh"
       const blocks = [
         { type: "text", index: 0, text: "Directory listing" },
         { type: "text", index: 1, text: "Read results" }
@@ -368,14 +379,19 @@ describe("tool transcript replay", () => {
         ? durable
         : [
             nextUser,
-            mode === "stale-before-fresh" ? { ...assistant, content: blocks } : replay,
-            ...(mode === "stale-before-fresh" ? [result] : []),
+            staleBeforeFresh ? { ...assistant, content: blocks } : replay,
+            ...(staleBeforeFresh ? [result] : []),
+            ...(hiddenRepeat ? [{ ...result }] : []),
             ...(mode === "checkpoint-only" ? [replayedResult] : []),
-            ...(mode === "fresh-result" || mode === "stale-before-fresh" ? [fresh] : [])
+            ...(hasFresh ? [fresh] : [])
           ]
       const turns = mode === "durable-view"
         ? undefined
-        : readCheckpointReplayTurns({ channel_values: { messages: checkpointRows(checkpoint) } })
+        : readCheckpointReplayTurns({
+            channel_values: {
+              messages: [...checkpointRows(checkpoint), ...(hiddenRepeat ? [hiddenTeam] : [])]
+            }
+          })
       const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
       const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable, {
         useStableProviderOccurrences: Boolean(turns)
@@ -383,13 +399,13 @@ describe("tool transcript replay", () => {
       const aliases = findReplayedToolExchangeAliases(merged)
       const visible = merged.filter(({ id }) => !aliases.has(id))
       expect(visible.map(({ role }) => role)).toEqual(
-        mode === "fresh-result" || mode === "stale-before-fresh"
+        hasFresh
           ? ["user", "assistant", "tool", "user", "assistant", "tool"]
           : ["user", "assistant", "tool", "user"]
       )
       expect(visible[1].content).toEqual(final.content)
       expect(visible[3].id).toBe(nextUser.id)
-      if (mode === "stale-before-fresh") {
+      if (staleBeforeFresh && hasFresh) {
         expect(durable.some(({ id }) => id === visible[4].id)).toBe(false)
         const bindings = resolveToolResultOwnership(visible)
         expect(bindings.get(getWorkerToolUiKey(visible[4].id, "shared-call", 0))?.id).toBe(fresh.id)
@@ -2503,27 +2519,32 @@ describe("tool transcript replay", () => {
     expect(argumentReads).toBeLessThan(3_000)
   })
 
-  it("indexes distinct structured outcomes without reconciling unchanged complete batches", () => {
+  it.each([false, true])("indexes distinct structured outcomes (projected %s)", (projected) => {
     let payloadReads = 0
     const versionCount = 180
-    const build = () => [user, ...Array.from({ length: versionCount }, (_, index) => {
+    const build = (checkpoint = false) => [user, ...Array.from({ length: versionCount }, (_, index) => {
       const [assistant, result] = exchange(index + 1)
       return [
         { ...assistant, content: `Checking version ${index}` },
         {
           ...result,
-          content: [{
-            type: "text",
-            get text() {
-              payloadReads++
-              return `Result version ${index}`
-            }
-          }]
+          content: [
+            {
+              type: "text",
+              get text() {
+                payloadReads++
+                return `Result version ${index}`
+              }
+            },
+            ...(checkpoint && projected
+              ? [{ type: "resource_link", uri: `https://example.com/results/${index}` }]
+              : [])
+          ]
         }
       ]
     }).flat()]
     const durable = build()
-    const prepared = prepareToolTranscriptReplayMerge(durable, build())
+    const prepared = prepareToolTranscriptReplayMerge(durable, build(true))
     const merged = mergeCheckpointAuthorityTranscriptMessages(prepared.checkpoint, prepared.durable)
     expect(merged.map(({ id }) => id)).toEqual(durable.map(({ id }) => id))
     expect(findReplayedToolExchangeAliases(merged).size).toBe(0)
