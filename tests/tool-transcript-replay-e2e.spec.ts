@@ -14,6 +14,11 @@ const profile = path.join(output, "profile")
 const workspace = path.join(output, "workspace")
 const title = "Tool transcript replay fixture"
 const threadId = "tool-replay-e2e"
+const structuredThreadId = "structured-tool-replay-e2e"
+const firstNoticeReply = "Checking current data"
+const storedNoticeDraft = `${firstNoticeReply} with beta findings`
+const finalNoticeReply = `${storedNoticeDraft} confirmed`
+const noticeSeparator = "A separate response between notices"
 const lastReply = "Replay fixture finished"
 const callId = "reused-provider-tool-call"
 const resultIds = [
@@ -264,6 +269,93 @@ function toCheckpointMessage(message: Message) {
   }
 }
 
+async function seedStructuredHistory(): Promise<void> {
+  const db = await import("../src/main/db")
+  const { getThreadCheckpointPath } = await import("../src/main/storage")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver")
+  const [previousUser, previousAssistant, previousResult] = makeExchange(0)
+  const [user, , result] = makeExchange(1)
+  const blocks = (text: string) => [{ type: "text", text }]
+  const assistant: Message = {
+    ...previousAssistant,
+    content: blocks(firstNoticeReply),
+    tool_calls: [
+      ...previousAssistant.tool_calls!,
+      { id: "listing", name: "ls", args: { path: "." } }
+    ]
+  }
+  const listing: Message = {
+    ...result,
+    id: "9c09fdd9-e146-4c2c-9b12-cac648551576",
+    tool_call_id: "listing",
+    name: "ls",
+    content: "Listed current files"
+  }
+  const separator: Message = {
+    ...assistant,
+    id: "separator",
+    tool_calls: undefined,
+    content: noticeSeparator
+  }
+  await db.initializeDatabase()
+  try {
+    db.createThread(structuredThreadId, {
+      title: "Structured transcript replay fixture",
+      workspacePath: workspace,
+      agentMode: "normal"
+    })
+    db.upsertThreadMessages(structuredThreadId, [
+      previousUser,
+      previousAssistant,
+      previousResult,
+      user,
+      setOccurrence({ ...assistant, content: blocks(storedNoticeDraft) }, 2),
+      result,
+      listing,
+      separator
+    ])
+    await db.flush()
+  } finally {
+    await db.closeDatabase()
+  }
+  const notice = (id: string) => ({
+    id,
+    type: "human",
+    content: "Worker notification",
+    additional_kwargs: { cmb_internal_coordinator_notification: true }
+  })
+  const saver = new SqlJsSaver(getThreadCheckpointPath(structuredThreadId))
+  try {
+    await saver.put(
+      { configurable: { thread_id: structuredThreadId, checkpoint_ns: "" } },
+      {
+        v: 1,
+        id: "structured-checkpoint",
+        ts: new Date().toISOString(),
+        channel_values: {
+          messages: [
+            toCheckpointMessage(user),
+            notice("first-notice"),
+            ...[assistant, result, listing, separator].map(toCheckpointMessage),
+            notice("second-notice"),
+            ...[
+              setOccurrence({ ...assistant, content: blocks(finalNoticeReply) }, 2),
+              setOccurrence({ ...result, content: "", status: "error" }, 2),
+              setOccurrence(listing, 2)
+            ].map(toCheckpointMessage)
+          ]
+        },
+        channel_versions: { messages: 1 },
+        versions_seen: {},
+        pending_sends: []
+      },
+      { source: "loop", step: 1, writes: {}, parents: {} }
+    )
+  } finally {
+    await saver.close()
+  }
+}
+
 interface TestWindow {
   api: {
     threads: {
@@ -277,6 +369,7 @@ async function main(): Promise<void> {
   await mkdir(workspace, { recursive: true })
   process.env.CMB_COWORK_AGENT_HOME = profile
   const rawRowCount = await seedHistory()
+  await seedStructuredHistory()
   const binary = createRequire(import.meta.url)("electron") as string
   const env: Record<string, string> = {
     CMB_E2E_ELECTRON_BIN: binary,
@@ -435,6 +528,24 @@ async function main(): Promise<void> {
         assert.match(
           request?.target?.messageId ?? "",
           /^provider-0::cmb-same-role-duplicate:assistant:/
+        )
+        const structuredArchive = path.join(output, `${phase}-structured.zip`)
+        await app.evaluate(({ dialog }, filePath) => {
+          dialog.showSaveDialog = async () => ({ canceled: false, filePath })
+        }, structuredArchive)
+        const structured = await page.evaluate(
+          (id) => (window as unknown as TestWindow).api.threads.exportSession(id),
+          structuredThreadId
+        )
+        assert.equal(structured.success, true, structured.error)
+        const exportedStructured = JSON.parse(
+          new AdmZip(structuredArchive).readAsText("session.json")
+        ) as typeof archived
+        assert.deepEqual(
+          exportedStructured.messages
+            .filter(({ role }) => role === "assistant")
+            .map(({ content }) => content),
+          ["Checking fixture 0", firstNoticeReply, noticeSeparator, finalNoticeReply]
         )
         await page.screenshot({
           animations: "disabled",

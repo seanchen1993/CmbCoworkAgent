@@ -1528,6 +1528,21 @@ function keepDistinctCheckpointTurns<T extends TranscriptMessage>(
   }
 }
 
+function readReplayProse(content: unknown): string | undefined {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return
+  const parts: string[] = []
+  for (const block of content) {
+    if (typeof block === "string") {
+      if (block) parts.push(block)
+      continue
+    }
+    if (block?.type !== "text" || typeof block.text !== "string") return
+    if (block.text) parts.push(block.text)
+  }
+  return parts.join("\n")
+}
+
 function findContestedToolPresentations<T extends TranscriptMessage>(
   replay: readonly T[],
   checkpoint: ReturnType<typeof indexAnchoredExchanges<T>>,
@@ -1539,18 +1554,17 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
     JSON.stringify([anchor?.id ?? null, exchangeKey(exchange)])
   const matchesPersistedProse = (known: unknown, candidate: unknown, owner: unknown) => {
     if (sameValue(known, candidate)) return true
-    if (typeof known !== "string" || typeof candidate !== "string") return false
-    const storedText = known.trimEnd()
-    const candidateText = candidate.trimEnd()
-    const ownerText = typeof owner === "string" ? owner.trimEnd() : undefined
-    return Boolean(
-      storedText &&
-      candidateText &&
-      (candidateText.startsWith(storedText) ||
-        (storedText.startsWith(candidateText) &&
-          (ownerText === undefined ||
-            !storedText.startsWith(ownerText) ||
-            candidateText.length > ownerText.length)))
+    const storedText = readReplayProse(known)?.trimEnd()
+    const candidateText = readReplayProse(candidate)?.trimEnd()
+    const ownerText = readReplayProse(owner)?.trimEnd()
+    if (!storedText || !candidateText || ownerText === storedText) return false
+    if (candidateText === storedText) return true
+    if (candidateText.startsWith(storedText)) return !ownerText?.startsWith(storedText)
+    return (
+      storedText.startsWith(candidateText) &&
+      (!ownerText ||
+        (!ownerText.startsWith(storedText) &&
+          (!storedText.startsWith(ownerText) || candidateText.length > ownerText.length)))
     )
   }
   for (const assistant of replay) {
@@ -1863,13 +1877,10 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
     type Declaration = { id: string; text: string; rawTurn: string; hidden: boolean }
     const groups = new Map<string, Declaration[]>()
     for (const [index, row] of rows.entries()) {
-      if (
-        row.role !== "assistant" ||
-        typeof row.content !== "string" ||
-        !Array.isArray(row.tool_calls) ||
-        !row.tool_calls.length
-      )
+      if (row.role !== "assistant" || !Array.isArray(row.tool_calls) || !row.tool_calls.length)
         continue
+      const text = readReplayProse(row.content)
+      if (text === undefined) continue
       const sourceId = sources[index].id
       const rawTurn = rawAssistantTurns.get(sourceId)
       if (rawTurn === undefined) continue
@@ -1881,7 +1892,7 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
       const group = groups.get(key) ?? []
       group.push({
         id: row.id,
-        text: row.content,
+        text,
         rawTurn,
         hidden: rawCheckpointTurns.hiddenAssistants.has(sourceId)
       })

@@ -577,7 +577,12 @@ describe("tool transcript replay", () => {
     "error",
     "no-witness",
     "continued-prose",
-    "newline-prose"
+    "newline-prose",
+    "structured-continuation",
+    "structured-newline",
+    "saved-blocks",
+    "checkpoint-blocks",
+    "multiple-text-blocks"
   ])("keeps separate hidden replies with sparse checkpoint results (%s)", (mode) => {
     const lateEmpty = mode !== "missing-first"
     const [older, olderResult] = exchange()
@@ -589,11 +594,36 @@ describe("tool transcript replay", () => {
       content: "An independent message"
     }
     const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
-    const first = { ...older, tool_calls: calls, content: "Checking" }
-    const savedText = "Checking the new directory"
+    const blocks = (text: string) => text.split("\n").map((text) => ({ type: "text", text }))
+    const savedBlocks = mode.startsWith("structured") || mode === "saved-blocks"
+    const checkpointBlocks =
+      mode.startsWith("structured") || mode === "checkpoint-blocks" || mode === "multiple-text-blocks"
+    const first = {
+      ...older,
+      tool_calls: calls,
+      content: checkpointBlocks ? blocks("Checking") : "Checking"
+    }
+    const savedText =
+      mode === "multiple-text-blocks" ? "Checking\nNew directory" : "Checking the new directory"
+    const continuation = [
+      "continued-prose",
+      "structured-continuation",
+      "saved-blocks",
+      "checkpoint-blocks",
+      "multiple-text-blocks"
+    ].includes(mode)
     const suffix =
-      mode === "continued-prose" ? " and reporting back" : mode === "newline-prose" ? "\n" : ""
-    const next = { ...current, tool_calls: calls, content: savedText + suffix }
+      mode === "newline-prose" || mode === "structured-newline"
+        ? "\n"
+        : continuation
+          ? " and reporting back"
+          : ""
+    const nextText = savedText + suffix
+    const next = {
+      ...current,
+      tool_calls: calls,
+      content: checkpointBlocks ? blocks(nextText) : nextText
+    }
     const resultId = "1c711082-5111-4632-976d-7c05ee064c33"
     const read = {
       ...olderResult,
@@ -617,7 +647,7 @@ describe("tool transcript replay", () => {
       {
         ...current,
         tool_calls: calls,
-        content: lateEmpty ? savedText : first.content
+        content: lateEmpty ? (savedBlocks ? blocks(savedText) : savedText) : first.content
       },
       read,
       ls,
