@@ -30,6 +30,7 @@ vi.mock("./catalog-client", async (original) => ({
 
 let service: typeof import("./service")
 let consent: Awaited<ReturnType<typeof projectUseConsentFixture>> | undefined
+// 冷启动测试夹具会重新装载真实的 Harness 与 Mods 依赖。
 beforeEach(async () => {
   vi.resetModules()
   state.root = await mkdtemp(join(canonicalTmpdir(), "harness-direct-admission-"))
@@ -66,7 +67,7 @@ beforeEach(async () => {
   ]
   await writeFile(join(state.root, "plugins.json"), JSON.stringify(state.plugins))
   service = await import("./service")
-})
+}, 30_000)
 afterEach(async () => {
   consent?.close()
   consent = undefined
@@ -283,4 +284,4 @@ it("projects the real AutoBiz scaffold through original project and Feature serv
     code: "ENOENT"
   })
   expect((await readProjectSource(join(root, "project"))).bundle.digest).toBe(bundle.digest)
-})
+}, 20_000)
