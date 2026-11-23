@@ -69,11 +69,8 @@ export function createBrowserApi() {
         "browser:startScriptRecording",
         options
       ) as Promise<BrowserRecordingSession>,
-    pauseScriptRecording: (panelWidth?: number) =>
-      ipcRenderer.invoke(
-        "browser:pauseScriptRecording",
-        panelWidth
-      ) as Promise<BrowserRecordingSession>,
+    pauseScriptRecording: () =>
+      ipcRenderer.invoke("browser:pauseScriptRecording") as Promise<BrowserRecordingSession>,
     updateScriptRecordingDraft: (input: BrowserRecordingDraftUpdateInput) =>
       ipcRenderer.invoke(
         "browser:updateScriptRecordingDraft",

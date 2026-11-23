@@ -75,7 +75,6 @@ describe("browser script execution service", () => {
 
     await executeRecordingScriptInBuiltinBrowser({
       script: `import { test } from "@playwright/test";
-// cmb-browser-panel-width: 864
 // cmb-browser-device-viewport: 390x844
 
 const baseUrl = "https://example.com";

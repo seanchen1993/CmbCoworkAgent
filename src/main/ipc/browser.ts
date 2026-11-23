@@ -163,7 +163,7 @@ function registerBrowserScriptRecordingIpc({ browserService, ipcMain }: BrowserI
 
   ipcMain.handle(
     "browser:pauseScriptRecording",
-    (_event, panelWidth?: number): BrowserRecordingSession => pauseScriptRecording(panelWidth)
+    (): BrowserRecordingSession => pauseScriptRecording()
   )
 
   ipcMain.handle(

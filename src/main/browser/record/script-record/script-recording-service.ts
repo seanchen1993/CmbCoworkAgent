@@ -13,8 +13,7 @@ import type {
 import {
   generateScriptRecording,
   parseScriptRecordingScript,
-  withScriptRecordingDeviceViewport,
-  withScriptRecordingPanelWidth
+  withScriptRecordingDeviceViewport
 } from "../../../../shared/browser-script-recording"
 import {
   buildPlaywrightScriptRecorderInjectionScript,
@@ -576,7 +575,6 @@ function toView(session: BrowserRecordingSession | null): BrowserRecordingSessio
         ? session.scriptPrefix
         : generateScriptRecording(session.actions, {
             source: "script",
-            panelWidth: session.panelWidth,
             deviceViewport: session.deviceViewport,
             variableActionIds: session.variableActionIds,
             variableActionNames: session.variableActionNames
@@ -794,12 +792,6 @@ export function startScriptRecording(
     scriptPrefixActionCount: seedScript ? seededRecording.actions.length : undefined,
     libraryFileName: readString(options.libraryFileName),
     libraryDisplayName: readString(options.libraryDisplayName),
-    panelWidth:
-      typeof options.panelWidth === "number" &&
-      Number.isFinite(options.panelWidth) &&
-      options.panelWidth > 0
-        ? Math.round(options.panelWidth)
-        : undefined,
     deviceViewport: normalizeDeviceViewport(options.deviceViewport),
     actions: seededRecording.actions,
     variableActionIds: seededRecording.variableActionIds,
@@ -820,27 +812,9 @@ export function startScriptRecording(
   return toView(activeSession)
 }
 
-function updateActiveSessionPanelWidth(panelWidth?: number): void {
-  if (
-    !activeSession ||
-    typeof panelWidth !== "number" ||
-    !Number.isFinite(panelWidth) ||
-    panelWidth <= 0
-  )
-    return
-  activeSession.panelWidth = Math.round(panelWidth)
-  if (activeSession.scriptPrefix) {
-    activeSession.scriptPrefix = withScriptRecordingPanelWidth(
-      activeSession.scriptPrefix,
-      activeSession.panelWidth
-    )
-  }
-}
-
-export function pauseScriptRecording(panelWidth?: number): BrowserRecordingSession {
+export function pauseScriptRecording(): BrowserRecordingSession {
   if (!activeSession || activeSession.status !== "recording")
     return toView(activeSession ?? lastSession)
-  updateActiveSessionPanelWidth(panelWidth)
   activeSession.status = "paused"
   pendingExplicitNavigation = null
   return toView(activeSession)
@@ -881,7 +855,6 @@ export function stopScriptRecording(
 ): BrowserRecordingSession {
   if (!activeSession) return toView(lastSession)
 
-  updateActiveSessionPanelWidth(environment?.panelWidth)
   const deviceViewport = normalizeDeviceViewport(environment?.deviceViewport)
   if (deviceViewport) {
     activeSession.deviceViewport = deviceViewport
@@ -1012,7 +985,9 @@ export function recordScriptRecorderConsoleMessage(frame: WebFrameMain, message:
   const playwrightEvent = parsePlaywrightScriptRecorderEvent(message, framePath)
   if (playwrightEvent) {
     const action = normalizeScriptEvent(playwrightEvent as ScriptRecorderEvent, framePath)
-    if (action) {
+    // Page transitions caused by a recorded click/press are already reproduced by
+    // that action. Only BrowserService's explicit navigation channel may add goto.
+    if (action && !(action.kind === "navigate" && action.navigationSource === "implicit")) {
       appendActionAndEmit(activeSession, action)
     }
     return

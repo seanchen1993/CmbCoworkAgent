@@ -5,8 +5,7 @@ import { getGlobalBrowserService } from "../../core/browser-service-registry"
 import {
   applyScriptRecordingVariableValues,
   buildScriptExecutableScript,
-  extractScriptRecordingDeviceViewport,
-  extractScriptRecordingPanelWidth
+  extractScriptRecordingDeviceViewport
 } from "../../../../shared/browser-script-recording"
 import type {
   BrowserScriptExecutionInput,
@@ -320,7 +319,6 @@ async function waitForBrowserPanelPage(
 async function connectInAppBrowser(options: {
   threadId?: string | null
   workspacePath?: string | null
-  panelWidth?: number
   deviceViewport?: BrowserDeviceSize
   isCancelled: () => boolean
 }): Promise<{
@@ -340,7 +338,7 @@ async function connectInAppBrowser(options: {
 
   browserService.requestPanel(
     options.threadId ?? undefined,
-    options.panelWidth,
+    undefined,
     true,
     options.deviceViewport
   )
@@ -479,7 +477,6 @@ export async function executeRecordingScriptInBuiltinBrowser(
     const { browser, context, page } = await connectInAppBrowser({
       threadId: input.threadId,
       workspacePath: input.workspacePath,
-      panelWidth: deviceViewport ? undefined : extractScriptRecordingPanelWidth(script),
       deviceViewport,
       isCancelled: () => executionController.cancelled
     })

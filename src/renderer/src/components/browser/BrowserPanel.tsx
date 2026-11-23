@@ -1119,10 +1119,6 @@ export function BrowserPanel({
         <BrowserScriptRecordingControls
           browserCreated={state.created}
           currentUrl={state.url}
-          getPanelWidth={() => {
-            const width = panelRef.current?.getBoundingClientRect().width
-            return width && width > 0 ? Math.round(width) : undefined
-          }}
           getDeviceViewport={getRecordingViewport}
           threadId={threadId}
           workspacePath={workspacePath}
