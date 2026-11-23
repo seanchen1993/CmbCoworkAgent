@@ -570,107 +570,112 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each(["missing-first", "empty-late", "different-result", "error", "no-witness"])(
-    "keeps separate hidden replies with sparse checkpoint results (%s)",
-    (mode) => {
-      const lateEmpty = mode !== "missing-first"
-      const [older, olderResult] = exchange()
-      const [current] = exchange(2)
-      const currentUser = { ...user, id: "current-user" }
-      const boundary = {
-        id: "between-hidden",
-        role: "assistant",
-        content: "An independent message"
-      }
-      const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
-      const first = { ...older, tool_calls: calls, content: "Checking" }
-      const next = { ...current, tool_calls: calls, content: "Checking the new directory" }
-      const resultId = "1c711082-5111-4632-976d-7c05ee064c33"
-      const read = {
-        ...olderResult,
-        id: resultId,
-        provider_source_id: resultId,
-        content: "Read content"
-      }
-      const lsId = "ad506755-5e42-4cef-834f-eb1be0f11d27"
-      const ls = {
-        id: lsId,
-        role: "tool",
-        tool_call_id: "ls-call",
-        name: "ls",
-        content: "Listed files"
-      }
-      const durable = [
-        user,
-        older,
-        olderResult,
-        currentUser,
-        {
-          ...current,
-          tool_calls: calls,
-          content: lateEmpty ? next.content : first.content
-        },
-        read,
-        ls,
-        boundary
-      ]
-      const firstResults = lateEmpty ? [read, ls] : []
-      const latestReadId =
-        mode === "different-result" ? "81cbcdce-733b-4d6f-86b5-261cb3d89d22" : resultId
-      const nextResults = [
-        {
-          ...read,
-          id:
-            mode === "different-result"
-              ? latestReadId
-              : `${resultId}::cmb-same-role-duplicate:tool:2`,
-          provider_source_id: latestReadId,
-          provider_occurrence: mode === "different-result" ? 1 : 2,
-          content: lateEmpty ? "" : read.content,
-          ...(mode === "error" ? { status: "error", is_error: true } : {})
-        },
-        {
-          ...ls,
-          id: `${lsId}::cmb-same-role-duplicate:tool:2`,
-          content: mode === "no-witness" ? "" : ls.content
-        }
-      ]
-      const checkpoint = [currentUser, first, ...firstResults, boundary, next, ...nextResults]
-      const turns = readCheckpointReplayTurns({
-        channel_values: {
-          messages: [
-            ...checkpointRows([currentUser]),
-            hiddenTeam,
-            ...checkpointRows([first, ...firstResults, boundary]),
-            { ...hiddenTeam, id: "second-hidden-notice" },
-            ...checkpointRows([next, ...nextResults])
-          ]
-        }
-      })
-      const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
-      const merged = mergeCheckpointAuthorityTranscriptMessages(
-        prepared.checkpoint,
-        prepared.durable,
-        { useStableProviderOccurrences: true }
-      )
-      const aliases = findReplayedToolExchangeAliases(merged)
-      const text = getAssistantReplayContent(aliases, (id) => merged.find((row) => row.id === id))
-      const visible = merged.filter(({ id }) => !aliases.has(id))
-      expect(
-        visible
-          .filter(({ role }) => role === "assistant")
-          .map((row) => text.get(row.id) ?? row.content)
-          .slice(-3)
-      ).toEqual([first.content, boundary.content, next.content])
-      if (lateEmpty) {
-        const reply = visible.findLast(({ role }) => role === "assistant")!
-        const result = resolveToolResultOwnership(visible).get(
-          getWorkerToolUiKey(reply.id, "shared-call", 0)
-        )
-        expect(result?.content).toBe(mode === "empty-late" ? read.content : "")
-      }
+  it.each([
+    "missing-first",
+    "empty-late",
+    "different-result",
+    "error",
+    "no-witness",
+    "continued-prose",
+    "newline-prose"
+  ])("keeps separate hidden replies with sparse checkpoint results (%s)", (mode) => {
+    const lateEmpty = mode !== "missing-first"
+    const [older, olderResult] = exchange()
+    const [current] = exchange(2)
+    const currentUser = { ...user, id: "current-user" }
+    const boundary = {
+      id: "between-hidden",
+      role: "assistant",
+      content: "An independent message"
     }
-  )
+    const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
+    const first = { ...older, tool_calls: calls, content: "Checking" }
+    const savedText = "Checking the new directory"
+    const suffix =
+      mode === "continued-prose" ? " and reporting back" : mode === "newline-prose" ? "\n" : ""
+    const next = { ...current, tool_calls: calls, content: savedText + suffix }
+    const resultId = "1c711082-5111-4632-976d-7c05ee064c33"
+    const read = {
+      ...olderResult,
+      id: resultId,
+      provider_source_id: resultId,
+      content: "Read content"
+    }
+    const lsId = "ad506755-5e42-4cef-834f-eb1be0f11d27"
+    const ls = {
+      id: lsId,
+      role: "tool",
+      tool_call_id: "ls-call",
+      name: "ls",
+      content: "Listed files"
+    }
+    const durable = [
+      user,
+      older,
+      olderResult,
+      currentUser,
+      {
+        ...current,
+        tool_calls: calls,
+        content: lateEmpty ? savedText : first.content
+      },
+      read,
+      ls,
+      boundary
+    ]
+    const firstResults = lateEmpty ? [read, ls] : []
+    const differentExecution = mode === "different-result" || Boolean(suffix)
+    const latestReadId = differentExecution ? "81cbcdce-733b-4d6f-86b5-261cb3d89d22" : resultId
+    const nextResults = [
+      {
+        ...read,
+        id: differentExecution ? latestReadId : `${resultId}::cmb-same-role-duplicate:tool:2`,
+        provider_source_id: latestReadId,
+        provider_occurrence: differentExecution ? 1 : 2,
+        content: lateEmpty ? "" : read.content,
+        ...(mode === "error" ? { status: "error", is_error: true } : {})
+      },
+      {
+        ...ls,
+        id: `${lsId}::cmb-same-role-duplicate:tool:2`,
+        content: mode === "no-witness" ? "" : ls.content
+      }
+    ]
+    const checkpoint = [currentUser, first, ...firstResults, boundary, next, ...nextResults]
+    const turns = readCheckpointReplayTurns({
+      channel_values: {
+        messages: [
+          ...checkpointRows([currentUser]),
+          hiddenTeam,
+          ...checkpointRows([first, ...firstResults, boundary]),
+          { ...hiddenTeam, id: "second-hidden-notice" },
+          ...checkpointRows([next, ...nextResults])
+        ]
+      }
+    })
+    const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
+    const merged = mergeCheckpointAuthorityTranscriptMessages(
+      prepared.checkpoint,
+      prepared.durable,
+      { useStableProviderOccurrences: true }
+    )
+    const aliases = findReplayedToolExchangeAliases(merged)
+    const text = getAssistantReplayContent(aliases, (id) => merged.find((row) => row.id === id))
+    const visible = merged.filter(({ id }) => !aliases.has(id))
+    expect(
+      visible
+        .filter(({ role }) => role === "assistant")
+        .map((row) => text.get(row.id) ?? row.content)
+        .slice(-3)
+    ).toEqual([first.content, boundary.content, next.content])
+    if (lateEmpty) {
+      const reply = visible.findLast(({ role }) => role === "assistant")!
+      const result = resolveToolResultOwnership(visible).get(
+        getWorkerToolUiKey(reply.id, "shared-call", 0)
+      )
+      expect(result?.content).toBe(mode === "empty-late" ? read.content : "")
+    }
+  })
 
   it.each([false, true])(
     "finds the correct structured result variant for a prose revision (trimmed %s)",

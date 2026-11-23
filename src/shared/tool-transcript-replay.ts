@@ -1532,16 +1532,27 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
   replay: readonly T[],
   checkpoint: ReturnType<typeof indexAnchoredExchanges<T>>,
   targets: ReadonlyMap<AnchoredToolExchange<T>, AnchoredToolExchange<T>>,
-  rawTurns: ReadonlyMap<string, string>,
-  payloadId: (value: unknown) => number
+  rawTurns: ReadonlyMap<string, string>
 ): ReadonlySet<AnchoredToolExchange<T>> {
   const byPresentation = new Map<string, Array<AnchoredToolSlots<T>>>()
   const key = (exchange: PartialToolExchange<T>, anchor?: T) =>
-    JSON.stringify([
-      anchor?.id ?? null,
-      exchangeKey(exchange),
-      payloadId(exchange.assistant.content)
-    ])
+    JSON.stringify([anchor?.id ?? null, exchangeKey(exchange)])
+  const matchesPersistedProse = (known: unknown, candidate: unknown, owner: unknown) => {
+    if (sameValue(known, candidate)) return true
+    if (typeof known !== "string" || typeof candidate !== "string") return false
+    const storedText = known.trimEnd()
+    const candidateText = candidate.trimEnd()
+    const ownerText = typeof owner === "string" ? owner.trimEnd() : undefined
+    return Boolean(
+      storedText &&
+      candidateText &&
+      (candidateText.startsWith(storedText) ||
+        (storedText.startsWith(candidateText) &&
+          (ownerText === undefined ||
+            !storedText.startsWith(ownerText) ||
+            candidateText.length > ownerText.length)))
+    )
+  }
   for (const assistant of replay) {
     const exchange = readToolExchangeSlots(assistant, checkpoint.ownership)
     if (!exchange) continue
@@ -1566,7 +1577,12 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
         turn !== undefined &&
         turn !== owner &&
         sameReplayAnchor(copy.anchor, other.anchor, true) &&
-        sameExchangeCalls(target.exchange, other.exchange, true, true)
+        sameExchangeCalls(target.exchange, other.exchange, true, false) &&
+        matchesPersistedProse(
+          target.exchange.assistant.content,
+          other.exchange.assistant.content,
+          copy.exchange.assistant.content
+        )
       )
     })
     if (otherClaim) contested.add(copy)
@@ -2014,7 +2030,7 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   if (rawAssistantTurns) keepDistinctCheckpointTurns(targets, rawAssistantTurns)
   const contestedPresentations =
     rawAssistantTurns && targets.size
-      ? findContestedToolPresentations(replay, checkpoint, targets, rawAssistantTurns, payloadId)
+      ? findContestedToolPresentations(replay, checkpoint, targets, rawAssistantTurns)
       : undefined
   const checkpointAliases = selectCheckpointReplayAliases(replay, checkpoint, targets)
   const replayWithoutCopies = checkpointAliases.size
