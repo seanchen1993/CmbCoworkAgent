@@ -159,7 +159,7 @@ import {
   describeCheckpointMessageForkTarget,
   deriveCheckpointTranscriptIndex,
   findMessagesAfterCheckpointVisibleIds,
-  findCheckpointReplayPrefixesBeforeHiddenTurns,
+  readCheckpointReplayTurns,
   isWorkflowPlumbingTranscriptContent,
   mergeCheckpointAuthorityTranscriptMessages,
   truncateCheckpointMessagesAfter
@@ -2857,7 +2857,7 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
   const alignedCheckpoint = alignReplayedToolExchanges(
     persistedMessages,
     checkpointMessages,
-    findCheckpointReplayPrefixesBeforeHiddenTurns(checkpoint)
+    readCheckpointReplayTurns(checkpoint)
   )
   const merged = mergeThreadMessageTranscripts(alignedCheckpoint, persistedMessages)
   const aliases = findReplayedToolExchangeAliases(merged)

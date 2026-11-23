@@ -5,7 +5,7 @@ import { createRequire } from "node:module"
 import path from "node:path"
 import AdmZip from "adm-zip"
 import type { Checkpoint } from "@langchain/langgraph-checkpoint"
-import { _electron as electron, type ElectronApplication, type Locator } from "playwright"
+import { _electron as electron, type ElectronApplication } from "playwright"
 import type { Message } from "../src/main/types"
 
 const root = path.resolve(__dirname, "..")
@@ -200,15 +200,14 @@ async function seedHistory(): Promise<number> {
           ...toCheckpointMessage(legacy),
           tool_calls: { length: 1 }
         },
-        ...[shiftedUser, ...shifted[0], setOccurrence(shifted[1][0], 2), shifted[1][1]].map(
-          toCheckpointMessage
-        ),
+        toCheckpointMessage(shiftedUser),
         {
-          id: "hidden-after-shifted-tools",
+          id: "hidden-before-shifted-tools",
           type: "human",
-          content: "Hidden Team notification after the completed exchanges",
+          content: "Hidden Team notification before the tool exchanges",
           additional_kwargs: { cmb_internal_coordinator_notification: true }
-        }
+        },
+        ...[...shifted[0], setOccurrence(shifted[1][0], 2), shifted[1][1]].map(toCheckpointMessage)
       ]
     },
     channel_versions: { messages: 1 },
@@ -251,32 +250,6 @@ interface TestWindow {
       getMessages(id: string): Promise<Message[]>
     }
   }
-}
-
-async function collectRenderedAssistantRows(chat: Locator): Promise<string[]> {
-  return chat
-    .locator("[data-chat-scroll] > [data-radix-scroll-area-viewport]")
-    .evaluate(async (element) => {
-      const rows = new Map<string, string>()
-      for (
-        let top = 0, step = 0;
-        step < 100;
-        step++, top += Math.max(1, element.clientHeight / 2)
-      ) {
-        element.scrollTop = top
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-        )
-        for (const row of element.querySelectorAll<HTMLElement>(
-          '[data-chat-message-row][data-message-role="assistant"]'
-        )) {
-          if (row.dataset.chatMessageId) rows.set(row.dataset.chatMessageId, row.innerText)
-        }
-        if (element.scrollTop + element.clientHeight + 1 >= element.scrollHeight)
-          return [...rows.values()]
-      }
-      throw new Error("Did not reach the bottom of the replay fixture")
-    })
 }
 
 async function main(): Promise<void> {
@@ -322,7 +295,9 @@ async function main(): Promise<void> {
       }
       const archivePath = path.join(output, `${phase}.zip`)
       const page = await app.firstWindow()
-      await app.evaluate(({ dialog, ipcMain }, target) => {
+      await app.evaluate(({ BrowserWindow, dialog, ipcMain }, target) => {
+        // Mount the fixture in one viewport regardless of the test desktop's display size.
+        BrowserWindow.getAllWindows()[0]?.webContents.setZoomFactor(0.35)
         dialog.showSaveDialog = async () => ({ canceled: false, filePath: target })
         const channel = "threads:search-target-window"
         const handlers = (
@@ -353,7 +328,9 @@ async function main(): Promise<void> {
       const archived = JSON.parse(archive.readAsText("session.json")) as {
         messages: { role: string; content: string; toolCallId?: string }[]
       }
-      const rows = await collectRenderedAssistantRows(chat)
+      const rows = await chat
+        .locator('[data-chat-message-row][data-message-role="assistant"]')
+        .allInnerTexts()
       const visible = rows.flatMap((row) => row.match(/Checking fixture \d/g) ?? [])
       const exported = archived.messages.filter((message) => message.role === "tool")
       const markdown = archive.readAsText("session.md")
@@ -361,7 +338,15 @@ async function main(): Promise<void> {
         (id) => (window as unknown as TestWindow).api.threads.getMessages(id),
         threadId
       )
-      console.log(JSON.stringify({ phase, visible, exported, rawRows: stored.length }))
+      console.log(
+        JSON.stringify({
+          phase,
+          visible,
+          exported,
+          renderedRows: rows.length,
+          rawRows: stored.length
+        })
+      )
       try {
         assert.deepEqual(visible, [
           "Checking fixture 0",

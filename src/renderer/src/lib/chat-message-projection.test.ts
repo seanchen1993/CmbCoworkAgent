@@ -142,6 +142,51 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     expect(associations.has(getWorkerToolUiKey(second.id, executeCall.id, 0))).toBe(false)
   })
 
+  it.each([
+    {
+      callName: "read_file",
+      resultId: "ad506755-5e42-4cef-834f-eb1be0f11d27",
+      resultName: "execute",
+      before: true
+    },
+    {
+      callName: "bot_work_create",
+      resultId: "bot-attempt-38607a85-e47b-4fcb-a144-abcca82a9991-1",
+      resultName: "bot_work_create",
+      before: false
+    }
+  ])(
+    "rechecks late result names for $callName without an order change",
+    ({ callName, resultId, resultName, before }) => {
+      const toolCall = { ...executeCall, name: callName }
+      const original = assistant({ id: "original", tool_calls: [toolCall] })
+      const active = assistant({ id: "active", tool_calls: [toolCall] })
+      const firstResult = assistant({
+        id: "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465",
+        role: "tool",
+        tool_call_id: toolCall.id,
+        name: callName
+      })
+      const copy = { ...firstResult, id: `${firstResult.id}::cmb-same-role-duplicate:tool:2` }
+      const unlabeled = { ...firstResult, id: resultId, name: undefined, content: "New procedure" }
+      const messages = [original, firstResult, active, copy, unlabeled]
+      const display = {
+        messages,
+        structureVersion: 1,
+        indexById: new Map(messages.map(({ id }, index) => [id, index]))
+      }
+      const project = createChatReplayAliasProjector()
+      expect(
+        project({ ...display, contentVersion: 1, changedMessages: messages }).has(copy.id)
+      ).toBe(before)
+      const labeled = { ...unlabeled, name: resultName }
+      messages[messages.length - 1] = labeled
+      const aliases = project({ ...display, contentVersion: 2, changedMessages: [labeled] })
+      expect(aliases.has(copy.id)).toBe(!before)
+      expect(aliases).toEqual(findDisplayedReplayAliases(messages))
+    }
+  )
+
   it("folds the calls and results proved by the projected order, not stale durable order", () => {
     const resultId = "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465"
     const user = assistant({ id: "user", role: "user", content: "Run both checks" })

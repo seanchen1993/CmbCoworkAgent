@@ -1,5 +1,8 @@
 import { parseBotToolReceiptId } from "./bots/turn-feedback"
-import type { CheckpointAuthorityTranscriptMessage } from "./checkpoint-transcript"
+import type {
+  CheckpointAuthorityTranscriptMessage,
+  CheckpointReplayTurns
+} from "./checkpoint-transcript"
 import {
   buildMessageSameRoleDuplicateId,
   getMessageProviderOccurrence,
@@ -211,13 +214,20 @@ export function hasToolReplayCandidates(messages: readonly TranscriptMessage[]):
 
 function indexAnchoredExchanges<T extends TranscriptMessage>(
   messages: readonly T[],
-  checkpointPrefixes?: ReadonlyMap<string, ReadonlySet<string>>
+  includeLeadingHidden: boolean,
+  checkpointTurns?: CheckpointReplayTurns
 ) {
   const ownership = resolveToolResultOwnership(messages)
-  const byAnchor = new Map<
-    string,
-    { exchange: ToolExchange<T>; position: number; anchor: T; hasPhysicalResults: boolean } | null
-  >()
+  type Candidate = {
+    exchange: ToolExchange<T>
+    position: number
+    anchor: T | undefined
+    hasPhysicalResults: boolean
+  }
+  const byAnchor = new Map<string, Candidate | null>()
+  const addCandidate = (key: string, candidate: Candidate | null) => {
+    byAnchor.set(key, byAnchor.has(key) ? null : candidate)
+  }
   let anchor: T | undefined
   let position = 0
   for (const message of messages) {
@@ -226,25 +236,37 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
       position = 0
       continue
     }
-    if (!anchor || message.role !== "assistant") continue
+    if ((!anchor && !includeLeadingHidden) || message.role !== "assistant") continue
     const exchange = readExchange(message, ownership)
     if (exchange) {
-      const prefix = checkpointPrefixes?.get(anchor.id)
       const hasPhysicalResults = exchange.results.every(hasToolResultExecutionId)
-      const key = JSON.stringify([
-        anchor.id,
+      const evidenceKey = [
         exchangeKey(exchange),
         hasPhysicalResults ? exchange.results.map(resultReplayKey) : null
-      ])
+      ]
+      const candidate = { exchange, position, anchor, hasPhysicalResults }
+      const requiresRawProof =
+        checkpointTurns && (!anchor || checkpointTurns.hiddenAnchors.has(anchor.id))
       const unsafe =
-        prefix &&
+        requiresRawProof &&
         (!hasPhysicalResults ||
-          !prefix.has(message.id) ||
-          exchange.results.some(({ id }) => !prefix.has(id)))
-      byAnchor.set(
-        key,
-        unsafe || byAnchor.has(key) ? null : { exchange, position, anchor, hasPhysicalResults }
-      )
+          !checkpointTurns.uniqueMessageIds.has(message.id) ||
+          exchange.results.some(
+            (result, index) =>
+              !checkpointTurns.uniqueMessageIds.has(result.id) ||
+              checkpointTurns.rawResultByCall.get(
+                getWorkerToolUiKey(message.id, exchange.calls[index].id, index)
+              ) !== result.id
+          ))
+      if (anchor)
+        addCandidate(JSON.stringify([anchor.id, ...evidenceKey]), unsafe ? null : candidate)
+      if (
+        includeLeadingHidden &&
+        hasPhysicalResults &&
+        (!checkpointTurns || (!anchor && checkpointTurns.leadingHiddenAssistants.has(message.id)))
+      ) {
+        addCandidate(JSON.stringify([null, ...evidenceKey]), unsafe ? null : candidate)
+      }
     }
     position++
   }
@@ -313,21 +335,29 @@ function applyCheckpointAlignments<T extends TranscriptMessage>(
 export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   canonical: readonly T[],
   replay: T[],
-  checkpointPrefixes?: ReadonlyMap<string, ReadonlySet<string>>
+  checkpointTurns?: CheckpointReplayTurns
 ): T[] {
-  if (canonical.length < 3 || replay.length < 3) return replay
-  const candidates = indexAnchoredExchanges(canonical)
+  const includeLeadingHidden = Boolean(checkpointTurns?.leadingHiddenAssistants.size)
+  const minimumRows = includeLeadingHidden ? 2 : 3
+  if (canonical.length < minimumRows || replay.length < minimumRows) return replay
+  const candidates = indexAnchoredExchanges(canonical, includeLeadingHidden)
   if (candidates.size === 0) return replay
   const groups: Array<Array<[copy: T, durable: T]>> = []
-  for (const [key, candidate] of indexAnchoredExchanges(replay, checkpointPrefixes)) {
+  for (const [key, candidate] of indexAnchoredExchanges(
+    replay,
+    includeLeadingHidden,
+    checkpointTurns
+  )) {
     const target = candidates.get(key)
     if (
       !target ||
       !candidate ||
       (target.position !== candidate.position && !hasExecutionIdentity(target.exchange)) ||
-      !sameRow(target.anchor, candidate.anchor, target.hasPhysicalResults) ||
-      (getMessageProviderOccurrence(target.anchor) ?? 1) !==
-        (getMessageProviderOccurrence(candidate.anchor) ?? 1) ||
+      (candidate.anchor &&
+        (!target.anchor ||
+          !sameRow(target.anchor, candidate.anchor, target.hasPhysicalResults) ||
+          (getMessageProviderOccurrence(target.anchor) ?? 1) !==
+            (getMessageProviderOccurrence(candidate.anchor) ?? 1))) ||
       !isSameExchange(target.exchange, candidate.exchange, target.hasPhysicalResults)
     )
       continue

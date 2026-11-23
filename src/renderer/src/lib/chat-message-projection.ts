@@ -37,6 +37,7 @@ function replaySourceKey(message: Message): string | undefined {
   if (message.role === "assistant" || message.role === "tool") {
     return `${message.role}:${getMessageProviderSourceId(message)}`
   }
+  return undefined
 }
 
 function sameToolSlots(before: Message["tool_calls"], after: Message["tool_calls"]): boolean {
@@ -77,6 +78,7 @@ export function createChatReplayAliasProjector(): (
         evidenceChanged ||= (repeatedSources.has(source) &&
           (message.role === "tool" || completedAssistantIds.has(message.id))) ||
           previous.tool_call_id !== message.tool_call_id ||
+          (message.role === "tool" && previous.name !== message.name) ||
           getMessageProviderOccurrence(previous) !== getMessageProviderOccurrence(message) ||
           !sameToolSlots(previous.tool_calls, message.tool_calls)
       }

@@ -13,6 +13,7 @@ import {
 } from "./message-role-collision"
 import type { RoleCollisionMessage } from "./message-role-collision"
 import { buildSubagentTaskInvocationIdentity } from "./subagent-invocation-identity"
+import { resolveToolResultOwnership, type ToolOwnershipMessage } from "./tool-result-ownership"
 import { isInternalGoalPrompt, isVisibleTranscriptMessage } from "./transcript-visibility"
 
 export {
@@ -602,34 +603,69 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
 }
 
-/** A hidden turn can change tool bindings after it. Capture the completed prefix of its visible turn. */
-export function findCheckpointReplayPrefixesBeforeHiddenTurns(
-  checkpoint: unknown
-): ReadonlyMap<string, ReadonlySet<string>> {
-  const prefixes = new Map<string, Set<string>>()
-  const visibleAnchors = new Set<string>()
+export interface CheckpointReplayTurns {
+  hiddenAnchors: ReadonlySet<string>
+  leadingHiddenAssistants: ReadonlySet<string>
+  uniqueMessageIds: ReadonlySet<string>
+  rawResultByCall: ReadonlyMap<string, string>
+}
+
+/** Use original user turns to confirm ownership when their visible projection omits a boundary. */
+export function readCheckpointReplayTurns(checkpoint: unknown): CheckpointReplayTurns | undefined {
+  const hiddenAnchors = new Set<string>()
+  const leadingHiddenAssistants = new Set<string>()
   let visibleAnchor: string | undefined
-  let beforeHidden = new Set<string>()
-  getCheckpointMessages(checkpoint).forEach((message, index) => {
+  let leadingHidden = false
+  const messages = getCheckpointMessages(checkpoint)
+  messages.forEach((message, index) => {
     if (!isRecord(message)) return
     const role = getMessageRole(message)
     if (role === "user") {
       const content = getMessageContent(message)
       if (isInternalNotificationMessage(message) || !isVisibleTranscriptMessage("user", content)) {
-        if (visibleAnchor && !prefixes.has(visibleAnchor)) prefixes.set(visibleAnchor, beforeHidden)
+        if (visibleAnchor) hiddenAnchors.add(visibleAnchor)
+        else leadingHidden = true
       } else {
         visibleAnchor = getMessageId(message, index)
-        beforeHidden = new Set()
-        if (visibleAnchors.has(visibleAnchor)) prefixes.set(visibleAnchor, beforeHidden)
-        visibleAnchors.add(visibleAnchor)
+        leadingHidden = false
       }
-    } else if ((role === "assistant" || role === "tool") && visibleAnchor) {
-      const id = getMessageId(message, index)
-      if (prefixes.has(visibleAnchor)) beforeHidden.delete(id)
-      else beforeHidden.add(id)
+    } else if (role === "system") {
+      visibleAnchor = undefined
+      leadingHidden = false
+    } else if (leadingHidden && role === "assistant") {
+      leadingHiddenAssistants.add(getMessageId(message, index))
     }
   })
-  return prefixes
+  if (!hiddenAnchors.size && !leadingHiddenAssistants.size) return
+  const rawRows: ToolOwnershipMessage[] = []
+  const seenIds = new Set<string>()
+  const uniqueMessageIds = new Set<string>()
+  messages.forEach((message, index) => {
+    if (!isRecord(message)) return
+    const role = getMessageRole(message)
+    const id = getMessageId(message, index)
+    if (seenIds.has(id)) uniqueMessageIds.delete(id)
+    else uniqueMessageIds.add(id)
+    seenIds.add(id)
+    if (role === "user" || role === "system") {
+      rawRows.push({ id, role })
+    } else if (role === "assistant") {
+      rawRows.push({ id, role, tool_calls: getMessageToolCalls(message) })
+    } else if (role === "tool") {
+      const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+      rawRows.push({
+        id,
+        role,
+        tool_call_id: readString(message.tool_call_id) ?? readString(kwargs?.tool_call_id)
+      })
+    }
+  })
+  return {
+    hiddenAnchors,
+    leadingHiddenAssistants,
+    uniqueMessageIds,
+    rawResultByCall: resolveToolResultOwnership(rawRows, (message) => message.id)
+  }
 }
 
 export function filterNewCheckpointReplayMessages(
