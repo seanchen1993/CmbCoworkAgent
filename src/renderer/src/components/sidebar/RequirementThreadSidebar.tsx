@@ -5,6 +5,7 @@ import {
   ChevronRight,
   ClipboardList,
   createLucideIcon,
+  Loader2,
   Plus,
   RefreshCw,
   Search,
@@ -180,6 +181,10 @@ export function RequirementThreadSidebar({
     requirement: RequirementRecord
     threadId?: string
   } | null>(null)
+  const [requirementDeleteTarget, setRequirementDeleteTarget] = useState<RequirementRecord | null>(
+    null
+  )
+  const [deletingRequirement, setDeletingRequirement] = useState(false)
   const [hoveredRequirementId, setHoveredRequirementId] = useState<string | null>(null)
   const [refreshingRequirementId, setRefreshingRequirementId] = useState<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
@@ -303,11 +308,15 @@ export function RequirementThreadSidebar({
   }
 
   const deleteRequirement = async (requirement: RequirementRecord): Promise<void> => {
+    setDeletingRequirement(true)
     try {
       await mode.onDeleteRequirement(requirement)
+      setRequirementDeleteTarget(null)
       setHoveredRequirementId(null)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除需求失败")
+    } finally {
+      setDeletingRequirement(false)
     }
   }
 
@@ -563,7 +572,7 @@ export function RequirementThreadSidebar({
                                   type="button"
                                   className="rounded px-2 py-1 text-left text-destructive hover:bg-muted"
                                   onClick={() => {
-                                    void deleteRequirement(requirement)
+                                    setRequirementDeleteTarget(requirement)
                                   }}
                                 >
                                   删除需求和会话
@@ -768,6 +777,42 @@ export function RequirementThreadSidebar({
             </Button>
             <Button variant="destructive" onClick={() => void confirmDelete()}>
               删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!requirementDeleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !deletingRequirement) setRequirementDeleteTarget(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认删除需求和会话</DialogTitle>
+            <DialogDescription>
+              {`确定删除「${requirementDeleteTarget?.title ?? ""}」吗？该需求、关联会话和归档文件都会被删除，且不可恢复。`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={deletingRequirement}
+              onClick={() => setRequirementDeleteTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deletingRequirement}
+              onClick={() => {
+                if (requirementDeleteTarget) void deleteRequirement(requirementDeleteTarget)
+              }}
+            >
+              {deletingRequirement ? <Loader2 className="size-4 animate-spin" /> : null}
+              确认删除
             </Button>
           </DialogFooter>
         </DialogContent>
