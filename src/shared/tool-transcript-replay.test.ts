@@ -107,7 +107,7 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it.each(["compacted", "projected", "partly-projected", "revised-prose"])(
+  it.each(["compacted", "projected", "partly-projected", "revised-prose", "native-prose"])(
     "preserves distinct historical raw results under checkpoint recovery (%s)",
     (mode) => {
       const [first, result] = exchange()
@@ -116,7 +116,10 @@ describe("tool transcript replay", () => {
       const projected = [{ type: "text", text: "Same stored text" }]
       const one = [...projected, { type: "resource_link", uri: "fixture://one" }]
       const two = [...projected, { type: "resource_link", uri: "fixture://two" }]
-      const durable = [user, first, { ...result, content: projected }, second, {
+      const presentation = mode === "revised-prose" || mode === "native-prose"
+        ? "Checking and explaining the result" : second.content
+      const storedSecond = mode === "native-prose" ? { ...second, content: presentation } : second
+      const durable = [user, first, { ...result, content: projected }, storedSecond, {
         ...secondResult, content: projected
       }, copy]
       const original = { channel_values: { messages: checkpointRows([
@@ -128,8 +131,6 @@ describe("tool transcript replay", () => {
       const tail = [
         { ...user, id: "compacted-later-user" }, { ...user, id: "compacted-latest-user" }
       ]
-      const presentation = mode === "revised-prose"
-        ? "Checking and explaining the result" : second.content
       const latest = mode === "compacted" ? tail : [
         user, first, { ...result, content: projected }, { ...second, content: presentation }, {
           ...secondResult, content: mode === "partly-projected" ? two : projected
