@@ -579,8 +579,13 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
         let canonicalVersion: [number, number] | undefined
         if (canonicalMessageId) {
           canonicalVersion = readTargetVersion(request.threadId, canonicalMessageId)
-          page = await readWindow(canonicalMessageId)
+          const end = message.legacy_checkpoint_replay_end
+          page = await readWindow(end ?? canonicalMessageId)
           if (!current()) return { status: "staleIdentity" }
+          if (end && !page?.messages.some(({ id }) => id === canonicalMessageId)) {
+            page = await readWindow(canonicalMessageId)
+            if (!current()) return { status: "staleIdentity" }
+          }
           if (!page?.messages.some(({ id }) => id === canonicalMessageId)) return { status: "changed" }
         }
         const finalIdentity = await readSearchThread(sender.id, request, false)

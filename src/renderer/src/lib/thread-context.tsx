@@ -5442,14 +5442,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               const load = (targetMessageId: string) => window.api.threads.getMessagesPage(threadId, {
                 targetMessageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
               })
-              const page = await load(target.messageId)
-              const canonicalMessageId = page.messages.find(({ id }) => id === target.messageId)
-                ?.legacy_checkpoint_replay_of
-              return {
-                page: canonicalMessageId && isCurrentLoad() ? await load(canonicalMessageId) : page,
-                goalEvent: undefined,
-                canonicalMessageId
+              let page = await load(target.messageId)
+              const message = page.messages.find(({ id }) => id === target.messageId)
+              const canonicalMessageId = message?.legacy_checkpoint_replay_of
+              if (canonicalMessageId && isCurrentLoad()) {
+                const end = message?.legacy_checkpoint_replay_end
+                page = await load(end ?? canonicalMessageId)
+                if (end && isCurrentLoad() && !page.messages.some(({ id }) => id === canonicalMessageId))
+                  page = await load(canonicalMessageId)
               }
+              return { page, goalEvent: undefined, canonicalMessageId }
             }
             const result = readPage ? await readPage(residentMessageIds) : await readLocalPage()
             const page = result?.page
@@ -5528,7 +5530,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   historyPageLoading: false
                 }
               }
-              const durableTarget = result?.goalEvent?.transcript_message_id ?? targetId
+              const durableTarget = result?.goalEvent?.transcript_message_id ??
+                (result?.canonicalMessageId ? raw.at(-1)?.id : undefined) ?? targetId
               const targetPageWindow = createThreadMessagePageWindow(targetMessages, {
                 targetMessageId: durableTarget
               }, undefined, raw)

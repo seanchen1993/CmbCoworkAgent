@@ -107,7 +107,9 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it("preserves distinct historical raw results when a later checkpoint omits the tool turn", () => {
+  it.each(["compacted", "projected", "partly-projected"])(
+    "preserves distinct historical raw results under checkpoint recovery (%s)",
+    (mode) => {
     const [first, result] = exchange()
     const [second, secondResult] = exchange(2)
     const [copy, copyResult] = exchange(3)
@@ -123,12 +125,18 @@ describe("tool transcript replay", () => {
     ]) } }
     const imported = new Set([copy.id])
     const legacy = readLegacyImportedCheckpointReplayEvidence(durable, original, imported)
-    const latest = [
+    const tail = [
       { ...user, id: "compacted-later-user" }, { ...user, id: "compacted-latest-user" }
+    ]
+    const latest = mode === "compacted" ? tail : [
+      user, first, { ...result, content: projected }, second, {
+        ...secondResult, content: mode === "projected" ? projected : two
+      }, ...tail
     ]
     const replay = prepareToolTranscriptReplayMerge(durable, latest, undefined, imported, legacy)
     const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
     expect(merged.map(({ id }) => id)).not.toContain(copy.id)
+    expect(merged.filter(({ role }) => role === "assistant").map(({ id }) => id)).toEqual([first.id, second.id])
     expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content)).toEqual([one, two])
   })
 

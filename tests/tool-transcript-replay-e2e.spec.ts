@@ -739,6 +739,10 @@ async function main(): Promise<void> {
           oldPage.messages.find(({ id }) => id.endsWith(":assistant:3"))?.legacy_checkpoint_replay_of,
           setOccurrence(projectedDurable[1], 2).id
         )
+        assert.equal(
+          oldPage.messages.find(({ id }) => id.endsWith(":assistant:3"))?.legacy_checkpoint_replay_end,
+          projectedDurable[4].id
+        )
         await page.getByText(importedTitle, { exact: true }).first().click({ timeout: 30_000 })
         const oldChat = page.locator(`[data-chat-thread-id="${importedThreadId}"]`)
         await oldChat.getByText("Checking the revised result", { exact: true }).first().waitFor()
@@ -769,6 +773,9 @@ async function main(): Promise<void> {
             const row = range?.startContainer.parentElement?.closest<HTMLElement>("[data-chat-message-id]")
             return row?.dataset.chatMessageId === id && range?.toString() === text
           }, { id: setOccurrence(projectedDurable[1], 2).id, text: importedSearchText })
+          const canonical = page.locator(`[data-chat-thread-id="${importedSearchThreadId}"]`)
+            .locator(`[data-chat-message-id="${setOccurrence(projectedDurable[1], 2).id}"]`)
+          assert.equal(await canonical.getByText("INTERRUPTED", { exact: true }).count(), 0)
         }
         await page.screenshot({
           animations: "disabled",

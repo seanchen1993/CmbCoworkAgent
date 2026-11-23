@@ -1040,15 +1040,14 @@ export function readThreadMessagesPage(
       const legacyAliases = readPageLegacyReplayAliases(
         database, request, orderedMessages, truncatedMessageIds, isForwardPage, cancellation
       )
-      const aliasBytes = [...legacyAliases].reduce((bytes, [, target]) =>
-        bytes + jsonBytes({ legacy_checkpoint_replay_of: target }), 0)
+      const aliasBytes = [...legacyAliases.values()].reduce((bytes, alias) => bytes + jsonBytes(alias), 0)
       // The exchange joins the view as a unit. Avoid transferring only some of
       // its aliases if the page was already at the response byte budget.
       if (responseBytes + aliasBytes <= byteBudget) {
         responseBytes += aliasBytes
         for (const message of orderedMessages) {
-          const canonical = legacyAliases.get(message.id)
-          if (canonical) message.legacy_checkpoint_replay_of = canonical
+          const alias = legacyAliases.get(message.id)
+          if (alias) Object.assign(message, alias)
         }
       }
     }
@@ -1109,8 +1108,8 @@ function readPageLegacyReplayAliases(
   truncatedIds: readonly string[],
   forward: boolean,
   cancellation: Int32Array
-): ReadonlyMap<string, string> {
-  const aliases = new Map<string, string>()
+): ReadonlyMap<string, Pick<Message, "legacy_checkpoint_replay_of" | "legacy_checkpoint_replay_end">> {
+  const aliases = new Map<string, Pick<Message, "legacy_checkpoint_replay_of" | "legacy_checkpoint_replay_end">>()
   const { checkpointDirectory, threadId } = request
   if (!checkpointDirectory || !/^[a-zA-Z0-9_-]+$/.test(threadId) || !messages.some((row) =>
     (row.provider_occurrence ?? 1) > 1 &&
@@ -1156,6 +1155,7 @@ function readPageLegacyReplayAliases(
     typeof id !== "string" || !byId.has(id)
   )) return aliases
   const missingSlots = resolveToolResultOwnership(ordered)
+  const positions = new Map(ordered.map(({ id }, index) => [id, index]))
   const laterOwnerFences = new Map<string, number>()
   for (const row of rows) {
     if (typeof row.message_id !== "string" || typeof row.published_checkpoint_id !== "string" ||
@@ -1195,7 +1195,24 @@ function readPageLegacyReplayAliases(
       if (!checkpoint) continue
       const evidence = readLegacyImportedCheckpointReplayEvidence(ordered, checkpoint.checkpoint, group.ids)
       for (const [id, retained] of evidence.aliases) {
-        if (visibleIds.has(id)) aliases.set(id, retained)
+        if (!visibleIds.has(id)) continue
+        const canonical = byId.get(retained)
+        let end: string | undefined
+        if (canonical?.role === "assistant") {
+          let last = positions.get(retained) ?? -1
+          for (const [index, call] of (canonical.tool_calls ?? []).entries()) {
+            const result = missingSlots.get(getWorkerToolUiKey(retained, call.id, index))
+            const position = result && positions.get(result.id)
+            if (result && typeof position === "number" && position > last) {
+              last = position
+              end = result.id
+            }
+          }
+        }
+        aliases.set(id, {
+          legacy_checkpoint_replay_of: retained,
+          ...(end ? { legacy_checkpoint_replay_end: end } : {})
+        })
       }
     } catch {
       // A missing or unreadable historical checkpoint supplies no display proof.
@@ -1215,8 +1232,15 @@ function proveLaterToolResultOwners(
   const byCall = database.prepare(`SELECT message_id, ordinal FROM thread_messages
     WHERE thread_id = ? AND role = 'tool' AND tool_call_id = ? AND ordinal > ?
     ORDER BY ordinal LIMIT ?`)
-  const results = [...new Set([callId, getRawWorkerToolCallId(callId)])]
+  const rawCallId = getRawWorkerToolCallId(callId)
+  const results = [...new Set([callId, rawCallId])]
     .flatMap((id) => byCall.all(threadId, id, last, limit + 1))
+  const scopedResult = database.prepare(`SELECT 1 FROM thread_messages
+    WHERE thread_id = ? AND role = 'tool' AND ordinal > ?
+      AND tool_call_id >= 'worker-turn-' AND tool_call_id < 'worker-turn.'
+      AND instr(tool_call_id, '::') > 0 AND substr(tool_call_id, instr(tool_call_id, '::') + 2) = ?
+    LIMIT 1`).get(threadId, last, rawCallId)
+  if (scopedResult) return -Infinity
   if (!results.length) return Infinity
   if (results.length > limit) return -Infinity
   const nearestUser = database.prepare(`SELECT ordinal FROM thread_messages

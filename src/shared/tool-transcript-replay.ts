@@ -2766,6 +2766,57 @@ function projectDurableToolPresentations<T extends TranscriptMessage>(
   return projected.size ? durableMessages.map((row) => projected.get(row) ?? row) : durableMessages
 }
 
+function indexVisibleAssistantAnchors<T extends TranscriptMessage>(rows: readonly T[]): Map<T, T> {
+  let anchor: T | undefined
+  const anchors = new Map<T, T>()
+  for (const row of rows) {
+    if (row.role === "user" || row.role === "system") anchor = row.role === "user" ? row : undefined
+    if (anchor && row.role === "assistant") anchors.set(row, anchor)
+  }
+  return anchors
+}
+
+function restoreLegacyProjectedCheckpointResults<T extends TranscriptMessage>(
+  checkpoint: T[],
+  durable: readonly T[],
+  evidence: LegacyCheckpointReplayEvidence | undefined,
+  turns?: CheckpointReplayTurns
+): T[] {
+  if (!evidence?.resultContents.size) return checkpoint
+  const storedById = new Map<string, T | null>()
+  for (const row of durable) storedById.set(row.id, storedById.has(row.id) ? null : row)
+  const checkpointIds = new Map<string, number>()
+  for (const { id } of checkpoint) checkpointIds.set(id, (checkpointIds.get(id) ?? 0) + 1)
+  const storedOwnership = resolveToolResultOwnership(durable)
+  const checkpointOwnership = resolveToolResultOwnership(checkpoint)
+  const storedAnchors = indexVisibleAssistantAnchors(durable)
+  const checkpointAnchors = indexVisibleAssistantAnchors(checkpoint)
+  const restored = new Map<T, unknown>()
+  for (const [assistant, anchor] of checkpointAnchors) {
+    const storedAssistant = storedById.get(assistant.id)
+    if (!storedAssistant || checkpointIds.get(assistant.id) !== 1 ||
+        !sameReplayAnchor(storedAnchors.get(storedAssistant), anchor, true)) continue
+    const source = readExchange(assistant, checkpointOwnership)
+    const stored = readExchange(storedAssistant, storedOwnership)
+    if (!stored || !source || !sameExchangeCalls(stored, source, true, true) ||
+        (turns && !hasRawCheckpointToolBindings(source, turns)) ||
+        !stored.results.every((result, index) => {
+          const peer = source.results[index]
+          return peer.id === result.id && checkpointIds.get(peer.id) === 1 &&
+            storedById.get(result.id) === result && sameStoredToolResult(result, peer)
+        })) continue
+    // A checkpoint reconstructed from SQLite can carry the same lossy body
+    // on both sides. An independently present raw payload keeps its contents.
+    for (const [index, result] of stored.results.entries()) {
+      const peer = source.results[index]
+      if (evidence.resultContents.has(result) && sameRow(result, peer, true))
+        restored.set(peer, evidence.resultContents.get(result))
+    }
+  }
+  return restored.size ? checkpoint.map((row) => restored.has(row)
+    ? { ...row, content: restored.get(row) } : row) : checkpoint
+}
+
 function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
   durable: readonly T[],
   checkpoint: readonly T[],
@@ -2784,17 +2835,8 @@ function reconcileExactCheckpointReplays<T extends TranscriptMessage>(
   const storedOwnership = resolveToolResultOwnership(durable)
   const rawById = new Map(checkpoint.map((row) => [row.id, row]))
   const storedById = new Map(durable.map((row) => [row.id, row]))
-  const readAnchors = (rows: readonly T[]) => {
-    let anchor: T | undefined
-    const anchors = new Map<T, T>()
-    for (const row of rows) {
-      if (row.role === "user" || row.role === "system") anchor = row.role === "user" ? row : undefined
-      if (anchor && row.role === "assistant") anchors.set(row, anchor)
-    }
-    return anchors
-  }
-  const rawAnchors = readAnchors(checkpoint)
-  const storedAnchors = readAnchors(durable)
+  const rawAnchors = indexVisibleAssistantAnchors(checkpoint)
+  const storedAnchors = indexVisibleAssistantAnchors(durable)
   const witnessed = new Map<string, { raw: ToolExchange<T>; stored: ToolExchange<T> }>()
   const projectionGroups = new Map<string, Array<{ raw: ToolExchange<T>; stored: ToolExchange<T> }>>()
   const payloadId = createPayloadIds()
@@ -2964,6 +3006,9 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
   if (!stored.length || checkpointRows.length < 2)
     return { checkpoint: keepHiddenToolScope(checkpointRows, checkpointRows), durable: stored }
   const checkpointVersions = nameCheckpointReplayOccurrences(checkpointRows, rawCheckpointTurns)
+  checkpointVersions.messages = restoreLegacyProjectedCheckpointResults(
+    checkpointVersions.messages, durableRows, legacyEvidence, checkpointVersions.checkpointTurns
+  )
   const reconciledDurable = reconcileExactCheckpointReplays(
     stored, checkpointVersions.messages, legacyImportedIds, checkpointVersions.checkpointTurns
   )
