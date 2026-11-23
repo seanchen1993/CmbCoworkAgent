@@ -539,11 +539,11 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   type SlotVersion = { batch: PartialToolExchange<T>; keys: string[]; complete: boolean }
   const versions = new Map<string, SlotVersion[]>()
   const observed = new Map<string, Map<number, SlotVersion[]>>()
-  const completeTextVersions = new Map<
+  const textVersionsByResults = new Map<
     string,
     Array<{ batch: PartialToolExchange<T>; text: string }>
   >()
-  const completeOrder = new Map<PartialToolExchange<T>, number>()
+  const replayOrder = new Map<PartialToolExchange<T>, number>()
   const exactCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const exactSingleToolCopies = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const extendedText = (candidate: T, original: T) =>
@@ -599,12 +599,12 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
       copies.set(batch, original.batch)
       continue
     }
-    if (full && typeof assistant.content === "string") {
-      completeOrder.set(batch, position)
+    if (typeof assistant.content === "string") {
+      replayOrder.set(batch, position)
       const outcome = JSON.stringify(keys)
-      const complete = completeTextVersions.get(outcome) ?? []
-      complete.push({ batch, text: assistant.content })
-      completeTextVersions.set(outcome, complete)
+      const revisions = textVersionsByResults.get(outcome) ?? []
+      revisions.push({ batch, text: assistant.content })
+      textVersionsByResults.set(outcome, revisions)
     }
     for (const key of keys) {
       const byResultCount = observed.get(key) ?? new Map<number, SlotVersion[]>()
@@ -615,9 +615,9 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     }
   }
 
-  const completeAliases = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
-  const completePresentations = new Map<PartialToolExchange<T>, T>()
-  for (const variants of completeTextVersions.values()) {
+  const presentationAliases = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
+  const continuedText = new Map<PartialToolExchange<T>, T>()
+  for (const variants of textVersionsByResults.values()) {
     if (variants.length < 2) continue
     variants.sort((left, right) => (left.text < right.text ? -1 : Number(left.text > right.text)))
     const prefixes: typeof variants = []
@@ -651,10 +651,10 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     for (const chain of chains.values()) {
       if (chain.length < 2) continue
       const retained = chain.reduce((first, batch) =>
-        completeOrder.get(batch)! < completeOrder.get(first)! ? batch : first
+        replayOrder.get(batch)! < replayOrder.get(first)! ? batch : first
       )
-      completePresentations.set(retained, chain.at(-1)!.assistant)
-      for (const batch of chain) if (batch !== retained) completeAliases.set(batch, retained)
+      continuedText.set(retained, chain.at(-1)!.assistant)
+      for (const batch of chain) if (batch !== retained) presentationAliases.set(batch, retained)
     }
   }
 
@@ -664,7 +664,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   const samePresentation = new Map<PartialToolExchange<T>, PartialToolExchange<T>>()
   const partials = [...versions.values()]
     .flat()
-    .filter((version) => !version.complete)
+    .filter((version) => !version.complete && !presentationAliases.has(version.batch))
     .sort((left, right) => right.keys.length - left.keys.length)
   const findContainingBatch = (version: SlotVersion, exactPresentation: boolean) => {
     const candidates = version.keys
@@ -683,18 +683,16 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
     for (const group of candidates.groups) {
       for (const candidate of group) {
         const sameVersion = samePresentation.get(candidate.batch) ?? candidate.batch
-        const completeVersion = completeAliases.get(sameVersion) ?? sameVersion
+        const presentationVersion = presentationAliases.get(sameVersion) ?? sameVersion
         const retained = exactPresentation
           ? sameVersion
-          : (containing.get(completeVersion) ?? completeVersion)
-        const retainedPresentation = completePresentations.get(retained) ?? retained.assistant
-        const revised =
-          !exactPresentation && extendedText(version.batch.assistant, retainedPresentation)
+          : (containing.get(presentationVersion) ?? presentationVersion)
+        const retainedPresentation = continuedText.get(retained) ?? retained.assistant
+        const copyPresentation = continuedText.get(version.batch) ?? version.batch.assistant
         if (
-          (!exactPresentation &&
-            !revised &&
-            !sameValue(retainedPresentation.content, version.batch.assistant.content) &&
-            !extendedText(retainedPresentation, version.batch.assistant)) ||
+          (!sameValue(retainedPresentation.content, copyPresentation.content) &&
+            !extendedText(copyPresentation, retainedPresentation) &&
+            !extendedText(retainedPresentation, copyPresentation)) ||
           !exactSlots(version.batch, retained, exactPresentation)
         )
           continue
@@ -720,11 +718,12 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   const divergentPresentations = new Set<PartialToolExchange<T>>()
   for (const [copy, original] of containing) {
     const longest =
-      longestPresentation.get(original) ?? completePresentations.get(original) ?? original.assistant
-    if (extendedText(copy.assistant, longest)) longestPresentation.set(original, copy.assistant)
+      longestPresentation.get(original) ?? continuedText.get(original) ?? original.assistant
+    const copyPresentation = continuedText.get(copy) ?? copy.assistant
+    if (extendedText(copyPresentation, longest)) longestPresentation.set(original, copyPresentation)
     else if (
-      !sameValue(copy.assistant.content, longest.content) &&
-      !extendedText(longest, copy.assistant)
+      !sameValue(copyPresentation.content, longest.content) &&
+      !extendedText(longest, copyPresentation)
     ) {
       divergentPresentations.add(original)
     }
@@ -732,7 +731,10 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   for (const [copy, original] of containing) {
     if (
       divergentPresentations.has(original) &&
-      !sameValue(copy.assistant.content, original.assistant.content)
+      !sameValue(
+        (continuedText.get(copy) ?? copy.assistant).content,
+        (continuedText.get(original) ?? original.assistant).content
+      )
     ) {
       containing.delete(copy)
     }
@@ -740,9 +742,13 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   // Rejected cross-presentation transitions leave the proved continuity
   // inside each unchanged presentation intact.
   for (const [copy, original] of samePresentation) {
-    containing.set(copy, containing.get(original) ?? completeAliases.get(original) ?? original)
+    const presentation = presentationAliases.get(original) ?? original
+    containing.set(copy, containing.get(presentation) ?? presentation)
   }
-  const continuations = new Map([...containing, ...completeAliases])
+  const continuations = new Map(containing)
+  for (const [copy, original] of presentationAliases) {
+    continuations.set(copy, containing.get(original) ?? original)
+  }
   const withVerifiedText = new Set([...continuations].flat())
   for (const [copy, original] of exactSingleToolCopies) {
     if (withVerifiedText.has(original)) exactCopies.set(copy, original)

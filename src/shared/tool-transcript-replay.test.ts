@@ -434,16 +434,16 @@ describe("tool transcript replay", () => {
     }
   )
 
-  it("continues a completed text branch while preserving its common prefix and sibling", () => {
-    const texts = [
-      "Checking",
-      "Checking version",
-      "Checking version and status",
-      "Checking directory"
-    ]
-    const rows = [
-      user,
-      ...texts.flatMap((content, index) => {
+  it.each([false, true])(
+    "continues one text branch while retaining its siblings (partial %s)",
+    (partial) => {
+      const texts = [
+        "Checking",
+        "Checking version",
+        "Checking version and status",
+        "Checking directory"
+      ]
+      const batches = texts.map((content, index) => {
         const [assistant, result] = exchange(index + 1)
         const secondId = "ad506755-5e42-4cef-834f-eb1be0f11d27"
         const directory = {
@@ -460,22 +460,18 @@ describe("tool transcript replay", () => {
             tool_calls: [...assistant.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
           },
           result,
-          directory
+          ...(partial ? [] : [directory])
         ]
       })
-    ]
-    const aliases = findReplayedToolExchangeAliases(rows)
-    expect(aliases).toEqual(
-      new Map([
-        [rows[7].id, rows[4].id],
-        [rows[8].id, rows[5].id],
-        [rows[9].id, rows[6].id]
-      ])
-    )
-    expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))).toEqual(
-      new Map([[rows[4].id, texts[2]]])
-    )
-  })
+      const rows = [user, ...batches.flat()]
+      const retained = batches[1]
+      const aliases = findReplayedToolExchangeAliases(rows)
+      expect(aliases).toEqual(new Map(batches[2].map((row, index) => [row.id, retained[index].id])))
+      expect(getAssistantReplayContent(aliases, (id) => rows.find((row) => row.id === id))).toEqual(
+        new Map([[retained[0].id, texts[2]]])
+      )
+    }
+  )
 
   it.each([false, true])(
     "finds the correct structured result variant for a prose revision (trimmed %s)",
