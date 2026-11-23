@@ -261,7 +261,9 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
   }
   const retained = messages.filter((message) => !aliases.has(message.id))
   const after = resolveToolResultOwnership(retained)
-  const beforeResults = new Set(original.values())
+  const previouslyOwnedExecutionIds = new Set(
+    [...original.values()].filter(hasToolResultExecutionId).map(getMessageProviderSourceId)
+  )
   const ownerByResultId = new Map([...original].map(([owner, result]) => [result.id, owner]))
   for (const message of retained) {
     if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue
@@ -280,7 +282,7 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
       if (
         !originalOwner ||
         after.get(originalOwner)?.id !== duplicateOf ||
-        beforeResults.has(next) ||
+        previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) ||
         !hasToolResultExecutionId(next) ||
         resultReplayKey(previous) === resultReplayKey(next)
       ) {
@@ -329,23 +331,24 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   // Compare result identity independently of FIFO: a replay could have already
   // occupied a newer call that happened to reuse the original ID.
   const owned = new Set(ownership.values())
+  const ownedExecutionIds = new Set<string>()
   const knownResults = new Map<string, T>()
   for (const row of owned) {
-    if (aliases.has(row.id) || !hasToolResultExecutionId(row)) continue
+    if (!hasToolResultExecutionId(row)) continue
+    ownedExecutionIds.add(getMessageProviderSourceId(row))
+    if (aliases.has(row.id)) continue
     const key = resultReplayKey(row)
     if (!knownResults.has(key)) knownResults.set(key, row)
   }
-  const detachedExecutionIdsByCall = new Map<string, Set<string>>()
+  const callsWithUnownedResults = new Set<string>()
   for (const row of messages) {
     if (
       row.role === "tool" &&
       row.tool_call_id &&
-      !owned.has(row) &&
-      hasToolResultExecutionId(row)
+      hasToolResultExecutionId(row) &&
+      !ownedExecutionIds.has(getMessageProviderSourceId(row))
     ) {
-      const executions = detachedExecutionIdsByCall.get(row.tool_call_id) ?? new Set<string>()
-      executions.add(resultReplayKey(row))
-      detachedExecutionIdsByCall.set(row.tool_call_id, executions)
+      callsWithUnownedResults.add(row.tool_call_id)
     }
   }
   const attachedDuplicates = new Map<string, string>()
@@ -357,11 +360,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       aliases.set(row.id, original.id)
       continue
     }
-    const potentialResults = row.tool_call_id && detachedExecutionIdsByCall.get(row.tool_call_id)
-    if (
-      potentialResults &&
-      potentialResults.size > Number(potentialResults.has(resultReplayKey(row)))
-    ) {
+    if (row.tool_call_id && callsWithUnownedResults.has(row.tool_call_id)) {
       attachedDuplicates.set(row.id, original.id)
     }
   }

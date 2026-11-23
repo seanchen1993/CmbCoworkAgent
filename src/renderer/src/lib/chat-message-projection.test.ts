@@ -222,6 +222,20 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     expect(results.get(getWorkerToolUiKey(current.id, executeCall.id, 0))?.content).toBe(
       "Current output"
     )
+
+    const priorPreview = { ...currentResult, content: "Earlier result preview" }
+    const priorFull = {
+      ...currentResult,
+      id: `${currentResult.id}::cmb-same-role-duplicate:tool:2`
+    }
+    const noCurrentResult = [
+      assistant({ id: "u0", role: "user" }),
+      assistant({ id: "unrelated-older-call", tool_calls: [executeCall] }),
+      priorPreview,
+      ...rows.slice(0, -1),
+      priorFull
+    ]
+    expect(findDisplayedReplayAliases(noCurrentResult).size).toBe(0)
   })
   it("keeps a replay row visible when only it has the live reasoning", () => {
     const original = assistant()
