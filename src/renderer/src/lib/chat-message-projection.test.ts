@@ -59,13 +59,20 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       id: "unrelated-tail",
       tool_calls: [{ ...executeCall, id: "unrelated-call" }]
     })
+    const repeatedText = assistant({ id: `${original.id}::cmb-same-role-duplicate:assistant:3` })
+    const repeatedPendingCall = {
+      ...tail,
+      id: `${original.id}::cmb-same-role-duplicate:assistant:4`
+    }
     const history = [
       original,
       tool,
       copy,
       toolCopy,
       ...Array.from({ length: 10000 }, (_, index) => assistant({ id: `unrelated-${index}` })),
-      tail
+      tail,
+      repeatedText,
+      repeatedPendingCall
     ]
     let forbidHistoryReads = false
     const rows = new Proxy(history, {
@@ -84,13 +91,19 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     deriveTools(rows, rows, 1, aliases)
     forbidHistoryReads = true
     for (let frame = 0; frame < 300; frame++) {
-      const next = { ...tail, content: `Streaming ${frame}` }
-      history[history.length - 1] = next
-      expect(project({ ...display, contentVersion: frame + 2, changedMessages: [next] })).toBe(
-        aliases
-      )
-      const toolRows = deriveTools(rows, [next], 1, aliases).messages
-      expect(toolRows.map(({ id }) => id)).toEqual([original.id, tool.id, tail.id])
+      const changedMessages = [tail, repeatedText, repeatedPendingCall].map((message) => ({
+        ...message,
+        content: `Streaming ${frame}`
+      }))
+      for (const changed of changedMessages) history[indexById.get(changed.id)!] = changed
+      expect(project({ ...display, contentVersion: frame + 2, changedMessages })).toBe(aliases)
+      const toolRows = deriveTools(rows, changedMessages, 1, aliases).messages
+      expect(toolRows.map(({ id }) => id)).toEqual([
+        original.id,
+        tool.id,
+        tail.id,
+        repeatedPendingCall.id
+      ])
     }
     forbidHistoryReads = false
     const distinct = { ...copy, reasoning: "Keep this distinct reasoning" }
@@ -102,8 +115,31 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       tool.id,
       copy.id,
       toolCopy.id,
-      tail.id
+      tail.id,
+      repeatedPendingCall.id
     ])
+  })
+
+  it("rebuilds tool ownership when history is replaced at the same local revision", () => {
+    const derive = createIncrementalToolDerivationProjector()
+    const first = assistant({ id: "first", tool_calls: [executeCall] })
+    const second = assistant({ id: "second", tool_calls: [executeCall] })
+    const result = assistant({
+      id: "result",
+      role: "tool",
+      content: "Result for first",
+      tool_call_id: executeCall.id
+    })
+    const aliases = new Map([["hidden", "retained"]])
+    const oldOrder = [second, first, result]
+    const hydrated = [first, result, second]
+    derive(oldOrder, oldOrder, 1, aliases)
+    const { messages } = derive(hydrated, hydrated, 1, aliases)
+    const associations = buildToolResultAssociations(messages)
+    expect(associations.get(getWorkerToolUiKey(first.id, executeCall.id, 0))?.content).toBe(
+      "Result for first"
+    )
+    expect(associations.has(getWorkerToolUiKey(second.id, executeCall.id, 0))).toBe(false)
   })
 
   it("folds the calls and results proved by the projected order, not stale durable order", () => {
@@ -265,6 +301,10 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       currentResult
     ]
     expect(findDisplayedReplayAliases(rows.slice(0, -1)).size).toBe(0)
+    expect(
+      findDisplayedReplayAliases([...rows.slice(0, -1), { ...currentResult, name: "another-tool" }])
+        .size
+    ).toBe(0)
     const aliases = findDisplayedReplayAliases(rows)
     expect(aliases).toEqual(new Map([[replay.id, oldResult.id]]))
     const trailing = { ...replay, id: `${resultId}::cmb-same-role-duplicate:tool:3` }

@@ -57,6 +57,7 @@ export function createChatReplayAliasProjector(): (
   let previousStructureVersion = -1
   let previousById = new Map<string, Message>()
   let repeatedSources = new Set<string>()
+  let completedAssistantIds = new Set<string>()
   let aliases = noReplayAliases
 
   return ({ messages, changedMessages, structureVersion }) => {
@@ -67,13 +68,14 @@ export function createChatReplayAliasProjector(): (
         const previous = previousById.get(message.id)
         if (message === previous) continue
         const source = replaySourceKey(message)
-        if (source !== (previous && replaySourceKey(previous))) {
+        if (!previous || message.role !== previous.role || source !== replaySourceKey(previous)) {
           rebuildSources = true
           break
         }
-        if (!source || !previous) continue
         previousById.set(message.id, message)
-        evidenceChanged ||= repeatedSources.has(source) ||
+        if (!source) continue
+        evidenceChanged ||= (repeatedSources.has(source) &&
+          (message.role === "tool" || completedAssistantIds.has(message.id))) ||
           previous.tool_call_id !== message.tool_call_id ||
           getMessageProviderOccurrence(previous) !== getMessageProviderOccurrence(message) ||
           !sameToolSlots(previous.tool_calls, message.tool_calls)
@@ -86,15 +88,16 @@ export function createChatReplayAliasProjector(): (
       repeatedSources = new Set()
       const sources = new Set<string>()
       for (const message of messages) {
+        previousById.set(message.id, message)
         const source = replaySourceKey(message)
         if (!source) continue
-        previousById.set(message.id, message)
         if (sources.has(source)) repeatedSources.add(source)
         sources.add(source)
       }
     }
     if (rebuildSources || evidenceChanged) {
-      const nextAliases = findReplayedToolExchangeAliases(messages)
+      completedAssistantIds = new Set()
+      const nextAliases = findReplayedToolExchangeAliases(messages, completedAssistantIds)
       if (nextAliases.size !== aliases.size ||
           [...nextAliases].some(([id, target]) => aliases.get(id) !== target)) {
         aliases = nextAliases

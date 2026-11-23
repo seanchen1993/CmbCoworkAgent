@@ -32,6 +32,8 @@ interface ToolExchange<T> {
 
 const noAliases: ReadonlyMap<string, string> = new Map()
 const toolResultUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const langGraphToolResultPrefix =
+  /^run-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-tool-/i
 const generatedAssistantId = /^current-run-assistant:[0-9a-f-]{36}$/i
 const botFileDeliveryToolName = "bot_deliver_files"
 
@@ -144,7 +146,11 @@ function exchangeKey(exchange: ToolExchange<TranscriptMessage>): string {
 
 function hasToolResultExecutionId(result: TranscriptMessage): boolean {
   const source = getMessageProviderSourceId(result)
-  return source !== result.tool_call_id && toolResultUuid.test(source)
+  const callId = result.tool_call_id
+  if (typeof callId !== "string" || !callId || source === callId) return false
+  if (toolResultUuid.test(source)) return true
+  const prefix = langGraphToolResultPrefix.exec(source)?.[0]
+  return Boolean(prefix && source.slice(prefix.length) === callId)
 }
 
 function hasExecutionIdentity(exchange: ToolExchange<TranscriptMessage>): boolean {
@@ -215,12 +221,76 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
     if (!anchor || message.role !== "assistant") continue
     const exchange = readExchange(message, ownership)
     if (exchange) {
-      const key = JSON.stringify([anchor.id, exchangeKey(exchange)])
+      const key = JSON.stringify([
+        anchor.id,
+        exchangeKey(exchange),
+        exchange.results.every(hasToolResultExecutionId)
+          ? exchange.results.map(resultReplayKey)
+          : null
+      ])
       byAnchor.set(key, byAnchor.has(key) ? null : { exchange, position, anchor })
     }
     position++
   }
   return byAnchor
+}
+
+function applyCheckpointAlignments<T extends TranscriptMessage>(
+  replay: T[],
+  groups: Array<Array<[copy: T, durable: T]>>
+): T[] {
+  if (!groups.length) return replay
+  const replayIdCounts = new Map<string, number>()
+  for (const { id } of replay) replayIdCounts.set(id, (replayIdCounts.get(id) ?? 0) + 1)
+  const movingGroups = new Map<string, number>()
+  const destinationGroups = new Map<string, number>()
+  const rejected = new Set<number>()
+  const dependents = new Map<number, number[]>()
+  const reserve = (index: Map<string, number>, id: string, group: number) => {
+    const existing = index.get(id)
+    if (existing === undefined) index.set(id, group)
+    else {
+      rejected.add(existing)
+      rejected.add(group)
+    }
+  }
+  groups.forEach((rows, group) => {
+    for (const [copy, durable] of rows) {
+      if (replayIdCounts.get(copy.id) !== 1) rejected.add(group)
+      if (copy.id === durable.id) continue
+      reserve(movingGroups, copy.id, group)
+      reserve(destinationGroups, durable.id, group)
+    }
+  })
+  // A target already in the checkpoint is usable only if another accepted
+  // group vacates it. Dropping any group must also drop its dependent moves.
+  for (const [id, group] of destinationGroups) {
+    if (!replayIdCounts.has(id)) continue
+    const vacating = movingGroups.get(id)
+    if (vacating === undefined) {
+      rejected.add(group)
+      continue
+    }
+    const consumers = dependents.get(vacating) ?? []
+    consumers.push(group)
+    dependents.set(vacating, consumers)
+  }
+  for (const group of rejected) {
+    for (const dependent of dependents.get(group) ?? []) rejected.add(dependent)
+  }
+  const aligned = new Map<T, T>()
+  groups.forEach((rows, group) => {
+    if (rejected.has(group)) return
+    for (const [copy, durable] of rows) {
+      aligned.set(copy, {
+        ...copy,
+        id: durable.id,
+        provider_source_id: durable.provider_source_id,
+        provider_occurrence: durable.provider_occurrence
+      })
+    }
+  })
+  return aligned.size ? replay.map((message) => aligned.get(message) ?? message) : replay
 }
 
 /** A checkpoint and durable page may number the same complete exchange differently. */
@@ -232,8 +302,7 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   if (canonical.length < 3 || replay.length < 3) return replay
   const candidates = indexAnchoredExchanges(canonical, unsafeAnchors)
   if (candidates.size === 0) return replay
-  const replayIds = new Set(replay.map((message) => message.id))
-  const aligned = new Map<T, T>()
+  const groups: Array<Array<[copy: T, durable: T]>> = []
   for (const [key, candidate] of indexAnchoredExchanges(replay, unsafeAnchors)) {
     const target = candidates.get(key)
     if (
@@ -246,26 +315,20 @@ export function alignReplayedToolExchanges<T extends TranscriptMessage>(
       !isSameExchange(target.exchange, candidate.exchange)
     )
       continue
-    const rows = [[candidate.exchange.assistant, target.exchange.assistant]]
+    const rows: Array<[copy: T, durable: T]> = [
+      [candidate.exchange.assistant, target.exchange.assistant]
+    ]
     for (const [index, result] of candidate.exchange.results.entries()) {
       rows.push([result, target.exchange.results[index]])
     }
-    if (rows.some(([copy, row]) => copy.id !== row.id && replayIds.has(row.id))) continue
-    for (const [copy, row] of rows) {
-      if (
-        copy.id === row.id &&
-        getMessageProviderOccurrence(copy) === getMessageProviderOccurrence(row)
-      )
-        continue
-      aligned.set(copy, {
-        ...copy,
-        id: row.id,
-        provider_source_id: row.provider_source_id,
-        provider_occurrence: row.provider_occurrence
-      })
-    }
+    const changes = rows.filter(
+      ([copy, durable]) =>
+        copy.id !== durable.id ||
+        getMessageProviderOccurrence(copy) !== getMessageProviderOccurrence(durable)
+    )
+    if (changes.length) groups.push(changes)
   }
-  return aligned.size ? replay.map((message) => aligned.get(message) ?? message) : replay
+  return applyCheckpointAlignments(replay, groups)
 }
 
 interface UnsafeBindings {
@@ -307,13 +370,15 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
         continue
       const duplicateOf = previous && aliases.get(previous.id)
       const originalOwner = duplicateOf && ownerByResultId.get(duplicateOf)
+      const callName = (call as { name?: unknown }).name
       // Bot delivery authorizes a receipt from the persisted batch. Its card
       // must keep displaying that receipt until the batch itself changes.
       const canRebind = Boolean(
         originalOwner &&
         next &&
         previous &&
-        (call as { name?: unknown }).name !== botFileDeliveryToolName &&
+        callName !== botFileDeliveryToolName &&
+        (!next.name || !callName || next.name === callName) &&
         hasToolResultExecutionId(previous) &&
         hasToolResultExecutionId(next) &&
         !previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) &&
@@ -333,7 +398,8 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
 
 /** Identify copies using the same result bindings that are used in chat. */
 export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
-  messages: readonly T[]
+  messages: readonly T[],
+  completedAssistantIds?: Set<string>
 ): ReadonlyMap<string, string> {
   if (!hasToolReplayCandidates(messages)) return noAliases
   const ownership = resolveToolResultOwnership(messages)
@@ -356,6 +422,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
     if (message.role === "user" || message.role === "system") sameTurn.clear()
     const exchange = readExchange(message, ownership)
     if (!exchange || !hasExecutionIdentity(exchange)) continue
+    completedAssistantIds?.add(message.id)
 
     // Transport replay can append records after the next visible user turn.
     // Only separately generated result UUIDs support matching across that boundary.

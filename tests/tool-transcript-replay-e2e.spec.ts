@@ -17,7 +17,7 @@ const threadId = "tool-replay-e2e"
 const lastReply = "Replay fixture finished"
 const callId = "reused-provider-tool-call"
 const resultIds = [
-  "1445a579-bd96-4e17-a5dd-91c06f999933",
+  `run-01a2083d-0c02-779f-a925-59e67d731656-tool-${callId}`,
   "edd6a76e-803b-4d4a-91b5-8bcd33ba0d7f",
   "11e6a77f-e4f6-460a-915f-fb932922bb7c",
   "08dec078-5601-43c6-b93d-6ad1713864a4"
@@ -103,6 +103,28 @@ async function seedHistory(): Promise<number> {
     content: "Earlier versioned result",
     tool_call_id: versionedCallId
   }
+  const shiftedCallId = "shifted-provider-tool-call"
+  const shiftedUser: Message = { ...nextAfterReplay[0], id: "shifted-user" }
+  const shifted = ["first", "second"].map((label, index): [Message, Message] => [
+    {
+      ...versionedAssistant,
+      id: "shifted-assistant",
+      content: `Checking shifted ${label} call`,
+      tool_calls: [{ id: shiftedCallId, name: "read_file", args: { file_path: `${label}.txt` } }]
+    },
+    {
+      ...versionedResult,
+      id: `run-01a2083d-0c02-779f-a925-59e67d73166${index}-tool-${shiftedCallId}`,
+      content: `Shifted ${label} result`,
+      tool_call_id: shiftedCallId
+    }
+  ])
+  const earlierUser: Message = { ...shiftedUser, id: "older-user", content: "Earlier request" }
+  const earlierResponse: Message = {
+    ...legacy,
+    id: "shifted-assistant",
+    content: "Earlier response to preserve"
+  }
   const firstFinal: Message = {
     id: "first-final",
     role: "assistant",
@@ -141,7 +163,14 @@ async function seedHistory(): Promise<number> {
     setOccurrence(versionedAssistant, 2),
     setOccurrence({ ...versionedResult, content: "Final versioned result" }, 2),
     setOccurrence(versionedAssistant, 3),
-    setOccurrence(versionedResult, 3)
+    setOccurrence(versionedResult, 3),
+    earlierUser,
+    earlierResponse,
+    shiftedUser,
+    setOccurrence(shifted[0][0], 2),
+    shifted[0][1],
+    setOccurrence(shifted[1][0], 3),
+    shifted[1][1]
   ]
   await db.initializeDatabase()
   try {
@@ -170,7 +199,10 @@ async function seedHistory(): Promise<number> {
         {
           ...toCheckpointMessage(legacy),
           tool_calls: { length: 1 }
-        }
+        },
+        ...[shiftedUser, ...shifted[0], setOccurrence(shifted[1][0], 2), shifted[1][1]].map(
+          toCheckpointMessage
+        )
       ]
     },
     channel_versions: { messages: 1 },
@@ -316,10 +348,20 @@ async function main(): Promise<void> {
             ["Fixture result 3", callId],
             ["Updated fourth result", callId],
             ["Earlier versioned result", "versioned-provider-tool-call"],
-            ["Final versioned result", "versioned-provider-tool-call"]
+            ["Final versioned result", "versioned-provider-tool-call"],
+            ["Shifted first result", "shifted-provider-tool-call"],
+            ["Shifted second result", "shifted-provider-tool-call"]
           ]
         )
         assert.equal(rows.filter((row) => row.includes("Checking versioned result")).length, 2)
+        for (const content of [
+          "Earlier response to preserve",
+          "Checking shifted first call",
+          "Checking shifted second call"
+        ]) {
+          assert.equal(rows.filter((row) => row.includes(content)).length, 1)
+          assert.equal(archived.messages.filter((row) => row.content === content).length, 1)
+        }
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)
         assert.equal(markdown.match(/Updated fourth result/g)?.length, 1)
         assert.match(markdown, /Readable legacy response/)

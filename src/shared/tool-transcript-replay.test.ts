@@ -38,6 +38,36 @@ describe("tool transcript replay", () => {
     expect(checkpoint[1].id).toBe("shared-response")
   })
 
+  it("aligns independent exchanges that reused both provider IDs in the same turn", () => {
+    const otherResultId = "1c711082-5111-4632-976d-7c05ee064c33"
+    const [first] = exchange()
+    const [second] = exchange(2)
+    const [third] = exchange(3)
+    const [, firstResult] = exchange()
+    const secondResult = {
+      ...firstResult,
+      id: otherResultId,
+      provider_source_id: otherResultId,
+      content: "New execution"
+    }
+    const olderResponse = { ...first, content: "Earlier user reply", tool_calls: undefined }
+    const durable = [
+      { ...user, id: "earlier-user" },
+      olderResponse,
+      user,
+      second,
+      firstResult,
+      third,
+      secondResult
+    ]
+    const checkpoint = [user, first, firstResult, second, secondResult]
+    const aligned = alignReplayedToolExchanges(durable, checkpoint)
+    expect(mergeCheckpointAuthorityTranscriptMessages(aligned, durable)).toEqual(durable)
+    expect(checkpoint[1].id).toBe(first.id)
+    const blocked = [...checkpoint, { ...third, tool_calls: undefined, content: "Keep this row" }]
+    expect(alignReplayedToolExchanges(durable, blocked)).toBe(blocked)
+  })
+
   it("aligns an older result with no saved status to its explicit success snapshot", () => {
     const [assistant, tool] = exchange(2)
     const durable = [user, assistant, { ...tool, status: "success" }]
@@ -121,6 +151,37 @@ describe("tool transcript replay", () => {
         [third[1].id, first[1].id]
       ])
     )
+  })
+
+  it("uses actual LangGraph run-scoped tool IDs and leaves distinct runs intact", () => {
+    const scoped = (occurrence: number, runId: string, suffix = "shared-call") => {
+      const [assistant, tool] = exchange(occurrence)
+      const source = `run-${runId}-tool-${suffix}`
+      return [
+        assistant,
+        {
+          ...tool,
+          id: tool.id.replace(resultId, source),
+          provider_source_id: source
+        }
+      ]
+    }
+    const run = "01a2083d-0c02-779f-a925-59e67d731656"
+    const first = scoped(1, run)
+    const copy = scoped(2, run)
+    const independent = scoped(3, "01a2083d-0c02-779f-a925-59e67d731657")
+    expect(findReplayedToolExchangeAliases([...first, ...copy, ...independent])).toEqual(
+      new Map([
+        [copy[0].id, first[0].id],
+        [copy[1].id, first[1].id]
+      ])
+    )
+    expect(
+      findReplayedToolExchangeAliases([
+        ...scoped(1, run, "another-call"),
+        ...scoped(2, run, "another-call")
+      ]).size
+    ).toBe(0)
   })
 
   it("retains surrounding reasoning and final replies when a strong execution moved slots", () => {
@@ -222,7 +283,7 @@ describe("tool transcript replay", () => {
 
   it("keeps Bot delivery cards on the receipt selected by persisted batch authorization", () => {
     const [assistant, tool] = exchange()
-    const calls = assistant.tool_calls!.map((call) => ({ ...call, name: "bot_deliver_files" }))
+    const calls = [{ id: "shared-call", name: "bot_deliver_files", args: { path: "fixture" } }]
     const oldResult = { ...tool, name: "bot_deliver_files", content: "Old receipt" }
     const newResult = {
       ...oldResult,

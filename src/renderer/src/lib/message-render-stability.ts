@@ -132,6 +132,7 @@ export function createIncrementalToolDerivationProjector(): (
   excludedIds?: ReadonlyMap<string, string>
 ) => IncrementalToolDerivationProjection {
   let previousStructureVersion = -1
+  let previousMessages: readonly Message[] | undefined
   let previousExcludedIds: ReadonlyMap<string, string> | undefined
   let projected: Message[] = []
   let indexById = new Map<string, number>()
@@ -150,7 +151,12 @@ export function createIncrementalToolDerivationProjector(): (
   }
 
   return (messages, changedMessages, structureVersion, excludedIds) => {
-    if (structureVersion !== previousStructureVersion || excludedIds !== previousExcludedIds) {
+    if (
+      messages !== previousMessages ||
+      structureVersion !== previousStructureVersion ||
+      excludedIds !== previousExcludedIds
+    ) {
+      previousMessages = messages
       previousStructureVersion = structureVersion
       previousExcludedIds = excludedIds
       return rebuild(messages, excludedIds)
