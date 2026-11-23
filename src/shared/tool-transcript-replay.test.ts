@@ -582,7 +582,14 @@ describe("tool transcript replay", () => {
     "structured-newline",
     "saved-blocks",
     "checkpoint-blocks",
-    "multiple-text-blocks"
+    "multiple-text-blocks",
+    "inline-reasoning",
+    "later-inline-reasoning",
+    "retained-image",
+    "retained-tool-use",
+    "interleaved-blocks",
+    "different-image",
+    "moved-image"
   ])("keeps separate hidden replies with sparse checkpoint results (%s)", (mode) => {
     const lateEmpty = mode !== "missing-first"
     const [older, olderResult] = exchange()
@@ -594,24 +601,63 @@ describe("tool transcript replay", () => {
       content: "An independent message"
     }
     const calls = [...current.tool_calls!, { id: "ls-call", name: "ls", args: {} }]
-    const blocks = (text: string) => text.split("\n").map((text) => ({ type: "text", text }))
-    const savedBlocks = mode.startsWith("structured") || mode === "saved-blocks"
+    const includesReasoning = mode.endsWith("inline-reasoning")
+    const image = { type: "image", source: { type: "url", url: "https://example.com/status.png" } }
+    const retained =
+      mode === "retained-tool-use"
+        ? { type: "tool_use", id: "ls-call", name: "ls", input: {} }
+        : mode.includes("image") || mode === "interleaved-blocks"
+          ? image
+          : undefined
+    const conflictingImage = mode === "different-image" || mode === "moved-image"
+    const blocks = (text: string, stage: "first" | "saved" | "later") => {
+      const display = text.split("\n").map((text) => ({ type: "text", text }))
+      const reasoning = { type: "reasoning", reasoning: `Reasoning for ${stage}` }
+      if (
+        includesReasoning &&
+        stage !== "saved" &&
+        (stage === "later" || mode === "inline-reasoning")
+      ) {
+        return [reasoning, ...display]
+      }
+      if (!retained) return display
+      if (stage === "later" && mode === "different-image") {
+        return [...display, {
+          ...image,
+          source: { ...image.source, url: "https://example.com/new.png" }
+        }]
+      }
+      if (stage === "later" && mode === "moved-image") return [retained, ...display]
+      if (mode === "interleaved-blocks") {
+        return [...display.slice(0, 1), retained, ...display.slice(1)]
+      }
+      return [...display, retained]
+    }
+    const savedBlocks =
+      mode.startsWith("structured") || mode === "saved-blocks" || includesReasoning ||
+      Boolean(retained)
     const checkpointBlocks =
-      mode.startsWith("structured") || mode === "checkpoint-blocks" || mode === "multiple-text-blocks"
+      mode.startsWith("structured") || mode === "checkpoint-blocks" ||
+      mode === "multiple-text-blocks" || includesReasoning || Boolean(retained)
     const first = {
       ...older,
       tool_calls: calls,
-      content: checkpointBlocks ? blocks("Checking") : "Checking"
+      content: checkpointBlocks ? blocks("Checking", "first") : "Checking"
     }
     const savedText =
-      mode === "multiple-text-blocks" ? "Checking\nNew directory" : "Checking the new directory"
-    const continuation = [
-      "continued-prose",
-      "structured-continuation",
-      "saved-blocks",
-      "checkpoint-blocks",
-      "multiple-text-blocks"
-    ].includes(mode)
+      mode === "multiple-text-blocks" || mode === "interleaved-blocks"
+        ? "Checking\nNew directory"
+        : "Checking the new directory"
+    const continuation =
+      includesReasoning ||
+      Boolean(retained) ||
+      [
+        "continued-prose",
+        "structured-continuation",
+        "saved-blocks",
+        "checkpoint-blocks",
+        "multiple-text-blocks"
+      ].includes(mode)
     const suffix =
       mode === "newline-prose" || mode === "structured-newline"
         ? "\n"
@@ -622,7 +668,7 @@ describe("tool transcript replay", () => {
     const next = {
       ...current,
       tool_calls: calls,
-      content: checkpointBlocks ? blocks(nextText) : nextText
+      content: checkpointBlocks ? blocks(nextText, "later") : nextText
     }
     const resultId = "1c711082-5111-4632-976d-7c05ee064c33"
     const read = {
@@ -647,7 +693,7 @@ describe("tool transcript replay", () => {
       {
         ...current,
         tool_calls: calls,
-        content: lateEmpty ? (savedBlocks ? blocks(savedText) : savedText) : first.content
+        content: lateEmpty ? (savedBlocks ? blocks(savedText, "saved") : savedText) : first.content
       },
       read,
       ls,
@@ -697,7 +743,11 @@ describe("tool transcript replay", () => {
         .filter(({ role }) => role === "assistant")
         .map((row) => text.get(row.id) ?? row.content)
         .slice(-3)
-    ).toEqual([first.content, boundary.content, next.content])
+    ).toEqual([
+      conflictingImage ? blocks(savedText, "saved") : first.content,
+      boundary.content,
+      next.content
+    ])
     if (lateEmpty) {
       const reply = visible.findLast(({ role }) => role === "assistant")!
       const result = resolveToolResultOwnership(visible).get(

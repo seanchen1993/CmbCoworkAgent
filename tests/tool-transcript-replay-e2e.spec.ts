@@ -275,7 +275,10 @@ async function seedStructuredHistory(): Promise<void> {
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver")
   const [previousUser, previousAssistant, previousResult] = makeExchange(0)
   const [user, , result] = makeExchange(1)
-  const blocks = (text: string) => [{ type: "text", text }]
+  const blocks = (text: string) => [
+    { type: "text", text },
+    { type: "tool_use", id: "listing", name: "ls", input: { path: "." } }
+  ]
   const assistant: Message = {
     ...previousAssistant,
     content: blocks(firstNoticeReply),
@@ -339,7 +342,16 @@ async function seedStructuredHistory(): Promise<void> {
             ...[assistant, result, listing, separator].map(toCheckpointMessage),
             notice("second-notice"),
             ...[
-              setOccurrence({ ...assistant, content: blocks(finalNoticeReply) }, 2),
+              setOccurrence(
+                {
+                  ...assistant,
+                  content: [
+                    { type: "reasoning", reasoning: "Inspect the new directory listing" },
+                    ...blocks(finalNoticeReply)
+                  ]
+                },
+                2
+              ),
               setOccurrence({ ...result, content: "", status: "error" }, 2),
               setOccurrence(listing, 2)
             ].map(toCheckpointMessage)

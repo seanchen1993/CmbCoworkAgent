@@ -1528,19 +1528,51 @@ function keepDistinctCheckpointTurns<T extends TranscriptMessage>(
   }
 }
 
-function readReplayProse(content: unknown): string | undefined {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return
-  const parts: string[] = []
+interface ReplayProse {
+  text: string[]
+  blocks: unknown[]
+}
+
+function readReplayProse(content: unknown): ReplayProse {
+  if (typeof content === "string") return { text: [content], blocks: [] }
+  if (!Array.isArray(content)) return { text: [""], blocks: [] }
+  const text: string[] = []
+  const blocks: unknown[] = []
+  let parts: string[] = []
   for (const block of content) {
-    if (typeof block === "string") {
-      if (block) parts.push(block)
-      continue
+    if (typeof block === "string" || (block?.type === "text" && typeof block.text === "string")) {
+      const value = typeof block === "string" ? block : block.text
+      if (value) parts.push(value)
+    } else {
+      text.push(parts.join("\n"))
+      blocks.push(block)
+      parts = []
     }
-    if (block?.type !== "text" || typeof block.text !== "string") return
-    if (block.text) parts.push(block.text)
   }
-  return parts.join("\n")
+  text.push(parts.join("\n"))
+  return { text, blocks }
+}
+
+function getReplayProseMatch(stored: ReplayProse, source: ReplayProse): number {
+  if (!sameValue(stored.blocks, source.blocks)) return 0
+  let shorter = false
+  let longer = false
+  let length = 0
+  let hasStoredText = false
+  for (const [index, part] of stored.text.entries()) {
+    const known = part.trimEnd()
+    const candidate = source.text[index].trimEnd()
+    hasStoredText ||= known.length > 0
+    if (known.startsWith(candidate)) shorter ||= known.length > candidate.length
+    else if (candidate.startsWith(known)) longer = true
+    else return 0
+    if (shorter && longer) return 0
+    length += candidate.length
+  }
+  if (!length || !hasStoredText) return 0
+  // An exact match outranks a continuation. Among prefixes of the stored
+  // snapshot, prefer the one that accounts for more of the persisted text.
+  return shorter ? length : longer ? Number.MAX_SAFE_INTEGER : Number.POSITIVE_INFINITY
 }
 
 function findContestedToolPresentations<T extends TranscriptMessage>(
@@ -1552,20 +1584,15 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
   const byPresentation = new Map<string, Array<AnchoredToolSlots<T>>>()
   const key = (exchange: PartialToolExchange<T>, anchor?: T) =>
     JSON.stringify([anchor?.id ?? null, exchangeKey(exchange)])
-  const matchesPersistedProse = (known: unknown, candidate: unknown, owner: unknown) => {
-    if (sameValue(known, candidate)) return true
-    const storedText = readReplayProse(known)?.trimEnd()
-    const candidateText = readReplayProse(candidate)?.trimEnd()
-    const ownerText = readReplayProse(owner)?.trimEnd()
-    if (!storedText || !candidateText || ownerText === storedText) return false
-    if (candidateText === storedText) return true
-    if (candidateText.startsWith(storedText)) return !ownerText?.startsWith(storedText)
-    return (
-      storedText.startsWith(candidateText) &&
-      (!ownerText ||
-        (!ownerText.startsWith(storedText) &&
-          (!storedText.startsWith(ownerText) || candidateText.length > ownerText.length)))
-    )
+  const checkpointProse = new Map<T, ReplayProse>()
+  const readCheckpointProse = (assistant: T) => {
+    const existing = checkpointProse.get(assistant)
+    if (existing) return existing
+    // Apply the Values writer's projection only to the evidence. It omits
+    // provider-only blocks such as inline reasoning from the durable body.
+    const prose = readReplayProse(extractPersistedMessageContent(assistant.content))
+    checkpointProse.set(assistant, prose)
+    return prose
   }
   for (const assistant of replay) {
     const exchange = readToolExchangeSlots(assistant, checkpoint.ownership)
@@ -1585,6 +1612,9 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
       sameExchangeCalls(target.exchange, copy.exchange, true, true)
     )
       continue
+    const stored = target.exchange.assistant.content
+    const storedProse = readReplayProse(stored)
+    const ownerMatch = getReplayProseMatch(storedProse, readCheckpointProse(copy.exchange.assistant))
     const otherClaim = byPresentation.get(key(target.exchange, copy.anchor))?.some((other) => {
       const turn = rawTurns.get(other.exchange.assistant.id)
       return (
@@ -1592,11 +1622,9 @@ function findContestedToolPresentations<T extends TranscriptMessage>(
         turn !== owner &&
         sameReplayAnchor(copy.anchor, other.anchor, true) &&
         sameExchangeCalls(target.exchange, other.exchange, true, false) &&
-        matchesPersistedProse(
-          target.exchange.assistant.content,
-          other.exchange.assistant.content,
-          copy.exchange.assistant.content
-        )
+        (sameValue(stored, other.exchange.assistant.content) ||
+          getReplayProseMatch(storedProse, readCheckpointProse(other.exchange.assistant)) >
+            ownerMatch)
       )
     })
     if (otherClaim) contested.add(copy)
@@ -1879,8 +1907,8 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
     for (const [index, row] of rows.entries()) {
       if (row.role !== "assistant" || !Array.isArray(row.tool_calls) || !row.tool_calls.length)
         continue
-      const text = readReplayProse(row.content)
-      if (text === undefined) continue
+      const { text, blocks } = readReplayProse(extractPersistedMessageContent(row.content))
+      if (blocks.length) continue
       const sourceId = sources[index].id
       const rawTurn = rawAssistantTurns.get(sourceId)
       if (rawTurn === undefined) continue
@@ -1892,7 +1920,7 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
       const group = groups.get(key) ?? []
       group.push({
         id: row.id,
-        text,
+        text: text[0],
         rawTurn,
         hidden: rawCheckpointTurns.hiddenAssistants.has(sourceId)
       })
