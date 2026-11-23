@@ -3640,7 +3640,8 @@ export function ChatContainer({
     liveDisplayMessages,
     streamData.messages,
     messagesContentVersion,
-    liveDisplayProjection
+    liveDisplayProjection,
+    streamData.stream?.messageOrderRevision
   )
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion

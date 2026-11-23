@@ -36,7 +36,7 @@ assert.equal(
 )
 
 const source = readFileSync(
-  resolve(__dirname, "../src/renderer/src/lib/worker-tool-result-key.ts"),
+  resolve(__dirname, "../src/shared/tool-result-ownership.ts"),
   "utf8"
 )
 assert.doesNotMatch(source, /pendingCalls\.filter|pendingCalls\.indexOf|pendingCalls\.splice/)

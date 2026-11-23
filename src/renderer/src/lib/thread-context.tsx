@@ -1900,7 +1900,7 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
       isLoading: latestStream.isLoading,
       stream: latestStream
     })
-  }, [stream.messages, stream.isLoading, threadId])
+  }, [stream.messages, stream.messageOrderRevision, stream.isLoading, threadId])
 
   return null
 })

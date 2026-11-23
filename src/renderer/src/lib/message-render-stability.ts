@@ -166,7 +166,7 @@ export function createIncrementalToolDerivationProjector(): (
   }
 }
 
-export function areToolResultAssociationsEqual(
+function areToolResultAssociationsEqual(
   left: ToolResultAssociation | undefined,
   right: ToolResultAssociation | undefined
 ): boolean {

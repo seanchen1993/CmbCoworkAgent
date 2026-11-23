@@ -6,6 +6,7 @@ import {
   findReplayedToolExchangeAliases
 } from "../../../shared/tool-transcript-replay"
 import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
+import { createLiveDisplayMessageProjector } from "./live-display-message-projection"
 import {
   createChatMessageProjector,
   findDisplayedReplayAliases,
@@ -75,8 +76,12 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
     const ambiguousOrder = [user, original, replay, other, result, replayResult, otherResult]
     const resolvedHints = [user, original, result, replay, replayResult, other, otherResult]
     expect(hasToolReplayCandidates(ambiguousOrder)).toBe(true)
-    expect(findReplayedToolExchangeAliases(ambiguousOrder).size).toBe(0)
-    const reordered = createChatMessageProjector()(ambiguousOrder, [], resolvedHints)
+    expect(findReplayedToolExchangeAliases(ambiguousOrder).get(replay.id)).toBe(original.id)
+    const project = createChatMessageProjector()
+    const before = project(ambiguousOrder, [], ambiguousOrder, 0, undefined, 1)
+    const reordered = project(ambiguousOrder, [], resolvedHints, 0, undefined, 2)
+    expect(reordered.structureVersion).toBeGreaterThan(before.structureVersion)
+    expect(reordered.messages.map(({ id }) => id)).toEqual(resolvedHints.map(({ id }) => id))
     expect(findDisplayedReplayAliases(reordered.messages).get(replay.id)).toBe(original.id)
 
     const durableOnly = [user, original, result]
@@ -92,6 +97,49 @@ describe("createChatMessageProjector tool-call reconciliation", () => {
       new Map([
         [replay.id, original.id],
         [replayResult.id, result.id]
+      ])
+    )
+  })
+
+  it("keeps status and identity on a failed result replay during streaming", () => {
+    const original = assistant({ tool_calls: [executeCall] })
+    const result: Message = {
+      id: "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465",
+      role: "tool",
+      content: "Failed",
+      tool_call_id: executeCall.id,
+      status: "error",
+      is_error: true,
+      created_at: new Date(1)
+    }
+    const baseline = [original, result]
+    const originalAlias = `${original.id}::cmb-same-role-duplicate:assistant:2`
+    const resultAlias = `${result.id}::cmb-same-role-duplicate:tool:2`
+    const live = createLiveDisplayMessageProjector()(baseline, [
+      {
+        id: originalAlias,
+        type: "ai",
+        content: original.content,
+        tool_calls: [executeCall],
+        provider_source_id: original.id,
+        provider_occurrence: 2
+      },
+      {
+        id: resultAlias,
+        type: "tool",
+        content: "Failed",
+        tool_call_id: executeCall.id,
+        status: "error",
+        is_error: true,
+        provider_source_id: result.id,
+        provider_occurrence: 2
+      }
+    ])
+    const display = createChatMessageProjector()(baseline, live.messages, undefined, 0, live)
+    expect(findDisplayedReplayAliases(display.messages)).toEqual(
+      new Map([
+        [originalAlias, original.id],
+        [resultAlias, result.id]
       ])
     )
   })

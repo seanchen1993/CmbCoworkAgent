@@ -1,8 +1,10 @@
 import type { Message } from "../types"
-import { findReplayedToolExchangeAliases } from "../../../shared/tool-transcript-replay"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
-import { areToolResultAssociationsEqual } from "./message-render-stability"
-import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
+
+export {
+  findReplayedToolExchangeAliases as findDisplayedReplayAliases,
+  preserveReplayToolBindings
+} from "../../../shared/tool-transcript-replay"
 
 export interface ChatMessageProjection {
   /**
@@ -24,31 +26,6 @@ export interface ChatLiveMessageProjectionMetadata {
 }
 
 const noReplayAliases: ReadonlyMap<string, string> = new Map()
-
-/** Only hide rows when the remaining tool cards keep their original results. */
-export function preserveReplayToolBindings(
-  messages: readonly Message[],
-  aliases: ReadonlyMap<string, string>
-): ReadonlyMap<string, string> {
-  if (aliases.size === 0) return aliases
-  const retained = messages.filter((message) => !aliases.has(message.id))
-  const originalResults = buildToolResultAssociations(messages)
-  const retainedResults = buildToolResultAssociations(retained)
-  for (const message of retained) {
-    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue
-    for (let index = 0; index < message.tool_calls.length; index++) {
-      const key = getWorkerToolUiKey(message.id, message.tool_calls[index]?.id, index)
-      if (!areToolResultAssociationsEqual(originalResults.get(key), retainedResults.get(key))) {
-        return noReplayAliases
-      }
-    }
-  }
-  return aliases
-}
-
-export function findDisplayedReplayAliases(messages: readonly Message[]): ReadonlyMap<string, string> {
-  return preserveReplayToolBindings(messages, findReplayedToolExchangeAliases(messages))
-}
 
 /** A live row may have the only surviving copy of renderer-only reasoning. */
 export function resolveChatReplayAliases(
@@ -140,7 +117,8 @@ export function createChatMessageProjector(): (
   liveMessages: readonly Message[],
   orderHintMessages: ReadonlyArray<{ id?: string }> | undefined,
   baselineContentVersion?: number,
-  liveProjection?: ChatLiveMessageProjectionMetadata
+  liveProjection?: ChatLiveMessageProjectionMetadata,
+  valuesOrderRevision?: number
 ) => ChatMessageProjection {
   let previousBaseline: readonly Message[] | null = null
   let previousBaselineContentVersion = 0
@@ -150,6 +128,7 @@ export function createChatMessageProjector(): (
   let previousLiveProjectionStructureVersion = -1
   let previousUsedLiveProjection = false
   let previousOrderHintStructureKey = ""
+  let previousValuesOrderRevision = 0
   let baselineIndexById = new Map<string, number>()
   let liveIndexById = new Map<string, number>()
   let messages: Message[] = []
@@ -162,7 +141,8 @@ export function createChatMessageProjector(): (
     liveMessages,
     orderHintMessages,
     baselineContentVersion = 0,
-    liveProjection
+    liveProjection,
+    valuesOrderRevision = 0
   ) => {
     const usesLiveProjection = Boolean(liveProjection)
     const nextLiveStructureKey = usesLiveProjection ? "" : liveStructureKey(liveMessages)
@@ -175,6 +155,7 @@ export function createChatMessageProjector(): (
       (liveProjection
         ? liveProjection.structureVersion !== previousLiveProjectionStructureVersion
         : nextLiveStructureKey !== previousLiveStructureKey) ||
+      valuesOrderRevision !== previousValuesOrderRevision ||
       nextOrderHintStructureKey !== previousOrderHintStructureKey
 
     const changedMessages: Message[] = []
@@ -227,6 +208,7 @@ export function createChatMessageProjector(): (
       previousLiveProjectionStructureVersion = liveProjection?.structureVersion ?? -1
       previousUsedLiveProjection = usesLiveProjection
       previousOrderHintStructureKey = nextOrderHintStructureKey
+      previousValuesOrderRevision = valuesOrderRevision
       contentVersion += 1
       structureVersion += 1
       return {

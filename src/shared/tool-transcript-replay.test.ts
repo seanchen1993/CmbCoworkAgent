@@ -162,15 +162,10 @@ describe("tool transcript replay", () => {
     expect(
       findReplayedToolExchangeAliases([assistant, copy, lastCopy, tool, copyTool, lastTool])
     ).toEqual(expected)
-    expect(
-      findReplayedToolExchangeAliases([
-        assistant,
-        copy,
-        tool,
-        lastTool,
-        { ...copyTool, content: "Different" }
-      ]).size
-    ).toBe(0)
+    const changed = { ...copyTool, content: "Different" }
+    const changedTrace = findReplayedToolExchangeAliases([assistant, copy, tool, lastTool, changed])
+    expect(changedTrace.get(copy.id)).toBe(assistant.id)
+    expect(changedTrace.has(changed.id)).toBe(false)
   })
 
   it("preserves exact-row Bot file delivery authorizations", () => {
@@ -259,15 +254,65 @@ describe("tool transcript replay", () => {
       provider_source_id: undefined,
       content: "Earlier result"
     }
-    const rows = [previousUser, previous, user, previousResult, assistant, tool, replay, replayTool]
+    const secondPrevious = { ...previous, id: "another-earlier-assistant" }
+    const secondPreviousResult = {
+      ...previousResult,
+      id: "another-earlier-result",
+      content: "Second earlier result"
+    }
+    const rows = [
+      previousUser,
+      previous,
+      secondPrevious,
+      user,
+      previousResult,
+      secondPreviousResult,
+      assistant,
+      tool,
+      replay,
+      replayTool
+    ]
     expect(findReplayedToolExchangeAliases(rows)).toEqual(
       new Map([
         [replay.id, assistant.id],
         [replayTool.id, tool.id]
       ])
     )
+    const withoutOldResults = rows.filter(
+      ({ id }) => id !== previousResult.id && id !== secondPreviousResult.id
+    )
+    expect(findReplayedToolExchangeAliases(withoutOldResults).get(replay.id)).toBe(assistant.id)
+  })
+
+  it("uses physical result identity across users and keeps different executions separate", () => {
+    const [assistant, tool] = exchange()
+    const [replay, replayTool] = exchange(2)
+    const nextUser = { ...user, id: "later" }
     expect(
-      findReplayedToolExchangeAliases(rows.filter(({ id }) => id !== previousResult.id)).size
+      findReplayedToolExchangeAliases([user, assistant, tool, nextUser, replay, replayTool])
+    ).toEqual(
+      new Map([
+        [replay.id, assistant.id],
+        [replayTool.id, tool.id]
+      ])
+    )
+    expect(findReplayedToolExchangeAliases([user, assistant, tool, nextUser, replayTool])).toEqual(
+      new Map([[replayTool.id, tool.id]])
+    )
+    expect(
+      findReplayedToolExchangeAliases([
+        user,
+        assistant,
+        tool,
+        nextUser,
+        replay,
+        {
+          ...replayTool,
+          id: "c02ca9d7-95da-4bbb-a2d9-0d101b12a420",
+          provider_source_id: undefined,
+          provider_occurrence: undefined
+        }
+      ]).size
     ).toBe(0)
   })
 
@@ -305,7 +350,7 @@ describe("tool transcript replay", () => {
         provider_source_id: row.provider_source_id?.replace(resultId, "legacy-result")
       }))
     for (const input of [
-      [...first, user, ...second],
+      [...first, user, ...second.map((row) => ({ ...row, goal_id: "another-goal" }))],
       [...first, ...exchange(2, { path: "elsewhere" })],
       [...first, second[0], { ...second[1], id: "result-from-another-execution" }],
       [...first, second[0], { ...second[1], status: "error", is_error: true }],
