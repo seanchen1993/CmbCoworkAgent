@@ -120,6 +120,36 @@ afterEach(() => {
 })
 
 describe("turn completion gate inside the real agent graph", () => {
+  it("queues the retry notice between a rejected reply and its replacement", async () => {
+    const model = new ScriptedChatModel([
+      scriptedAi("Truncated draft", { finish_reason: "length" }),
+      scriptedAi("Recovered answer", { finish_reason: "stop" })
+    ])
+    const notice = { type: "model_retry", retryKind: "completion_gate" }
+    const agent = createAgent({
+      model,
+      tools: [],
+      middleware: [
+        createTurnCompletionGateMiddleware({
+          ownerRunToken: RUN,
+          onRecovery: (_input, writeToStream) => writeToStream?.(notice)
+        })
+      ]
+    })
+    const observed: unknown[] = []
+    const stream = await agent.stream(
+      { messages: [new HumanMessage("Answer the question")] },
+      { configurable: { thread_id: THREAD }, streamMode: ["messages", "custom"] }
+    )
+    for await (const [mode, data] of stream) {
+      if (mode === "custom") observed.push(data)
+      if (mode === "messages" && Array.isArray(data) && AIMessage.isInstance(data[0])) {
+        observed.push(data[0].content)
+      }
+    }
+    expect(observed).toEqual(["Truncated draft", notice, "Recovered answer"])
+  })
+
   it("recovers a leaked DSML tail and executes only the subsequent structured tool call", async () => {
     const { model, final } = await runGraph([
       scriptedAi(

@@ -56,6 +56,69 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
+  it.each(["values", "messages", "authoritative snapshot"] as const)(
+    "clears the completion retry on the first visible reply delivered as %s",
+    async (mode) => {
+      const previous = ai("draft", "Visible text from before the retry")
+      const answer = ai("recovered", "OK")
+      const retry = {
+        type: "model_retry",
+        retryKind: "completion_gate",
+        attempt: 2,
+        maxRetries: 2
+      }
+      const response =
+        mode === "values"
+          ? values([answer])
+          : mode === "messages"
+            ? chunk(answer)
+            : {
+                event: "custom",
+                data: { type: "coordinator_ai_snapshot_message", assistantMessage: answer }
+              }
+      const transport: UseStreamTransport = {
+        async stream() {
+          return (async function* () {
+            yield values([previous])
+            yield { event: "custom", data: retry }
+            yield values([previous])
+            yield {
+              event: "custom",
+              data: {
+                type: "message_id_alias",
+                fromId: previous.id,
+                toId: "stable-draft",
+                role: "assistant"
+              }
+            }
+            yield values([{ ...previous, id: "stable-draft" }])
+            const reasoningOnly = { ...ai("recovered", ""), reasoning: "Still thinking" }
+            yield chunk(reasoningOnly)
+            yield chunk(tool("tool-progress"))
+            yield response
+          })()
+        }
+      }
+      const onRetryEvent = vi.fn()
+      const stream = createElectronStream({
+        transport,
+        threadId: "test",
+        onCustomEvent: (data) => {
+          const type = (data as { type?: unknown })?.type
+          if (type === "model_retry" || type === "model_retry_clear") {
+            const visibleAnswer = stream.messages.find((message) => message.id === answer.id)
+            onRetryEvent(data, stream.isLoading, visibleAnswer?.content)
+          }
+        }
+      })
+      await stream.submit(null)
+      expect(onRetryEvent.mock.calls).toEqual([
+        [retry, true, undefined],
+        [{ type: "model_retry_clear" }, true, answer.content]
+      ])
+    }
+  )
+
   it("renames an already streaming reply before publishing the steer boundary", async () => {
     const { frames, stream } = await run([
       chunk(ai("provider", "before")),

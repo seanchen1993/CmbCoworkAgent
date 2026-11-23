@@ -499,13 +499,18 @@ export function describeTurnCompletionFailure(report: TurnCompletionGateReport):
   return null
 }
 
-/** Fired once per injected recovery prompt, for the run's UI notice. */
-export type TurnCompletionRecoveryCallback = (input: {
+export interface TurnCompletionRecoveryNotice {
   kind: "defect" | "todo"
   detail: string
   attempt: number
   maxAttempts: number
-}) => void
+}
+
+/** Fired once per injected recovery prompt, for the run's UI notice. */
+export type TurnCompletionRecoveryCallback = (
+  input: TurnCompletionRecoveryNotice,
+  writeToStream?: (event: unknown) => void
+) => void
 
 /** Trusted main-turn transport check. Undefined means its delivery contract is satisfied.
  * A satisfied explicit delivery may replace an empty private final reply, never a broken protocol.
@@ -621,12 +626,15 @@ export function createTurnCompletionGateMiddleware(
           console.warn(
             `[TurnCompletionGate] ${threadId} retry ${runState.retriesUsed}/${maxRetries}: ${inspection.defect} — ${inspection.detail}`
           )
-          onRecovery?.({
-            kind: "defect",
-            detail: inspection.detail,
-            attempt: runState.retriesUsed,
-            maxAttempts: maxRetries
-          })
+          onRecovery?.(
+            {
+              kind: "defect",
+              detail: inspection.detail,
+              attempt: runState.retriesUsed,
+              maxAttempts: maxRetries
+            },
+            runtime.writer
+          )
           return {
             messages: [createRecoveryMessage(threadId, messages, prompt)],
             jumpTo: "model" as const
@@ -655,12 +663,15 @@ export function createTurnCompletionGateMiddleware(
         }
         runState.todoNudgesUsed += 1
         runState.unfinishedTodos = []
-        onRecovery?.({
-          kind: "todo",
-          detail: `仍有 ${unfinished.length} 项待办未完成`,
-          attempt: runState.todoNudgesUsed,
-          maxAttempts: maxTodoNudges
-        })
+        onRecovery?.(
+          {
+            kind: "todo",
+            detail: `仍有 ${unfinished.length} 项待办未完成`,
+            attempt: runState.todoNudgesUsed,
+            maxAttempts: maxTodoNudges
+          },
+          runtime.writer
+        )
         const prompt = buildTodoRecoveryPrompt(unfinished, runState.todoNudgesUsed, maxTodoNudges)
         return {
           messages: [createRecoveryMessage(threadId, messages, prompt)],
