@@ -423,7 +423,9 @@ import {
 import {
   clearTurnCompletionGateState,
   describeTurnCompletionFailure,
-  readTurnCompletionGateReport
+  readTurnCompletionGateReport,
+  type TurnCompletionRecoveryCallback,
+  type TurnCompletionRecoveryNotice
 } from "../agent/turn-completion-integrity"
 import {
   evaluateGoalWithRuntimeRetry,
@@ -524,6 +526,11 @@ const MAX_PENDING_MEMORY_FILE_PATHS = 512
 const MAX_MEMORY_BATCH_NOTICE_CHARACTERS = 512
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
+const DESKTOP_AGENT_STREAM_MODES: Array<"messages" | "values" | "custom"> = [
+  "messages",
+  "values",
+  "custom"
+]
 
 /**
  * 完成门禁对所有物理运行入口一视同仁：invoke / resume / interrupt 跑的是同一张
@@ -539,12 +546,7 @@ function readTurnCompletionFailure(threadId: string, runToken: string): string |
 }
 
 /** 门禁重试的 UI 提示：重试要花掉用户一次模型调用，不能是静默的内部循环。 */
-function formatTurnCompletionRecoveryNotice(input: {
-  kind: "defect" | "todo"
-  detail: string
-  attempt: number
-  maxAttempts: number
-}): string {
+function formatTurnCompletionRecoveryNotice(input: TurnCompletionRecoveryNotice): string {
   return input.kind === "todo"
     ? `任务尚未完成（${input.detail}），已请求模型继续（${input.attempt}/${input.maxAttempts}）。`
     : `模型未给出有效结果（${input.detail}），已请求模型重新作答（${input.attempt}/${input.maxAttempts}）。`
@@ -4671,6 +4673,13 @@ export function persistAndForwardPhysicalRunStreamChunk(
   // forwarding. A provider callback may resume after any earlier await even
   // though a replacement physical run already owns the thread.
   throwIfPhysicalStreamRunIsInactive(threadId, runToken, signal)
+  if (mode === "custom") {
+    const data = asPlainRecord(payload)
+    if (data?.type === "model_retry" && data.retryKind === "completion_gate") {
+      safeSendToWindow(window, channel, { type: "custom", data })
+    }
+    return null
+  }
   // Arm the 250 ms run-scoped flush window for ordinary token chunks. Deferring
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
@@ -5153,33 +5162,23 @@ function notifyStreamDisconnectRetry(
   })
 }
 
-/**
- * 门禁续跑复用传输层重试的横幅。
- *
- * 对用户来说「模型被重试」和「模型被要求重答」是同一件事——这一轮多花了一次
- * 模型调用、屏幕上会多出一段回答——不该一个是 2.2 秒的 toast、一个是常驻横幅。
- * 两者的差别只在文案，由 retryKind 区分。
- *
- * 没有 delayMs：门禁不等待，判定完立刻跳回模型。横幅的存活区间因此是「门禁做出
- * 判定」到「重答的第一个 token 到达」，由 renderer 既有的清除路径负责收尾
- * （真实 assistant token 到达 / isLoading 转 false / 出错），无需额外的 clear 事件。
- */
 function notifyTurnCompletionRetry(
   window: BrowserWindow,
   channel: string,
-  input: { kind: "defect" | "todo"; detail: string; attempt: number; maxAttempts: number }
+  input: TurnCompletionRecoveryNotice,
+  writeToStream?: (event: unknown) => void
 ): void {
-  safeSendToWindow(window, channel, {
-    type: "custom",
-    data: {
-      type: "model_retry",
-      retryKind: "completion_gate",
-      attempt: input.attempt,
-      maxRetries: input.maxAttempts,
-      reason: formatTurnCompletionRecoveryNotice(input),
-      delayMs: 0
-    }
-  })
+  const data = {
+    type: "model_retry",
+    retryKind: "completion_gate",
+    attempt: input.attempt,
+    maxRetries: input.maxAttempts,
+    reason: formatTurnCompletionRecoveryNotice(input),
+    delayMs: 0
+  }
+  // Order the notice after the rejected reply's frames and before the next model call.
+  if (writeToStream) writeToStream(data)
+  else safeSendToWindow(window, channel, { type: "custom", data })
 }
 
 function clearStreamDisconnectRetry(window: BrowserWindow, channel: string): void {
@@ -7278,14 +7277,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // The completion gate bounced the turn back to the model. Surface it:
         // the retry costs the user a model call and changes what they see in the
         // transcript, so it must not be a silent internal loop.
-        const sendTurnCompletionNotice = (input: {
-          kind: "defect" | "todo"
-          detail: string
-          attempt: number
-          maxAttempts: number
-        }): void => {
+        const sendTurnCompletionNotice: TurnCompletionRecoveryCallback = (input, writeToStream) => {
           if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-          notifyTurnCompletionRetry(window, channel, input)
+          notifyTurnCompletionRetry(window, channel, input, writeToStream)
         }
 
         let latestSerializedValuesMessagesForGoalFlush: unknown[] = []
@@ -8762,7 +8756,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const streamConfig = {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
-            streamMode: ["messages", "values"] as ("messages" | "values")[],
+            streamMode: DESKTOP_AGENT_STREAM_MODES,
             // Centralized product budget (agent-runtime-limits). Hardcoding it
             // here made one logical turn's budget depend on which entry point
             // resumed it, and left the IM path below the limit it used to get.
@@ -11725,7 +11719,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const resumeStreamConfig = {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
-            streamMode: ["messages", "values"] as ("messages" | "values")[],
+            streamMode: DESKTOP_AGENT_STREAM_MODES,
             // Centralized product budget (agent-runtime-limits). Hardcoding it
             // here made one logical turn's budget depend on which entry point
             // resumed it, and left the IM path below the limit it used to get.
@@ -11775,9 +11769,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               subagentLifecycle: resumeSubagentLifecycle.callbacks,
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
-              onTurnCompletionRecovery: (input) => {
+              onTurnCompletionRecovery: (input, writeToStream) => {
                 if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-                notifyTurnCompletionRetry(window, channel, input)
+                notifyTurnCompletionRetry(window, channel, input, writeToStream)
               },
               workspacePath,
               coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
@@ -12901,7 +12895,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const interruptStreamConfig = {
           configurable: { thread_id: threadId },
           signal: abortController.signal,
-          streamMode: ["messages", "values"] as ("messages" | "values")[],
+          streamMode: DESKTOP_AGENT_STREAM_MODES,
           recursionLimit: getAgentGraphRecursionLimit()
         }
 
@@ -12932,9 +12926,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
-              onTurnCompletionRecovery: (input) => {
+              onTurnCompletionRecovery: (input, writeToStream) => {
                 if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-                notifyTurnCompletionRetry(window, channel, input)
+                notifyTurnCompletionRetry(window, channel, input, writeToStream)
               },
               workspacePath,
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,

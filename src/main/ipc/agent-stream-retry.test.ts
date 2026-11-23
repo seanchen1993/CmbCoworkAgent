@@ -50,6 +50,33 @@ function fakeWindow(sent: unknown[]): BrowserWindow {
   } as unknown as BrowserWindow
 }
 
+it("forwards queued completion retry notices from the active physical run", () => {
+  const threadId = "completion-retry"
+  const runToken = "run"
+  const signal = new AbortController().signal
+  const sent: unknown[] = []
+  const window = fakeWindow(sent)
+  const forward = (data: unknown) =>
+    persistAndForwardPhysicalRunStreamChunk(
+      window,
+      "agent:test",
+      threadId,
+      runToken,
+      signal,
+      "custom",
+      data
+    )
+  const notice = { type: "model_retry", retryKind: "completion_gate", attempt: 2, maxRetries: 2 }
+  setCurrentRunMessageQueueOwner(threadId, runToken)
+  try {
+    expect(forward({ type: "other" })).toBeNull()
+    expect(forward(notice)).toBeNull()
+    expect(sent).toEqual([{ type: "custom", data: notice }])
+  } finally {
+    clearCurrentRunMessageQueue(threadId, runToken)
+  }
+})
+
 it("rolls back provisional rows and partially persisted values before replaying a prior checkpoint", async () => {
   const directory = mkdtempSync(join(tmpdir(), "cmb-failed-values-"))
   storage.dbPath = join(directory, "threads.sqlite")
