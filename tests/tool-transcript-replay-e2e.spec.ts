@@ -15,6 +15,7 @@ const workspace = path.join(output, "workspace")
 const title = "Tool transcript replay fixture"
 const threadId = "tool-replay-e2e"
 const structuredThreadId = "structured-tool-replay-e2e"
+const projectedThreadId = "projected-tool-replay-e2e"
 const firstNoticeReply = "Checking current data"
 const storedNoticeDraft = `${firstNoticeReply} with beta findings`
 const finalNoticeReply = `${storedNoticeDraft} confirmed`
@@ -395,11 +396,55 @@ async function seedStructuredHistory(): Promise<void> {
   }
 }
 
+async function seedProjectedHistory(): Promise<Message[]> {
+  const db = await import("../src/main/db")
+  const { getThreadCheckpointPath } = await import("../src/main/storage")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver")
+  const [user, assistant, tool] = makeExchange(0)
+  const body = [{ type: "text" as const, text: "The projected result is unchanged" }]
+  const firstRaw = [...body, { type: "resource_link", uri: "https://example.com/first" }]
+  const secondRaw = [...body, { type: "resource_link", uri: "https://example.com/second" }]
+  const revised = { ...assistant, content: "Checking the revised result" }
+  const end = { ...user, id: "after-projected-tools", content: "Continue with the next request" }
+  const durable = [
+    user, assistant, { ...tool, content: body }, setOccurrence(revised, 2),
+    setOccurrence({ ...tool, content: body }, 2), end
+  ]
+  await db.initializeDatabase()
+  try {
+    db.createThread(projectedThreadId, {
+      title: "Projected tool transcript replay fixture", workspacePath: workspace, agentMode: "normal"
+    })
+    db.upsertThreadMessages(projectedThreadId, durable)
+    await db.flush()
+  } finally {
+    await db.closeDatabase()
+  }
+  const saver = new SqlJsSaver(getThreadCheckpointPath(projectedThreadId))
+  try {
+    await saver.put({ configurable: { thread_id: projectedThreadId, checkpoint_ns: "" } }, {
+      v: 1,
+      id: "projected-replay-checkpoint",
+      ts: new Date().toISOString(),
+      channel_values: { messages: [
+        user, assistant, { ...tool, content: firstRaw },
+        revised, { ...tool, content: secondRaw },
+        revised, { ...tool, content: secondRaw }, end
+      ].map(toCheckpointMessage) },
+      channel_versions: { messages: 1 }, versions_seen: {}, pending_sends: []
+    }, { source: "loop", step: 1, writes: {}, parents: {} })
+  } finally {
+    await saver.close()
+  }
+  return durable
+}
+
 interface TestWindow {
   api: {
     threads: {
       exportSession(id: string): Promise<{ success: boolean; error?: string }>
       getMessages(id: string): Promise<Message[]>
+      bootstrapLegacyCheckpointTranscript(id: string): Promise<{ migration: { migratedMessages: number } } | null>
     }
   }
 }
@@ -409,6 +454,7 @@ async function main(): Promise<void> {
   process.env.CMB_COWORK_AGENT_HOME = profile
   const rawRowCount = await seedHistory()
   await seedStructuredHistory()
+  const projectedDurable = await seedProjectedHistory()
   const binary = createRequire(import.meta.url)("electron") as string
   const env: Record<string, string> = {
     CMB_E2E_ELECTRON_BIN: binary,
@@ -600,6 +646,37 @@ async function main(): Promise<void> {
             .map(({ content }) => content),
           ["Checking fixture 0", firstNoticeReply, noticeSeparator, finalNoticeReply]
         )
+        const projectedArchive = path.join(output, `${phase}-projected.zip`)
+        await app.evaluate(({ dialog }, filePath) => {
+          dialog.showSaveDialog = async () => ({ canceled: false, filePath })
+        }, projectedArchive)
+        const projected = await page.evaluate(
+          (id) => (window as unknown as TestWindow).api.threads.exportSession(id),
+          projectedThreadId
+        )
+        assert.equal(projected.success, true, projected.error)
+        const projectedMessages = JSON.parse(
+          new AdmZip(projectedArchive).readAsText("session.json")
+        ).messages as typeof archived.messages
+        assert.deepEqual(projectedMessages.map(({ role }) => role), projectedDurable.map(({ role }) => role))
+        const tools = projectedMessages.filter(({ role }) => role === "tool")
+        assert.deepEqual(tools.map(({ toolCallId }) => toolCallId), [callId, callId])
+        assert.deepEqual(
+          projectedMessages.filter(({ role }) => role === "assistant").map(({ content }) => content),
+          ["Checking fixture 0", "Checking the revised result"]
+        )
+        if (phase === "initial") {
+          const bootstrap = await page.evaluate(
+            (id) => (window as unknown as TestWindow).api.threads.bootstrapLegacyCheckpointTranscript(id),
+            projectedThreadId
+          )
+          assert.equal(bootstrap?.migration.migratedMessages, 0)
+        }
+        const projectedRows = await page.evaluate(
+          (id) => (window as unknown as TestWindow).api.threads.getMessages(id),
+          projectedThreadId
+        )
+        assert.deepEqual(projectedRows.map(({ id }) => id), projectedDurable.map(({ id }) => id))
         await page.screenshot({
           animations: "disabled",
           path: path.join(output, `${phase}.png`),

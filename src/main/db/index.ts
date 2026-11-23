@@ -2056,6 +2056,26 @@ export function getThreadMessages(threadId: string): Message[] {
   })
 }
 
+export function getLegacyImportedToolOccurrenceIds(threadId: string, checkpointId: string): Set<string> {
+  const stmt = getDb().prepare(`SELECT message_id FROM legacy_checkpoint_transcript_imports AS i
+    JOIN thread_messages AS m USING (thread_id, message_id)
+    WHERE i.thread_id = ? AND i.published_checkpoint_id = ? AND i.owned_by_migration = 1
+      AND i.partial_version IS NULL AND i.rewrite_progress IS NULL
+      AND COALESCE(m.stream_authority, 0) = 0 AND m.provider_occurrence > 1
+      AND m.role IN ('assistant', 'tool')`)
+  const ids = new Set<string>()
+  try {
+    stmt.bind([threadId, checkpointId])
+    while (stmt.step()) {
+      const { message_id: id } = stmt.getAsObject()
+      if (typeof id === "string") ids.add(id)
+    }
+  } finally {
+    stmt.free()
+  }
+  return ids
+}
+
 function normalizeThreadMessagesPageLimit(limit: number | undefined): number {
   if (!Number.isFinite(limit) || limit === undefined || limit <= 0) {
     return DEFAULT_THREAD_MESSAGES_PAGE_LIMIT

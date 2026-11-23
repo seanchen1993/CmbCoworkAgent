@@ -47,6 +47,42 @@ function exchange(occurrence = 1, args = { path: "fixture" }, content = "ok"): M
 }
 
 describe("tool transcript replay", () => {
+  it.each(["projected", "imported-assistant", "imported-batch", "pending", "same-prose"])(
+    "keeps distinct raw result versions that share a stored projection (%s)",
+    (mode) => {
+      const [first, result] = exchange()
+      const [second, secondResult] = exchange(2)
+      const [copy, copyResult] = exchange(3)
+      const projected = [{ type: "text", text: "Read completed" }]
+      const resource = (uri: string) => [...projected, { type: "resource_link", uri }]
+      const firstRaw = resource("fixture://first")
+      const secondRaw = resource("fixture://second")
+      const firstAssistant = { ...first, content: mode === "same-prose" ? "Second" : "First" }
+      const secondAssistant = { ...second, content: "Second" }
+      const rawCopy = { ...copy, content: secondAssistant.content }
+      const durable = [
+        user, firstAssistant, { ...result, content: projected },
+        secondAssistant, { ...secondResult, content: projected },
+        ...(mode === "imported-batch" ? [rawCopy, { ...copyResult, content: secondRaw }]
+          : mode === "imported-assistant" || mode === "pending" ? [rawCopy] : [])
+      ]
+      const checkpoint = [
+        user, firstAssistant, { ...result, content: firstRaw },
+        secondAssistant, { ...secondResult, content: secondRaw },
+        rawCopy, { ...copyResult, content: secondRaw }
+      ]
+      const imported = mode.startsWith("imported") ? new Set([copy.id, copyResult.id]) : undefined
+      const replay = prepareToolTranscriptReplayMerge(durable, checkpoint, undefined, imported)
+      const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
+      expect(merged.map(({ id }) => id)).toEqual([
+        user.id, first.id, result.id, second.id, secondResult.id,
+        ...(mode === "pending" ? [copy.id] : [])
+      ])
+      expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content))
+        .toEqual([firstRaw, secondRaw])
+    }
+  )
+
   it("aligns a complete cross-source exchange despite conflicting occurrence numbers", () => {
     const durable = [user, ...exchange(2)]
     const checkpoint = [user, ...exchange()]

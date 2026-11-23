@@ -30,6 +30,7 @@ import {
   getThreadValuesJson,
   getThreadValuesJsonPage,
   getThreadMessages,
+  getLegacyImportedToolOccurrenceIds,
   getThreadMessageCount,
   getThreadMessageOrdinalBoundary,
   getThreadMessageIdentityContext,
@@ -353,6 +354,7 @@ interface CheckpointMessage {
 
 interface ThreadCheckpoint {
   checkpoint?: {
+    id?: string
     channel_values?: {
       messages?: CheckpointMessage[]
     }
@@ -2844,7 +2846,8 @@ function buildExportMessagesFromThreadMessages(messages: Message[]): ExportMessa
 
 export function mergeCheckpointAndPersistedThreadMessagesForSession(
   checkpoint: unknown,
-  persistedMessages: Message[]
+  persistedMessages: Message[],
+  legacyImportedIds?: ReadonlySet<string>
 ): Message[] {
   const checkpointTranscriptIndex = checkpoint ? deriveCheckpointTranscriptIndex(checkpoint) : null
   const rawCheckpointMessages = getCheckpointChannelMessages(checkpoint)
@@ -2858,7 +2861,8 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
   const replay = prepareToolTranscriptReplayMerge(
     persistedMessages,
     checkpointMessages,
-    readCheckpointReplayTurns(checkpoint)
+    readCheckpointReplayTurns(checkpoint),
+    legacyImportedIds
   )
   const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable, {
     useStableProviderOccurrences: true
@@ -4444,7 +4448,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         : buildExportMessagesFromThreadMessages(
             mergeCheckpointAndPersistedThreadMessagesForSession(
               latestCheckpoint?.checkpoint,
-              getThreadMessages(threadId)
+              getThreadMessages(threadId),
+              latestCheckpoint?.checkpoint?.id
+                ? getLegacyImportedToolOccurrenceIds(threadId, latestCheckpoint.checkpoint.id)
+                : undefined
             )
           )
 

@@ -75,6 +75,7 @@ import {
   mergeCheckpointAuthorityTranscriptMessage
 } from "../../shared/checkpoint-transcript"
 import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
+import { findExactCheckpointToolReplays } from "../../shared/tool-transcript-replay"
 import { extractVisibleReasoning } from "../../shared/model-reasoning"
 import {
   normalizeTranscriptReasoning,
@@ -1636,9 +1637,14 @@ function buildDurableLegacyCheckpointMessages(
       provider_source_id?: string
       provider_occurrence?: number
       tool_call_id?: string
+      replayTurn: number
+      replayCalls?: unknown[]
+      replayGoal?: string
+      replayWindow?: string
     }
   > = []
 
+  let replayTurn = 0
   for (let index = 0; index < rawMessages.length; index += 1) {
     if (index % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) throwIfCancelled(cancellation)
     if (isSerializedSummarizationMessage(rawMessages[index])) continue
@@ -1649,6 +1655,7 @@ function buildDurableLegacyCheckpointMessages(
       objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
 
     const role = serializedMessageRole(message, kwargs)
+    if (role === "user" || role === "system") replayTurn++
     // The source is already decoded in this worker. Determine visibility before
     // bounding its text, since a cut through a closing tag can look like reasoning.
     const sourceReasoning =
@@ -1733,6 +1740,10 @@ function buildDurableLegacyCheckpointMessages(
           ? 1
           : 0,
       content,
+      replayTurn,
+      replayCalls: toolCallsJson === rawToolCallsJson ? toolCalls ?? undefined : undefined,
+      replayGoal: typeof message.goal_id === "string" ? message.goal_id : undefined,
+      replayWindow: typeof message.active_window_id === "string" ? message.active_window_id : undefined,
       ...providerTuple,
       sourceDeclaredOccurrence: providerTuple?.provider_occurrence,
       sourceMessageId: stableSourceId ? sourceId : undefined,
@@ -1855,7 +1866,85 @@ function buildDurableLegacyCheckpointMessages(
     // slot owns this provider occurrence and may publish its durable row.
     messages[index] = { ...message, shadowSlot: true }
   }
+  // Exact raw replays occupy source positions for recovery but need only one
+  // durable exchange. Preserve already published source layouts on upgrade.
+  let previousTurn = 0
+  const replayAliases = normalized.some((message) =>
+    message.role === "tool" && (message.provider_occurrence ?? 1) > 1
+  ) ? findExactCheckpointToolReplays(normalized.map((message) => ({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    tool_calls: message.stableSourceId && !message.providerIdentityDeclared
+      ? message.replayCalls : undefined,
+    tool_call_id: message.tool_call_id,
+    provider_source_id: message.provider_source_id,
+    provider_occurrence: message.provider_occurrence,
+    reasoning: message.reasoning ?? undefined,
+    goal_id: message.replayGoal,
+    active_window_id: message.replayWindow,
+    name: message.name ?? undefined,
+    status: message.status ?? undefined,
+    is_error: message.isError ? true : undefined,
+    content_is_projection: !message.stableSourceId ||
+      message.legacyReasoning !== message.reasoning || message.searchProjectionTruncated,
+    replayTurn: message.replayTurn
+  })), ({ replayTurn }) => {
+    const changed = replayTurn !== previousTurn
+    previousTurn = replayTurn
+    return changed
+  }) : new Map<string, string>()
+  if (replayAliases.size) {
+    const published = readPublishedLegacyReplaySlots(databasePath, threadId)
+    const byId = new Map(messages.flatMap((message, index) =>
+      message.shadowSlot ? [] : [[message.messageId, { message, index }] as const]
+    ))
+    const shadows: Array<[number, DurableLegacyCheckpointMessage]> = []
+    for (const [copyId, ownerId] of replayAliases) {
+      throwIfCancelled(cancellation)
+      const copy = byId.get(copyId)
+      const owner = byId.get(ownerId)?.message
+      if (!copy || !owner || owner.role !== copy.message.role) break
+      const identity = legacyCheckpointProviderIdentity(owner)
+      if (published && copy.index < published.count && published.slots.get(copy.index) !== identity)
+        break
+      shadows.push([copy.index, {
+        ...copy.message,
+        messageId: owner.messageId,
+        providerSourceId: owner.providerSourceId,
+        providerOccurrence: owner.providerOccurrence,
+        shadowSlot: true
+      }])
+    }
+    if (shadows.length === replayAliases.size) {
+      for (const [index, message] of shadows) messages[index] = message
+    }
+  }
   return { messages, sourceClaims, sourcePrefixKeys, occurrenceSnapshot, graphBoundaries }
+}
+
+function readPublishedLegacyReplaySlots(databasePath: string, threadId: string) {
+  if (!existsSync(databasePath)) return
+  const database = new DatabaseSync(databasePath, { readOnly: true, timeout: 100 })
+  try {
+    const columns = database.prepare("PRAGMA table_info(legacy_checkpoint_transcript_migrations)").all()
+    if (!columns.length) return
+    const shadow = columns.some(({ name }) => name === "shadow_slots") ? "shadow_slots" : "NULL"
+    const row = database.prepare(`SELECT total_messages, ${shadow} AS shadow_slots
+      FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?`).get(threadId)
+    if (!row) return
+    const slots = new Map<number, string>()
+    const stored: unknown = parseJsonValue(row.shadow_slots)
+    if (Array.isArray(stored)) {
+      for (const entry of stored) {
+        if (Array.isArray(entry) && typeof entry[0] === "number" && typeof entry[1] === "string")
+          slots.set(entry[0], entry[1])
+      }
+    }
+    return { count: Number(row.total_messages), slots }
+  } finally {
+    database.close()
+  }
 }
 
 function ensureLegacyTranscriptMigrationSchema(database: DatabaseSync): void {
