@@ -86,6 +86,7 @@ export function createChatReplayAliasProjector(): (
           (message.role === "tool" || toolReplayAssistantIds.has(message.id))) ||
           previous.tool_call_id !== message.tool_call_id ||
           previous.historical_tool_replay_id !== message.historical_tool_replay_id ||
+          previous.legacy_checkpoint_replay_of !== message.legacy_checkpoint_replay_of ||
           (message.role === "tool" && previous.name !== message.name) ||
           getMessageProviderOccurrence(previous) !== getMessageProviderOccurrence(message) ||
           !sameToolSlots(previous.tool_calls, message.tool_calls)

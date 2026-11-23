@@ -287,6 +287,7 @@ export interface Message {
   ordinal?: number
   /** An exact physical tool result verified by a durable page read. */
   historical_tool_replay_id?: string
+  legacy_checkpoint_replay_of?: string
   /** A rendered Goal event occupies the position immediately before its durable anchor. */
   transcript_anchor_message_id?: string
   provider_source_id?: string

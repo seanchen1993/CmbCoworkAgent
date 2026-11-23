@@ -2,6 +2,7 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
 import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
+import { readLegacyReplayCheckpoint } from "../checkpointer/runtime-projection-store"
 import {
   beginLegacyCheckpointRecoveryHash, legacyCheckpointReplayRowSql, NATIVE_DURABLE_CHECKPOINT_ID
 } from "../checkpointer/legacy-checkpoint-source"
@@ -23,6 +24,8 @@ import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "./order-sql"
 import { readPriorToolReplayIds } from "./tool-replay-evidence"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
+import { readLegacyImportedCheckpointReplayAliases } from "../../shared/tool-transcript-replay"
+import { getRawWorkerToolCallId, getWorkerToolUiKey, resolveToolResultOwnership } from "../../shared/tool-result-ownership"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -1029,6 +1032,20 @@ export function readThreadMessagesPage(
         responseBytes += extraBytes
         message.historical_tool_replay_id = earlier
       }
+      const legacyAliases = readPageLegacyReplayAliases(
+        database, request, orderedMessages, truncatedMessageIds, isForwardPage, cancellation
+      )
+      const aliasBytes = [...legacyAliases].reduce((bytes, [, target]) =>
+        bytes + jsonBytes({ legacy_checkpoint_replay_of: target }), 0)
+      // The exchange joins the view as a unit. Avoid transferring only some of
+      // its aliases if the page was already at the response byte budget.
+      if (responseBytes + aliasBytes <= byteBudget) {
+        responseBytes += aliasBytes
+        for (const message of orderedMessages) {
+          const canonical = legacyAliases.get(message.id)
+          if (canonical) message.legacy_checkpoint_replay_of = canonical
+        }
+      }
     }
     throwIfCancelled(cancellation)
     database.exec("COMMIT")
@@ -1078,4 +1095,129 @@ export function readThreadMessagesPage(
     }
     throw error
   }
+}
+
+function readPageLegacyReplayAliases(
+  database: DatabaseSync,
+  request: ThreadMessageHydrationReadRequest,
+  messages: readonly Message[],
+  truncatedIds: readonly string[],
+  forward: boolean,
+  cancellation: Int32Array
+): ReadonlyMap<string, string> {
+  const aliases = new Map<string, string>()
+  const { checkpointDirectory, threadId } = request
+  if (!checkpointDirectory || !/^[a-zA-Z0-9_-]+$/.test(threadId) || !messages.some((row) =>
+    (row.provider_occurrence ?? 1) > 1 &&
+    ((row.role === "assistant" && row.tool_calls?.length) || row.role === "tool")
+  )) return aliases
+  const ids = messages.filter((row) => (row.provider_occurrence ?? 1) > 1 &&
+    (row.role === "assistant" || row.role === "tool")).map(({ id }) => id)
+  if (!database.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table'
+    AND name = 'legacy_checkpoint_transcript_imports'`).get()) return aliases
+  const groups = new Map<string, { ids: Set<string>; assistant: boolean }>()
+  const readReceipts = database.prepare(`SELECT m.message_id, m.role, i.published_checkpoint_id
+    FROM thread_messages AS m JOIN legacy_checkpoint_transcript_imports AS i USING (thread_id, message_id)
+    WHERE m.thread_id = ? AND m.message_id IN (SELECT value FROM json_each(?))
+      AND i.owned_by_migration = 1 AND i.partial_version IS NULL AND i.rewrite_progress IS NULL
+      AND COALESCE(m.stream_authority, 0) = 0 AND m.goal_id IS NULL AND m.active_window_id IS NULL`)
+  const visibleReceipts = readReceipts.all(threadId, JSON.stringify(ids))
+  if (!visibleReceipts.length) return aliases
+  const clipped = new Set(truncatedIds)
+  const visible = (forward ? messages : messages.slice().reverse()).map((row) =>
+    clipped.has(row.id) ? { ...row, content_is_projection: true } : row
+  )
+  const before = visible[0]
+  const after = visible.at(-1)
+  const prior = before.role === "user" ? [] :
+    readLegacyReplayPageContext(database, threadId, before.ordinal, "before", cancellation)
+  const later = !after || after.role === "user" ? [] :
+    readLegacyReplayPageContext(database, threadId, after.ordinal, "after", cancellation)
+  const ordered = [...prior, ...visible, ...later]
+  const supplementalIds = [...prior, ...later].filter((row) => (row.provider_occurrence ?? 1) > 1)
+    .map(({ id }) => id)
+  const rows = supplementalIds.length
+    ? [...visibleReceipts, ...readReceipts.all(threadId, JSON.stringify(supplementalIds))]
+    : visibleReceipts
+  if (!rows.some((row) => row.role === "assistant")) return aliases
+  const first = ordered[0].ordinal
+  const last = ordered.at(-1)?.ordinal
+  if (first === undefined || last === undefined) return aliases
+  const physical = database.prepare(`SELECT message_id FROM thread_messages
+    WHERE thread_id = ? AND ordinal BETWEEN ? AND ? LIMIT ?`)
+    .all(threadId, first, last, ordered.length + 1)
+  const byId = new Map(ordered.map((row) => [row.id, row]))
+  if (physical.length !== ordered.length || physical.some(({ message_id: id }) =>
+    typeof id !== "string" || !byId.has(id)
+  )) return aliases
+  const missingSlots = resolveToolResultOwnership(ordered)
+  const outsideResult = database.prepare(`SELECT 1 FROM thread_messages
+    WHERE thread_id = ? AND role = 'tool' AND tool_call_id IN (?, ?) AND ordinal > ? LIMIT 1`)
+  for (const row of rows) {
+    if (typeof row.message_id !== "string" || typeof row.published_checkpoint_id !== "string" ||
+        row.published_checkpoint_id === NATIVE_DURABLE_CHECKPOINT_ID) continue
+    const stored = byId.get(row.message_id)
+    if (row.role === "assistant" && stored?.tool_calls?.some(({ id }, index) =>
+      !missingSlots.has(getWorkerToolUiKey(stored.id, id, index)) &&
+      outsideResult.get(threadId, id, getRawWorkerToolCallId(id), last)
+    )) continue
+    const group = groups.get(row.published_checkpoint_id) ?? { ids: new Set(), assistant: false }
+    group.assistant ||= row.role === "assistant"
+    group.ids.add(row.message_id)
+    groups.set(row.published_checkpoint_id, group)
+  }
+  const checkpointPath = join(checkpointDirectory, `${threadId}.sqlite`)
+  const visibleIds = new Set(ids)
+  let inspected = 0
+  for (const [source, group] of groups) {
+    if (!group.assistant) continue
+    if (inspected++ === 4) break
+    try {
+      const checkpoint = readLegacyReplayCheckpoint(checkpointPath, threadId, source, cancellation)
+      for (const [id, retained] of readLegacyImportedCheckpointReplayAliases(ordered, checkpoint, group.ids)) {
+        if (visibleIds.has(id)) aliases.set(id, retained)
+      }
+    } catch {
+      // A missing or unreadable historical checkpoint supplies no display proof.
+      throwIfCancelled(cancellation)
+    }
+  }
+  return aliases
+}
+
+function readLegacyReplayPageContext(
+  database: DatabaseSync, threadId: string, ordinal: number | undefined,
+  direction: "before" | "after", cancellation: Int32Array
+): Message[] {
+  if (ordinal === undefined) return []
+  const before = direction === "before"
+  const comparison = before ? "<" : ">"
+  const order = before ? "DESC" : "ASC"
+  const candidates = database.prepare(`SELECT message_id, role,
+      length(CAST(content_json AS BLOB)) + COALESCE(length(CAST(tool_calls_json AS BLOB)), 0)
+        + COALESCE(length(CAST(reasoning AS BLOB)), 0) AS bytes
+    FROM thread_messages WHERE thread_id = ? AND ordinal ${comparison} ?
+    ORDER BY ordinal ${order}, created_at ${order}, message_id ${order} LIMIT 64`)
+    .all(threadId, ordinal)
+  const ids: string[] = []
+  let bytes = 0
+  for (const row of candidates) {
+    throwIfCancelled(cancellation)
+    bytes += Number(row.bytes) + 128
+    if (typeof row.message_id !== "string" || bytes > 512 * 1024) break
+    ids.push(row.message_id)
+    if (row.role === "user" || row.role === "system") break
+  }
+  if (!ids.length) return []
+  const rows = readRowsById(database, threadId, ids, cancellation)
+  const fragments = readFragmentSummaries(database, threadId, ids, cancellation)
+  if (before) ids.reverse()
+  return ids.flatMap((id) => {
+    const row = rows.get(id)
+    if (!row) return []
+    const summary = fragments.get(id)
+    const { message, truncated } = rowToMessage(row, summary, cancellation)
+    return [truncated || (summary?.length ?? 0) > 0
+      ? { ...message, content_is_projection: true } : message]
+  })
 }

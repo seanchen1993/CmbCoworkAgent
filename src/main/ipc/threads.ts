@@ -250,6 +250,7 @@ import {
   readLatestCheckpointRuntimeTupleInWorker,
   readLatestCheckpointTupleInWorker
 } from "../checkpointer/runtime-projection-client"
+import { readLegacyReplayCheckpointAncestors } from "../checkpointer/runtime-projection-store"
 import { readThreadConversationPresenceForMutation } from "../services/thread-conversation-presence"
 import {
   cancelLegacySubagentTranscriptMigration,
@@ -4443,14 +4444,23 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       }
       const rawApiCall = captured?.rawApiCall ?? getCapturedRawApiCall(threadId)
       const latestCheckpoint = target ? null : await getLatestCheckpoint(threadId)
+      const checkpointId = latestCheckpoint?.checkpoint?.id
       const messages = captured
         ? buildExportMessages(captured.messages as CheckpointMessage[], true)
         : buildExportMessagesFromThreadMessages(
             mergeCheckpointAndPersistedThreadMessagesForSession(
               latestCheckpoint?.checkpoint,
               getThreadMessages(threadId),
-              latestCheckpoint?.checkpoint?.id
-                ? getLegacyImportedToolOccurrenceIds(threadId, latestCheckpoint.checkpoint.id)
+              checkpointId
+                ? getLegacyImportedToolOccurrenceIds(threadId, checkpointId, (sources) => {
+                    try {
+                      return readLegacyReplayCheckpointAncestors(
+                        getThreadCheckpointPath(threadId), threadId, checkpointId, sources
+                      )
+                    } catch {
+                      return new Set()
+                    }
+                  })
                 : undefined
             )
           )

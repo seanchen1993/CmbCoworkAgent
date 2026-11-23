@@ -8,7 +8,8 @@ import {
   alignReplayedToolExchanges,
   findReplayedToolExchangeAliases,
   getAssistantReplayContent,
-  prepareToolTranscriptReplayMerge
+  prepareToolTranscriptReplayMerge,
+  readLegacyImportedCheckpointReplayAliases
 } from "./tool-transcript-replay"
 import { getWorkerToolUiKey, resolveToolResultOwnership } from "./tool-result-ownership"
 import { normalizeMessageContent } from "./thread-message-content"
@@ -47,7 +48,10 @@ function exchange(occurrence = 1, args = { path: "fixture" }, content = "ok"): M
 }
 
 describe("tool transcript replay", () => {
-  it.each(["projected", "imported-assistant", "imported-batch", "pending", "same-prose"])(
+  it.each([
+    "projected", "imported-assistant", "imported-batch", "imported-hidden-afterward",
+    "imported-later-goal", "pending", "same-prose", "same-prose-independent"
+  ])(
     "keeps distinct raw result versions that share a stored projection (%s)",
     (mode) => {
       const [first, result] = exchange()
@@ -57,29 +61,46 @@ describe("tool transcript replay", () => {
       const resource = (uri: string) => [...projected, { type: "resource_link", uri }]
       const firstRaw = resource("fixture://first")
       const secondRaw = resource("fixture://second")
-      const firstAssistant = { ...first, content: mode === "same-prose" ? "Second" : "First" }
+      const firstAssistant = { ...first, content: mode.startsWith("same-prose") ? "Second" : "First" }
       const secondAssistant = { ...second, content: "Second" }
       const rawCopy = { ...copy, content: secondAssistant.content }
+      const storedCopy = mode === "imported-later-goal"
+        ? { ...rawCopy, goal_id: "continued-goal", active_window_id: "continued-window" }
+        : rawCopy
+      const copiedResult = mode === "same-prose-independent" ? resource("fixture://third") : secondRaw
+      const next = { ...user, id: "next-user" }
       const durable = [
         user, firstAssistant, { ...result, content: projected },
         secondAssistant, { ...secondResult, content: projected },
         ...(mode === "imported-batch" ? [rawCopy, { ...copyResult, content: secondRaw }]
-          : mode === "imported-assistant" || mode === "pending" ? [rawCopy] : [])
+          : mode.startsWith("imported") || mode === "pending" ? [storedCopy] : []),
+        next
       ]
       const checkpoint = [
         user, firstAssistant, { ...result, content: firstRaw },
         secondAssistant, { ...secondResult, content: secondRaw },
-        rawCopy, { ...copyResult, content: secondRaw }
+        rawCopy, { ...copyResult, content: copiedResult }, next
       ]
       const imported = mode.startsWith("imported") ? new Set([copy.id, copyResult.id]) : undefined
-      const replay = prepareToolTranscriptReplayMerge(durable, checkpoint, undefined, imported)
+      const source = { channel_values: { messages: [
+        ...checkpointRows(checkpoint),
+        ...(mode === "imported-hidden-afterward" ? [hiddenTeam] : [])
+      ] } }
+      const turns = readCheckpointReplayTurns(source)
+      const replay = prepareToolTranscriptReplayMerge(durable, checkpoint, turns, imported)
       const merged = mergeCheckpointAuthorityTranscriptMessages(replay.checkpoint, replay.durable)
+      const keepCopy = mode === "pending" || mode === "imported-later-goal"
       expect(merged.map(({ id }) => id)).toEqual([
         user.id, first.id, result.id, second.id, secondResult.id,
-        ...(mode === "pending" ? [copy.id] : [])
+        ...(mode === "same-prose-independent" ? [copy.id, copyResult.id] : keepCopy ? [copy.id] : []),
+        "next-user"
       ])
       expect(merged.filter(({ role }) => role === "tool").map(({ content }) => content))
-        .toEqual([firstRaw, secondRaw])
+        .toEqual([firstRaw, secondRaw, ...(mode === "same-prose-independent" ? [copiedResult] : [])])
+      if (imported) {
+        const aliases = readLegacyImportedCheckpointReplayAliases(durable, source, imported)
+        expect(aliases.get(copy.id)).toBe(keepCopy ? undefined : second.id)
+      }
     }
   )
 
@@ -2625,4 +2646,27 @@ describe("tool transcript replay", () => {
     expect(payloadReads).toBeLessThan(versionCount * 50)
     }
   )
+
+  it("bounds work when archived tool payloads project to one value and prose has changed", () => {
+    let payloadReads = 0
+    const count = 300
+    const body = (index: number, revised: boolean) => [{
+      type: "text",
+      get text() {
+        payloadReads++
+        return "Same stored value"
+      }
+    }, ...(revised ? [{ type: "resource_link", uri: `fixture://resource/${index}` }] : [])]
+    const rows = (revised: boolean) => [user, ...Array.from({ length: count }, (_, index) => {
+      const [assistant, tool] = exchange(index + 1)
+      return [
+        { ...assistant, content: `${revised ? "Checkpoint" : "Stored"} reply ${index}` },
+        { ...tool, content: body(index, revised) }
+      ]
+    }).flat()]
+    const replay = prepareToolTranscriptReplayMerge(rows(false), rows(true))
+    expect(replay.durable).toHaveLength(2 * count + 1)
+    expect(replay.checkpoint).toHaveLength(2 * count + 1)
+    expect(payloadReads).toBeLessThan(32 * count)
+  })
 })

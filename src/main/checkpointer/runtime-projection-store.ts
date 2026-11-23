@@ -755,14 +755,14 @@ function checkpointSnapshotChainFitsPresenceBudget(
     visited.add(cursor)
     const snapshot = database
       .prepare(
-        `SELECT parent_checkpoint_id, suffix
+        `SELECT parent_checkpoint_id, length(CAST(suffix AS BLOB)) AS suffix_bytes
          FROM checkpoint_message_snapshots
          WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
          LIMIT 1`
       )
       .get(row.threadId, row.checkpointNs, cursor) as Record<string, unknown> | undefined
-    if (!snapshot) return false
-    totalBytes += payloadBytes(normalizePayload(snapshot.suffix, "message snapshot"))
+    if (!snapshot || typeof snapshot.suffix_bytes !== "number") return false
+    totalBytes += snapshot.suffix_bytes
     if (totalBytes > CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET) return false
     cursor =
       snapshot.parent_checkpoint_id === null || snapshot.parent_checkpoint_id === undefined
@@ -770,6 +770,56 @@ function checkpointSnapshotChainFitsPresenceBudget(
         : String(snapshot.parent_checkpoint_id)
   }
   return true
+}
+
+export function readLegacyReplayCheckpoint(
+  path: string, threadId: string, checkpointId: string, cancellation: Int32Array
+): unknown {
+  const source = resolveForegroundCheckpointReadPath(path)
+  if (!existsSync(source)) return
+  const database = new DatabaseSync(source, { readOnly: true, timeout: 100 })
+  try {
+    database.exec("BEGIN")
+    throwIfCancelled(cancellation)
+    const selected = database.prepare(`SELECT length(CAST(checkpoint AS BLOB)) AS bytes
+      FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`)
+      .get(threadId, checkpointId)
+    if (typeof selected?.bytes !== "number" || selected.bytes > CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET)
+      return
+    const row = readStoredCheckpointRow(database, threadId, "", false, undefined, checkpointId)
+    if (!row) return
+    const checkpoint = objectRecord(parseTypedJson(row.type, row.checkpoint, "checkpoint"))
+    if (!checkpoint) return
+    const reference = objectRecord(objectRecord(checkpoint.channel_values)?.messages)
+    if (reference?.[EXTERNAL_MESSAGES_MARKER] === true &&
+        !checkpointSnapshotChainFitsPresenceBudget(database, row, cancellation)) return
+    return hydrateRawCheckpointMessages(database, row, checkpoint, cancellation)
+  } finally {
+    database.close()
+  }
+}
+
+export function readLegacyReplayCheckpointAncestors(
+  path: string, threadId: string, checkpointId: string, sources: readonly string[]
+): Set<string> {
+  const source = resolveForegroundCheckpointReadPath(path)
+  if (!existsSync(source)) return new Set()
+  const database = new DatabaseSync(source, { readOnly: true, timeout: 100 })
+  try {
+    const rows = database.prepare(`WITH RECURSIVE lineage(id) AS (
+      SELECT ?
+      UNION
+      SELECT checkpoint.parent_checkpoint_id FROM checkpoints AS checkpoint
+      JOIN lineage ON checkpoint.checkpoint_id = lineage.id
+      WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
+        AND checkpoint.parent_checkpoint_id IS NOT NULL
+      LIMIT ${CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT}
+    ) SELECT id FROM lineage WHERE id IN (SELECT value FROM json_each(?))`)
+      .all(checkpointId, threadId, JSON.stringify(sources))
+    return new Set(rows.flatMap(({ id }) => typeof id === "string" ? [id] : []))
+  } finally {
+    database.close()
+  }
 }
 
 function isVisibleSerializedCheckpointMessage(raw: unknown): boolean {
@@ -1875,8 +1925,7 @@ function buildDurableLegacyCheckpointMessages(
     id: message.id,
     role: message.role,
     content: message.content,
-    tool_calls: message.stableSourceId && !message.providerIdentityDeclared
-      ? message.replayCalls : undefined,
+    tool_calls: message.stableSourceId ? message.replayCalls : undefined,
     tool_call_id: message.tool_call_id,
     provider_source_id: message.provider_source_id,
     provider_occurrence: message.provider_occurrence,

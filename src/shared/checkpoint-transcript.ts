@@ -14,6 +14,7 @@ import {
 import type { RoleCollisionMessage } from "./message-role-collision"
 import { buildSubagentTaskInvocationIdentity } from "./subagent-invocation-identity"
 import { resolveToolResultOwnership, type ToolOwnershipMessage } from "./tool-result-ownership"
+import { extractVisibleReasoning } from "./model-reasoning"
 import { isInternalGoalPrompt, isVisibleTranscriptMessage } from "./transcript-visibility"
 
 export {
@@ -99,6 +100,7 @@ export interface CompletedToolReplayObservation {
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
   historical_tool_replay_id?: string
+  legacy_checkpoint_replay_of?: string
   provider_source_id?: string
   provider_occurrence?: number
   role?: string
@@ -646,6 +648,36 @@ export interface CheckpointReplayTurns {
   uniqueMessageIds: ReadonlySet<string>
   rawResultByCall: ReadonlyMap<string, string>
   rawToolTranscript: readonly ToolOwnershipMessage[]
+}
+
+export function readCheckpointToolReplayMessages(checkpoint: unknown): CheckpointAuthorityTranscriptMessage[] {
+  const raw = getCheckpointMessages(checkpoint)
+  return deriveCheckpointTranscriptIndex(checkpoint).visibleMessages.flatMap(({ rawIndex }) => {
+    const message = rawIndex === undefined ? undefined : raw[rawIndex]
+    if (rawIndex === undefined || !isRecord(message)) return []
+    const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+    const metadata = isRecord(message.additional_kwargs) ? message.additional_kwargs :
+      isRecord(kwargs?.additional_kwargs) ? kwargs.additional_kwargs : undefined
+    const role = getMessageRole(message)
+    const status = readString(message.status) ?? readString(kwargs?.status)
+    return [{
+      id: getMessageId(message, rawIndex),
+      ...((role === "assistant" || role === "tool") && getMessageProviderTupleFromMetadata(metadata)),
+      role,
+      content: role === "user"
+        ? readString(metadata?.cmb_visible_user_message) || getMessageContent(message)
+        : getMessageContent(message),
+      reasoning: role === "assistant" ? extractVisibleReasoning(message) || undefined : undefined,
+      tool_calls: role === "assistant" ? getMessageToolCalls(message) : undefined,
+      tool_call_id: readString(message.tool_call_id) ?? readString(kwargs?.tool_call_id),
+      name: role === "tool" ? readString(message.name) ?? readString(kwargs?.name) : undefined,
+      status,
+      is_error: status === "error" || message.is_error === true || kwargs?.is_error === true ||
+        metadata?.is_error === true ? true : undefined,
+      goal_id: readString(message.goal_id) ?? readString(kwargs?.goal_id),
+      active_window_id: readString(message.active_window_id) ?? readString(kwargs?.active_window_id)
+    }]
+  })
 }
 
 /** Use original user turns to confirm ownership when their visible projection omits a boundary. */

@@ -16,6 +16,9 @@ const title = "Tool transcript replay fixture"
 const threadId = "tool-replay-e2e"
 const structuredThreadId = "structured-tool-replay-e2e"
 const projectedThreadId = "projected-tool-replay-e2e"
+const importedThreadId = "legacy-imported-tool-replay-e2e"
+const projectedTitle = "Projected tool transcript replay fixture"
+const importedTitle = "Legacy imported tool transcript replay fixture"
 const firstNoticeReply = "Checking current data"
 const storedNoticeDraft = `${firstNoticeReply} with beta findings`
 const finalNoticeReply = `${storedNoticeDraft} confirmed`
@@ -396,7 +399,7 @@ async function seedStructuredHistory(): Promise<void> {
   }
 }
 
-async function seedProjectedHistory(): Promise<Message[]> {
+async function seedProjectedHistory(id = projectedThreadId, legacy = false): Promise<Message[]> {
   const db = await import("../src/main/db")
   const { getThreadCheckpointPath } = await import("../src/main/storage")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver")
@@ -406,25 +409,35 @@ async function seedProjectedHistory(): Promise<Message[]> {
   const secondRaw = [...body, { type: "resource_link", uri: "https://example.com/second" }]
   const revised = { ...assistant, content: "Checking the revised result" }
   const end = { ...user, id: "after-projected-tools", content: "Continue with the next request" }
+  const copy = setOccurrence(revised, 3)
   const durable = [
     user, assistant, { ...tool, content: body }, setOccurrence(revised, 2),
-    setOccurrence({ ...tool, content: body }, 2), end
+    setOccurrence({ ...tool, content: body }, 2), ...(legacy ? [copy] : []), end
   ]
+  const checkpointId = `${id}-checkpoint`
   await db.initializeDatabase()
   try {
-    db.createThread(projectedThreadId, {
-      title: "Projected tool transcript replay fixture", workspacePath: workspace, agentMode: "normal"
+    db.createThread(id, {
+      title: legacy ? importedTitle : projectedTitle, workspacePath: workspace, agentMode: "normal"
     })
-    db.upsertThreadMessages(projectedThreadId, durable)
+    db.upsertThreadMessages(id, durable)
+    if (legacy) {
+      db.getDb().run(`INSERT INTO legacy_checkpoint_transcript_migrations
+        (thread_id, checkpoint_id, total_messages, next_index, status, updated_at, search_projection_state)
+        VALUES (?, ?, 8, 8, 'complete', ?, 'complete')`, [id, checkpointId, Date.now()])
+      db.getDb().run(`INSERT INTO legacy_checkpoint_transcript_imports
+        (thread_id, message_id, content_key, published_checkpoint_id)
+        VALUES (?, ?, ?, ?)`, [id, copy.id, "test legacy assistant import", checkpointId])
+    }
     await db.flush()
   } finally {
     await db.closeDatabase()
   }
-  const saver = new SqlJsSaver(getThreadCheckpointPath(projectedThreadId))
+  const saver = new SqlJsSaver(getThreadCheckpointPath(id))
   try {
-    await saver.put({ configurable: { thread_id: projectedThreadId, checkpoint_ns: "" } }, {
+    await saver.put({ configurable: { thread_id: id, checkpoint_ns: "" } }, {
       v: 1,
-      id: "projected-replay-checkpoint",
+      id: checkpointId,
       ts: new Date().toISOString(),
       channel_values: { messages: [
         user, assistant, { ...tool, content: firstRaw },
@@ -444,6 +457,7 @@ interface TestWindow {
     threads: {
       exportSession(id: string): Promise<{ success: boolean; error?: string }>
       getMessages(id: string): Promise<Message[]>
+      getMessagesPage(id: string, options: { limit: number }): Promise<{ messages: Message[] }>
       bootstrapLegacyCheckpointTranscript(id: string): Promise<{ migration: { migratedMessages: number } } | null>
     }
   }
@@ -455,6 +469,7 @@ async function main(): Promise<void> {
   const rawRowCount = await seedHistory()
   await seedStructuredHistory()
   const projectedDurable = await seedProjectedHistory()
+  const importedDurable = await seedProjectedHistory(importedThreadId, true)
   const binary = createRequire(import.meta.url)("electron") as string
   const env: Record<string, string> = {
     CMB_E2E_ELECTRON_BIN: binary,
@@ -677,6 +692,23 @@ async function main(): Promise<void> {
           projectedThreadId
         )
         assert.deepEqual(projectedRows.map(({ id }) => id), projectedDurable.map(({ id }) => id))
+        const oldPage = await page.evaluate(
+          (id) => (window as unknown as TestWindow).api.threads.getMessagesPage(id, { limit: 2 }),
+          importedThreadId
+        )
+        assert.deepEqual(oldPage.messages.map(({ id }) => id), importedDurable.slice(-2).map(({ id }) => id))
+        assert.equal(
+          oldPage.messages.find(({ id }) => id.endsWith(":assistant:3"))?.legacy_checkpoint_replay_of,
+          setOccurrence(projectedDurable[1], 2).id
+        )
+        await page.getByText(importedTitle, { exact: true }).first().click({ timeout: 30_000 })
+        const oldChat = page.locator(`[data-chat-thread-id="${importedThreadId}"]`)
+        await oldChat.getByText("Checking the revised result", { exact: true }).first().waitFor()
+        assert.equal(await oldChat.getByText("Checking the revised result", { exact: true }).count(), 1)
+        const oldRows = await page.evaluate(
+          (id) => (window as unknown as TestWindow).api.threads.getMessages(id), importedThreadId
+        )
+        assert.deepEqual(oldRows.map(({ id }) => id), importedDurable.map(({ id }) => id))
         await page.screenshot({
           animations: "disabled",
           path: path.join(output, `${phase}.png`),
