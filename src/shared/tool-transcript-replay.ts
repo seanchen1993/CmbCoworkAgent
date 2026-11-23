@@ -59,6 +59,16 @@ const langGraphToolResultPrefix =
 const generatedAssistantId = /^current-run-assistant:[0-9a-f-]{36}$/i
 const botFileDeliveryToolName = "bot_deliver_files"
 
+function indexAssistantTurns(rows: readonly { id: string; role?: string }[]): Map<string, number> {
+  const turns = new Map<string, number>()
+  let turn = 0
+  for (const { role, id } of rows) {
+    if (role === "user" || role === "system") turn++
+    if (role === "assistant") turns.set(id, turn)
+  }
+  return turns
+}
+
 export function getAssistantReplayContent(
   aliases: ReadonlyMap<string, string>,
   read: (id: string) => TranscriptMessage | undefined
@@ -512,12 +522,7 @@ function findToolSlotCopyAliases<T extends TranscriptMessage>(
   toolReplayAssistantIds?: Set<string>
 ) {
   const rawRows = checkpointTurns?.rawToolTranscript ?? messages
-  const rawTurnByAssistant = new Map<string, number>()
-  let turn = 0
-  for (const row of rawRows) {
-    if (row.role === "user" || row.role === "system") turn++
-    if (row.role === "assistant") rawTurnByAssistant.set(row.id, turn)
-  }
+  const rawTurnByAssistant = indexAssistantTurns(rawRows)
   const assistantTextKey = (row: T) =>
     `${rawTurnByAssistant.get(row.id)}\u0000${getMessageProviderSourceId(row)}`
   const firstText = new Map<string, string>()
@@ -1476,6 +1481,35 @@ function selectCheckpointReplayAliases<T extends TranscriptMessage>(
   return preserveReplayToolBindings(replay, independent, checkpoint.ownership)
 }
 
+function keepDistinctCheckpointTurns<T extends TranscriptMessage>(
+  targets: Map<AnchoredToolExchange<T>, AnchoredToolExchange<T>>,
+  checkpointTurns: CheckpointReplayTurns
+): void {
+  const rawTurns = indexAssistantTurns(checkpointTurns.rawToolTranscript)
+  const byTarget = new Map<AnchoredToolExchange<T>, AnchoredToolExchange<T>[]>()
+  for (const [copy, target] of targets) {
+    const group = byTarget.get(target) ?? []
+    group.push(copy)
+    byTarget.set(target, group)
+  }
+  for (const [target, copies] of byTarget) {
+    if (copies.length < 2) continue
+    const preferred =
+      copies.find((copy) => isExactToolExchangeReplay(target.exchange, copy.exchange)) ?? copies[0]
+    const retainedTurn = rawTurns.get(preferred.exchange.assistant.id)
+    for (const copy of copies) {
+      if (
+        rawTurns.get(copy.exchange.assistant.id) !== retainedTurn &&
+        !isExactToolExchangeReplay(preferred.exchange, copy.exchange)
+      ) {
+        // Keep the other notification's presentation. Occurrence reservation
+        // below can give it space without consuming this durable row.
+        targets.delete(copy)
+      }
+    }
+  }
+}
+
 type CheckpointAlignment<T> = Array<[copy: T, durable: T]>
 
 function reserveCheckpointVersionIds<T extends TranscriptMessage>(
@@ -1839,6 +1873,7 @@ export function prepareToolTranscriptReplayMerge<T extends TranscriptMessage>(
       }
     }
   }
+  if (checkpointTurns) keepDistinctCheckpointTurns(targets, checkpointTurns)
   const checkpointAliases = selectCheckpointReplayAliases(replay, checkpoint, targets)
   const replayWithoutCopies = checkpointAliases.size
     ? replay.filter(({ id }) => !checkpointAliases.has(id))

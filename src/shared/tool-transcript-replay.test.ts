@@ -511,6 +511,56 @@ describe("tool transcript replay", () => {
     }
   )
 
+  it("preserves distinct replies from two hidden turns that contain the same tool outcome", () => {
+    const [earlier, previousResult] = exchange()
+    const [current] = exchange(2)
+    const currentUser = { ...user, id: "current-user" }
+    const resultId = "ad506755-5e42-4cef-834f-eb1be0f11d27"
+    const result = {
+      ...previousResult,
+      id: resultId,
+      provider_source_id: resultId,
+      content: "Fresh result"
+    }
+    const alpha = { ...earlier, content: "Checking alpha" }
+    const beta = { ...current, content: "Checking beta" }
+    const betaResult = {
+      ...result,
+      id: `${resultId}::cmb-same-role-duplicate:tool:2`,
+      provider_occurrence: 2
+    }
+    const durable = [user, earlier, previousResult, currentUser, current, result]
+    const checkpoint = [currentUser, alpha, result, beta, betaResult]
+    const turns = readCheckpointReplayTurns({
+      channel_values: {
+        messages: [
+          checkpointRows([currentUser])[0],
+          hiddenTeam,
+          ...checkpointRows([alpha, result]),
+          { ...hiddenTeam, id: "second-hidden-notice" },
+          ...checkpointRows([beta, betaResult])
+        ]
+      }
+    })
+    const prepared = prepareToolTranscriptReplayMerge(durable, checkpoint, turns)
+    const merged = mergeCheckpointAuthorityTranscriptMessages(
+      prepared.checkpoint,
+      prepared.durable,
+      { useStableProviderOccurrences: true }
+    )
+    const aliases = findReplayedToolExchangeAliases(merged)
+    expect(merged.filter(({ id }) => !aliases.has(id)).map(({ content }) => content)).toEqual([
+      user.content,
+      earlier.content,
+      previousResult.content,
+      currentUser.content,
+      alpha.content,
+      result.content,
+      beta.content,
+      result.content
+    ])
+  })
+
   it.each([false, true])(
     "finds the correct structured result variant for a prose revision (trimmed %s)",
     (trimmed) => {
