@@ -167,30 +167,24 @@ describe("active requirement design entry", () => {
 })
 
 describe("requirement design prompt", () => {
-  it("describes the attached requirement as the source of truth", () => {
+  it("identifies the attached requirement file and target function", () => {
     const prompt = buildRequirementDesignPrompt("FR2 待办总结", "prd/fr-2-doc.md")
 
-    expect(prompt).toContain("需求文件「prd/fr-2-doc.md」")
-    expect(prompt).toContain("为「FR2 待办总结」设计高保真交互原型")
-    expect(prompt).toContain("其他资料仅作补充")
-    expect(prompt).toContain("以需求文件为准")
-    expect(prompt).toContain("可独立运行")
+    expect(prompt).toBe(
+      "请根据已附加的需求文件「prd/fr-2-doc.md」，为「FR2 待办总结」设计高保真交互原型。"
+    )
   })
 
-  it("builds a single-session prompt from the complete PRD", () => {
+  it("builds a concise full-PRD design prompt", () => {
     const prompt = buildFullPrdDesignPrompt("prd/product.md")
 
-    expect(prompt).toContain("完整 PRD 文档「prd/product.md」")
-    expect(prompt).toContain("整个产品")
-    expect(prompt).toContain("信息架构")
+    expect(prompt).toBe("请根据已附加的需求PRD 文档「prd/product.md」，设计高保真 UI 交互原型。")
   })
 
-  it("builds a prototype prompt for a requirement-space document attachment", () => {
+  it("builds a concise requirement-space prototype prompt", () => {
     const prompt = buildSpaceRequirementDesignPrompt("资金结算")
 
-    expect(prompt).toContain("为「资金结算」生成高保真交互原型")
-    expect(prompt).toContain("需求文档是业务范围、流程和规则的唯一依据")
-    expect(prompt).toContain("完整原型文件")
+    expect(prompt).toBe("请根据已附加的需求文档，为「资金结算」生成高保真交互原型。")
   })
 })
 

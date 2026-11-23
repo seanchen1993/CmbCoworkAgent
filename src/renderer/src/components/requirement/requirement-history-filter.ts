@@ -1,6 +1,6 @@
 import type { RequirementRecord, RequirementUser } from "./requirement-data"
 
-export type RequirementSourceFilter = "all" | "local" | "remote" | "space"
+export type RequirementSourceFilter = "all" | "local" | "space"
 
 function normalizeUserIdentity(value: string): string {
   return value.trim().toLocaleLowerCase()
@@ -52,8 +52,7 @@ export function filterRequirements(
       item.sourceName,
       item.initialDescription,
       item.status,
-      item.owner?.name,
-      ...(item.collaborators ?? []).map((user) => user.name)
+      item.owner?.name
     ]
       .filter(Boolean)
       .join(" ")

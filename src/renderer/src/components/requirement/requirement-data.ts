@@ -54,9 +54,8 @@ export type RequirementRecord = {
   needDesign: NeedDesignChoice
   prdManifest: RequirementPrdManifest
   prd: "是" | "否"
-  origin?: "local" | "remote" | "space"
+  origin?: "local" | "space"
   owner?: RequirementUser
-  collaborators?: RequirementUser[]
   readOnly?: boolean
   functionCount?: number
 }

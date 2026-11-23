@@ -13,7 +13,6 @@ import { REQUIREMENT_SPACE_LIST_QUERY_KEY } from "./requirement-navigation"
 const sourceFilters: Array<{ value: RequirementSourceFilter; label: string }> = [
   { value: "all", label: "全部" },
   { value: "local", label: "本地" },
-  { value: "remote", label: "远端" },
   { value: "space", label: "需求空间3.0" }
 ]
 
@@ -72,14 +71,13 @@ export function RequirementHistoryView({
     return () => window.removeEventListener("keydown", handleShortcut)
   }, [])
 
-  const visibleCount =
-    filterRequirements(requirements, {
-      currentUser,
-      mineOnly,
-      query,
-      sourceFilter,
-      systemId: selectedSystemId
-    }).length + (!mineOnly && (sourceFilter === "all" || sourceFilter === "remote") ? 1 : 0)
+  const visibleCount = filterRequirements(requirements, {
+    currentUser,
+    mineOnly,
+    query,
+    sourceFilter,
+    systemId: selectedSystemId
+  }).length
 
   return (
     <TooltipProvider delayDuration={180}>
@@ -102,34 +100,21 @@ export function RequirementHistoryView({
                 aria-label="需求来源筛选"
               >
                 {sourceFilters.map((filter) => {
-                  const unavailable = filter.value === "remote"
-                  const button = (
+                  return (
                     <button
                       key={filter.value}
                       type="button"
-                      disabled={unavailable}
                       aria-pressed={sourceFilter === filter.value}
                       onClick={() => onSourceFilterChange(filter.value)}
                       className={cn(
                         "h-7 rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                         sourceFilter === filter.value
                           ? "bg-background-elevated text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground",
-                        unavailable && "cursor-not-allowed opacity-50"
+                          : "text-muted-foreground hover:text-foreground"
                       )}
                     >
                       {filter.label}
                     </button>
-                  )
-                  return unavailable ? (
-                    <Tooltip key={filter.value}>
-                      <TooltipTrigger asChild>
-                        <span>{button}</span>
-                      </TooltipTrigger>
-                      <TooltipContent>敬请期待</TooltipContent>
-                    </Tooltip>
-                  ) : (
-                    button
                   )
                 })}
               </div>

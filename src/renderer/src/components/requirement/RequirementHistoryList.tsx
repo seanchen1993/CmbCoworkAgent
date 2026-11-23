@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useMemo, useState } from "react"
 import {
   AlertTriangle,
   ChevronLeft,
@@ -10,7 +10,7 @@ import {
   Trash2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Avatar, AvatarFallback, AvatarGroup } from "@/components/ui/avatar"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import {
   Dialog,
   DialogContent,
@@ -27,7 +27,6 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,10 +41,7 @@ import {
   type RequirementRecord,
   type RequirementUser
 } from "./requirement-data"
-import {
-  filterRequirements,
-  type RequirementSourceFilter
-} from "./requirement-history-filter"
+import { filterRequirements, type RequirementSourceFilter } from "./requirement-history-filter"
 import { RequirementStatusTags } from "./RequirementStatusTags"
 import { RequirementListLoading } from "./RequirementListLoading"
 import { findRequirementDesignEntry } from "@/lib/requirement-design-entry"
@@ -91,92 +87,10 @@ function avatarToneClass(value: string): string {
 }
 
 function sourceTagClass(origin: RequirementRecord["origin"]): string {
-  if (origin === "remote") {
-    return "bg-[#e6f8f6] text-[#14a89d] dark:bg-[#14a89d]/15 dark:text-[#62d8cf]"
-  }
   if (origin === "space") {
     return "bg-[#f1eaff] text-[#8b5cf6] dark:bg-[#8b5cf6]/16 dark:text-[#b9a0ff]"
   }
   return "bg-[#edf1ff] text-[#5570f6] dark:bg-[#5570f6]/16 dark:text-[#9eafff]"
-}
-
-function RequirementAvatars({ users }: { users: RequirementUser[] }): React.JSX.Element {
-  const [open, setOpen] = useState(false)
-  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const clearCloseTimer = (): void => {
-    if (!closeTimerRef.current) return
-    clearTimeout(closeTimerRef.current)
-    closeTimerRef.current = null
-  }
-  const show = (): void => {
-    clearCloseTimer()
-    setOpen(true)
-  }
-  const hide = (): void => {
-    clearCloseTimer()
-    closeTimerRef.current = setTimeout(() => setOpen(false), 100)
-  }
-
-  useEffect(() => clearCloseTimer, [])
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          onPointerEnter={show}
-          onPointerLeave={hide}
-          onFocus={show}
-          onBlur={hide}
-          className="ml-0.5 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label={`远端用户 ${users.length} 人：${users.map((user) => user.name).join("、")}`}
-        >
-          <AvatarGroup>
-            {users.slice(0, 3).map((user) => (
-              <Avatar key={user.id} className="size-6 ring-2 ring-background-elevated">
-                <AvatarFallback
-                  className={cn("text-[10px] font-semibold", avatarToneClass(user.name))}
-                >
-                  {initials(user.name)}
-                </AvatarFallback>
-              </Avatar>
-            ))}
-          </AvatarGroup>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        side="bottom"
-        align="start"
-        sideOffset={7}
-        className="z-[60] w-56 p-2.5"
-        onOpenAutoFocus={(event) => event.preventDefault()}
-        onCloseAutoFocus={(event) => event.preventDefault()}
-        onPointerEnter={show}
-        onPointerLeave={hide}
-      >
-        <div className="mb-2 text-[11px] font-medium text-muted-foreground">
-          远端用户 · {users.length}
-        </div>
-        <div className="space-y-1.5">
-          {users.map((user) => (
-            <div key={user.id} className="flex items-center gap-2 rounded-md px-1 py-0.5">
-              <Avatar className="size-6">
-                <AvatarFallback
-                  className={cn("text-[10px] font-semibold", avatarToneClass(user.name))}
-                >
-                  {initials(user.name)}
-                </AvatarFallback>
-              </Avatar>
-              <span className="min-w-0 truncate text-xs font-medium text-foreground">
-                {user.name}/{user.id}
-              </span>
-            </div>
-          ))}
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
 }
 
 export function RequirementHistoryList({
@@ -291,7 +205,6 @@ export function RequirementHistoryList({
                 const owner = item.owner ?? (item.origin === "local" ? currentUser : null)
                 const spaceDesign =
                   item.origin === "space" ? findRequirementDesignEntry(item.id) : null
-                const collaborators = item.collaborators ?? []
                 const developmentStatus =
                   item.developmentThreadIds.length > 0 ||
                   developingRequirementIds.has(item.id) ||
@@ -327,12 +240,13 @@ export function RequirementHistoryList({
                     }}
                   >
                     <div className="flex items-center gap-2 pr-9">
-                      <span
-                        className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60"
-                      >
+                      <span className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded-md bg-muted/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60">
                         <span
                           aria-hidden
-                          className={cn("size-1.5 shrink-0 rounded-full", systemTagToneClass(item.systemId))}
+                          className={cn(
+                            "size-1.5 shrink-0 rounded-full",
+                            systemTagToneClass(item.systemId)
+                          )}
                         />
                         {item.system}
                       </span>
@@ -349,11 +263,7 @@ export function RequirementHistoryList({
                           sourceTagClass(item.origin)
                         )}
                       >
-                        {item.origin === "remote"
-                          ? "远端"
-                          : item.origin === "space"
-                            ? "需求空间3.0"
-                            : "本地"}
+                        {item.origin === "space" ? "需求空间3.0" : "本地"}
                       </span>
                       {item.origin !== "space" && isRequirementPublished(item) ? (
                         <span
@@ -476,8 +386,6 @@ export function RequirementHistoryList({
                         />
                         {item.origin === "space" && item.status ? (
                           <RequirementSpaceStatusTag status={item.status} />
-                        ) : collaborators.length ? (
-                          <RequirementAvatars users={collaborators} />
                         ) : (
                           <span />
                         )}
@@ -568,10 +476,7 @@ export function RequirementHistoryList({
             <ChevronRight className="size-4" />
           </button>
           <Select value={String(pageSize)} onValueChange={changePageSize}>
-            <SelectTrigger
-              className="ml-1 h-8 w-[104px] rounded-lg text-xs"
-              aria-label="每页条数"
-            >
+            <SelectTrigger className="ml-1 h-8 w-[104px] rounded-lg text-xs" aria-label="每页条数">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
