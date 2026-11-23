@@ -24,6 +24,19 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+/** Even incomplete legacy calls participate in result ownership. */
+const noCalls: readonly string[] = []
+
+function ownedCallIds(assistant: TranscriptMessage): readonly string[] {
+  if (assistant.role !== "assistant" || !Array.isArray(assistant.tool_calls)) return noCalls
+  const ids: string[] = []
+  for (const value of assistant.tool_calls) {
+    const id = record(value)?.id
+    if (typeof id === "string" && id) ids.push(id)
+  }
+  return ids
+}
+
 function readCallIds(assistant: TranscriptMessage): ReadonlySet<string> | undefined {
   if (
     assistant.role !== "assistant" ||
@@ -62,7 +75,7 @@ function readExchange<T extends TranscriptMessage>(
       continue
     }
     if (precedingCalls === undefined) {
-      precedingCalls = start > 0 ? (readCallIds(messages[start - 1]) ?? null) : null
+      precedingCalls = start > 0 ? new Set(ownedCallIds(messages[start - 1])) : null
     }
     if (
       precedingCalls?.has(id) ||
@@ -188,7 +201,7 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(
       exchanges.set(key, ambiguous || exchanges.has(key) ? null : { exchange, position, anchor })
       index = exchange.end
     } else {
-      for (const id of readCallIds(message) ?? []) unmatchedCallIds.add(id)
+      for (const id of ownedCallIds(message)) unmatchedCallIds.add(id)
       index++
     }
     if (message.role === "assistant") position++
@@ -335,34 +348,50 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
   const aliases = new Map<string, string>()
   const seen = new Map<string, ToolExchange<T>>()
   const completedResults = new Map<string, T>()
-  const unmatchedCallIds = new Set<string>()
+  const deferredCalls = new Set<string>()
+  const ambiguousCalls = new Set<string>()
   for (let index = 0; index < messages.length; ) {
     const message = messages[index]
     if (message.role === "user" || message.role === "system") {
       seen.clear()
       completedResults.clear()
     }
-    if (message.role === "user") unmatchedCallIds.clear()
+    if (message.role === "user") {
+      deferredCalls.clear()
+      ambiguousCalls.clear()
+    }
     const exchange = readExchange(messages, index)
     const exchanges = exchange ? [exchange] : readInterleavedReplays(messages, index)
     if (!exchanges) {
       if (
         message.role === "tool" &&
         message.tool_call_id &&
-        !unmatchedCallIds.has(message.tool_call_id) &&
-        hasToolResultExecutionId(message)
+        !ambiguousCalls.has(message.tool_call_id)
       ) {
-        const resolved = completedResults.get(resultReplayKey(message))
-        if (resolved && resolved.id !== message.id && sameRow(resolved, message)) {
-          aliases.set(message.id, resolved.id)
+        if (deferredCalls.delete(message.tool_call_id)) {
+          if (hasToolResultExecutionId(message))
+            completedResults.set(resultReplayKey(message), message)
+        } else if (hasToolResultExecutionId(message)) {
+          const resolved = completedResults.get(resultReplayKey(message))
+          if (resolved && resolved.id !== message.id && sameRow(resolved, message)) {
+            aliases.set(message.id, resolved.id)
+          }
         }
       }
-      for (const id of readCallIds(message) ?? []) unmatchedCallIds.add(id)
+      for (const id of ownedCallIds(message)) {
+        if (deferredCalls.has(id)) ambiguousCalls.add(id)
+        deferredCalls.add(id)
+      }
       index++
       continue
     }
     for (const current of exchanges) {
-      if ([...current.results.keys()].some((id) => unmatchedCallIds.has(id))) continue
+      // Removing a result could otherwise change FIFO ownership for a separate
+      // earlier call, including a legacy call whose display name is missing.
+      for (const id of current.results.keys()) {
+        if (deferredCalls.has(id)) ambiguousCalls.add(id)
+      }
+      if ([...current.results.keys()].some((id) => ambiguousCalls.has(id))) continue
       for (const [alias, canonical] of current.replayResults ?? []) aliases.set(alias, canonical)
       for (const result of current.results.values()) {
         if (hasToolResultExecutionId(result)) completedResults.set(resultReplayKey(result), result)

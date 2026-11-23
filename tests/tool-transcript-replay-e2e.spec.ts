@@ -73,6 +73,17 @@ async function seedHistory(): Promise<number> {
     content: lastReply,
     created_at: new Date(2026, 0, 1, 0, 3)
   }
+  const legacy: Message = {
+    ...final,
+    id: "legacy-text",
+    content: "Readable legacy response"
+  }
+  const nextFinal: Message = {
+    ...final,
+    id: "second-final",
+    content: "Second fixture finished"
+  }
+  const nextWithLateResult = [next[0], next[1], nextFinal, next[2]]
   const repeated = [2, 3].flatMap((occurrence) =>
     first.slice(1).map((row) => setOccurrence(row, occurrence))
   )
@@ -93,10 +104,12 @@ async function seedHistory(): Promise<number> {
     ...interleaved,
     firstFinal,
     setOccurrence(first[2], 4),
-    ...next,
+    ...nextWithLateResult,
+    setOccurrence(next[2], 2),
     mismatch[0],
     ...mismatch.slice(1).map((row) => setOccurrence(row, 2)),
-    final
+    final,
+    legacy
   ]
   await db.initializeDatabase()
   try {
@@ -121,11 +134,9 @@ async function seedHistory(): Promise<number> {
           content: "Hidden notification fixture",
           additional_kwargs: { cmb_internal_coordinator_notification: true }
         },
-        ...[...next, ...mismatch, final].map(toCheckpointMessage),
+        ...[...nextWithLateResult, ...mismatch, final].map(toCheckpointMessage),
         {
-          id: "legacy-text",
-          type: "ai",
-          content: "Readable legacy response",
+          ...toCheckpointMessage(legacy),
           tool_calls: { length: 1 }
         }
       ]

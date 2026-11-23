@@ -201,9 +201,19 @@ describe("tool transcript replay", () => {
     expect(findReplayedToolExchangeAliases([assistant, tool, separator, copy])).toEqual(
       new Map([[copy.id, tool.id]])
     )
+    expect(findReplayedToolExchangeAliases([assistant, separator, tool, copy])).toEqual(
+      new Map([[copy.id, tool.id]])
+    )
     expect(
       findReplayedToolExchangeAliases([otherAssistant, separator, assistant, tool, copy]).size
     ).toBe(0)
+    const legacy = { ...otherAssistant, tool_calls: [{ id: "shared-call" }] }
+    expect(findReplayedToolExchangeAliases([legacy, separator, assistant, tool, copy]).size).toBe(0)
+    const multipleOwners = {
+      ...assistant,
+      tool_calls: [...assistant.tool_calls!, ...assistant.tool_calls!]
+    }
+    expect(findReplayedToolExchangeAliases([multipleOwners, separator, tool, copy]).size).toBe(0)
   })
 
   it("retains partial evidence and folds subsequent exact complete copies", () => {

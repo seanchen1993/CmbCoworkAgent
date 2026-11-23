@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import type { Message, ToolCall } from "../types"
+import { findReplayedToolExchangeAliases } from "../../../shared/tool-transcript-replay"
+import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 import {
   createChatMessageProjector,
   resolveChatReplayAliases,
@@ -35,6 +37,36 @@ function liveProjection(
 }
 
 describe("createChatMessageProjector tool-call reconciliation", () => {
+  it("folds the calls and results proved by the projected order, not stale durable order", () => {
+    const resultId = "a45d9be4-3ca7-4e24-ad61-9e0a55b0e465"
+    const user = assistant({ id: "user", role: "user", content: "Run both checks" })
+    const original = assistant({ tool_calls: [executeCall] })
+    const result: Message = {
+      id: resultId,
+      role: "tool",
+      tool_call_id: executeCall.id,
+      content: "First result",
+      created_at: new Date(1)
+    }
+    const replay = { ...original, id: `${original.id}::cmb-same-role-duplicate:assistant:2` }
+    const replayResult = { ...result, id: `${resultId}::cmb-same-role-duplicate:tool:2` }
+    const other = assistant({ id: "other", tool_calls: [executeCall] })
+    const otherResult = { ...result, id: "another-tool-result", content: "Independent result" }
+    const durable = [user, original, result, replay, replayResult, other, otherResult]
+    const hints = [user, original, replayResult, other, otherResult, replay, result]
+    const display = createChatMessageProjector()(durable, [], hints)
+    const aliases = findReplayedToolExchangeAliases(display.messages)
+    expect(aliases.get(result.id)).toBe(replayResult.id)
+    const results = buildToolResultAssociations(
+      display.messages.filter(({ id }) => !aliases.has(id))
+    )
+    expect(results.get(getWorkerToolUiKey(other.id, executeCall.id, 0))?.content).toBe(
+      "Independent result"
+    )
+    expect(results.get(getWorkerToolUiKey(original.id, executeCall.id, 0))?.content).toBe(
+      "First result"
+    )
+  })
   it("keeps a replay row visible when only it has the live reasoning", () => {
     const original = assistant()
     const replay = assistant({ id: "replay" })

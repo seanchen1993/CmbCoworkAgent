@@ -3650,8 +3650,19 @@ export function ChatContainer({
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  // Values hints can reorder results sharing one provider call ID. Prove the
+  // pairs on the same order used by the tool cards before filtering any rows.
+  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
+    displayMessages,
+    displayMessageProjection.changedMessages,
+    displayMessagesStructureVersion
+  )
+  const projectedReplayAliases = useMemo(() =>
+    baselineReplayAliases.size ? findReplayedToolExchangeAliases(displayMessages) : baselineReplayAliases,
+    [baselineReplayAliases, displayMessages, displayMessagesStructureVersion, toolDerivationProjection.version]
+  )
   const replayAliases = resolveChatReplayAliases(
-    baselineReplayAliases,
+    projectedReplayAliases,
     liveDisplayMessages,
     displayMessageProjection,
     liveDisplayProjection.messageIds
@@ -3751,13 +3762,6 @@ export function ChatContainer({
     hookLogBuckets
   })
 
-  // Fold the actual committed + streamed timeline. The parent only owns committed history.
-  // Reuse the existing tool projection version so ordinary text tokens do not rescan results.
-  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
-    displayMessages,
-    displayMessageProjection.changedMessages,
-    displayMessagesStructureVersion
-  )
   const inlineQuestion = useMemo(() => {
     const callId =
       surface === "bot" && canAnswerUserInput && pendingUserInput?.threadId === threadId
@@ -3906,7 +3910,7 @@ export function ChatContainer({
     () =>
       surface === "bot" && !showExecutionDetails
         ? projectBotExecution(
-            displayMessages,
+            replayAliases.size ? displayMessages.filter((message) => !replayAliases.has(message.id)) : displayMessages,
             isLoading,
             executionCardCallIds,
             inlineQuestionCallId,
@@ -3921,6 +3925,7 @@ export function ChatContainer({
       displayMessages,
       displayMessagesStructureVersion,
       toolDerivationProjection.version,
+      replayAliases,
       dynamicVisibilityProjection.version,
       inlineQuestionCallId,
       toolCallDisplayStates,
