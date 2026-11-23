@@ -5,6 +5,7 @@ import {
   IDLE_MODEL_NAME,
   IDLE_MODEL_MODE,
   IDLE_MODEL_MAX_TOKENS,
+  IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
   IDLE_MODEL_UAT_NOTICE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   isModelAvailable,
@@ -279,7 +280,10 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
         name: IDLE_MODEL_NAME,
         baseUrl,
         model: IDLE_MODEL_MODE,
-        maxTokens: IDLE_MODEL_MAX_TOKENS,
+        maxTokens:
+          environment.idleModelEnvironment === "uat"
+            ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS
+            : IDLE_MODEL_MAX_TOKENS,
         apiKey: environment.apiKey,
         tier: "premium"
       },

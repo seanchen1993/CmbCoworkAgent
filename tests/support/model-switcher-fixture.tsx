@@ -5,6 +5,7 @@ import { ModelSwitcher } from "../../src/renderer/src/components/chat/ModelSwitc
 import { CustomModelDialog } from "../../src/renderer/src/components/chat/CustomModelDialog"
 import {
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
+  IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
   IDLE_MODEL_UAT_NOTICE
 } from "../../src/shared/model-catalog"
 import * as store from "./model-switcher-store"
@@ -83,6 +84,7 @@ Object.assign(window, {
       getBuiltinConfigs: async () => [
         {
           ...idle,
+          maxTokens: useUat ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS : idle.maxTokens,
           lockedFields: ["baseUrl", "model", "apiKey", ...(useUat ? [] : ["maxTokens"])],
           notice: useUat ? IDLE_MODEL_UAT_NOTICE : undefined,
           unavailableReason: idleAvailable ? undefined : IDLE_MODEL_SAP_REQUIRED_MESSAGE
