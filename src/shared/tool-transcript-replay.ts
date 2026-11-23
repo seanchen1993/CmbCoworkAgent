@@ -121,21 +121,27 @@ function exchangeKey(exchange: ToolExchange<TranscriptMessage>): string {
   ])
 }
 
-function indexAnchoredExchanges<T extends TranscriptMessage>(messages: readonly T[]) {
-  const exchanges = new Map<string, { exchange: ToolExchange<T>; position: number } | null>()
-  let anchor = ""
+function indexAnchoredExchanges<T extends TranscriptMessage>(
+  messages: readonly T[],
+  unsafeAnchors?: ReadonlySet<string>
+) {
+  const exchanges = new Map<
+    string,
+    { exchange: ToolExchange<T>; position: number; anchor: T } | null
+  >()
+  let anchor: T | undefined
   let position = 0
   for (let index = 0; index < messages.length; ) {
     const message = messages[index]
     if (message.role === "user" || message.role === "system") {
-      anchor = message.id
+      anchor = message.role === "user" && !unsafeAnchors?.has(message.id) ? message : undefined
       position = 0
     }
     const exchange =
       anchor && message.role === "assistant" ? readExchange(messages, index) : undefined
-    if (exchange) {
-      const key = JSON.stringify([anchor, exchangeKey(exchange)])
-      exchanges.set(key, exchanges.has(key) ? null : { exchange, position })
+    if (anchor && exchange) {
+      const key = JSON.stringify([anchor.id, exchangeKey(exchange)])
+      exchanges.set(key, exchanges.has(key) ? null : { exchange, position, anchor })
       index = exchange.end
     } else {
       index++
@@ -148,19 +154,23 @@ function indexAnchoredExchanges<T extends TranscriptMessage>(messages: readonly 
 /** A checkpoint and durable page may number the same complete exchange differently. */
 export function alignReplayedToolExchanges<T extends TranscriptMessage>(
   canonical: readonly T[],
-  replay: T[]
+  replay: T[],
+  unsafeAnchors?: ReadonlySet<string>
 ): T[] {
   if (canonical.length < 3 || replay.length < 3) return replay
-  const candidates = indexAnchoredExchanges(canonical)
+  const candidates = indexAnchoredExchanges(canonical, unsafeAnchors)
   if (candidates.size === 0) return replay
   const replayIds = new Set(replay.map((message) => message.id))
   const aligned = new Map<T, T>()
-  for (const [key, candidate] of indexAnchoredExchanges(replay)) {
+  for (const [key, candidate] of indexAnchoredExchanges(replay, unsafeAnchors)) {
     const target = candidates.get(key)
     if (
       !target ||
       !candidate ||
       target.position !== candidate.position ||
+      !sameRow(target.anchor, candidate.anchor) ||
+      (getMessageProviderOccurrence(target.anchor) ?? 1) !==
+        (getMessageProviderOccurrence(candidate.anchor) ?? 1) ||
       !isSameExchange(target.exchange, candidate.exchange)
     )
       continue
@@ -199,6 +209,21 @@ function hasExecutionIdentity(exchange: ToolExchange<TranscriptMessage>): boolea
       return source !== result.tool_call_id && toolResultUuid.test(source)
     })
   )
+}
+
+/** On an unchanged transcript array only adjacent tail exchanges can gain or
+ * lose an alias when the final tool result is replaced in place. */
+export function canChangeReplayedToolTail(messages: readonly TranscriptMessage[]): boolean {
+  if (messages.at(-1)?.role !== "tool") return false
+  const limit = Math.max(0, messages.length - 128)
+  let index = messages.length - 1
+  while (index >= limit && messages[index].role === "tool") index--
+  if (index < limit) return limit > 0
+  const tailAssistant = messages[index--]
+  if (tailAssistant.role !== "assistant" || messages[index]?.role !== "tool") return false
+  while (index >= limit && messages[index].role === "tool") index--
+  if (index < limit) return limit > 0
+  return messages[index].role === "assistant" && hasSameReplayId(messages[index], tailAssistant)
 }
 
 /** Only adjacent complete copies with independent execution evidence are safe

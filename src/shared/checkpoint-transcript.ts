@@ -602,6 +602,22 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
 }
 
+/** A hidden graph turn can share the last visible user in a projected page. */
+export function findVisibleAnchorsWithHiddenCheckpointTurns(checkpoint: unknown): ReadonlySet<string> {
+  const unsafeAnchors = new Set<string>()
+  let visibleAnchor: string | undefined
+  getCheckpointMessages(checkpoint).forEach((message, index) => {
+    if (!isRecord(message) || getMessageRole(message) !== "user") return
+    const content = getMessageContent(message)
+    if (isInternalNotificationMessage(message) || !isVisibleTranscriptMessage("user", content)) {
+      if (visibleAnchor) unsafeAnchors.add(visibleAnchor)
+    } else {
+      visibleAnchor = getMessageId(message, index)
+    }
+  })
+  return unsafeAnchors
+}
+
 export function filterNewCheckpointReplayMessages(
   checkpoint: unknown,
   replay: readonly unknown[]

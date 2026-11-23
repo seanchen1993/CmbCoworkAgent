@@ -159,6 +159,7 @@ import {
   describeCheckpointMessageForkTarget,
   deriveCheckpointTranscriptIndex,
   findMessagesAfterCheckpointVisibleIds,
+  findVisibleAnchorsWithHiddenCheckpointTurns,
   isWorkflowPlumbingTranscriptContent,
   mergeCheckpointAuthorityTranscriptMessages,
   truncateCheckpointMessagesAfter
@@ -2763,7 +2764,7 @@ function roleToCheckpointType(role: Message["role"]): CheckpointMessage["type"] 
 
 function checkpointMessagesToThreadMessages(
   messages: CheckpointMessage[] | undefined,
-  options: { visibleRawIndices?: readonly number[] } = {}
+  options: { visibleRawIndices?: readonly number[]; includeReplayToolMetadata?: boolean } = {}
 ): Message[] {
   if (!Array.isArray(messages)) return []
   const candidates: Array<[CheckpointMessage, number]> = options.visibleRawIndices
@@ -2782,12 +2783,14 @@ function checkpointMessagesToThreadMessages(
     const rawText = stringifyContent(content)
     if (isWorkflowPlumbingTranscriptContent(rawText)) return []
     const additionalKwargs = getCheckpointMessageAdditionalKwargs(msg)
+    const includeReplayToolMetadata = role === "tool" && options.includeReplayToolMetadata
     const providerTuple =
-      role === "assistant" || role === "tool"
+      role === "assistant" || includeReplayToolMetadata
         ? getMessageProviderTupleFromMetadata(additionalKwargs)
         : undefined
     const status = msg.status ?? msg.kwargs?.status
-    const isError = msg.is_error === true || msg.kwargs?.is_error === true || status === "error"
+    const isError = msg.is_error === true || msg.kwargs?.is_error === true ||
+      additionalKwargs?.is_error === true || status === "error"
     return {
       id,
       ...providerTuple,
@@ -2807,8 +2810,8 @@ function checkpointMessagesToThreadMessages(
       ...(role === "tool" && getCheckpointMessageName(msg)
         ? { name: getCheckpointMessageName(msg) }
         : {}),
-      ...(role === "tool" && status ? { status } : {}),
-      ...(role === "tool" && isError ? { is_error: true } : {}),
+      ...(includeReplayToolMetadata && status ? { status } : {}),
+      ...(includeReplayToolMetadata && isError ? { is_error: true } : {}),
       created_at: now
     }
   })
@@ -2848,15 +2851,13 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
   )
   const checkpointMessages = checkpointMessagesToThreadMessages(
     rawCheckpointMessages,
-    { visibleRawIndices }
+    { visibleRawIndices, includeReplayToolMetadata: true }
   )
-  const visibleIndices = new Set(visibleRawIndices)
-  const hasHiddenTurn = rawCheckpointMessages?.some((message, index) =>
-    !visibleIndices.has(index) && message && getMessageRole(message) === "user"
+  const alignedCheckpoint = alignReplayedToolExchanges(
+    persistedMessages,
+    checkpointMessages,
+    findVisibleAnchorsWithHiddenCheckpointTurns(checkpoint)
   )
-  const alignedCheckpoint = hasHiddenTurn
-    ? checkpointMessages
-    : alignReplayedToolExchanges(persistedMessages, checkpointMessages)
   const merged = mergeThreadMessageTranscripts(alignedCheckpoint, persistedMessages)
   const aliases = findReplayedToolExchangeAliases(merged)
   return aliases.size ? merged.filter((message) => !aliases.has(message.id)) : merged

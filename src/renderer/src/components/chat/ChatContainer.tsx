@@ -262,7 +262,10 @@ import {
   formatGoalEventMessage,
   isVisibleCheckpointTranscriptMessage
 } from "@/lib/goal-transcript"
-import { findReplayedToolExchangeAliases } from "../../../../shared/tool-transcript-replay"
+import {
+  canChangeReplayedToolTail,
+  findReplayedToolExchangeAliases
+} from "../../../../shared/tool-transcript-replay"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
 import {
@@ -1210,7 +1213,7 @@ function getThreadDisplayBaseline(
     cached.sourceTailSnapshot &&
     sourceTail &&
     sourceTail.role !== "user" &&
-    sourceTail.role !== "tool" &&
+    !canChangeReplayedToolTail(messages) &&
     cached.sourceTailSnapshot.id === sourceTail.id &&
     cached.sourceTailSnapshot.role === sourceTail.role &&
     cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
@@ -3623,6 +3626,10 @@ export function ChatContainer({
   const { baseline: threadDisplayBaseline, replayAliases } = useMemo(
     () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
     [messagesContentVersion, threadMessages]
+  )
+  const resolveDisplayMessageId = useCallback(
+    (messageId: string) => replayAliases.get(messageId) ?? messageId,
+    [replayAliases]
   )
   const liveDisplayProjection = threadProjectionRuntime.projectLiveDisplayMessages(
     threadMessages,
@@ -8810,6 +8817,7 @@ export function ChatContainer({
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         validateSearchLocation={validateSearchLocation}
+        resolveDisplayMessageId={resolveDisplayMessageId}
         onCancelLocalSearch={cancelLocalSearch}
         searchLocalCorpus={searchLocalCorpus}
         onRevealSearchContext={setSearchReveal}

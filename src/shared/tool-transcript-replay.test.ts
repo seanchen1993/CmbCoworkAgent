@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { mergeCheckpointAuthorityTranscriptMessages } from "./checkpoint-transcript"
+import {
+  findVisibleAnchorsWithHiddenCheckpointTurns,
+  mergeCheckpointAuthorityTranscriptMessages
+} from "./checkpoint-transcript"
 import type { CheckpointAuthorityTranscriptMessage as Message } from "./checkpoint-transcript"
 import {
   alignReplayedToolExchanges,
@@ -53,6 +56,53 @@ describe("tool transcript replay", () => {
     ]) {
       expect(alignReplayedToolExchanges(unmatched, checkpoint)).toBe(checkpoint)
     }
+  })
+
+  it("preserves different prompts even when the user message reused a raw ID", () => {
+    const checkpoint = [{ ...user, provider_occurrence: 2 }, ...exchange()]
+    const differentUser = { ...user, content: "Inspect a different fixture" }
+    expect(alignReplayedToolExchanges([user, ...exchange(2)], checkpoint)).toBe(checkpoint)
+    expect(
+      alignReplayedToolExchanges([user, ...exchange(2)], [differentUser, ...exchange()])[0]
+    ).toBe(differentUser)
+    expect(
+      alignReplayedToolExchanges([user, ...exchange(2)], [differentUser, ...exchange()])[1].id
+    ).toBe("shared-response")
+  })
+
+  it("preserves hidden subturns and still aligns a subsequent visible turn", () => {
+    const later = { ...user, id: "next-user" }
+    const hidden = {
+      id: "team-notification",
+      type: "human",
+      content: "notification",
+      additional_kwargs: { cmb_internal_coordinator_notification: true }
+    }
+    const unsafe = findVisibleAnchorsWithHiddenCheckpointTurns({
+      channel_values: {
+        messages: [
+          { ...user, type: "human" },
+          hidden,
+          ...exchange(),
+          { ...later, type: "human" },
+          ...exchange()
+        ]
+      }
+    })
+    expect([...unsafe]).toEqual([user.id])
+    const checkpoint = [user, ...exchange(), later, ...exchange()]
+    const canonical = [user, ...exchange(3), later, ...exchange(2)]
+    // Give the two independent turns distinct result and assistant source IDs.
+    for (const rows of [canonical, checkpoint]) {
+      for (const row of rows.slice(-2)) {
+        row.id = `later-${row.id}`
+        row.provider_source_id = `later-${row.provider_source_id}`
+      }
+    }
+    expect(alignReplayedToolExchanges(canonical, checkpoint, unsafe).map(({ id }) => id)).toEqual([
+      ...checkpoint.slice(0, 4).map(({ id }) => id),
+      ...canonical.slice(-2).map(({ id }) => id)
+    ])
   })
 
   it("identifies adjacent replay with the same result execution ID", () => {

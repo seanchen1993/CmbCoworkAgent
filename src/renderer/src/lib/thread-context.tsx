@@ -98,6 +98,7 @@ import {
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
+  findVisibleAnchorsWithHiddenCheckpointTurns,
   isCheckpointEmptyAssistantToolCallMessage,
   isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
@@ -312,6 +313,8 @@ type HistoryCheckpoint = {
         tool_calls?: unknown[]
         tool_call_id?: string
         name?: string
+        status?: string
+        is_error?: boolean
         additional_kwargs?: Record<string, unknown>
         kwargs?: {
           id?: string
@@ -320,6 +323,8 @@ type HistoryCheckpoint = {
           tool_calls?: unknown[]
           tool_call_id?: string
           name?: string
+          status?: string
+          is_error?: boolean
           additional_kwargs?: Record<string, unknown>
         }
       }>
@@ -6392,6 +6397,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let durableConversationPresence: ThreadConversationPresence = "unknown"
       let hasPersistedVisibleTailAfterCheckpoint = false
       let checkpointMessagesLoaded = false
+      let checkpointUnsafeReplayAnchors: ReadonlySet<string> | undefined
       let checkpointPresenceFallbackResolved = false
       let mainTranscriptPublished = false
       let criticalHistoryHydrationFailed = false
@@ -6813,6 +6819,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             Array.isArray(channelValues.messages)
           ) {
             checkpointMessagesLoaded = true
+            checkpointUnsafeReplayAnchors = findVisibleAnchorsWithHiddenCheckpointTurns(
+              latestCheckpoint.checkpoint
+            )
             let internalGoalPromptIndex = 0
             const checkpointRawRestoredMessages = channelValues.messages.flatMap(
               (msg, index): Message | [] => {
@@ -6881,6 +6890,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
                 const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
                 const toolName = msg.name ?? msg.kwargs?.name
+                const toolStatus = msg.status ?? msg.kwargs?.status
+                const toolIsError = msg.is_error === true || msg.kwargs?.is_error === true ||
+                  additionalKwargs?.is_error === true || toolStatus === "error"
                 const messageId =
                   msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
                 const fallbackTime = new Date()
@@ -6915,7 +6927,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   }
                 }
                 const providerTuple =
-                  role === "assistant"
+                  role === "assistant" || role === "tool"
                     ? getMessageProviderTupleFromMetadata(additionalKwargs)
                     : undefined
 
@@ -6928,6 +6940,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   tool_calls: toolCalls as Message["tool_calls"],
                   ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                   ...(role === "tool" && toolName && { name: toolName }),
+                  ...(role === "tool" && toolStatus && { status: toolStatus }),
+                  ...(role === "tool" && toolIsError && { is_error: true }),
                   created_at: startAt,
                   start_at: startAt,
                   end_at: endAt
@@ -7071,11 +7085,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               goalTranscriptPageRange !== undefined
             )
       const restoredTranscript = mergePersistedMessagesIntoTranscript(
-        rawRestoredMessages.some((message) =>
-          message.role === "user" && !isVisibleCheckpointTranscriptMessage(message)
-        )
-          ? checkpointTranscript
-          : alignReplayedToolExchanges(visiblePersistedThreadMessages, checkpointTranscript),
+        alignReplayedToolExchanges(
+          visiblePersistedThreadMessages,
+          checkpointTranscript,
+          checkpointUnsafeReplayAnchors
+        ),
         visiblePersistedThreadMessages
       )
       const restoredTranscriptMessages = restoreVisibleCheckpointMessageTimes(

@@ -84,6 +84,8 @@ interface ChatSearchOverlayProps {
   getSearchCorpus: (signal?: AbortSignal) => ChatSearchCorpus | Promise<ChatSearchCorpus>
   /** Ensures a virtualized message row is mounted before highlighting it. */
   onRevealMessage: (messageId: string) => void
+  /** Durable navigation validates the original ID before revealing its visible row. */
+  resolveDisplayMessageId?: (messageId: string) => string
   /** Searches durable pages beyond the currently loaded renderer window. */
   searchDurableMessages?: SearchDurableMessages
   /** Loads an unloaded durable result before the overlay asks to paint it. */
@@ -582,6 +584,7 @@ export function ChatSearchOverlay({
   onRevealSearchContext,
   onCancelLocalSearch,
   validateSearchLocation,
+  resolveDisplayMessageId,
   open,
   onClose,
   getViewport,
@@ -630,7 +633,8 @@ export function ChatSearchOverlay({
     onRevealDurableMessage,
     onDurableRevealFinished,
     onRevealSearchContext,
-    validateSearchLocation
+    validateSearchLocation,
+    resolveDisplayMessageId
   })
   useLayoutEffect(() => {
     // A durable page replaces the parent's visible-index map. Async continuations must use
@@ -640,9 +644,14 @@ export function ChatSearchOverlay({
       onRevealDurableMessage,
       onDurableRevealFinished,
       onRevealSearchContext,
-      validateSearchLocation
+      validateSearchLocation,
+      resolveDisplayMessageId
     }
-  }, [onRevealMessage, onRevealDurableMessage, onDurableRevealFinished, onRevealSearchContext, validateSearchLocation])
+  }, [onRevealMessage, onRevealDurableMessage, onDurableRevealFinished, onRevealSearchContext,
+    validateSearchLocation, resolveDisplayMessageId])
+
+  const displayIdFor = useCallback((messageId: string): string =>
+    revealCallbacksRef.current.resolveDisplayMessageId?.(messageId) ?? messageId, [])
 
   const searchGenerationRef = useRef(0)
   const searchMatcherRef = useRef(createChatSearchMatcher(CHAT_SEARCH_RESULT_LIMIT + 1))
@@ -733,9 +742,10 @@ export function ChatSearchOverlay({
     (match: OverlayChatSearchMatch, rawQuery: string, scroll: boolean): void => {
       const findRow = (): { viewport: HTMLElement; row: HTMLElement } | null => {
         const viewport = getViewport()
+        const displayId = displayIdFor(match.messageId)
         const row = viewport
           ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")).find(
-              (candidate) => candidate.dataset.chatMessageId === match.messageId
+              (candidate) => candidate.dataset.chatMessageId === displayId
             )
           : undefined
         return viewport && row ? { viewport, row } : null
@@ -857,7 +867,7 @@ export function ChatSearchOverlay({
           : null
         if (match.location && !locationRange && !contextRequested) {
           contextRequested = true
-          const reveal = { messageId: match.messageId, location: match.location }
+          const reveal = { messageId: displayIdFor(match.messageId), location: match.location }
           contextRevealRef.current = reveal
           revealCallbacksRef.current.onRevealSearchContext?.(reveal)
           highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
@@ -903,7 +913,7 @@ export function ChatSearchOverlay({
         revealCallbacksRef.current.onRevealMessage(match.messageId)
         const validate = revealCallbacksRef.current.validateSearchLocation
         if (match.location && validate) {
-          void validate({ messageId: match.messageId, location: match.location }, validation.signal)
+          void validate({ messageId: displayIdFor(match.messageId), location: match.location }, validation.signal)
             .then((valid) => {
               if (!isCurrent() || validation.signal.aborted) return
               if (valid) tryHighlight(0)
@@ -944,7 +954,7 @@ export function ChatSearchOverlay({
       }
       revealMountedRow()
     },
-    [apiSupported, applyHighlights, getViewport]
+    [apiSupported, applyHighlights, displayIdFor, getViewport]
   )
 
   const publishMatches = useCallback(
@@ -954,7 +964,7 @@ export function ChatSearchOverlay({
       const merged = mergeChatSearchResults(
         localMatchesRef.current,
         durableMatchesRef.current.filter(
-          (match) => !localDocumentCoverageRef.current.get(match.messageId)
+          (match) => !localDocumentCoverageRef.current.get(displayIdFor(match.messageId))
         )
       )
       let explicitMatch = externalMatchRef.current
@@ -984,7 +994,7 @@ export function ChatSearchOverlay({
             const controller = new AbortController()
             externalMatchValidation.current = controller
             const pinned = explicitMatch
-            void validate({ messageId: pinned.messageId, location }, controller.signal)
+            void validate({ messageId: displayIdFor(pinned.messageId), location }, controller.signal)
               .then((valid) => {
                 if (!valid && !controller.signal.aborted && externalMatchRef.current === pinned) {
                   clearExternalMatch()
@@ -1027,16 +1037,17 @@ export function ChatSearchOverlay({
         return
       }
       const previousContext = contextRevealRef.current
+      const activeDisplayId = displayIdFor(activeMatch.messageId)
       if (
         repaint &&
         previousContext &&
         activeMatch.location &&
         pendingNavigationRef.current === null &&
-        (previousContext.messageId !== activeMatch.messageId ||
+        (previousContext.messageId !== activeDisplayId ||
           chatSearchLocationKey(previousContext.location) !==
             chatSearchLocationKey(activeMatch.location))
       ) {
-        const reveal = { messageId: activeMatch.messageId, location: activeMatch.location }
+        const reveal = { messageId: activeDisplayId, location: activeMatch.location }
         contextRevealRef.current = reveal
         revealCallbacksRef.current.onRevealSearchContext?.(reveal)
         if (contextRefreshFrameRef.current !== null)
@@ -1058,7 +1069,7 @@ export function ChatSearchOverlay({
         revealAndHighlight(activeMatch, rawQuery, false)
       }
     },
-    [revealAndHighlight, setActive]
+    [displayIdFor, revealAndHighlight, setActive]
   )
 
   useEffect(() => {
@@ -1200,8 +1211,8 @@ export function ChatSearchOverlay({
         ),
         shouldContinue: () => active && searchGenerationRef.current === generation,
         getLocalCoverage: (messageId) => ({
-          occurrenceCount: localOccurrenceCountsRef.current.get(messageId) ?? 0,
-          authoritative: localDocumentCoverageRef.current.get(messageId) ?? false
+          occurrenceCount: localOccurrenceCountsRef.current.get(displayIdFor(messageId)) ?? 0,
+          authoritative: localDocumentCoverageRef.current.get(displayIdFor(messageId)) ?? false
         }),
         onProgress: ({ addedMatches }) => {
           if (!active || searchGenerationRef.current !== generation) return
@@ -1233,7 +1244,7 @@ export function ChatSearchOverlay({
       window.clearTimeout(timer)
       externalMatchValidation.current?.abort()
     }
-  }, [normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
+  }, [displayIdFor, normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
 
   // Leading/trailing max-wait throttling guarantees progress during an
   // uninterrupted token stream while still coalescing the hot path.

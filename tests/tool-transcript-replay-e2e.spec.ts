@@ -44,6 +44,8 @@ function makeExchange(index: number): Message[] {
       name: "read_file",
       content: `Fixture result ${index}`,
       tool_call_id: callId,
+      status: index === 2 ? "error" : "success",
+      ...(index === 2 ? { is_error: true } : {}),
       created_at
     }
   ]
@@ -96,10 +98,16 @@ async function seedHistory(): Promise<number> {
     id: "tool-replay-complete",
     ts: new Date().toISOString(),
     channel_values: {
-      messages: [...first, ...repeated, ...next, ...mismatch, final].map((message) => ({
-        ...message,
-        type: message.role === "assistant" ? "ai" : message.role === "user" ? "human" : "tool"
-      }))
+      messages: [
+        ...[...first, ...repeated].map(toCheckpointMessage),
+        {
+          id: "hidden-team-turn",
+          type: "human",
+          content: "Hidden notification fixture",
+          additional_kwargs: { cmb_internal_coordinator_notification: true }
+        },
+        ...[...next, ...mismatch, final].map(toCheckpointMessage)
+      ]
     },
     channel_versions: { messages: 1 },
     versions_seen: {},
@@ -117,6 +125,21 @@ async function seedHistory(): Promise<number> {
     await saver.close()
   }
   return durable.length
+}
+
+function toCheckpointMessage(message: Message) {
+  return {
+    ...message,
+    type: message.role === "assistant" ? "ai" : message.role === "user" ? "human" : "tool",
+    ...(message.provider_occurrence
+      ? {
+          additional_kwargs: {
+            cmb_internal_provider_source_id: message.provider_source_id,
+            cmb_internal_provider_occurrence: message.provider_occurrence
+          }
+        }
+      : {})
+  }
 }
 
 interface TestWindow {
@@ -170,8 +193,21 @@ async function main(): Promise<void> {
         pipe?.on("data", (data) => appendFileSync(path.join(output, "electron.log"), data))
       }
       const archivePath = path.join(output, `${phase}.zip`)
-      await app.evaluate(({ dialog }, target) => {
+      await app.evaluate(({ dialog, ipcMain }, target) => {
         dialog.showSaveDialog = async () => ({ canceled: false, filePath: target })
+        const channel = "threads:search-target-window"
+        const handlers = (
+          ipcMain as unknown as {
+            _invokeHandlers: Map<string, (event: unknown, request: unknown) => unknown>
+          }
+        )._invokeHandlers
+        const open = handlers.get(channel)!
+        ipcMain.removeHandler(channel)
+        ipcMain.handle(channel, (event, request) => {
+          const state = globalThis as { replaySearchRequest?: unknown }
+          state.replaySearchRequest = request
+          return open(event, request)
+        })
       }, archivePath)
       const page = await app.firstWindow()
       await page.route(/^https?:/, (route) => route.abort())
@@ -216,6 +252,33 @@ async function main(): Promise<void> {
         assert.equal(markdown.match(/Fixture result 0/g)?.length, 1)
         assert.equal(stored.length, rawRowCount)
         assert.equal(await chat.getByText("INTERRUPTED", { exact: true }).count(), 0)
+        const search = page.getByRole("dialog", { name: "搜索会话" })
+        await page.getByRole("button", { name: "搜索会话", exact: true }).click()
+        await search.getByRole("combobox", { name: "搜索会话" }).fill("Checking fixture 0")
+        await search.locator(`[data-search-thread="${threadId}"]`).first().click()
+        await page.waitForFunction(() => {
+          const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights
+          const range = [...(registry.get("chat-search-active") ?? [])][0]
+          const row =
+            range?.startContainer.parentElement?.closest<HTMLElement>("[data-chat-message-id]")
+          return (
+            row?.dataset.chatMessageId === "provider-0" &&
+            range?.toString() === "Checking fixture 0"
+          )
+        })
+        const request = await app.evaluate(
+          () =>
+            (
+              globalThis as {
+                replaySearchRequest?: { target?: { messageId?: string } }
+              }
+            ).replaySearchRequest
+        )
+        assert.match(
+          request?.target?.messageId ?? "",
+          /^provider-0::cmb-same-role-duplicate:assistant:/
+        )
+        await page.screenshot({ path: path.join(output, `${phase}.png`) })
       } catch (error) {
         failures.push(`${phase}: ${String(error)}`)
       }
