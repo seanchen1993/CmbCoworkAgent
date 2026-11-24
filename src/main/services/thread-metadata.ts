@@ -24,6 +24,11 @@ export const RENDERER_WRITABLE_THREAD_METADATA_KEYS = new Set([
   "botWorkModelRoutingMode"
 ])
 
+const RENDERER_REMOVABLE_THREAD_METADATA_KEYS = new Set([
+  ...RENDERER_WRITABLE_THREAD_METADATA_KEYS,
+  "requirementDevelopment"
+])
+
 function assertSafeMetadataKey(key: string): void {
   if (!key || UNSAFE_METADATA_KEYS.has(key)) {
     throw new Error(`Invalid thread metadata key: ${key || "<empty>"}`)
@@ -154,7 +159,11 @@ export function validateRendererThreadMetadataPatch(patch: ThreadMetadataPatch):
     }
   }
 
-  validateThreadMetadataPatch(patch, RENDERER_WRITABLE_THREAD_METADATA_KEYS)
+  // requirementDevelopment is owned by the main-process requirement workflow. The renderer may
+  // clear a stale association during reset, but must never be able to create or modify one.
+  validateThreadMetadataPatch(patch)
+  validateThreadMetadataPatch({ set: patch.set }, RENDERER_WRITABLE_THREAD_METADATA_KEYS)
+  validateThreadMetadataPatch({ remove: patch.remove }, RENDERER_REMOVABLE_THREAD_METADATA_KEYS)
 
   for (const [key, value] of Object.entries(patch.set ?? {})) {
     if (value === undefined) throw new Error(`Invalid thread metadata value for ${key}`)
