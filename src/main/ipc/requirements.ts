@@ -832,12 +832,20 @@ async function convertRequirementSourceToMarkdown(sourcePath: string): Promise<s
 }
 
 function removeEmbeddedBase64Images(markdown: string): string {
-  return markdown
+  const withoutImageNodes = markdown
     .replace(
       /!\\?\[[^\]\r\n]*\\?\]\\?\(\s*data:image\/[^;,\s)]+(?:;[^,\s)]*)*;base64,[a-z0-9+/=\s]+\\?\)/gi,
       ""
     )
     .replace(/<img\b[^>]*\bsrc=["']data:image\/[^"']+;base64,[^"']*["'][^>]*>/gi, "")
+
+  // Mammoth can escape Markdown punctuation differently across documents and
+  // platforms. A generated data URI is always kept on the image's own line,
+  // so remove that line as a format-independent safety net.
+  return withoutImageNodes
+    .split(/\r?\n/)
+    .filter((line) => !/data:image\/[^;,\s)]+(?:;[^,\s)]*)*;base64,/i.test(line))
+    .join("\n")
 }
 
 async function readRequirementSourcePreview(item: RequirementIndexItem): Promise<string> {

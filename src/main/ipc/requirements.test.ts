@@ -447,7 +447,7 @@ describe("requirement source preview", () => {
 
     writeFileSync(
       previewPath,
-      '保留前文\n\n!\\[IMG\\_256\\]\\(data:image/png;base64,aGVsbG8=\\)\n\n保留后文\n<img src="data:image/jpeg;base64,aGVsbG8=" alt="legacy">',
+      '保留前文\n\n!\\[IMG\\_256\\]\\(data:image/png;base64,aGVsbG8=\\)\n\n不规则图片语法 data:image/webp;base64,aGVsbG8=\n\n保留后文\n<img src="data:image/jpeg;base64,aGVsbG8=" alt="legacy">',
       "utf-8"
     )
     const loaded = (await getSourcePreview(null, created.requirement!.reqId)) as {
