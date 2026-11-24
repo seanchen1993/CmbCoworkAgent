@@ -150,6 +150,17 @@ it("keeps a missing interpreter error visible in an optional-context warning", a
   expect(result?.harnessAgentsPrompt).toBeUndefined()
 })
 
+it("keeps the host failure in the fallback warning and leaves plugin output in the command log", async () => {
+  state.spawn.mockImplementation((input: { stderr(chunk: Buffer): void }) => {
+    input.stderr(Buffer.from("PLUGIN_STDERR_CANARY"))
+    return { stop: vi.fn(), completion: Promise.resolve({ code: 2 }) }
+  })
+  const result = await read()
+  expect(result?.sessionContextInjectWarning).toContain("exited with code 2")
+  expect(result?.sessionContextInjectWarning).toContain("已回退")
+  expect(result?.sessionContextInjectWarning).not.toContain("PLUGIN_STDERR_CANARY")
+})
+
 it("stops an owner whose synchronous first output exceeds the original buffer limit", async () => {
   const stop = vi.fn()
   state.spawn.mockImplementation((input: { stdout(chunk: Buffer): void }) => {

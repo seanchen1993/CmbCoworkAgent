@@ -1380,6 +1380,7 @@ async function runHarnessInvocationAsync(
   let stdoutLength = 0,
     stderrLength = 0,
     exceededMaxBuffer = false
+  let launchAttempted = false
   const completion = (async () => {
     const release = await harnessInvocationSemaphore.acquire(deadline.signal)
     let extensionContext: Awaited<ReturnType<typeof prepareExtensionContext>>
@@ -1451,6 +1452,7 @@ async function runHarnessInvocationAsync(
           ...(suppressPythonCache ? { PYTHONDONTWRITEBYTECODE: "1" } : {})
         }).filter((entry): entry is [string, string] => typeof entry[1] === "string")
       )
+      launchAttempted = true
       const owned = startOwnedHookCommand({
         executable: executable.command,
         args,
@@ -1523,6 +1525,8 @@ async function runHarnessInvocationAsync(
     )
       throw error
     if (signal?.aborted) signal.throwIfAborted()
+    if (findHookProcessCleanupError(error) || (!launchAttempted && !deadline.signal.aborted))
+      throw error
     const message = configured.configKey === "create_project" && (await isPythonCommandNotFound(error))
       ? "请安装最新版 Python 3" : undefined
     throw new HarnessPluginCommandError(configured, formatAdapterError(failure), message, error)
@@ -3348,7 +3352,13 @@ async function readHarnessFeatureSessionContextAgentPrompt(
         error
       }
     )
-    if (error instanceof HarnessPluginCommandError) return { warning: detail }
+    if (error instanceof HarnessPluginCommandError) {
+      // The failure detail can contain plugin stdout/stderr. Keep it in the command log.
+      const causeMessage = error.cause instanceof Error ? error.cause.message : ""
+      return { warning: causeMessage
+        ? formatSessionContextInjectWarning(`${detail}（${causeMessage}）`)
+        : detail }
+    }
     return { warning: formatSessionContextInjectWarning(detail) }
   }
 }

@@ -27,6 +27,7 @@ function syncEntry(deps: Record<string, unknown>) {
     ts.ScriptKind.TS
   )
   const declarations = [
+    "configureHarnessInvocation",
     "resolveHarnessKnowledgeWorkspace",
     "createKnowledgeCommandProject",
     "resolveProjectKnowledgePath",
@@ -132,7 +133,7 @@ describe("native create verification at the process queue boundary", () => {
         const sync = syncEntry({
           isDerivedPlugin,
           findCompatibleKnowledgePlugin: async () => ({
-            plugin: { id: derived ? "derived" : "original", path: root },
+            plugin: { id: derived ? "derived" : "original", name: "Fixture", path: root },
             adapter: { id: "fixture", name: "Fixture" },
             config: {}
           }),
@@ -150,6 +151,8 @@ describe("native create verification at the process queue boundary", () => {
             args: ["-c", 'import json; print(json.dumps({"ok":True,"message":"synced"}))']
           }),
           readLeanTokenStore: async () => ({ leanToken: "" }),
+          HARNESS_INSPECT_COMMAND_CONFIG_KEYS: { pullKnowledge: "pull_knowledge" },
+          readInternalHarnessProject: () => undefined,
           runHarnessInvocationAsync: invoke,
           harnessCommandLogOptions: () => ({ configKey: "pull_knowledge" }),
           HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS: 5000,
