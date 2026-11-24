@@ -14,7 +14,6 @@ import { withDesignSessionOrder } from "../../../../shared/design-session-order"
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react"
 import { v4 as uuid } from "uuid"
 import { ChevronDown, LayoutTemplate, Move, Redo2, Undo2, X } from "lucide-react"
-import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigation"
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
 import { getDesignPreviewViewportStyle } from "@/lib/design-preview-viewport"
@@ -55,7 +54,7 @@ import {
 } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
 import { DesignAttachmentMenu } from "./DesignAttachmentMenu"
-import { ExportDesignModal, ImportUrlModal } from "./DesignModals"
+import { ExportDesignModal, ImportPackageEntryModal, ImportUrlModal } from "./DesignModals"
 import { DesignCreationPage } from "./DesignCreationPage"
 import { DesignSystemLibraryDialog, type DesignSystemLibraryMode } from "./DesignSystemLibraryDialog"
 import { DesignWorkspaceLayout } from "./DesignWorkspaceLayout"
@@ -75,8 +74,18 @@ import { normalizeDesignModelId } from "../../../../shared/design-model-selectio
 import {
   buildNewDesignPrompt,
   shouldSkipDesignQuestions,
-  type DesignRunRequest
+  type DesignRunRequest,
+  type DesignSessionSnapshot
 } from "../../../../shared/managed-design-session"
+import type {
+  DesignAssetPreviewTicket,
+  DesignPackageStageResult
+} from "../../../../shared/design-package"
+import type {
+  DesignCanvasObservationItem,
+  DesignCanvasResolvedAnnotations,
+  DesignCanvasSyncAnnotationsPayload
+} from "../../../../shared/design-canvas-bridge"
 import { TweaksFloatingPanel } from "./TweaksFloatingPanel"
 import { DesignPreviewFrame } from "./DesignPreviewFrame"
 import { DesignGenerationWaiting } from "./DesignGenerationWaiting"
@@ -241,17 +250,6 @@ function getSessionKindLabel(
   }
 }
 
-function makeFileHref(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, "/")
-  if (/^[a-zA-Z]:\//.test(normalized)) {
-    return `file:///${encodeURI(normalized)}`
-  }
-  if (normalized.startsWith("//")) {
-    return `file:${encodeURI(normalized)}`
-  }
-  return `file://${encodeURI(normalized)}`
-}
-
 function makeTabState(): TabState {
   return {
     messages: [],
@@ -368,6 +366,15 @@ function makeIterationRollbackSnapshot(
 }
 
 function hydrateTabStateHtml(state: TabState, html: string): TabState {
+  if (state.artifactPackage) {
+    return {
+      ...state,
+      html,
+      variations: [],
+      activeVariationId: null,
+      reloadKey: state.reloadKey
+    }
+  }
   const baseHtml = ensureEditMode(html)
   const hasDesignSystem = isSingleDesignVariant(state)
   const patchedHtml = hasDesignSystem ? collapseVariationsToSingleArtifact(baseHtml) : baseHtml
@@ -972,11 +979,6 @@ function normalizeSingleTabSession(
   }
 }
 
-async function readPreviewDependencyDataUrlFile(resolvedPath: string): Promise<string | null> {
-  const result = await window.api.file.readDataUrl(resolvedPath)
-  return result.success ? (result.dataUrl ?? null) : null
-}
-
 async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Promise<string> {
   return prepareDesignPreview(html, htmlPath ?? "")
 }
@@ -1204,17 +1206,6 @@ function mergeEditModeKeys(html: string, edits: Record<string, unknown>): string
   })
 }
 
-function injectBaseHref(html: string, baseHref: string): string {
-  if (!baseHref.trim()) return html
-  const doc = new DOMParser().parseFromString(html, "text/html")
-  if (!doc.querySelector("base")) {
-    const base = doc.createElement("base")
-    base.href = baseHref
-    doc.head.prepend(base)
-  }
-  return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML
-}
-
 // Send a postMessage into the iframe
 function sendToIframe(iframe: HTMLIFrameElement | null, msg: object) {
   iframe?.contentWindow?.postMessage(msg, "*")
@@ -1315,6 +1306,21 @@ export function DesignView({
   const [importingSource, setImportingSource] = useState<null | "url" | "html" | "prototype_zip">(
     null
   )
+  const [pendingPackageImport, setPendingPackageImport] = useState<{
+    stage: DesignPackageStageResult
+    source: "gallery" | "session"
+    designSystemId: string | null
+  } | null>(null)
+  const [committingPackageImport, setCommittingPackageImport] = useState(false)
+  const [assetPreview, setAssetPreview] = useState<DesignAssetPreviewTicket | null>(null)
+  const [draftAssetPreview, setDraftAssetPreview] = useState<DesignAssetPreviewTicket | null>(null)
+  const [assetTicketNonce, setAssetTicketNonce] = useState(0)
+  const [draftTicketNonce, setDraftTicketNonce] = useState(0)
+  const [resolvedAnnotations, setResolvedAnnotations] = useState<DesignCanvasResolvedAnnotations | null>(
+    null
+  )
+  const resolvedAnnotationsRef = useRef<DesignCanvasResolvedAnnotations | null>(null)
+  resolvedAnnotationsRef.current = resolvedAnnotations
   const [exportChoice, setExportChoice] = useState<{
     html: string
     artifactPath: string | null
@@ -1345,6 +1351,14 @@ export function DesignView({
   const [canvasContainer, setCanvasContainer] = useState<HTMLDivElement | null>(null)
   const previewScrollRef = useRef<HTMLDivElement>(null)
   const [previewSize, setPreviewSize] = useState({ width: 800, height: 600 })
+  const iframeInnerScrollRef = useRef({ x: 0, y: 0 })
+  const viewportSizeRef = useRef({ width: 1440, height: 1000 })
+  const canvasRpcRef = useRef(
+    new Map<
+      string,
+      { resolve: (payload: unknown) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }
+    >()
+  )
   const activeTabId = SINGLE_DESIGN_TAB_ID
   const activeTabIdRef = useRef(activeTabId)
   const tabStatesRef = useRef(tabStates)
@@ -1367,6 +1381,125 @@ export function DesignView({
   const isWelcome = !hasPreviewContent && !questionsInConversation && ts.messages.length === 0 &&
     !["asking", "generating", "questions_ready"].includes(ts.generationState)
   const tweakEditor = useDesignTweaks(currentSessionId, visibleDraft ? visibleDraft.tweaks : ts.tweaks, visibleDraft?.runId)
+  const activeAssetPreview = visibleDraft ? draftAssetPreview : assetPreview
+  const activeAssetPreviewRef = useRef<DesignAssetPreviewTicket | null>(activeAssetPreview)
+  activeAssetPreviewRef.current = activeAssetPreview
+
+  const queryCanvasRpc = useCallback(
+    async <T,>(type: string, payload: Record<string, unknown>, timeoutMs = 1500): Promise<T | null> => {
+      const bridge = activeAssetPreviewRef.current
+      const win = iframeRef.current?.contentWindow
+      if (!bridge || !win) return null
+      const requestId = uuid()
+      return await new Promise<T | null>((resolve) => {
+        const timer = setTimeout(() => {
+          canvasRpcRef.current.delete(requestId)
+          resolve(null)
+        }, timeoutMs)
+        canvasRpcRef.current.set(requestId, {
+          resolve: (data) => resolve(data as T),
+          reject: () => resolve(null),
+          timer
+        })
+        win.postMessage(
+          { type, previewInstanceId: bridge.previewInstanceId, requestId, ...payload },
+          bridge.origin
+        )
+      })
+    },
+    []
+  )
+
+  const packageVersion = ts.artifactPackage?.version ?? null
+  const hasDraftPreview = Boolean(visibleDraft)
+  const hasArtifactHtml = Boolean(ts.html.trim())
+  useEffect(() => {
+    if (!currentSessionId || !sessionReady || !packageVersion || hasDraftPreview || !hasArtifactHtml) {
+      setAssetPreview(null)
+      return
+    }
+    let cancelled = false
+    let acquiredToken: string | null = null
+    setAssetPreview(null)
+    void window.api.design
+      .acquirePreviewUrl(currentSessionId, "canvas")
+      .then((result) => {
+        if (cancelled) {
+          if (result.ticket?.token) {
+            void window.api.design.releasePreviewUrl(result.ticket.token).catch(() => undefined)
+          }
+          return
+        }
+        if (result.success && result.ticket) {
+          acquiredToken = result.ticket.token
+          setAssetPreview(result.ticket)
+        } else {
+          showToast(result.error || "无法加载设计资源预览")
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) showToast(err instanceof Error ? err.message : "无法加载设计资源预览")
+      })
+    return () => {
+      cancelled = true
+      if (acquiredToken) {
+        void window.api.design.releasePreviewUrl(acquiredToken).catch(() => undefined)
+      }
+      setAssetPreview(null)
+    }
+  }, [
+    currentSessionId,
+    sessionReady,
+    packageVersion,
+    ts.reloadKey,
+    workspacePath,
+    hasDraftPreview,
+    hasArtifactHtml,
+    assetTicketNonce,
+    showToast
+  ])
+
+  const draftRunId = visibleDraft?.runId ?? null
+  useEffect(() => {
+    if (!currentSessionId || !sessionReady || !packageVersion || !draftRunId) {
+      setDraftAssetPreview(null)
+      return
+    }
+    let cancelled = false
+    let acquiredToken: string | null = null
+    setDraftAssetPreview(null)
+    void window.api.design
+      .acquirePreviewUrl(currentSessionId, "draft", draftRunId)
+      .then((result) => {
+        if (cancelled) {
+          if (result.ticket?.token) {
+            void window.api.design.releasePreviewUrl(result.ticket.token).catch(() => undefined)
+          }
+          return
+        }
+        if (result.success && result.ticket) {
+          acquiredToken = result.ticket.token
+          setDraftAssetPreview(result.ticket)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+      if (acquiredToken) {
+        void window.api.design.releasePreviewUrl(acquiredToken).catch(() => undefined)
+      }
+      setDraftAssetPreview(null)
+    }
+  }, [currentSessionId, sessionReady, packageVersion, draftRunId, workspacePath, draftTicketNonce])
+
+  useEffect(() => {
+    setResolvedAnnotations(null)
+    for (const [reqId, waiter] of canvasRpcRef.current.entries()) {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error("preview changed"))
+      canvasRpcRef.current.delete(reqId)
+    }
+  }, [activeAssetPreview?.previewInstanceId])
 
   // ── Per-tab derived values (all read from ts) ────────────────
   const inputValue = ts.inputValue
@@ -1511,6 +1644,10 @@ export function DesignView({
     tweakRevision: ts.tweaks?.revision,
     variationId: ts.activeVariationId,
     iframe: iframeRef,
+    crossOriginBridge:
+      !visibleDraft && activeAssetPreview
+        ? { origin: activeAssetPreview.origin, previewInstanceId: activeAssetPreview.previewInstanceId }
+        : null,
     onSelect: (selectedElement) => updateLocalUi({ selectedElement }),
     onError: showToast
   })
@@ -1532,10 +1669,19 @@ export function DesignView({
       const scale = Math.max((state?.zoom ?? 100) / 100, 0.25)
       const wrapperX = (previewScrollRef.current?.scrollLeft ?? 0) / scale
       const wrapperY = (previewScrollRef.current?.scrollTop ?? 0) / scale
-      const win = iframeRef.current?.contentWindow
+      const innerX =
+        iframeX ??
+        (activeAssetPreviewRef.current
+          ? iframeInnerScrollRef.current.x
+          : (iframeRef.current?.contentWindow?.scrollX ?? 0))
+      const innerY =
+        iframeY ??
+        (activeAssetPreviewRef.current
+          ? iframeInnerScrollRef.current.y
+          : (iframeRef.current?.contentWindow?.scrollY ?? 0))
       updateLocalUi({
-        iframeScrollX: wrapperX + (iframeX ?? win?.scrollX ?? 0),
-        iframeScrollY: wrapperY + (iframeY ?? win?.scrollY ?? 0)
+        iframeScrollX: wrapperX + innerX,
+        iframeScrollY: wrapperY + innerY
       }, true)
     },
     [updateLocalUi]
@@ -1671,13 +1817,26 @@ export function DesignView({
     }
   }, [])
 
+  const flushBeforeNavigation = useCallback(async () => {
+    try {
+      await directEditor.flush()
+      await tweakEditor.flush()
+      return true
+    } catch (error) {
+      showToast(`编辑尚未保存：${String(error)}`)
+      return false
+    }
+  }, [directEditor.flush, tweakEditor.flush, showToast])
+
   const handleSelectWorkspace = useCallback(async () => {
     setWorkspaceLoading(true)
     try {
+      const id = currentSessionIdRef.current
+      if (!(await flushBeforeNavigation()) || currentSessionIdRef.current !== id) return
       const selectedPath = await window.api.workspace.select()
-      if (selectedPath) {
-        if (currentSessionIdRef.current)
-          await getDesignSessionClient().setWorkspace(currentSessionIdRef.current, selectedPath)
+      if (selectedPath && currentSessionIdRef.current === id) {
+        if (id) await getDesignSessionClient().setWorkspace(id, selectedPath)
+        if (currentSessionIdRef.current !== id) return
         setWorkspacePath(selectedPath)
         if (requirementEntry?.source === "space") {
           setRequirementEntry({ ...requirementEntry, workspacePath: selectedPath })
@@ -1689,7 +1848,7 @@ export function DesignView({
     } finally {
       setWorkspaceLoading(false)
     }
-  }, [requirementEntry, setRequirementEntry, showToast])
+  }, [requirementEntry, setRequirementEntry, showToast, flushBeforeNavigation])
 
   // ── Keep refs in sync ────────────────────────────────────
   useEffect(() => {
@@ -1762,23 +1921,31 @@ export function DesignView({
         return
       appliedSeq = snapshot.seq
       const previous = tabStatesRef.current[SINGLE_DESIGN_TAB_ID] ?? makeTabState()
-      const state = { ...makeTabState(), ...snapshot.state }
+      let state = { ...makeTabState(), ...snapshot.state }
       const htmlChanged = sourceHtml !== snapshot.state.html
-      if (htmlChanged && state.html) {
+      const isPackageSnapshot = Boolean(snapshot.state.artifactPackage)
+      if (!isPackageSnapshot && htmlChanged && state.html) {
         // Prepare dependencies before mounting the final document: business scripts run once.
         state.html = initial ? "" : previous.html
         state.variations = initial ? [] : previous.variations
         state.reloadKey = previous.reloadKey
         if (!initial && previous.draftPreview && !snapshot.state.draftPreview) state.draftPreview = previous.draftPreview
-      } else if (!initial) {
+      } else if (!isPackageSnapshot && !initial) {
         state.html = previous.html
         state.variations = previous.variations
         state.reloadKey = previous.reloadKey
       }
       if (snapshot.state.html && preparedSourceHtml !== snapshot.state.html) {
         // A source revision is visible only when its matching prepared document is ready.
-        state.artifactRevision = previous.artifactRevision
-        state.appliedPatch = previous.appliedPatch
+        if (isPackageSnapshot) {
+          preparedSourceHtml = snapshot.state.html
+          state = hydrateTabStateHtml(state, snapshot.state.html)
+          state.draftPreview = snapshot.state.draftPreview ?? null
+          state.tweaks = snapshot.state.tweaks
+        } else {
+          state.artifactRevision = previous.artifactRevision
+          state.appliedPatch = previous.appliedPatch
+        }
       }
       if (previous.inputValue) state.inputValue = previous.inputValue
       if (!initial) {
@@ -1798,7 +1965,7 @@ export function DesignView({
       tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: state }
       setTabStates(tabStatesRef.current)
       client.markRead(id, snapshot.seq)
-      if (htmlChanged && snapshot.state.html) {
+      if (!isPackageSnapshot && htmlChanged && snapshot.state.html) {
         const raw = snapshot.state.html
         const reuseCaptureResources = snapshot.state.sourceInfo?.kind === "import_url" &&
           snapshot.state.appliedPatch?.mode === "live"
@@ -1942,14 +2109,6 @@ export function DesignView({
       }
     },
     [workspacePath, showToast]
-  )
-
-  const readDependencyTextFile = useCallback(
-    async (resolvedPath: string): Promise<string | null> => {
-      const result = await window.api.file.readText(resolvedPath)
-      return result.success ? (result.content ?? null) : null
-    },
-    []
   )
 
   const syncContextFilesToWorkspace = useCallback(
@@ -2173,35 +2332,80 @@ export function DesignView({
     [designSystems, workspacePath]
   )
 
-  const loadImportedHtmlFromFile = useCallback(
+  const applyServerImportedSnapshot = useCallback((snapshot: DesignSessionSnapshot) => {
+    const client = getDesignSessionClient()
+    client.ingest(snapshot)
+    currentSessionIdRef.current = snapshot.id
+    setCurrentSessionId(snapshot.id)
+    try {
+      localStorage.setItem(SESSION_LAST_KEY, snapshot.id)
+    } catch {
+      /* ignore */
+    }
+    const nextState = snapshot.state.artifactPackage
+      ? hydrateTabStateHtml({ ...makeTabState(), ...snapshot.state }, snapshot.state.html)
+      : { ...makeTabState(), ...snapshot.state }
+    tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: nextState }
+    setTabStates(tabStatesRef.current)
+    setSessionIndex(client.list())
+    setCreationPageOpen(false)
+  }, [])
+
+  const finalizePackageCommit = useCallback(
     async (
-      filePath: string
-    ): Promise<{
-      html: string
-      label: string
-      detail: string
-    }> => {
-      const readResult = await window.api.file.readText(filePath)
-      if (!readResult.success || !readResult.content) {
-        throw new Error(readResult.error || "读取 HTML 文件失败")
-      }
-
-      const inlinedHtml = await buildDesignHtmlPreviewDocument({
-        html: readResult.content,
-        htmlPath: filePath,
-        readTextFile: readDependencyTextFile,
-        readDataUrlFile: readPreviewDependencyDataUrlFile
-      })
-      const htmlWithBase = injectBaseHref(inlinedHtml, makeFileHref(filePath))
-
-      return {
-        html: htmlWithBase,
-        label: readResult.filename || getPathName(filePath) || "HTML 页面",
-        detail: filePath
+      stageId: string,
+      entryPath: string,
+      source: "gallery" | "session",
+      designSystemId: string | null
+    ) => {
+      setCommittingPackageImport(true)
+      try {
+        const createNew = source === "gallery" || !currentSessionIdRef.current
+        const committed = await window.api.design.commitImportPackage({
+          stageId,
+          entryPath,
+          sessionId: createNew ? null : currentSessionIdRef.current,
+          createNew,
+          workspacePath: workspacePath ?? undefined,
+          designSystemId,
+          preserveComposerDraft: source === "session"
+        })
+        if (!committed.success || !committed.snapshot) {
+          throw new Error(committed.error || "导入设计项目包失败")
+        }
+        applyServerImportedSnapshot(committed.snapshot)
+        setPendingPackageImport(null)
+        const issues: string[] = []
+        if (committed.missingAssets?.length) {
+          issues.push(`缺失资源 ${committed.missingAssets.slice(0, 3).join("、")}`)
+        }
+        if (committed.outOfScopeAssets?.length) {
+          issues.push(`超出目录范围 ${committed.outOfScopeAssets.slice(0, 3).join("、")}`)
+        }
+        if (issues.length > 0) {
+          showToast(`已导入（${issues.join("；")}）`)
+        } else {
+          showToast(
+            committed.artifactPackage?.assetCount
+              ? `已导入页面及 ${committed.artifactPackage.assetCount} 个独立资源`
+              : "已导入设计页面"
+          )
+        }
+      } finally {
+        setCommittingPackageImport(false)
       }
     },
-    [readDependencyTextFile]
+    [applyServerImportedSnapshot, showToast, workspacePath]
   )
+
+  const cancelPendingPackageImport = useCallback(() => {
+    setPendingPackageImport((prev) => {
+      if (prev?.stage.stageId) {
+        void window.api.design.cancelImportPackage(prev.stage.stageId).catch(() => undefined)
+      }
+      return null
+    })
+  }, [])
 
   const openImportUrlModal = useCallback(async () => {
     if (importingSource) return
@@ -2218,66 +2422,50 @@ export function DesignView({
 
   const handleImportHtmlFile = useCallback(
     async (source: "gallery" | "session") => {
-      const ready = await ensureWorkspaceSelected("导入 HTML 页面")
+      const ready = await ensureWorkspaceSelected("导入 HTML / ZIP")
       if (!ready) return
 
       setImportingSource("html")
       try {
-        const picked = await window.api.file.selectCode()
-        if (picked.canceled || picked.filePaths.length === 0) return
+        const picked = await window.api.design.pickImportHtmlOrZip()
+        if (picked.canceled || !picked.filePath) return
 
-        const htmlPath = picked.filePaths.find((filePath) => /\.html?$/i.test(filePath))
-        if (!htmlPath) {
-          showToast("请选择 .html 或 .htm 文件")
+        const staged = await window.api.design.stageImportPackage(
+          picked.filePath,
+          workspacePath ?? undefined
+        )
+        if (!staged.success || !staged.stageId || !staged.pages?.length) {
+          throw new Error(staged.error || "解析导入文件失败")
+        }
+
+        const designSystemId =
+          source === "gallery"
+            ? createDesignSystemId
+            : (tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId ?? null)
+
+        if (staged.pages.length === 1) {
+          await finalizePackageCommit(
+            staged.stageId,
+            staged.defaultEntryPath || staged.pages[0],
+            source,
+            designSystemId
+          )
           return
         }
 
-        const imported = await loadImportedHtmlFromFile(htmlPath)
-        const sessionId =
-          source === "gallery"
-            ? createSession(
-                {
-                  title: imported.label,
-                  kind: "import_html",
-                  sourceLabel: imported.label
-                },
-                { designSystemId: createDesignSystemId }
-              )
-            : (currentSessionId ??
-              createSession(
-                {
-                  title: imported.label,
-                  kind: "import_html",
-                  sourceLabel: imported.label
-                },
-                { designSystemId: createDesignSystemId }
-              ))
-
-        await applyImportedDesign({
-          sessionId,
-          html: imported.html,
-          sourceInfo: { kind: "import_html", label: imported.label, detail: imported.detail },
-          userMessage: `导入 HTML 文件：${imported.label}`,
-          designSystemId:
-            source === "gallery"
-              ? createDesignSystemId
-              : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
-        })
-        setCreationPageOpen(false)
+        setPendingPackageImport({ stage: staged, source, designSystemId })
       } catch (err) {
-        showToast(err instanceof Error ? err.message : "导入 HTML 页面失败")
+        showToast(err instanceof Error ? err.message : "导入 HTML / ZIP 失败")
       } finally {
         setImportingSource(null)
       }
     },
     [
-      ensureWorkspaceSelected,
-      showToast,
-      loadImportedHtmlFromFile,
-      createSession,
       createDesignSystemId,
-      currentSessionId,
-      applyImportedDesign
+      ensureWorkspaceSelected,
+      finalizePackageCommit,
+      showToast,
+      workspacePath
     ]
   )
 
@@ -2297,9 +2485,26 @@ export function DesignView({
           return
         }
 
-        const imported = await window.api.design.importPrototypeZip(zipPath)
+        const createNew = source === "gallery" || !currentSessionId
+        const designSystemId =
+          source === "gallery"
+            ? createDesignSystemId
+            : (tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId ?? null)
+
+        const imported = await window.api.design.importPrototypeZip(zipPath, {
+          workspacePath: workspacePath ?? undefined,
+          sessionId: createNew ? null : currentSessionId,
+          createNew,
+          designSystemId
+        })
         if (!imported.success || !imported.html) {
           throw new Error(imported.error || "解析原型图压缩包失败")
+        }
+
+        if (imported.snapshot) {
+          applyServerImportedSnapshot(imported.snapshot)
+          showToast(`已导入原型：${imported.imageCount ?? 0} 个画板（独立文件保存）`)
+          return
         }
 
         const label = imported.title || getPathName(zipPath) || "Pixso 原型"
@@ -2332,10 +2537,7 @@ export function DesignView({
             detail: `${zipPath}${imported.imageCount ? ` · ${imported.imageCount} 张图片` : ""}`
           },
           userMessage: `导入 Pixso 原型图压缩包：${label}`,
-          designSystemId:
-            source === "gallery"
-              ? createDesignSystemId
-              : tabStatesRef.current[SINGLE_DESIGN_TAB_ID]?.selectedDesignSystemId
+          designSystemId
         })
         setCreationPageOpen(false)
         showToast(`已生成原型 HTML：${imported.imageCount ?? 0} 张图片`)
@@ -2346,12 +2548,14 @@ export function DesignView({
       }
     },
     [
+      applyImportedDesign,
+      applyServerImportedSnapshot,
+      createDesignSystemId,
+      createSession,
+      currentSessionId,
       ensureWorkspaceSelected,
       showToast,
-      createSession,
-      createDesignSystemId,
-      currentSessionId,
-      applyImportedDesign
+      workspacePath
     ]
   )
 
@@ -2529,13 +2733,16 @@ export function DesignView({
 
   // Navigation detaches the view; only the explicit Stop action cancels a run.
   const openSession = useCallback(
-    (id: string) => {
-      setCreationPageOpen(false)
+    async (id: string) => {
+      const previous = currentSessionIdRef.current
       // 重选当前会话不会触发加载 Effect，因此直接复用已打开状态，避免恢复页卡死。
       if (currentSessionIdRef.current === id) {
+        setCreationPageOpen(false)
         localStorage.setItem(SESSION_LAST_KEY, id)
-        return
+        return true
       }
+      if (!(await flushBeforeNavigation()) || currentSessionIdRef.current !== previous) return false
+      setCreationPageOpen(false)
       flushArtifactEdits()
       setSessionOpening(true)
       const session = loadSessionById(id)
@@ -2544,8 +2751,9 @@ export function DesignView({
       currentSessionIdRef.current = id
       setCurrentSessionId(id)
       localStorage.setItem(SESSION_LAST_KEY, id)
+      return true
     },
-    [flushArtifactEdits]
+    [flushArtifactEdits, flushBeforeNavigation]
   )
 
   // 消费需求详情页传入的数据：首次创建会话，后续打开已有会话。
@@ -2559,14 +2767,15 @@ export function DesignView({
   })
 
   const backToGallery = useCallback(async () => {
-    try { await directEditor.flush() } catch (error) { showToast(`编辑尚未保存：${String(error)}`); return }
+    const id = currentSessionIdRef.current
+    if (!(await flushBeforeNavigation()) || currentSessionIdRef.current !== id) return
     flushArtifactEdits()
     currentSessionIdRef.current = null
     setCurrentSessionId(null)
     setSessionOpening(false)
     localStorage.removeItem(SESSION_LAST_KEY)
     setSessionIndex(getDesignSessionClient().list())
-  }, [flushArtifactEdits, directEditor.flush, showToast])
+  }, [flushArtifactEdits, flushBeforeNavigation])
 
   const deleteSession = useCallback(
     (id: string) => {
@@ -2586,6 +2795,29 @@ export function DesignView({
 
   // ── Inject / remove mode scripts when activeMode changes ─
   useEffect(() => {
+    if (!visibleDraft && activeAssetPreview) {
+      iframeRef.current?.contentWindow?.postMessage(
+        {
+          type: "__design_set_mode",
+          previewInstanceId: activeAssetPreview.previewInstanceId,
+          mode: activeMode
+        },
+        activeAssetPreview.origin
+      )
+      if (activeMode !== "edit") {
+        updateTs(activeTabId, { selectedElement: null })
+      }
+      return () => {
+        iframeRef.current?.contentWindow?.postMessage(
+          {
+            type: "__design_set_mode",
+            previewInstanceId: activeAssetPreview.previewInstanceId,
+            mode: null
+          },
+          activeAssetPreview.origin
+        )
+      }
+    }
     if (activeMode === "comment") {
       injectIntoIframe(iframeRef.current, COMMENT_INJECT)
       injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
@@ -2611,9 +2843,65 @@ export function DesignView({
       injectIntoIframe(iframeRef.current, EDIT_SELECT_CLEANUP)
       sendToIframe(iframeRef.current, { type: "__deactivate_edit_mode" })
     }
-  }, [activeMode, activeTabId, updateTs])
+  }, [activeMode, activeTabId, activeAssetPreview, visibleDraft, previewLoad, updateTs])
 
   useEffect(() => {
+    if (visibleDraft || !activeAssetPreview || !iframeRef.current?.contentWindow) return
+    const payload: DesignCanvasSyncAnnotationsPayload = {
+      comments: ts.comments.map((c) => ({
+        id: c.id,
+        pageX: c.pageX,
+        pageY: c.pageY,
+        anchor: c.anchor
+      })),
+      draftComment: ts.draftComment
+        ? {
+            pageX: ts.draftComment.pageX,
+            pageY: ts.draftComment.pageY,
+            anchor: ts.draftComment.anchor
+          }
+        : null,
+      strokes: ts.drawStrokes.map((s) => ({
+        id: s.id,
+        points: s.points,
+        anchor: s.anchor,
+        anchoredPoints: s.anchoredPoints
+      })),
+      notes: ts.drawNotes.map((n) => ({
+        id: n.id,
+        pageX: n.pageX,
+        pageY: n.pageY,
+        anchor: n.anchor
+      })),
+      draftDrawNote: ts.draftDrawNote
+        ? {
+            pageX: ts.draftDrawNote.pageX,
+            pageY: ts.draftDrawNote.pageY,
+            anchor: ts.draftDrawNote.anchor
+          }
+        : null
+    }
+    iframeRef.current.contentWindow.postMessage(
+      {
+        type: "__design_sync_annotations",
+        previewInstanceId: activeAssetPreview.previewInstanceId,
+        annotations: payload
+      },
+      activeAssetPreview.origin
+    )
+  }, [
+    activeAssetPreview,
+    visibleDraft,
+    previewLoad,
+    ts.comments,
+    ts.draftComment,
+    ts.drawStrokes,
+    ts.drawNotes,
+    ts.draftDrawNote
+  ])
+
+  useEffect(() => {
+    if (activeAssetPreview) return
     const root = iframeRef.current?.contentDocument
     if (!root || (activeMode !== "comment" && activeMode !== "draw")) return
     let raf = 0
@@ -2672,7 +2960,7 @@ export function DesignView({
       cancelAnimationFrame(raf)
       cleanup.forEach((dispose) => dispose())
     }
-  }, [activeMode, activeTabId, previewLoad, updateTs])
+  }, [activeMode, activeTabId, activeAssetPreview, previewLoad, updateTs])
 
   // ── Listen for all postMessages from iframe ───────────────
   useEffect(() => {
@@ -2680,14 +2968,63 @@ export function DesignView({
       if (e.source !== iframeRef.current?.contentWindow) return
       const msg = e.data
       if (!msg?.type) return
+      const bridge = activeAssetPreviewRef.current
+      if (bridge) {
+        if (e.origin !== bridge.origin || msg.previewInstanceId !== bridge.previewInstanceId) return
+      }
+
+      if (
+        msg.type === "__design_point_anchor_reply" ||
+        msg.type === "__design_stroke_anchor_reply" ||
+        msg.type === "__design_observations_reply"
+      ) {
+        const waiter =
+          typeof msg.requestId === "string" ? canvasRpcRef.current.get(msg.requestId) : null
+        if (waiter) {
+          clearTimeout(waiter.timer)
+          canvasRpcRef.current.delete(msg.requestId)
+          waiter.resolve(msg)
+        }
+        return
+      }
+
+      if (msg.type === "__design_annotations_resolved") {
+        if (msg.resolved) setResolvedAnnotations(msg.resolved as DesignCanvasResolvedAnnotations)
+        return
+      }
+
+      if (msg.type === "__design_canvas_ready") {
+        if (typeof msg.viewportW === "number" && typeof msg.viewportH === "number") {
+          viewportSizeRef.current = {
+            width: msg.viewportW || 1440,
+            height: msg.viewportH || 1000
+          }
+        }
+        if (typeof msg.scrollX === "number" || typeof msg.scrollY === "number") {
+          iframeInnerScrollRef.current = {
+            x: Number(msg.scrollX) || 0,
+            y: Number(msg.scrollY) || 0
+          }
+        }
+        return
+      }
 
       // ── Iframe scroll position update ─────────────────────
       if (msg.type === "__iframe_scroll") {
-        const { x, y, width, height } = msg as {
+        const { x, y, width, height, viewportW, viewportH } = msg as {
           x: number
           y: number
           width?: number
           height?: number
+          viewportW?: number
+          viewportH?: number
+        }
+        iframeInnerScrollRef.current = { x: Number(x) || 0, y: Number(y) || 0 }
+        if (typeof viewportW === "number" && typeof viewportH === "number") {
+          viewportSizeRef.current = {
+            width: viewportW || 1440,
+            height: viewportH || 1000
+          }
         }
         if (typeof width === "number" || typeof height === "number") {
           updatePreviewContentSize(width ?? 0, height ?? 0)
@@ -2698,15 +3035,18 @@ export function DesignView({
 
       // ── Comment click ──────────────────────────────────────
       if (msg.type === "__comment_click") {
-        const { pageX, pageY, elementDesc } = msg as {
+        const { pageX, pageY, elementDesc, anchor: bridgeAnchor } = msg as {
           pageX: number
           pageY: number
           elementDesc: string
+          anchor?: DesignElementAnchor
         }
-        const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, {
-          x: pageX,
-          y: pageY
-        })
+        const anchor = bridge
+          ? bridgeAnchor
+          : getPointAnchor(iframeRef.current?.contentDocument ?? null, {
+              x: pageX,
+              y: pageY
+            })
         updateTs(activeTabIdRef.current, {
           draftComment: {
             pageX,
@@ -2870,6 +3210,49 @@ export function DesignView({
       const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
       const hasFrameTarget = patchTargets?.some((target) => splitFrameNodeId(target.nodeId))
       const local = isIteration && !image && !skill && !state.draftPreview && !state.creationSelection?.template.package && (hasFrameTarget || shouldUseDesignPatch(prompt, !!patchTargets?.length))
+      const bridge = activeAssetPreviewRef.current
+      if (bridge) {
+        const runWithBridgeObservations = async () => {
+          let observations: DesignCanvasObservationItem[] = []
+          if (local && patchTargets?.length) {
+            const nodeIds = patchTargets
+              .map((target) => target.nodeId)
+              .filter((id): id is string => Boolean(id))
+            if (nodeIds.length > 0) {
+              const reply = await queryCanvasRpc<{ observations?: DesignCanvasObservationItem[] }>(
+                "__design_query_observations",
+                { nodeIds }
+              )
+              observations = reply?.observations ?? []
+            }
+          }
+          startManagedRun({
+            kind: local ? "patch" : "agent",
+            prompt,
+            isIteration,
+            modelId,
+            cleanUserMsg,
+            patch: local
+              ? {
+                  targets: patchTargets ?? [],
+                  variationId: state.activeVariationId,
+                  artifactRevision: state.artifactRevision ?? 0,
+                  observations,
+                  viewport: viewportSizeRef.current
+                }
+              : undefined,
+            currentHtml: undefined,
+            imageData: image?.base64,
+            mimeType: image?.mimeType,
+            skill,
+            sourceArtifactPath,
+            freshAgentThread,
+            rollback: rollbackSnapshot
+          })
+        }
+        void runWithBridgeObservations()
+        return
+      }
       const observations = (patchTargets ?? []).flatMap((target) => {
         const scoped = splitFrameNodeId(target.nodeId)
         const root = iframeRef.current?.contentDocument ?? null
@@ -2902,7 +3285,7 @@ export function DesignView({
         rollback: rollbackSnapshot
       })
     },
-    [startManagedRun]
+    [startManagedRun, queryCanvasRpc]
   )
 
   const startAskQuestions = useCallback(
@@ -3287,6 +3670,71 @@ ${commentLines}${variantNote}`
 
   const handleDrawNoteDraft = useCallback(
     (point: DrawPoint) => {
+      if (activeAssetPreviewRef.current) {
+        const resolvedMap = new Map(
+          (resolvedAnnotationsRef.current?.strokes ?? []).map((item) => [item.id, item.points])
+        )
+        updateTs(activeTabId, (prev) => ({
+          draftDrawNote: {
+            pageX: point.x,
+            pageY: point.y,
+            elements: [],
+            strokeId: pickStrokeIdForNotePoint(
+              prev.drawStrokes.map((s) => ({
+                id: s.id,
+                points: resolvedMap.get(s.id) ?? s.points,
+                anchorElement: null
+              })),
+              point,
+              null
+            )
+          }
+        }))
+        void queryCanvasRpc<{ anchor?: DesignElementAnchor; elements?: string[] }>(
+          "__design_query_point_anchor",
+          { point }
+        ).then((reply) => {
+          if (!reply) return
+          const latestResolvedMap = new Map(
+            (resolvedAnnotationsRef.current?.strokes ?? []).map((item) => [item.id, item.points])
+          )
+          updateTs(activeTabId, (prev) => {
+            if (
+              !prev.draftDrawNote ||
+              prev.draftDrawNote.pageX !== point.x ||
+              prev.draftDrawNote.pageY !== point.y
+            ) {
+              return {}
+            }
+            const nextAnchor = reply.anchor ?? prev.draftDrawNote.anchor
+            const nextElements =
+              nextAnchor?.label
+                ? [nextAnchor.label]
+                : (reply.elements?.length ? reply.elements : prev.draftDrawNote.elements)
+            const strokeId =
+              prev.draftDrawNote.strokeId ??
+              pickStrokeIdForNotePoint(
+                prev.drawStrokes.map((s) => ({
+                  id: s.id,
+                  points: latestResolvedMap.get(s.id) ?? s.points,
+                  anchorElement: null
+                })),
+                point,
+                null
+              )
+            return {
+              draftDrawNote: {
+                ...prev.draftDrawNote,
+                anchor: nextAnchor,
+                elements: nextElements,
+                strokeId
+              }
+            }
+          })
+        })
+        return
+      }
+
       const doc = iframeRef.current?.contentDocument ?? null
       const anchor = getPointAnchor(doc, point)
       const elements = anchor?.label ? [anchor.label] : collectDrawElementLabels([point])
@@ -3300,7 +3748,7 @@ ${commentLines}${variantNote}`
         }
       }))
     },
-    [activeTabId, updateTs, collectDrawElementLabels]
+    [activeTabId, updateTs, collectDrawElementLabels, queryCanvasRpc]
   )
 
   const handleDrawNoteSubmit = useCallback(
@@ -3344,6 +3792,57 @@ ${commentLines}${variantNote}`
 
   const handleDrawStrokeComplete = useCallback(
     (stroke: DrawStroke) => {
+      if (activeAssetPreviewRef.current) {
+        updateTs(activeTabId, (prev) => {
+          const resolvedStrokeMap = new Map(
+            (resolvedAnnotationsRef.current?.strokes ?? []).map((item) => [item.id, item.points])
+          )
+          const resolvedNoteMap = new Map(
+            (resolvedAnnotationsRef.current?.notes ?? []).map((item) => [item.id, item.point])
+          )
+          const nextStrokes = [...prev.drawStrokes, stroke]
+          const strokesInput = nextStrokes.map((s) => ({
+            id: s.id,
+            points: resolvedStrokeMap.get(s.id) ?? s.points,
+            anchorElement: null
+          }))
+          return {
+            drawStrokes: nextStrokes,
+            drawNotes: prev.drawNotes.map((note) => {
+              const notePoint = resolvedNoteMap.get(note.id) ?? { x: note.pageX, y: note.pageY }
+              const strokeId = pickStrokeIdForNotePoint(strokesInput, notePoint, null)
+              return strokeId ? { ...note, strokeId } : { ...note, strokeId: undefined }
+            })
+          }
+        })
+        void queryCanvasRpc<{
+          anchor?: DesignElementAnchor
+          anchoredPoints?: AnchoredDrawPoint[]
+          elements?: string[]
+        }>("__design_query_stroke_anchor", { points: stroke.points }).then((reply) => {
+          if (!reply) return
+          updateTs(activeTabId, (prev) => {
+            if (!prev.drawStrokes.some((s) => s.id === stroke.id)) return {}
+            return {
+              drawStrokes: prev.drawStrokes.map((s) =>
+                s.id === stroke.id
+                  ? {
+                      ...s,
+                      anchor: reply.anchor ?? s.anchor,
+                      anchoredPoints: reply.anchoredPoints ?? s.anchoredPoints
+                    }
+                  : s
+              ),
+              drawElementHints: [
+                ...prev.drawElementHints.filter((item) => item.strokeId !== stroke.id),
+                { strokeId: stroke.id, elements: reply.elements ?? [] }
+              ]
+            }
+          })
+        })
+        return
+      }
+
       const doc = iframeRef.current?.contentDocument ?? null
       const anchor = getDominantPointAnchor(doc, stroke.points)
       const anchoredStroke: DrawStroke = {
@@ -3375,7 +3874,7 @@ ${commentLines}${variantNote}`
         })
       }))
     },
-    [activeTabId, updateTs, collectDrawElementHint]
+    [activeTabId, updateTs, collectDrawElementHint, queryCanvasRpc]
   )
 
   const handleUndoDrawStroke = useCallback(() => {
@@ -3427,11 +3926,24 @@ ${commentLines}${variantNote}`
       const remainingX = deltaX - usedX
       const remainingY = deltaY - usedY
       if (Math.abs(remainingX) > 0.5 || Math.abs(remainingY) > 0.5) {
-        iframeRef.current?.contentWindow?.scrollBy({
-          left: remainingX / scale,
-          top: remainingY / scale,
-          behavior: "auto"
-        })
+        const bridge = activeAssetPreviewRef.current
+        if (bridge) {
+          iframeRef.current?.contentWindow?.postMessage(
+            {
+              type: "__design_scroll_by",
+              previewInstanceId: bridge.previewInstanceId,
+              left: remainingX / scale,
+              top: remainingY / scale
+            },
+            bridge.origin
+          )
+        } else {
+          iframeRef.current?.contentWindow?.scrollBy({
+            left: remainingX / scale,
+            top: remainingY / scale,
+            behavior: "auto"
+          })
+        }
       } else {
         updatePreviewScrollState()
       }
@@ -3446,7 +3958,9 @@ ${commentLines}${variantNote}`
       const hintsByStroke = new Map(
         state.drawElementHints.map((hint) => [hint.strokeId, hint.elements])
       )
-      const doc = iframeRef.current?.contentDocument ?? null
+      const isCrossOrigin = Boolean(activeAssetPreviewRef.current)
+      const resolvedSnapshot = resolvedAnnotationsRef.current
+      const doc = isCrossOrigin ? null : (iframeRef.current?.contentDocument ?? null)
       const instruction = userInstruction.trim()
       const instructionLine = instruction
         ? `\n适用于全部标记的用户补充说明：${instruction}\n`
@@ -3456,7 +3970,9 @@ ${commentLines}${variantNote}`
       const describeNote = (note: DrawNote, label: string, indent: string): string => {
         const elementText =
           note.elements.length > 0 ? `；接近元素：${note.elements.join(", ")}` : ""
-        const resolvedPoint = resolveAnchorPagePoint(doc, note.anchor)
+        const resolvedPoint = isCrossOrigin
+          ? (resolvedSnapshot?.notes.find((n) => n.id === note.id)?.point ?? null)
+          : resolveAnchorPagePoint(doc, note.anchor)
         const pageX = resolvedPoint?.x ?? note.pageX
         const pageY = resolvedPoint?.y ?? note.pageY
         const anchorText = getAnchoredElementSummary(note.anchor)
@@ -3485,7 +4001,12 @@ ${commentLines}${variantNote}`
       // Each region + its notes form one self-contained instruction unit.
       const regionBlocks = regionStrokes
         .map((stroke, index) => {
-          const resolvedPoints = resolveAnchoredStrokePoints(doc, stroke)
+          const resolvedStroke = isCrossOrigin
+            ? resolvedSnapshot?.strokes.find((s) => s.id === stroke.id)
+            : undefined
+          const resolvedPoints = isCrossOrigin
+            ? (resolvedStroke?.points ?? stroke.points)
+            : resolveAnchoredStrokePoints(doc, stroke)
           const xs = resolvedPoints.map((point) => point.x)
           const ys = resolvedPoints.map((point) => point.y)
           const minX = Math.round(Math.min(...xs))
@@ -3495,8 +4016,10 @@ ${commentLines}${variantNote}`
           const elements = hintsByStroke.get(stroke.id)?.filter(Boolean) ?? []
           const elementText = elements.length > 0 ? `；覆盖/接近元素：${elements.join(", ")}` : ""
           const anchorText = getAnchoredElementSummary(stroke.anchor)
-          const orphanText =
-            stroke.anchor && resolvedPoints === stroke.points ? "；anchor 未找到，已退回旧坐标" : ""
+          const isOrphaned = isCrossOrigin
+            ? Boolean(stroke.anchor && resolvedStroke?.orphaned)
+            : Boolean(stroke.anchor && resolvedPoints === stroke.points)
+          const orphanText = isOrphaned ? "；anchor 未找到，已退回旧坐标" : ""
           const header = `[区域 ${index + 1}] 区域 x:${minX}-${maxX}, y:${minY}-${maxY}；${stroke.color} 画笔，粗细 ${stroke.width}px，${resolvedPoints.length} 个点${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}`
           const ownNotes = notesByStroke.get(stroke.id) ?? []
           const body =
@@ -3548,6 +4071,63 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       : `✏️ 发送 ${annotationCount} 条绘制标记`
     const rollbackSnapshot = makeIterationRollbackSnapshot(state, getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state)
 
+    if (activeAssetPreviewRef.current) {
+      const resolvedSnapshot = resolvedAnnotationsRef.current
+      const strokesSnapshot = [...state.drawStrokes]
+      const notesSnapshot = [...state.drawNotes]
+      updateTs(tabId, (prev) => ({
+        inputValue: "",
+        drawStrokes: [],
+        drawElementHints: [],
+        drawNotes: [],
+        draftDrawNote: null,
+        messages: [...prev.messages, { role: "user" as const, content: cleanMsg }]
+      }))
+      void (async () => {
+        const strokeTargets = await Promise.all(
+          strokesSnapshot.map(async (stroke) => {
+            const pts =
+              resolvedSnapshot?.strokes.find((s) => s.id === stroke.id)?.points ?? stroke.points
+            const reply = await queryCanvasRpc<{ sampledAnchors?: DesignElementAnchor[] }>(
+              "__design_query_stroke_anchor",
+              { points: pts }
+            )
+            const list = reply?.sampledAnchors?.length
+              ? reply.sampledAnchors
+              : stroke.anchor
+                ? [stroke.anchor]
+                : []
+            const instruction =
+              notesSnapshot
+                .filter((note) => note.strokeId === stroke.id)
+                .map((note) => note.text)
+                .join("；") || userInstruction
+            return list.map((anchor) => ({ ...anchor, instruction }))
+          })
+        )
+        const patchTargets = [
+          ...strokeTargets.flat(),
+          ...notesSnapshot
+            .filter((note) => !note.strokeId)
+            .map((note) => ({ ...note.anchor, instruction: note.text }))
+        ]
+        startGeneration(
+          prompt,
+          tabId,
+          true,
+          state?.selectedModelId ?? undefined,
+          cleanMsg,
+          undefined,
+          undefined,
+          state.artifactPath,
+          false,
+          rollbackSnapshot,
+          patchTargets
+        )
+      })()
+      return
+    }
+
     updateTs(tabId, (prev) => ({
       inputValue: "",
       drawStrokes: [],
@@ -3580,7 +4160,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       }),
         ...state.drawNotes.filter((note) => !note.strokeId).map((note) => ({ ...note.anchor, instruction: note.text }))]
     )
-  }, [activeTabId, updateTs, startGeneration, buildDrawPrompt])
+  }, [activeTabId, updateTs, startGeneration, buildDrawPrompt, queryCanvasRpc])
 
   // ── Send message ──────────────────────────────────────────
 
@@ -4229,10 +4809,25 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       try {
         const result = await window.api.design.exportArtifactPackage(
           artifactPath,
-          workspacePath ?? undefined
+          workspacePath ?? undefined,
+          {
+            sessionId: currentSessionIdRef.current ?? undefined,
+            suggestedName: fileName,
+            saveDialog: true
+          }
         )
-        if (!result.success || !result.buffer) {
+        if (result.canceled) return
+        if (!result.success) {
           showToast(result.error || "导出项目包失败")
+          return
+        }
+        if (result.savedPath) {
+          setExportChoice(null)
+          showToast(`项目包已导出：${result.fileName ?? ""}`)
+          return
+        }
+        if (!result.buffer) {
+          showToast("导出项目包失败")
           return
         }
         downloadBlob(result.buffer, getExportFileName(fileName, "zip"), "application/zip")
@@ -4272,7 +4867,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       try {
         const info = await window.api.design.getArtifactPackageInfo(
           state.artifactPath,
-          workspacePath ?? undefined
+          workspacePath ?? undefined,
+          id ?? undefined
         )
         setExportChoice({
           html,
@@ -4347,6 +4943,26 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     />
   )
 
+  const importPackageModal = (
+    <ImportPackageEntryModal
+      open={Boolean(pendingPackageImport)}
+      stage={pendingPackageImport?.stage ?? null}
+      confirming={committingPackageImport}
+      onConfirm={(entryPath) => {
+        if (!pendingPackageImport?.stage.stageId) return
+        void finalizePackageCommit(
+          pendingPackageImport.stage.stageId,
+          entryPath,
+          pendingPackageImport.source,
+          pendingPackageImport.designSystemId
+        ).catch((err) => {
+          showToast(err instanceof Error ? err.message : "导入项目包失败")
+        })
+      }}
+      onClose={cancelPendingPackageImport}
+    />
+  )
+
   if (creationPageOpen) {
     return (
       <>
@@ -4380,6 +4996,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onConfirm={() => void handleLinkModalConfirm()}
           onClose={closeLinkModal}
         />
+        {importPackageModal}
         {toast && (
           <div
             role="status"
@@ -4418,6 +5035,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           }}
           onClose={closeLinkModal}
         />
+        {importPackageModal}
         {toast && (
           <div
             style={{
@@ -4480,6 +5098,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
         }}
         onClose={closeLinkModal}
       />
+      {importPackageModal}
       <ExportDesignModal
         key={
           exportChoice
@@ -5179,6 +5798,14 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
               style={S.navBtn}
               title="重新加载预览"
               onClick={() => {
+                if (ts.artifactPackage) {
+                  void directEditor.flush().then(() => {
+                    if (currentSessionIdRef.current !== currentSessionId) return
+                    if (visibleDraft) setDraftTicketNonce((n) => n + 1)
+                    else setAssetTicketNonce((n) => n + 1)
+                  }).catch((error) => showToast(`编辑尚未保存：${String(error)}`))
+                  return
+                }
                 // Force the iframe back to the design HTML even if it navigated away.
                 // Strategy: directly set srcdoc on the DOM element, then bump reloadKey
                 // so React also remounts it cleanly on next render.
@@ -5398,7 +6025,9 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                           : ts.activeVariationId === "c"
                             ? "#f59e0b"
                             : undefined
-                    const iframeDoc = iframeRef.current?.contentDocument ?? null
+                    const iframeDoc = activeAssetPreview
+                      ? null
+                      : (iframeRef.current?.contentDocument ?? null)
                     const viewport = getDesignPreviewViewportStyle(zoom)
                     // Region numbers must match buildDrawPrompt's "[区域 N]" labels, so this uses
                     // the same filter and ordering the prompt does.
@@ -5408,6 +6037,15 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                       .forEach((stroke, index) => regionNumberByStroke.set(stroke.id, index + 1))
                     const resolvedDrawStrokes: ResolvedDrawStroke[] = ts.drawStrokes.map(
                       (stroke) => {
+                        if (activeAssetPreview) {
+                          const entry = resolvedAnnotations?.strokes.find((s) => s.id === stroke.id)
+                          return {
+                            ...stroke,
+                            resolvedPoints: entry?.points ?? stroke.points,
+                            orphaned: Boolean(stroke.anchor && (entry ? entry.orphaned : false)),
+                            regionIndex: regionNumberByStroke.get(stroke.id)
+                          }
+                        }
                         const resolvedPoints = resolveAnchoredStrokePoints(iframeDoc, stroke)
                         return {
                           ...stroke,
@@ -5418,6 +6056,17 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                       }
                     )
                     const resolvedDrawNotes: ResolvedDrawNote[] = ts.drawNotes.map((note) => {
+                      if (activeAssetPreview) {
+                        const entry = resolvedAnnotations?.notes.find((n) => n.id === note.id)
+                        return {
+                          ...note,
+                          resolvedPoint: entry?.point ?? undefined,
+                          orphaned: Boolean(note.anchor && (entry ? entry.orphaned : false)),
+                          regionIndex: note.strokeId
+                            ? regionNumberByStroke.get(note.strokeId)
+                            : undefined
+                        }
+                      }
                       const resolvedPoint =
                         resolveAnchorPagePoint(iframeDoc, note.anchor) ?? undefined
                       return {
@@ -5429,15 +6078,20 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                           : undefined
                       }
                     })
-                    const draftDrawPoint = resolveAnchorPagePoint(
-                      iframeDoc,
-                      ts.draftDrawNote?.anchor
-                    )
+                    const draftDrawEntry = activeAssetPreview
+                      ? resolvedAnnotations?.draftDrawNote
+                      : undefined
+                    const draftDrawPoint = activeAssetPreview
+                      ? (draftDrawEntry?.point ?? null)
+                      : resolveAnchorPagePoint(iframeDoc, ts.draftDrawNote?.anchor)
                     const resolvedDraftDrawNote: ResolvedDraftDrawNote | null = ts.draftDrawNote
                       ? {
                           ...ts.draftDrawNote,
                           resolvedPoint: draftDrawPoint ?? undefined,
-                          orphaned: Boolean(ts.draftDrawNote.anchor && !draftDrawPoint),
+                          orphaned: Boolean(
+                            ts.draftDrawNote.anchor &&
+                              (activeAssetPreview ? Boolean(draftDrawEntry?.orphaned) : !draftDrawPoint)
+                          ),
                           regionIndex: ts.draftDrawNote.strokeId
                             ? regionNumberByStroke.get(ts.draftDrawNote.strokeId)
                             : undefined
@@ -5539,67 +6193,89 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                 minHeight: "100%"
                               }}
                             >
-                              <DesignPreviewFrame
-                                frameRef={iframeRef}
-                                scopeId={`${currentSessionId}:${ts.activeVariationId ?? "all"}:${ts.reloadKey}`}
-                                html={displayHtml}
-                                draft={visibleDraft}
-                                tweaks={tweakEditor.state}
-                                appliedPatch={ts.appliedPatch}
-                                artifactRevision={ts.artifactRevision ?? 0}
-                                initialScroll={{ x: ts.iframeScrollX, y: ts.iframeScrollY }}
-                                onVisible={(runId, revision, visibleHtml) => { if (!visibleDraft && visibleHtml) commitPreparedDesignPreview(visibleHtml); const id = currentSessionIdRef.current; if (id) getDesignSessionClient().previewVisible(id, runId, revision) }}
-                                style={{
-                                  display: "block",
-                                  position: "absolute",
-                                  left: 0,
-                                  top: 0,
-                                  border: "none",
-                                  transformOrigin: "top left",
-                                  transform: `scale(${zoom / 100})`,
-                                  width: viewport.width,
-                                  height: viewport.height,
-                                  // Comment + Edit modes need pointer events (scripts handle clicks via postMessage)
-                                  pointerEvents:
-                                    activeMode === null ||
-                                    activeMode === "comment" ||
-                                    activeMode === "edit" ||
-                                    activeMode === "move"
-                                      ? "auto"
-                                      : "none"
-                                }}
-                                onLoad={(isDraft, loadedHtml) => {
-                                  setPreviewLoad((n) => n + 1)
-                                  if (!isDraft && loadedHtml) commitPreparedDesignPreview(loadedHtml)
-                                  directEditor.onLoad()
-                                  // Block link/form navigation so clicks inside the preview
-                                  // never navigate the iframe away from the design
-                                  injectIntoIframe(
-                                    iframeRef.current,
-                                    DESIGN_PREVIEW_NAVIGATION_SCRIPT
-                                  )
-                                  // Always inject scroll tracker so pins stay anchored to content
-                                  injectIntoIframe(iframeRef.current, SCROLL_INJECT)
-                                  if (isDraft) return
-                                  // Reset scroll state — new iframe always starts at (0, 0)
-                                  updateLocalUi({
-                                    iframeScrollX: 0,
-                                    iframeScrollY: 0,
-                                    iframeContentWidth: 0,
-                                    iframeContentHeight: 0,
-                                    selectedElement: null
-                                  })
-                                  if (previewScrollRef.current) {
-                                    previewScrollRef.current.scrollLeft = 0
-                                    previewScrollRef.current.scrollTop = 0
+                              {(!ts.artifactPackage || activeAssetPreview) && (
+                                <DesignPreviewFrame
+                                  frameRef={iframeRef}
+                                  scopeId={`${currentSessionId}:${ts.activeVariationId ?? "all"}:${ts.reloadKey}`}
+                                  html={displayHtml}
+                                  draft={visibleDraft}
+                                  tweaks={tweakEditor.state}
+                                  appliedPatch={ts.appliedPatch}
+                                  artifactRevision={ts.artifactRevision ?? 0}
+                                  assetPreview={activeAssetPreview}
+                                  onAssetResync={() =>
+                                    visibleDraft
+                                      ? setDraftTicketNonce((n) => n + 1)
+                                      : setAssetTicketNonce((n) => n + 1)
                                   }
-                                  // Re-inject mode scripts after iframe reloads (variation switch, etc.)
-                                  if (activeMode === "comment")
-                                    injectIntoIframe(iframeRef.current, COMMENT_INJECT)
-                                  if (activeMode === "edit" && !window.api.design.sessions.inspectEditable)
-                                    injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
-                                }}
-                              />
+                                  initialScroll={{ x: ts.iframeScrollX, y: ts.iframeScrollY }}
+                                  onVisible={(runId, revision, visibleHtml) => {
+                                    if (!visibleDraft && visibleHtml && !activeAssetPreviewRef.current) {
+                                      commitPreparedDesignPreview(visibleHtml)
+                                    }
+                                    const id = currentSessionIdRef.current
+                                    if (id) getDesignSessionClient().previewVisible(id, runId, revision)
+                                  }}
+                                  style={{
+                                    display: "block",
+                                    position: "absolute",
+                                    left: 0,
+                                    top: 0,
+                                    border: "none",
+                                    transformOrigin: "top left",
+                                    transform: `scale(${zoom / 100})`,
+                                    width: viewport.width,
+                                    height: viewport.height,
+                                    // Comment + Edit modes need pointer events (scripts handle clicks via postMessage)
+                                    pointerEvents:
+                                      activeMode === null ||
+                                      activeMode === "comment" ||
+                                      activeMode === "edit" ||
+                                      activeMode === "move"
+                                        ? "auto"
+                                        : "none"
+                                  }}
+                                  onLoad={(isDraft, loadedHtml) => {
+                                    setPreviewLoad((n) => n + 1)
+                                    if (!isDraft && loadedHtml && !activeAssetPreviewRef.current) {
+                                      commitPreparedDesignPreview(loadedHtml)
+                                    }
+                                    directEditor.onLoad()
+                                    if (activeAssetPreviewRef.current) {
+                                      if (!isDraft) {
+                                        updateLocalUi({ selectedElement: null })
+                                      }
+                                      return
+                                    }
+                                    // Block link/form navigation so clicks inside the preview
+                                    // never navigate the iframe away from the design
+                                    injectIntoIframe(
+                                      iframeRef.current,
+                                      DESIGN_PREVIEW_NAVIGATION_SCRIPT
+                                    )
+                                    // Always inject scroll tracker so pins stay anchored to content
+                                    injectIntoIframe(iframeRef.current, SCROLL_INJECT)
+                                    if (isDraft) return
+                                    // Reset scroll state — new iframe always starts at (0, 0)
+                                    updateLocalUi({
+                                      iframeScrollX: 0,
+                                      iframeScrollY: 0,
+                                      iframeContentWidth: 0,
+                                      iframeContentHeight: 0,
+                                      selectedElement: null
+                                    })
+                                    if (previewScrollRef.current) {
+                                      previewScrollRef.current.scrollLeft = 0
+                                      previewScrollRef.current.scrollTop = 0
+                                    }
+                                    // Re-inject mode scripts after iframe reloads (variation switch, etc.)
+                                    if (activeMode === "comment")
+                                      injectIntoIframe(iframeRef.current, COMMENT_INJECT)
+                                    if (activeMode === "edit" && !window.api.design.sessions.inspectEditable)
+                                      injectIntoIframe(iframeRef.current, EDIT_SELECT_INJECT)
+                                  }}
+                                />
+                              )}
                             </div>
                           </div>
                           {(activeMode === "draw" ||
@@ -5644,7 +6320,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                               const cw = previewSize.width
                               const ch = previewSize.height
                               return ts.comments.map((c, i) => {
-                                const anchoredPoint = resolveAnchorPagePoint(iframeDoc, c.anchor)
+                                const anchoredPoint = activeAssetPreview
+                                  ? (resolvedAnnotations?.comments.find((item) => item.id === c.id)
+                                      ?.point ?? null)
+                                  : resolveAnchorPagePoint(iframeDoc, c.anchor)
                                 const pageX = anchoredPoint?.x ?? c.pageX
                                 const pageY = anchoredPoint?.y ?? c.pageY
                                 // Convert document-absolute coords to current canvas-relative % via scroll offset
@@ -5683,10 +6362,9 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                               const zf = zoom / 100
                               const cw = previewSize.width
                               const ch = previewSize.height
-                              const anchoredPoint = resolveAnchorPagePoint(
-                                iframeDoc,
-                                ts.draftComment.anchor
-                              )
+                              const anchoredPoint = activeAssetPreview
+                                ? (resolvedAnnotations?.draftComment?.point ?? null)
+                                : resolveAnchorPagePoint(iframeDoc, ts.draftComment.anchor)
                               const pageX = anchoredPoint?.x ?? ts.draftComment.pageX
                               const pageY = anchoredPoint?.y ?? ts.draftComment.pageY
                               const draftLeft = Math.min(

@@ -57,8 +57,8 @@ const CREATION_METHODS: Array<{
   },
   {
     id: "import_html",
-    label: "导入 HTML",
-    description: "选择本地 HTML 文件，保留可用的页面资源。",
+    label: "导入 HTML / ZIP",
+    description: "选择本地 HTML 或 ZIP 项目包，独立保存图片、字体和脚本资源。",
     icon: FileCode2
   },
   {

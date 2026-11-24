@@ -50,7 +50,7 @@ export function DesignStartActions({
         disabled={templateDisabled}
       />
       <ContextCard icon={<Globe size={14} />} label="通过内置浏览器打开" onClick={onImportUrl} />
-      <ContextCard icon={<FileCode2 size={14} />} label="上传 HTML 文件" onClick={onImportHtml} />
+      <ContextCard icon={<FileCode2 size={14} />} label="导入 HTML / ZIP" onClick={onImportHtml} />
       <ContextCard icon={<FolderCode size={14} />} label="关联代码" onClick={onAttachCode} />
     </div>
   )

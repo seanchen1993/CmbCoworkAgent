@@ -1,5 +1,11 @@
 import type { DesignUrlImportApi } from "../shared/design-url-import"
-import type { DesignSessionApi } from "../shared/managed-design-session"
+import type { DesignSessionApi, DesignSessionSnapshot } from "../shared/managed-design-session"
+import type {
+  DesignArtifactPackageRef,
+  DesignAssetPreviewTicket,
+  DesignPackageCommitParams,
+  DesignPackageStageResult
+} from "../shared/design-package"
 import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
 import type { DesignSystemLibraryApi, DesignSystemInfo } from "../shared/design-system"
 import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
@@ -2348,12 +2354,53 @@ interface CustomAPI {
     onUrlImportProgress: DesignUrlImportApi["onUrlImportProgress"]
     openImportBrowser: DesignUrlImportApi["openImportBrowser"]
     controlImportInteractions: DesignUrlImportApi["controlImportInteractions"]
-    importPrototypeZip: (filePath: string) => Promise<{
+    pickImportHtmlOrZip: () => Promise<{
+      canceled: boolean
+      filePath?: string
+      error?: string
+    }>
+    stageImportPackage: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<DesignPackageStageResult>
+    cancelImportPackage: (stageId: string) => Promise<{ canceled: boolean }>
+    commitImportPackage: (
+      params: DesignPackageCommitParams
+    ) => Promise<{
+      success: boolean
+      snapshot?: DesignSessionSnapshot
+      artifactPackage?: DesignArtifactPackageRef | null
+      missingAssets?: string[]
+      outOfScopeAssets?: string[]
+      warnings?: string[]
+      error?: string
+    }>
+    acquirePreviewUrl: (
+      sessionId: string,
+      kind: "canvas" | "draft",
+      runId?: string
+    ) => Promise<{
+      success: boolean
+      ticket?: DesignAssetPreviewTicket
+      error?: string
+    }>
+    releasePreviewUrl: (token: string) => Promise<{ released: boolean }>
+    importPrototypeZip: (
+      filePath: string,
+      options?: {
+        workspacePath?: string
+        sessionId?: string | null
+        createNew?: boolean
+        designSystemId?: string | null
+      }
+    ) => Promise<{
       success: boolean
       html?: string
       title?: string
       imageCount?: number
       metadataCount?: number
+      snapshot?: DesignSessionSnapshot
+      artifactPackage?: DesignArtifactPackageRef | null
       error?: string
     }>
     syncContextFiles: (params: {
@@ -2389,20 +2436,26 @@ interface CustomAPI {
     }>
     getArtifactPackageInfo: (
       filePath: string,
-      workspacePath?: string
+      workspacePath?: string,
+      sessionId?: string
     ) => Promise<{
       success: boolean
       filePath?: string
       dirPath?: string
+      entryRelativePath?: string
       relatedFileCount?: number
+      isPackage?: boolean
       error?: string
     }>
     exportArtifactPackage: (
       filePath: string,
-      workspacePath?: string
+      workspacePath?: string,
+      options?: { sessionId?: string; suggestedName?: string; saveDialog?: boolean }
     ) => Promise<{
       success: boolean
       fileName?: string
+      savedPath?: string
+      canceled?: boolean
       buffer?: ArrayBuffer
       relatedFileCount?: number
       error?: string

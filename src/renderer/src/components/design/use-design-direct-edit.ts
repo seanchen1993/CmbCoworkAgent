@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
 import {
   designDirectEditRuntime,
   type DesignEditorMode,
@@ -11,6 +11,7 @@ import type {
 } from "../../../../shared/design-edit"
 import type { ElementStyles } from "./types"
 import { getDesignSessionClient } from "./session-client"
+import { CanvasEditorFlush } from "./canvas-editor-flush"
 import { previewDocuments } from "@/lib/design-frame-dom"
 import { splitFrameNodeId } from "../../../../shared/design-captured-frame"
 
@@ -23,6 +24,7 @@ interface Options {
   tweakRevision?: number
   variationId: string | null
   iframe: RefObject<HTMLIFrameElement | null>
+  crossOriginBridge?: { origin: string; previewInstanceId: string } | null
   onSelect: (value: { edId: string; tagName: string; styles: ElementStyles } | null) => void
   onError: (message: string) => void
 }
@@ -39,11 +41,48 @@ export function useDesignDirectEdit(options: Options) {
   const styleWork = useRef<Promise<void> | null>(null)
   const workingStyle = useRef<{ id: string; values: Record<string, string> } | null>(null)
   const styleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bridgeInstance = options.crossOriginBridge?.previewInstanceId
+  const bridgeOrigin = options.crossOriginBridge?.origin
+  const bridgeFlush = useMemo(
+    () => new CanvasEditorFlush(),
+    [options.id, options.active, bridgeInstance]
+  )
+  useLayoutEffect(() => {
+    const frame = options.iframe.current?.contentWindow
+    return () => {
+      bridgeFlush.close()
+      if (options.active && frame && bridgeOrigin && bridgeInstance) {
+        frame.postMessage({
+          type: "__design_editor_action", action: "cleanup", previewInstanceId: bridgeInstance
+        }, bridgeOrigin)
+      }
+    }
+  }, [bridgeFlush, bridgeOrigin, bridgeInstance, options.active, options.iframe])
   const [status, setStatus] = useState("")
   const [load, setLoad] = useState(0)
   const onLoad = useCallback(() => setLoad((n) => n + 1), [])
+  const postToBridge = useCallback((payload: Record<string, unknown>): boolean => {
+    const bridge = latest.current.crossOriginBridge
+    const win = latest.current.iframe.current?.contentWindow
+    if (!bridge || !win) return false
+    win.postMessage({ previewInstanceId: bridge.previewInstanceId, ...payload }, bridge.origin)
+    return true
+  }, [])
   const install = useCallback((config: DesignEditableDocument) => {
-    const { iframe, active, mode } = latest.current
+    const { iframe, active, mode, crossOriginBridge } = latest.current
+    if (crossOriginBridge) {
+      if (!active || !iframe.current?.contentWindow) return false
+      iframe.current.contentWindow.postMessage(
+        {
+          type: "__design_editor_config",
+          previewInstanceId: crossOriginBridge.previewInstanceId,
+          config,
+          mode
+        },
+        crossOriginBridge.origin
+      )
+      return true
+    }
     const w = iframe.current?.contentWindow as EditorWindow | undefined
     if (
       !w ||
@@ -118,6 +157,7 @@ export function useDesignDirectEdit(options: Options) {
     options.html,
     options.revision,
     options.tweakRevision,
+    options.crossOriginBridge?.previewInstanceId,
     load,
     install
   ])
@@ -153,30 +193,52 @@ export function useDesignDirectEdit(options: Options) {
       for (const current of controllers.current.values()) current.cleanup()
       controllers.current.clear()
       selectedWindow.current = null
+
     }
   }, [options.id, options.active, options.iframe, options.variationId])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const handler = async (event: MessageEvent) => {
       const o = latest.current
-      const root = o.iframe.current?.contentDocument
+      const bridge = o.crossOriginBridge
       const w = event.source as Window | null
       const m = event.data
-      if (
-        !o.active ||
-        !o.id ||
-        !w || !root || !controllers.current.has(w) ||
-        !previewDocuments(root).some(({ doc }) => doc.defaultView === w) ||
-        !m ||
-        m.previewInstanceId !== root.documentElement.dataset.designPreviewInstance
-      )
+      if (!o.active || !o.id || !w || !m) return
+      if (bridge) {
+        if (
+          w !== o.iframe.current?.contentWindow ||
+          event.origin !== bridge.origin ||
+          m.previewInstanceId !== bridge.previewInstanceId
+        ) {
+          return
+        }
+      } else {
+        const root = o.iframe.current?.contentDocument
+        if (
+          !root ||
+          !controllers.current.has(w) ||
+          !previewDocuments(root).some(({ doc }) => doc.defaultView === w) ||
+          m.previewInstanceId !== root.documentElement.dataset.designPreviewInstance
+        ) {
+          return
+        }
+      }
+      const targetOrigin = bridge ? bridge.origin : "*"
+
+      if (bridge && m.type === "__design_editor_ready") {
+        bridgeFlush.ready = true
         return
+      }
+      if (bridge && m.type === "__design_editor_flush_reply") {
+        bridgeFlush.reply(m.requestId, m.error)
+        return
+      }
       if (m.type === "__design_editor_select") {
-        if (!m.nodeId && selectedWindow.current && selectedWindow.current !== w) return
-        if (m.nodeId && selectedWindow.current && selectedWindow.current !== w)
+        if (!bridge && !m.nodeId && selectedWindow.current && selectedWindow.current !== w) return
+        if (!bridge && m.nodeId && selectedWindow.current && selectedWindow.current !== w)
           controllers.current.get(selectedWindow.current)?.clearSelection()
         selected.current = descriptor.current?.nodes.find((n) => n.id === m.nodeId) ?? null
-        selectedWindow.current = selected.current ? w : null
+        selectedWindow.current = !bridge && selected.current ? w : null
         o.onSelect(m.nodeId ? { edId: m.nodeId, tagName: m.tagName, styles: m.styles } : null)
       } else if (m.type === "__design_editor_error") {
         o.onError(String(m.error))
@@ -198,14 +260,16 @@ export function useDesignDirectEdit(options: Options) {
             variationId: o.variationId,
             operations: [m.operation]
           }
-          await getDesignSessionClient().edit(id, command)
+          const save = getDesignSessionClient().edit(id, command)
+          if (bridge) bridgeFlush.track(save)
+          await save
           w?.postMessage(
             {
               type: "__design_editor_result",
               previewInstanceId: m.previewInstanceId,
               commandId: m.commandId
             },
-            "*"
+            targetOrigin
           )
           if (latest.current.id === id) setStatus("已保存")
         } catch (error) {
@@ -217,7 +281,7 @@ export function useDesignDirectEdit(options: Options) {
               commandId: m.commandId,
               error: text
             },
-            "*"
+            targetOrigin
           )
           if (latest.current.id === id) {
             setStatus("保存失败，可重试")
@@ -228,7 +292,7 @@ export function useDesignDirectEdit(options: Options) {
     }
     window.addEventListener("message", handler)
     return () => window.removeEventListener("message", handler)
-  }, [])
+  }, [bridgeFlush])
 
   const flushStyles = useCallback((): Promise<void> => {
     clearTimeout(styleTimer.current ?? undefined)
@@ -293,10 +357,16 @@ export function useDesignDirectEdit(options: Options) {
     [flushStyles]
   )
   const flush = useCallback(async () => {
-    for (const editor of controllers.current.values()) await editor.flush()
+    if (latest.current.crossOriginBridge && latest.current.active) {
+      await bridgeFlush.flush((requestId) =>
+        postToBridge({ type: "__design_editor_action", action: "flush", requestId })
+      )
+    } else {
+      for (const editor of controllers.current.values()) await editor.flush()
+    }
     await flushStyles()
     if (latest.current.id) await getDesignSessionClient().flush(latest.current.id)
-  }, [flushStyles])
+  }, [bridgeFlush, flushStyles, postToBridge])
   useEffect(
     () => () => {
       clearTimeout(styleTimer.current ?? undefined)
@@ -309,9 +379,11 @@ export function useDesignDirectEdit(options: Options) {
     flush,
     changeStyle,
     editSelected: () => {
+      if (postToBridge({ type: "__design_editor_action", action: "editSelected" })) return
       if (selectedWindow.current) controllers.current.get(selectedWindow.current)?.editSelected()
     },
     deleteSelected: () => {
+      if (postToBridge({ type: "__design_editor_action", action: "deleteSelected" })) return
       if (selectedWindow.current) controllers.current.get(selectedWindow.current)?.deleteSelected()
     }
   }

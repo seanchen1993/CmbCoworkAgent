@@ -68,7 +68,7 @@ export function useRequirementDesignEntry({
 }: {
   sessionReady: boolean
   createSession: CreateRequirementSession
-  openSession: (id: string) => void
+  openSession: (id: string) => Promise<boolean>
   setWorkspacePath: (path: string) => void
   onEntryChange: (entry: ActiveRequirementDesignEntry | null) => void
   showToast: (message: string) => void
@@ -158,7 +158,7 @@ export function useRequirementDesignEntry({
         }
         const activeEntry = readyEntries[0]
         storeRequirementDesignEntries(readyEntries.slice(1))
-        openSession(activeEntry.htmlId)
+        if (!(await openSession(activeEntry.htmlId))) return
         onEntryChange(activeEntry)
       } catch (error) {
         storeRequirementDesignEntries(readyEntries)

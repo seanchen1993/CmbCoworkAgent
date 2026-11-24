@@ -10,6 +10,7 @@ import {
   normalizeQuestionDef,
   buildNewDesignPrompt,
   buildDesignDraftResumePrompt,
+  createDesignState,
   type DesignRunRequest,
   type DesignRunEvent,
   type DesignSessionSnapshot,
@@ -18,6 +19,8 @@ import {
   type TabState,
   type SessionMeta
 } from "../../../shared/managed-design-session"
+import type { DesignArtifactPackageRef } from "../../../shared/design-package"
+import type { DesignArtifactMetadata, DesignSourceInfo } from "../../../renderer/src/components/design/types"
 import type { DesignSessionStore, DesignPatchJournal, DesignEditReceipt } from "./session-store"
 import {
   prepareEditableSource,
@@ -66,6 +69,7 @@ export interface DesignRunDependencies {
     candidate: DirectEditCandidate,
     before: DesignSessionSnapshot
   ) => Promise<void>
+  isMigrating?: (id: string) => boolean
   project?: (snapshot: DesignSessionSnapshot) => void
   execute: (
     request: DesignRunRequest,
@@ -154,6 +158,10 @@ export class DesignRunManager {
     const snapshot = this.sessions.get(id)
     if (!snapshot) throw new Error("设计会话不存在")
     return clone(snapshot)
+  }
+
+  assertNoPendingEdit(id: string): void {
+    if (this.editing.has(id)) throw new Error("直接编辑正在保存，请稍后重试")
   }
 
   inspectEditable(id: string): DesignEditableDocument {
@@ -361,7 +369,7 @@ export class DesignRunManager {
     const next = this.get(id)
     const updates = clone(patch)
     const importingPage =
-      updates.sourceInfo?.kind === "import_url" &&
+      ["import_url", "import_html", "prototype_zip"].includes(updates.sourceInfo?.kind ?? "") &&
       updates.generationState === "done" &&
       typeof updates.html === "string"
     if (importingPage && next.activeRunId) throw new Error("请先停止当前设计生成，再导入页面")
@@ -1117,7 +1125,7 @@ export class DesignRunManager {
     if (!this.deps.project) return
     for (const entry of this.store.pendingProjections()) {
       const snapshot = this.sessions.get(entry.id)
-      if (!snapshot) continue
+      if (!snapshot || this.deps.isMigrating?.(entry.id)) continue
       try {
         this.deps.project(clone(snapshot))
         this.store.projectionSaved(entry.id, entry.revision)
@@ -1152,12 +1160,191 @@ export class DesignRunManager {
     })
   }
 
-  setWorkspace(id: string, path: string): DesignSessionSnapshot {
+  commitImportedDesign(
+    id: string,
+    options: {
+      createNew: boolean
+      workspacePath: string
+      html: string
+      artifactPath: string
+      artifactPackage: DesignArtifactPackageRef | null
+      artifactMetadata: DesignArtifactMetadata
+      sourceInfo: DesignSourceInfo
+      userMessage: string
+      assistantMessage: string
+      preserveComposerDraft?: boolean
+      designSystemId?: string | null
+      designSystemName?: string | null
+      designSystemCategory?: string | null
+    }
+  ): DesignSessionSnapshot {
+    if (!/^ds_[a-zA-Z0-9_-]+$/.test(id)) throw new Error("设计会话 ID 无效")
+    if (this.store.wasDeleted(id)) throw new Error("设计会话已删除")
+
+    const tweaks = reconcileTweaks(readTweakDeclaration(options.html), null)
+    const messages = [
+      { id: randomUUID(), role: "user" as const, content: options.userMessage },
+      { id: randomUUID(), role: "assistant" as const, content: options.assistantMessage }
+    ]
+    const apiHistory = [
+      { role: "user" as const, content: options.userMessage },
+      { role: "assistant" as const, content: "页面已还原，可继续编辑" }
+    ]
+
+    if (options.createNew) {
+      if (this.sessions.has(id)) throw new Error("设计会话已存在")
+      const now = Date.now()
+      const state: TabState = {
+        ...createDesignState(),
+        html: options.html,
+        sourceInfo: options.sourceInfo,
+        generationState: "done",
+        rightTab: "design",
+        tweaksOn: true,
+        tweaks,
+        artifactRevision: 1,
+        reloadKey: 1,
+        artifactPath: options.artifactPath,
+        artifactPackage: options.artifactPackage,
+        artifactMetadata: options.artifactMetadata,
+        selectedDesignSystemId: options.designSystemId ?? null,
+        messages,
+        apiHistory
+      }
+      const meta: SessionMeta = {
+        id,
+        title: options.sourceInfo.label,
+        kind: options.sourceInfo.kind,
+        sourceLabel: options.sourceInfo.label,
+        createdAt: now,
+        updatedAt: now,
+        lastSubmittedAt: this.nextSubmissionTime(),
+        designSystemId: options.designSystemId ?? null,
+        designSystemName: options.designSystemName ?? null,
+        designSystemCategory: options.designSystemCategory ?? null,
+        artifactPath: options.artifactPath,
+        thumbnailText: options.artifactMetadata.preview?.thumbnailText
+      }
+      const committed = this.commit(
+        { id, seq: 0, meta, state, workspacePath: options.workspacePath, activeRunId: null, lastSeenSeq: 0 },
+        [{ type: "created" }]
+      )
+      this.replayProjections()
+      return committed
+    }
+
+    this.assertNoPendingEdit(id)
+    const next = this.get(id)
+    if (next.activeRunId || busy(next.state)) {
+      throw new Error("请先停止当前设计生成，再导入新页面")
+    }
+
+    const composerDraft = options.preserveComposerDraft
+      ? {
+          inputValue: next.state.inputValue,
+          attachedFiles: next.state.attachedFiles,
+          attachedImage: next.state.attachedImage,
+          codeContext: next.state.codeContext,
+          selectedSkill: next.state.selectedSkill,
+          selectedModelId: next.state.selectedModelId
+        }
+      : {
+          inputValue: "",
+          attachedFiles: null,
+          attachedImage: null,
+          codeContext: null,
+          selectedSkill: null
+        }
+
+    next.workspacePath = options.workspacePath
+    next.state = {
+      ...next.state,
+      ...composerDraft,
+      messages,
+      apiHistory,
+      html: options.html,
+      sourceInfo: options.sourceInfo,
+      generationState: "done",
+      questions: [],
+      answers: {},
+      originalPrompt: options.userMessage,
+      rightTab: "design",
+      variations: [],
+      activeVariationId: null,
+      tweaksOn: true,
+      tweaks,
+      activeMode: null,
+      comments: [],
+      draftComment: null,
+      activeCommentId: null,
+      drawStrokes: [],
+      drawElementHints: [],
+      drawNotes: [],
+      draftDrawNote: null,
+      selectedElement: null,
+      pendingApproval: null,
+      draftPreview: null,
+      generationMetrics: {},
+      liveOutput: null,
+      lastCompletedRunId: null,
+      appliedPatch: null,
+      patchStatus: null,
+      patchMetrics: undefined,
+      canUndoPatch: false,
+      canRedoPatch: false,
+      retryPrompt: null,
+      retryIsIteration: false,
+      retryCleanMsg: null,
+      retrySkill: null,
+      artifactRevision: (next.state.artifactRevision ?? 0) + 1,
+      reloadKey: (next.state.reloadKey ?? 0) + 1,
+      artifactPath: options.artifactPath,
+      artifactPackage: options.artifactPackage,
+      artifactMetadata: options.artifactMetadata,
+      selectedDesignSystemId:
+        options.designSystemId !== undefined
+          ? options.designSystemId
+          : next.state.selectedDesignSystemId
+    }
+    next.meta = {
+      ...next.meta,
+      title: options.sourceInfo.label,
+      kind: options.sourceInfo.kind,
+      sourceLabel: options.sourceInfo.label,
+      updatedAt: Date.now(),
+      designSystemId:
+        options.designSystemId !== undefined
+          ? options.designSystemId
+          : next.meta.designSystemId,
+      designSystemName:
+        options.designSystemName !== undefined
+          ? options.designSystemName
+          : next.meta.designSystemName,
+      designSystemCategory:
+        options.designSystemCategory !== undefined
+          ? options.designSystemCategory
+          : next.meta.designSystemCategory
+    }
+    const committed = this.commit(next, [{ type: "imported" }])
+    this.replayProjections()
+    return committed
+  }
+
+  setWorkspace(
+    id: string,
+    path: string,
+    statePatch?: Partial<Pick<TabState, "artifactPath" | "artifactPackage" | "artifactMetadata">>
+  ): DesignSessionSnapshot {
     const next = this.get(id)
     if (!path.trim()) throw new Error("工作目录不能为空")
-    if (next.workspacePath === path) return next
+    if (next.workspacePath === path && !statePatch) return next
     if (next.activeRunId) throw new Error("设计运行中无法切换工作目录，请先停止任务")
     next.workspacePath = path
+    if (statePatch) {
+      if (statePatch.artifactPath !== undefined) next.state.artifactPath = statePatch.artifactPath
+      if (statePatch.artifactPackage !== undefined) next.state.artifactPackage = statePatch.artifactPackage
+      if (statePatch.artifactMetadata !== undefined) next.state.artifactMetadata = statePatch.artifactMetadata
+    }
     return this.commit(next, [{ type: "edited", fields: ["workspacePath"] }])
   }
 

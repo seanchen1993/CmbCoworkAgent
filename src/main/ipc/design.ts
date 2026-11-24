@@ -18,8 +18,46 @@ import { registerDesignSystemLibraryHandlers } from "./design-system-library"
 import { DesignSystemLibrary } from "../services/design/system-library"
 import type { DesignSystemInfo } from "../../shared/design-system"
 import { DesignTemplatePreview } from "../services/design/template-preview"
-import { createDesignArtifactZip } from "../services/design/artifact-package"
+import { createDesignArtifactZip, writeDesignArtifactZipToFile } from "../services/design/artifact-package"
 import { writeDesignFilesAtomically } from "../services/design/artifact-storage"
+import {
+  DesignPackageService,
+  countPackageAssets,
+  listPackageFilesRelative,
+  resolveDesignArtifactLayout,
+  type DesignArtifactLayout
+} from "../services/design/design-package"
+import {
+  designAssetRegistry,
+  registerDesignAssetProtocolOnSession
+} from "../services/design/asset-protocol"
+import {
+  DESIGN_ASSET_SCHEME,
+  type DesignArtifactPackageRef,
+  type DesignPackageCommitParams,
+  type DesignPackageStageResult
+} from "../../shared/design-package"
+import {
+  DESIGN_PROTOTYPE_ZIP_MAX_BYTES,
+  DESIGN_PROTOTYPE_ZIP_MAX_ENTRY_BYTES,
+  DESIGN_PROTOTYPE_ZIP_MAX_IMAGES,
+  DESIGN_PROTOTYPE_ZIP_MAX_JSON_BYTES,
+  DESIGN_PROTOTYPE_ZIP_MAX_JSON_FILES,
+  DESIGN_PROTOTYPE_ZIP_MAX_TOTAL_IMAGE_BYTES,
+  DESIGN_PROTOTYPE_ZIP_MAX_TOTAL_JSON_BYTES,
+  buildPrototypeHtml as buildSharedPrototypeHtml,
+  extractPrototypeMetadataScreens,
+  getDesignPrototypeMimeType,
+  isDesignPrototypeImagePath,
+  metadataMatchesImage,
+  naturalPrototypeSort,
+  normalizeZipEntryPath,
+  prototypeBaseName,
+  readPrototypeImageDimensions,
+  resolvePrototypeHotspotTarget,
+  type PrototypeImageScreen,
+  type PrototypeMetadataScreen
+} from "../services/design/pixso-prototype"
 import { runBoundedDesignValidation, validateDesignBrowserWithRetry, isDesignValidationRepairable } from "../services/design/browser-validation-runner"
 import { designGenerationBrowserProbe } from "../services/design/generation-browser-probe"
 import type { DesignTemplateReference, DesignTemplateImportResult, DesignTemplateInfo } from "../../shared/design-template"
@@ -69,7 +107,7 @@ import { createDesignModelActivity, extractDesignPublicText } from "../../shared
 import { readStreamMessageWireMode, STREAM_MESSAGE_REASONING_MODE_KEY } from "../../shared/stream-message-wire-mode"
 import { materializeTweaks, readTweakDeclaration, reconcileTweaks, tweakSourceDiagnostics, type DesignTweakCommand, type DesignTweaksState } from "../../shared/design-tweaks"
 import { approvalDecisionBroker } from "../agent/approval-decision-broker"
-import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
+import { asDesignApprovalRequest, type DesignRunEvent, type DesignSessionChange, type DesignSessionSeed, type DesignSessionSnapshot, type DesignRunRequest, type TabState, type SessionMeta } from "../../shared/managed-design-session"
 
 const designExecutors = new Map<string, (params: Record<string, unknown>) => Promise<void>>()
 const managedDesignSinks = new Map<string, (event: DesignRunEvent) => void>()
@@ -520,8 +558,11 @@ interface DesignArtifactFileReadParams {
 }
 
 interface DesignArtifactPackageParams {
-  filePath: string
+  filePath?: string
   workspacePath?: string
+  sessionId?: string
+  suggestedName?: string
+  saveDialog?: boolean
 }
 
 interface DesignArtifactFileReadResult {
@@ -534,6 +575,10 @@ interface DesignArtifactFileReadResult {
 
 interface DesignImportPrototypeZipParams {
   filePath: string
+  workspacePath?: string
+  sessionId?: string | null
+  createNew?: boolean
+  designSystemId?: string | null
 }
 
 interface DesignImportPrototypeZipResult {
@@ -542,6 +587,8 @@ interface DesignImportPrototypeZipResult {
   title?: string
   imageCount?: number
   metadataCount?: number
+  snapshot?: DesignSessionSnapshot
+  artifactPackage?: DesignArtifactPackageRef | null
   error?: string
 }
 
@@ -560,6 +607,7 @@ interface DesignContextFilesSyncParams {
 
 interface DesignArtifactMetadata {
   templatePackage?: DesignTemplateReference
+  artifactPackage?: DesignArtifactPackageRef | null
   tweaks?: DesignTweaksState | null
   artifactId: string
   title?: string
@@ -585,13 +633,6 @@ interface DesignArtifactMetadata {
 const DESIGN_ARTIFACTS_DIR = ".cmb-design"
 const DESIGN_SYSTEMS_DIRNAME = "design-systems"
 const DESIGN_TEMPLATES_DIRNAME = "design-templates"
-const DESIGN_PROTOTYPE_ZIP_MAX_BYTES = 120 * 1024 * 1024
-const DESIGN_PROTOTYPE_ZIP_MAX_IMAGES = 80
-const DESIGN_PROTOTYPE_ZIP_MAX_ENTRY_BYTES = 30 * 1024 * 1024
-const DESIGN_PROTOTYPE_ZIP_MAX_TOTAL_IMAGE_BYTES = 90 * 1024 * 1024
-const DESIGN_PROTOTYPE_ZIP_MAX_JSON_BYTES = 5 * 1024 * 1024
-const DESIGN_PROTOTYPE_ZIP_MAX_JSON_FILES = 20
-const DESIGN_PROTOTYPE_ZIP_MAX_TOTAL_JSON_BYTES = 20 * 1024 * 1024
 const DESIGN_SYSTEM_PINNED_ORDER = new Map<string, number>([
   ["wplus", 0],
   ["wealth", 1]
@@ -807,56 +848,89 @@ function listDesignTemplates(packages: DesignTemplatePackages): DesignTemplateIn
   return templates.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
 }
 
-function resolveDesignArtifactPath(tabId: string, workspacePath?: string): { filePath?: string; error?: string } {
-  const workspace = typeof workspacePath === "string" && workspacePath.trim()
-    ? workspacePath.trim()
-    : app.getPath("userData")
-
-  try {
-    const workspaceRoot = path.resolve(workspace)
-    if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
-      return { error: `Design workspace is not available: ${workspaceRoot}` }
-    }
-
-    const artifactDir = path.join(workspaceRoot, DESIGN_ARTIFACTS_DIR, makeSafeDesignId(tabId))
-    const artifactPath = path.join(artifactDir, "index.html")
-    const resolvedArtifact = path.resolve(artifactPath)
-    const normalizedRoot = workspaceRoot.toLowerCase()
-    const normalizedArtifact = resolvedArtifact.toLowerCase()
-    if (normalizedArtifact !== normalizedRoot && !normalizedArtifact.startsWith(normalizedRoot + path.sep)) {
-      return { error: `Design artifact path escaped workspace: ${resolvedArtifact}` }
-    }
-    return { filePath: resolvedArtifact }
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) }
-  }
+function resolveDesignLayout(input: {
+  sessionId: string
+  workspacePath?: string | null
+  artifactPath?: string | null
+  artifactPackage?: DesignArtifactPackageRef | null
+}): DesignArtifactLayout {
+  return resolveDesignArtifactLayout({
+    ...input,
+    fallbackRootDir: app.getPath("userData")
+  })
 }
 
-function saveDesignArtifact(tabId: string, html: string, workspacePath?: string, metadataPatch?: Partial<DesignArtifactMetadata>): { success: boolean; filePath?: string; metadata?: DesignArtifactMetadata; error?: string } {
-  const resolved = resolveDesignArtifactPath(tabId, workspacePath)
-  if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact path" }
+function saveDesignArtifact(
+  tabId: string,
+  html: string,
+  workspacePath?: string,
+  metadataPatch?: Partial<DesignArtifactMetadata>,
+  layoutOverride?: DesignArtifactLayout
+): { success: boolean; filePath?: string; metadata?: DesignArtifactMetadata; error?: string } {
+  let layout: DesignArtifactLayout
+  if (layoutOverride) {
+    layout = layoutOverride
+  } else {
+    try {
+      layout = resolveDesignLayout({
+        sessionId: tabId,
+        workspacePath,
+        artifactPackage: metadataPatch?.artifactPackage
+      })
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  }
 
   try {
-    fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
-    backupExistingDesignArtifact(resolved.filePath)
-    const metadata = metadataPatch ? buildDesignArtifactMetadata(resolved.filePath, metadataPatch) : undefined
+    fs.mkdirSync(path.dirname(layout.entryFilePath), { recursive: true })
+    fs.mkdirSync(path.dirname(layout.metadataPath), { recursive: true })
+    backupExistingDesignArtifact(layout.entryFilePath, layout.versionsDir)
+    const metadata = metadataPatch
+      ? buildDesignArtifactMetadata(layout.entryFilePath, metadataPatch, layout.metadataPath)
+      : undefined
     writeDesignFilesAtomically([
-      ...(metadata ? [{ filePath: makeDesignArtifactMetadataPath(resolved.filePath), content: JSON.stringify(metadata, null, 2) }] : []),
-      { filePath: resolved.filePath, content: html }
+      ...(metadata ? [{ filePath: layout.metadataPath, content: JSON.stringify(metadata, null, 2) }] : []),
+      { filePath: layout.entryFilePath, content: html }
     ])
-    return { success: true, filePath: resolved.filePath, metadata }
+    return { success: true, filePath: layout.entryFilePath, metadata }
   } catch (err) {
-    return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+    return { success: false, filePath: layout.entryFilePath, error: err instanceof Error ? err.message : String(err) }
   }
 }
 
-function makeDesignArtifactMetadataPath(htmlPath: string): string {
-  return path.join(path.dirname(htmlPath), "artifact.json")
+const V2_PACKAGE_FILES_RE = /^(.*)[/\\]packages[/\\](pkg_[a-zA-Z0-9_-]{4,80})[/\\]files(?:[/\\].*)?$/
+
+function resolveMetadataPathForHtml(htmlPath: string, metadataPathOverride?: string): string {
+  if (metadataPathOverride) return metadataPathOverride
+  const resolved = path.resolve(htmlPath)
+  const match = resolved.match(V2_PACKAGE_FILES_RE)
+  if (match) return path.join(match[1], "artifact.json")
+  return path.join(path.dirname(resolved), "artifact.json")
 }
 
-function readDesignArtifactMetadata(htmlPath: string | undefined): DesignArtifactMetadata | null {
-  if (!htmlPath) return null
-  const metadataPath = makeDesignArtifactMetadataPath(htmlPath)
+function resolveVersionsDirForHtml(htmlPath: string, versionsDirOverride?: string): string {
+  if (versionsDirOverride) return versionsDirOverride
+  const resolved = path.resolve(htmlPath)
+  const match = resolved.match(V2_PACKAGE_FILES_RE)
+  if (match) return path.join(match[1], "versions")
+  return path.join(path.dirname(resolved), "versions")
+}
+
+function resolveDraftDirForHtml(outputFilePath: string, draftDirOverride?: string): string {
+  if (draftDirOverride) return draftDirOverride
+  const resolved = path.resolve(outputFilePath)
+  const match = resolved.match(V2_PACKAGE_FILES_RE)
+  if (match) return path.join(match[1], "drafts")
+  return path.dirname(resolved)
+}
+
+function readDesignArtifactMetadata(
+  htmlPath: string | undefined,
+  metadataPathOverride?: string
+): DesignArtifactMetadata | null {
+  if (!htmlPath && !metadataPathOverride) return null
+  const metadataPath = resolveMetadataPathForHtml(htmlPath ?? "", metadataPathOverride)
   try {
     if (!fs.existsSync(metadataPath) || !fs.statSync(metadataPath).isFile()) return null
     return JSON.parse(fs.readFileSync(metadataPath, "utf-8")) as DesignArtifactMetadata
@@ -865,13 +939,20 @@ function readDesignArtifactMetadata(htmlPath: string | undefined): DesignArtifac
   }
 }
 
-function buildDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArtifactMetadata>): DesignArtifactMetadata {
+function buildDesignArtifactMetadata(
+  htmlPath: string,
+  patch: Partial<DesignArtifactMetadata>,
+  metadataPathOverride?: string
+): DesignArtifactMetadata {
   const now = new Date().toISOString()
-  const previous = readDesignArtifactMetadata(htmlPath)
+  const metadataPath = resolveMetadataPathForHtml(htmlPath, metadataPathOverride)
+  const previous = readDesignArtifactMetadata(htmlPath, metadataPath)
   const next: DesignArtifactMetadata = {
     ...previous,
     ...patch,
-    artifactId: patch.artifactId || previous?.artifactId || path.basename(path.dirname(htmlPath)),
+    artifactPackage:
+      patch.artifactPackage !== undefined ? patch.artifactPackage : previous?.artifactPackage,
+    artifactId: patch.artifactId || previous?.artifactId || path.basename(path.dirname(metadataPath)),
     createdAt: previous?.createdAt || patch.createdAt || now,
     htmlPath,
     updatedAt: now,
@@ -879,9 +960,14 @@ function buildDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArti
   return next
 }
 
-function writeDesignArtifactMetadata(htmlPath: string, patch: Partial<DesignArtifactMetadata>): DesignArtifactMetadata {
-  const next = buildDesignArtifactMetadata(htmlPath, patch)
-  writeDesignFilesAtomically([{ filePath: makeDesignArtifactMetadataPath(htmlPath), content: JSON.stringify(next, null, 2) }])
+function writeDesignArtifactMetadata(
+  htmlPath: string,
+  patch: Partial<DesignArtifactMetadata>,
+  metadataPathOverride?: string
+): DesignArtifactMetadata {
+  const metadataPath = resolveMetadataPathForHtml(htmlPath, metadataPathOverride)
+  const next = buildDesignArtifactMetadata(htmlPath, patch, metadataPath)
+  writeDesignFilesAtomically([{ filePath: metadataPath, content: JSON.stringify(next, null, 2) }])
   return next
 }
 
@@ -907,7 +993,7 @@ function makeDesignThumbnailText(html: string): string {
     .slice(0, 120)
 }
 
-function backupExistingDesignArtifact(filePath: string): void {
+function backupExistingDesignArtifact(filePath: string, versionsDirOverride?: string): void {
   try {
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return
     const normalizedPath = path.resolve(filePath)
@@ -915,7 +1001,7 @@ function backupExistingDesignArtifact(filePath: string): void {
     const lastBackupAt = designArtifactLastBackupAt.get(normalizedPath) ?? 0
     if (now - lastBackupAt < DESIGN_ARTIFACT_VERSION_MIN_INTERVAL_MS) return
     designArtifactLastBackupAt.set(normalizedPath, now)
-    const versionsDir = path.join(path.dirname(filePath), "versions")
+    const versionsDir = resolveVersionsDirForHtml(filePath, versionsDirOverride)
     fs.mkdirSync(versionsDir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:.]/g, "-")
     fs.copyFileSync(filePath, path.join(versionsDir, `${stamp}.html`))
@@ -954,12 +1040,13 @@ function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: 
   try {
     fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
     const base = path.basename(resolved.filePath)
+    const metadataPath = resolveMetadataPathForHtml(resolved.filePath)
     if (!base.startsWith(".draft-") && !base.startsWith(".source-")) {
       backupExistingDesignArtifact(resolved.filePath)
     }
-    const metadata = metadataPatch ? buildDesignArtifactMetadata(resolved.filePath, metadataPatch) : undefined
+    const metadata = metadataPatch ? buildDesignArtifactMetadata(resolved.filePath, metadataPatch, metadataPath) : undefined
     writeDesignFilesAtomically([
-      ...(metadata ? [{ filePath: makeDesignArtifactMetadataPath(resolved.filePath), content: JSON.stringify(metadata, null, 2) }] : []),
+      ...(metadata ? [{ filePath: metadataPath, content: JSON.stringify(metadata, null, 2) }] : []),
       { filePath: resolved.filePath, content: html }
     ])
     return { success: true, filePath: resolved.filePath, metadata }
@@ -969,21 +1056,25 @@ function saveDesignArtifactFile(filePath: string, html: string, workspacePath?: 
 }
 
 function readDesignArtifact(tabId: string, workspacePath?: string): DesignArtifactFileReadResult {
-  const resolved = resolveDesignArtifactPath(tabId, workspacePath)
-  if (!resolved.filePath) return { success: false, error: resolved.error ?? "Failed to resolve design artifact path" }
+  let layout: DesignArtifactLayout
+  try {
+    layout = resolveDesignLayout({ sessionId: tabId, workspacePath })
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
 
   try {
-    if (!fs.existsSync(resolved.filePath)) {
-      return { success: false, filePath: resolved.filePath, error: `Design artifact not found: ${resolved.filePath}` }
+    if (!fs.existsSync(layout.entryFilePath)) {
+      return { success: false, filePath: layout.entryFilePath, error: `Design artifact not found: ${layout.entryFilePath}` }
     }
     return {
       success: true,
-      filePath: resolved.filePath,
-      html: fs.readFileSync(resolved.filePath, "utf-8"),
-      metadata: readDesignArtifactMetadata(resolved.filePath),
+      filePath: layout.entryFilePath,
+      html: fs.readFileSync(layout.entryFilePath, "utf-8"),
+      metadata: readDesignArtifactMetadata(layout.entryFilePath, layout.metadataPath),
     }
   } catch (err) {
-    return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+    return { success: false, filePath: layout.entryFilePath, error: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -998,11 +1089,12 @@ function readSavedDesignArtifactFile(filePath: string | undefined, workspacePath
     if (!fs.existsSync(resolved.filePath) || !fs.statSync(resolved.filePath).isFile()) {
       return { success: false, filePath: resolved.filePath, error: `Design artifact not found: ${resolved.filePath}` }
     }
+    const metadataPath = resolveMetadataPathForHtml(resolved.filePath)
     return {
       success: true,
       filePath: resolved.filePath,
       html: fs.readFileSync(resolved.filePath, "utf-8"),
-      metadata: readDesignArtifactMetadata(resolved.filePath),
+      metadata: readDesignArtifactMetadata(resolved.filePath, metadataPath),
     }
   } catch (err) {
     return { success: false, filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
@@ -1135,18 +1227,121 @@ function getReferencedDesignLocalAssets(html: string, rootDir: string): Set<stri
   return assets
 }
 
+const activeExportRoots = new Map<string, number>()
+
+function isExportDirActive(dirPath: string): boolean {
+  const resolved = path.resolve(dirPath)
+  for (const active of activeExportRoots.keys()) {
+    if (active === resolved || active.startsWith(resolved + path.sep)) return true
+  }
+  return false
+}
+
+function acquireExportRoot(dirPath: string): () => void {
+  const resolved = path.resolve(dirPath)
+  activeExportRoots.set(resolved, (activeExportRoots.get(resolved) ?? 0) + 1)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const next = (activeExportRoots.get(resolved) ?? 1) - 1
+    if (next <= 0) {
+      activeExportRoots.delete(resolved)
+      designPackageService.tryCleanupRetired(resolved)
+    } else {
+      activeExportRoots.set(resolved, next)
+    }
+  }
+}
+
+const designPackageService = new DesignPackageService({
+  isPackageInUse: (dir) => isExportDirActive(dir) || designAssetRegistry.isPackageInUse(dir),
+  isExportInUse: isExportDirActive,
+})
+
+function assertArtifactFileAvailable(filePath: string): void {
+  const parts = path.resolve(filePath).split(path.sep)
+  const directory = parts.lastIndexOf(DESIGN_ARTIFACTS_DIR)
+  const artifactId = directory >= 0 ? parts[directory + 1] : undefined
+  if (artifactId) designPackageService.assertSessionAvailable(artifactId.replace(/_design-main$/, ""))
+}
+
 function getDesignArtifactPackageInfo(
   filePath: string | undefined,
-  workspacePath?: string
-): { success: boolean; filePath?: string; dirPath?: string; relatedFileCount?: number; error?: string } {
+  workspacePath?: string,
+  sessionId?: string,
+  artifactPackage?: DesignArtifactPackageRef | null
+): {
+  success: boolean
+  filePath?: string
+  dirPath?: string
+  entryRelativePath?: string
+  relatedFileCount?: number
+  isPackage?: boolean
+  error?: string
+} {
+  if (sessionId || artifactPackage) {
+    try {
+      const layout = resolveDesignLayout({
+        sessionId: sessionId || "session",
+        workspacePath,
+        artifactPath: filePath,
+        artifactPackage,
+      })
+      if (layout.isPackage && fs.existsSync(layout.entryFilePath) && fs.statSync(layout.entryFilePath).isFile()) {
+        return {
+          success: true,
+          filePath: layout.entryFilePath,
+          dirPath: layout.packageRoot,
+          entryRelativePath: layout.entryRelativePath,
+          relatedFileCount: countPackageAssets(layout.packageRoot, layout.entryRelativePath),
+          isPackage: true,
+        }
+      }
+    } catch (err) {
+      if (!filePath) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  }
+
   const artifact = readSavedDesignArtifactFile(filePath, workspacePath)
   if (!artifact.success || !artifact.filePath || !artifact.html) {
     return { success: false, error: artifact.error ?? "Design artifact not found" }
   }
+  if (artifact.metadata?.artifactPackage) {
+    try {
+      const layout = resolveDesignLayout({
+        sessionId: artifact.metadata.artifactId || sessionId || "session",
+        workspacePath,
+        artifactPath: artifact.filePath,
+        artifactPackage: artifact.metadata.artifactPackage,
+      })
+      if (layout.isPackage) {
+        return {
+          success: true,
+          filePath: layout.entryFilePath,
+          dirPath: layout.packageRoot,
+          entryRelativePath: layout.entryRelativePath,
+          relatedFileCount: countPackageAssets(layout.packageRoot, layout.entryRelativePath),
+          isPackage: true,
+        }
+      }
+    } catch {
+      // Fall back to legacy flat local asset inspection below.
+    }
+  }
   const dirPath = path.dirname(artifact.filePath)
   try {
     const relatedFileCount = getReferencedDesignLocalAssets(artifact.html, dirPath).size
-    return { success: true, filePath: artifact.filePath, dirPath, relatedFileCount }
+    return {
+      success: true,
+      filePath: artifact.filePath,
+      dirPath,
+      entryRelativePath: path.basename(artifact.filePath),
+      relatedFileCount,
+      isPackage: false,
+    }
   } catch (err) {
     return {
       success: false,
@@ -1157,28 +1352,80 @@ function getDesignArtifactPackageInfo(
   }
 }
 
-function exportDesignArtifactPackage(
-  filePath: string | undefined,
-  workspacePath?: string,
-  tweaks?: DesignTweaksState | null,
+async function exportDesignArtifactPackage(options: {
+  filePath?: string
+  workspacePath?: string
+  sessionId?: string
+  artifactPackage?: DesignArtifactPackageRef | null
+  tweaks?: DesignTweaksState | null
   htmlOverride?: string
-): { success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string } {
-  const info = getDesignArtifactPackageInfo(filePath, workspacePath)
+  suggestedName?: string
+  saveDialog?: boolean
+  sender?: WebContents
+}): Promise<{
+  success: boolean
+  fileName?: string
+  savedPath?: string
+  canceled?: boolean
+  buffer?: ArrayBuffer
+  relatedFileCount?: number
+  error?: string
+}> {
+  const info = getDesignArtifactPackageInfo(
+    options.filePath,
+    options.workspacePath,
+    options.sessionId,
+    options.artifactPackage
+  )
   if (!info.success || !info.filePath || !info.dirPath) {
     return { success: false, error: info.error ?? "Design artifact not found" }
   }
+  const release = acquireExportRoot(info.dirPath)
   try {
-    const zipBuffer = createDesignArtifactZip(info.dirPath, info.filePath,
-      tweaks || htmlOverride ? materializeTweaks(htmlOverride ?? fs.readFileSync(info.filePath, "utf8"), tweaks) : undefined)
-    const baseName = path.basename(info.dirPath).replace(/[^a-zA-Z0-9._-]/g, "_") || "design"
+    const rawName = (options.suggestedName || path.basename(info.dirPath)).trim()
+    // eslint-disable-next-line no-control-regex
+    const safeName = rawName.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-").replace(/^-+|-+$/g, "") || "design"
+    const finalHtml =
+      options.tweaks || options.htmlOverride !== undefined
+        ? materializeTweaks(options.htmlOverride ?? fs.readFileSync(info.filePath, "utf8"), options.tweaks)
+        : undefined
+
+    if (options.saveDialog) {
+      const owner = options.sender ? BrowserWindow.fromWebContents(options.sender) : null
+      const dialogOptions: Electron.SaveDialogOptions = {
+        title: "导出设计项目包",
+        defaultPath: safeName.toLowerCase().endsWith(".zip") ? safeName : `${safeName}.zip`,
+        filters: [{ name: "ZIP 压缩包", extensions: ["zip"] }],
+      }
+      const picked = owner
+        ? await dialog.showSaveDialog(owner, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions)
+      if (picked.canceled || !picked.filePath) {
+        return { success: false, canceled: true }
+      }
+      if (!fs.existsSync(info.filePath)) {
+        return { success: false, error: "当前设计包已被替换或删除，请重试" }
+      }
+      await writeDesignArtifactZipToFile(info.dirPath, info.filePath, picked.filePath, finalHtml)
+      return {
+        success: true,
+        savedPath: picked.filePath,
+        fileName: path.basename(picked.filePath),
+        relatedFileCount: info.relatedFileCount ?? 0,
+      }
+    }
+
+    const zipBuffer = createDesignArtifactZip(info.dirPath, info.filePath, finalHtml)
     return {
       success: true,
-      fileName: `${baseName}.zip`,
+      fileName: `${safeName}.zip`,
       relatedFileCount: info.relatedFileCount ?? 0,
       buffer: Uint8Array.from(zipBuffer).buffer
     }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
+  } finally {
+    release()
   }
 }
 
@@ -1256,10 +1503,16 @@ function waitForDesignBrowserValidation(ms: number, signal: AbortSignal): Promis
 async function validateDesignArtifactInHiddenBrowser(
   filePath: string,
   signal: AbortSignal,
-  options: { onRetry?: () => void; originalSource?: string; fullChecks?: boolean } = {}
+  options: {
+    onRetry?: () => void
+    originalSource?: string
+    fullChecks?: boolean
+    loadUrl?: string
+    sourceHtml?: string
+  } = {}
 ): Promise<DesignBrowserValidationResult> {
   return validateDesignBrowserWithRetry(
-    () => validateDesignArtifactBrowserAttempt(filePath, signal, options.originalSource, options.fullChecks),
+    () => validateDesignArtifactBrowserAttempt(filePath, signal, options),
     signal, options.onRetry
   )
 }
@@ -1267,17 +1520,27 @@ async function validateDesignArtifactInHiddenBrowser(
 async function validateDesignArtifactBrowserAttempt(
   filePath: string,
   signal: AbortSignal,
-  originalSource?: string,
-  fullChecks = false
+  options: {
+    originalSource?: string
+    fullChecks?: boolean
+    loadUrl?: string
+    sourceHtml?: string
+  } = {}
 ): Promise<DesignBrowserValidationResult> {
-  const sourceHtml = fs.existsSync(filePath) && fs.statSync(filePath).isFile()
-    ? fs.readFileSync(filePath, "utf-8")
-    : ""
+  const { originalSource, fullChecks = false, loadUrl } = options
+  const sourceHtml =
+    options.sourceHtml ??
+    (filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile()
+      ? fs.readFileSync(filePath, "utf-8")
+      : "")
   const issues: DesignBrowserValidationIssue[] = validateDesignArtifactSourceStructure(originalSource ?? sourceHtml)
   let validationWindow: BrowserWindow | null = null
 
   try {
     if (signal.aborted) throw createDesignAbortError()
+    const partition = loadUrl?.startsWith(`${DESIGN_ASSET_SCHEME}://`)
+      ? `design-validate-${crypto.randomUUID()}`
+      : undefined
     validationWindow = new BrowserWindow({
       width: 1440,
       height: 1000,
@@ -1287,10 +1550,14 @@ async function validateDesignArtifactBrowserAttempt(
         nodeIntegration: false,
         sandbox: true,
         backgroundThrottling: false,
+        ...(partition ? { partition } : {}),
       },
     })
 
     const webContents = validationWindow.webContents
+    if (partition) {
+      registerDesignAssetProtocolOnSession(webContents.session)
+    }
     webContents.on("will-navigate", (event) => event.preventDefault())
     webContents.setWindowOpenHandler(() => ({ action: "deny" }))
     webContents.on("console-message", (details, legacyLevel, legacyMessage, legacyLine, legacySourceId) => {
@@ -1328,7 +1595,7 @@ async function validateDesignArtifactBrowserAttempt(
 
     return await runBoundedDesignValidation({
       signal, issues, timeoutMs: DESIGN_BROWSER_VALIDATION_TIMEOUT_MS,
-      load: () => validationWindow!.loadFile(filePath),
+      load: () => (loadUrl ? validationWindow!.loadURL(loadUrl) : validationWindow!.loadFile(filePath)),
       close: () => { if (validationWindow && !validationWindow.isDestroyed()) validationWindow.destroy() },
       inspect: async () => {
         await waitForDesignBrowserValidation(DESIGN_BROWSER_VALIDATION_SETTLE_MS, signal)
@@ -1360,10 +1627,14 @@ function sameResolvedFilePath(left: string | undefined, right: string | undefine
   return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
 }
 
-function writeDesignArtifactSourceSnapshot(outputFilePath: string, html: string): DesignArtifactFileReadResult {
+function writeDesignArtifactSourceSnapshot(
+  outputFilePath: string,
+  html: string,
+  draftDirOverride?: string
+): DesignArtifactFileReadResult {
   try {
     if (!html.trim()) return { success: false, error: "Design source snapshot content is empty" }
-    const dir = path.dirname(outputFilePath)
+    const dir = resolveDraftDirForHtml(outputFilePath, draftDirOverride)
     fs.mkdirSync(dir, { recursive: true })
     const snapshotPath = path.join(dir, `.source-${Date.now()}.html`)
     fs.writeFileSync(snapshotPath, html, "utf-8")
@@ -1373,21 +1644,31 @@ function writeDesignArtifactSourceSnapshot(outputFilePath: string, html: string)
   }
 }
 
-function makeDesignArtifactDraftPath(outputFilePath: string): string {
-  const dir = path.dirname(outputFilePath)
+function makeDesignArtifactDraftPath(outputFilePath: string, draftDirOverride?: string): string {
+  const dir = resolveDraftDirForHtml(outputFilePath, draftDirOverride)
+  fs.mkdirSync(dir, { recursive: true })
   const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   return path.join(dir, `.draft-${unique}.html`)
 }
 
-function prepareDesignArtifact(tabId: string, workspacePath?: string): { filePath?: string; error?: string } {
-  const resolved = resolveDesignArtifactPath(tabId, workspacePath)
-  if (!resolved.filePath) return { error: resolved.error ?? "Failed to resolve design artifact path" }
-
+function prepareDesignArtifact(
+  tabId: string,
+  workspacePath?: string,
+  artifactPackage?: DesignArtifactPackageRef | null,
+  artifactPath?: string | null
+): { filePath?: string; layout?: DesignArtifactLayout; error?: string } {
   try {
-    fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
-    return { filePath: resolved.filePath }
+    const layout = resolveDesignLayout({
+      sessionId: tabId,
+      workspacePath,
+      artifactPackage,
+      artifactPath,
+    })
+    fs.mkdirSync(path.dirname(layout.entryFilePath), { recursive: true })
+    fs.mkdirSync(layout.draftDir, { recursive: true })
+    return { filePath: layout.entryFilePath, layout }
   } catch (err) {
-    return { filePath: resolved.filePath, error: err instanceof Error ? err.message : String(err) }
+    return { error: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -1480,669 +1761,9 @@ function syncDesignContextFiles(params: DesignContextFilesSyncParams): {
   }
 }
 
-function escapeHtmlText(value: unknown): string {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;")
-}
+// Pixso prototype parsing and HTML template builders live in ../services/design/pixso-prototype.ts.
 
-function escapeScriptJson<T>(value: T): string {
-  return (JSON.stringify(value) ?? "null")
-    .replace(/</g, "\\u003c")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029")
-}
-
-function normalizeZipEntryPath(entryName: string): string {
-  return String(entryName || "").replace(/\\/g, "/").replace(/^\/+/, "")
-}
-
-function isDesignPrototypeImagePath(entryPath: string): boolean {
-  return /\.(png|jpe?g|webp|gif|bmp|avif|svg)$/i.test(entryPath)
-}
-
-function getDesignPrototypeMimeType(entryPath: string): string {
-  const ext = path.extname(entryPath).toLowerCase()
-  switch (ext) {
-    case ".avif":
-      return "image/avif"
-    case ".bmp":
-      return "image/bmp"
-    case ".gif":
-      return "image/gif"
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg"
-    case ".svg":
-      return "image/svg+xml"
-    case ".webp":
-      return "image/webp"
-    case ".png":
-    default:
-      return "image/png"
-  }
-}
-
-function naturalPrototypeSort(left: string, right: string): number {
-  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" })
-}
-
-function readWebpChunkHeader(
-  buffer: Buffer,
-  offset: number
-): { type: string; size: number; dataOffset: number; nextOffset: number } | null {
-  if (offset + 8 > buffer.length) return null
-  const type = buffer.toString("ascii", offset, offset + 4)
-  const size = buffer.readUInt32LE(offset + 4)
-  const dataOffset = offset + 8
-  const nextOffset = dataOffset + size + (size % 2)
-  if (dataOffset + size > buffer.length) return null
-  return { type, size, dataOffset, nextOffset }
-}
-
-function readPrototypeImageDimensions(buffer: Buffer, mimeType: string): { width?: number; height?: number } {
-  if (mimeType === "image/png" && buffer.length >= 24) {
-    return {
-      width: buffer.readUInt32BE(16),
-      height: buffer.readUInt32BE(20),
-    }
-  }
-
-  if (mimeType === "image/gif" && buffer.length >= 10) {
-    return {
-      width: buffer.readUInt16LE(6),
-      height: buffer.readUInt16LE(8),
-    }
-  }
-
-  if (mimeType === "image/jpeg" && buffer.length > 4) {
-    let offset = 2
-    while (offset + 9 < buffer.length) {
-      if (buffer[offset] !== 0xff) {
-        offset++
-        continue
-      }
-      const marker = buffer[offset + 1]
-      const blockLength = buffer.readUInt16BE(offset + 2)
-      if (!blockLength || offset + 2 + blockLength > buffer.length) break
-      if (
-        marker === 0xc0 ||
-        marker === 0xc1 ||
-        marker === 0xc2 ||
-        marker === 0xc3 ||
-        marker === 0xc5 ||
-        marker === 0xc6 ||
-        marker === 0xc7 ||
-        marker === 0xc9 ||
-        marker === 0xca ||
-        marker === 0xcb ||
-        marker === 0xcd ||
-        marker === 0xce ||
-        marker === 0xcf
-      ) {
-        return {
-          height: buffer.readUInt16BE(offset + 5),
-          width: buffer.readUInt16BE(offset + 7),
-        }
-      }
-      offset += 2 + blockLength
-    }
-  }
-
-  if (mimeType === "image/webp" && buffer.length >= 30 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") {
-    let offset = 12
-    while (offset + 8 <= buffer.length) {
-      const chunk = readWebpChunkHeader(buffer, offset)
-      if (!chunk) break
-      if (chunk.type === "VP8X" && chunk.size >= 10) {
-        return {
-          width: 1 + buffer.readUIntLE(chunk.dataOffset + 4, 3),
-          height: 1 + buffer.readUIntLE(chunk.dataOffset + 7, 3),
-        }
-      }
-      if (chunk.type === "VP8 " && chunk.size >= 10) {
-        return {
-          width: buffer.readUInt16LE(chunk.dataOffset + 6) & 0x3fff,
-          height: buffer.readUInt16LE(chunk.dataOffset + 8) & 0x3fff,
-        }
-      }
-      if (chunk.type === "VP8L" && chunk.size >= 5) {
-        const bits = buffer.readUInt32LE(chunk.dataOffset + 1)
-        return {
-          width: (bits & 0x3fff) + 1,
-          height: ((bits >> 14) & 0x3fff) + 1,
-        }
-      }
-      offset = chunk.nextOffset
-    }
-  }
-
-  if (mimeType === "image/svg+xml") {
-    const svg = buffer.toString("utf-8", 0, Math.min(buffer.length, 4096))
-    const tagMatch = svg.match(/<svg\b[^>]*>/i)
-    const tag = tagMatch?.[0] ?? ""
-    const width = tag.match(/\bwidth\s*=\s*["']?([\d.]+)/i)?.[1]
-    const height = tag.match(/\bheight\s*=\s*["']?([\d.]+)/i)?.[1]
-    if (width && height) {
-      return { width: Number(width), height: Number(height) }
-    }
-    const viewBox = tag.match(/\bviewBox\s*=\s*["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)/i)
-    if (viewBox) {
-      return { width: Number(viewBox[1]), height: Number(viewBox[2]) }
-    }
-  }
-
-  return {}
-}
-
-function prototypeBaseName(value: string): string {
-  const normalized = normalizeZipEntryPath(value)
-  const parsed = path.posix.parse(normalized)
-  return (parsed.name || parsed.base || normalized)
-    .replace(/[-_]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-}
-
-function findStringByKeys(source: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = source[key]
-    if (typeof value === "string" && value.trim()) return value.trim()
-  }
-  return undefined
-}
-
-function findNumberByKeys(source: Record<string, unknown>, keys: string[]): number | undefined {
-  for (const key of keys) {
-    const value = source[key]
-    if (typeof value === "number" && Number.isFinite(value)) return value
-    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value)
-  }
-  return undefined
-}
-
-function findNestedRecord(source: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
-  for (const key of keys) {
-    const value = source[key]
-    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>
-  }
-  return undefined
-}
-
-function uniqueStrings(values: Array<string | undefined>): string[] {
-  const seen = new Set<string>()
-  const result: string[] = []
-  for (const value of values) {
-    const normalized = value?.trim()
-    if (!normalized || seen.has(normalized)) continue
-    seen.add(normalized)
-    result.push(normalized)
-  }
-  return result
-}
-
-type PrototypeHotspot = {
-  x: number
-  y: number
-  width: number
-  height: number
-  target?: string
-  targetIndex?: number
-  label?: string
-}
-
-type PrototypeMetadataScreen = {
-  ids: string[]
-  name?: string
-  imageRef?: string
-  width?: number
-  height?: number
-  hotspots?: PrototypeHotspot[]
-}
-
-type PrototypeImageScreen = {
-  id: string
-  metadataIds: string[]
-  name: string
-  zipPath: string
-  mimeType: string
-  dataUrl: string
-  size: number
-  width?: number
-  height?: number
-  hotspots: PrototypeHotspot[]
-}
-
-function getPrototypeObjectLabel(source: Record<string, unknown>): string | undefined {
-  return findStringByKeys(source, [
-    "name",
-    "title",
-    "label",
-    "screenName",
-    "pageName",
-    "frameName",
-    "nodeName",
-    "id",
-  ])
-}
-
-function getPrototypeObjectIds(source: Record<string, unknown>): string[] {
-  return uniqueStrings([
-    findStringByKeys(source, ["id", "nodeId", "screenId", "pageId", "frameId", "guid", "uuid", "key"]),
-    findStringByKeys(source, ["targetId", "destinationId"]),
-  ])
-}
-
-function getPrototypeImageReference(source: Record<string, unknown>): string | undefined {
-  const direct = findStringByKeys(source, [
-    "image",
-    "imagePath",
-    "imageUrl",
-    "src",
-    "url",
-    "file",
-    "filePath",
-    "path",
-    "filename",
-    "screenshot",
-    "thumbnail",
-    "exportPath",
-  ])
-  if (direct && isDesignPrototypeImagePath(direct)) return direct
-
-  const nested = findNestedRecord(source, ["image", "asset", "screenshot", "thumbnail", "export"])
-  if (nested) return getPrototypeImageReference(nested)
-  return undefined
-}
-
-function normalizePrototypeRect(raw: Record<string, unknown>): { x?: number; y?: number; width?: number; height?: number } {
-  const bounds = findNestedRecord(raw, ["bounds", "rect", "frame", "absoluteBoundingBox", "box"]) ?? raw
-  const x = findNumberByKeys(bounds, ["x", "left", "l"])
-  const y = findNumberByKeys(bounds, ["y", "top", "t"])
-  const width = findNumberByKeys(bounds, ["width", "w"])
-  const height = findNumberByKeys(bounds, ["height", "h"])
-  const right = findNumberByKeys(bounds, ["right", "r"])
-  const bottom = findNumberByKeys(bounds, ["bottom", "b"])
-  return {
-    x,
-    y,
-    width: width ?? (typeof x === "number" && typeof right === "number" ? right - x : undefined),
-    height: height ?? (typeof y === "number" && typeof bottom === "number" ? bottom - y : undefined),
-  }
-}
-
-function extractPrototypeTarget(raw: Record<string, unknown>): string | undefined {
-  const direct = findStringByKeys(raw, [
-    "target",
-    "targetId",
-    "targetName",
-    "destination",
-    "destinationId",
-    "navigateTo",
-    "nodeId",
-    "screenId",
-    "pageId",
-    "to",
-    "link",
-  ])
-  if (direct) return direct
-  const action = findNestedRecord(raw, ["action", "transition", "interaction", "navigation"])
-  return action ? extractPrototypeTarget(action) : undefined
-}
-
-function extractPrototypeHotspots(value: unknown): PrototypeHotspot[] {
-  const hotspots: PrototypeHotspot[] = []
-  const visit = (node: unknown, depth: number) => {
-    if (!node || depth > 4) return
-    if (Array.isArray(node)) {
-      for (const item of node) visit(item, depth + 1)
-      return
-    }
-    if (typeof node !== "object") return
-
-    const raw = node as Record<string, unknown>
-    const rect = normalizePrototypeRect(raw)
-    const target = extractPrototypeTarget(raw)
-    if (
-      typeof rect.x === "number" &&
-      typeof rect.y === "number" &&
-      typeof rect.width === "number" &&
-      typeof rect.height === "number" &&
-      rect.width > 0 &&
-      rect.height > 0 &&
-      target
-    ) {
-      hotspots.push({
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        target,
-        label: getPrototypeObjectLabel(raw),
-      })
-      return
-    }
-
-    for (const key of ["hotspots", "links", "connections", "interactions", "actions", "areas", "children"]) {
-      if (key in raw) visit(raw[key], depth + 1)
-    }
-  }
-  visit(value, 0)
-  return hotspots.slice(0, 120)
-}
-
-function extractPrototypeMetadataScreens(value: unknown): PrototypeMetadataScreen[] {
-  const screens: PrototypeMetadataScreen[] = []
-  const seen = new Set<string>()
-
-  const visit = (node: unknown, depth: number) => {
-    if (!node || depth > 8) return
-    if (Array.isArray(node)) {
-      for (const item of node) visit(item, depth + 1)
-      return
-    }
-    if (typeof node !== "object") return
-
-    const raw = node as Record<string, unknown>
-    const imageRef = getPrototypeImageReference(raw)
-    const label = getPrototypeObjectLabel(raw)
-    const ids = getPrototypeObjectIds(raw)
-    const rect = normalizePrototypeRect(raw)
-    if (imageRef || (label && (raw.hotspots || raw.links || raw.interactions || raw.connections))) {
-      const key = `${ids.join("|")}:${imageRef ?? ""}:${label ?? ""}:${screens.length}`
-      if (!seen.has(key)) {
-        seen.add(key)
-        screens.push({
-          ids,
-          name: label,
-          imageRef,
-          width: rect.width,
-          height: rect.height,
-          hotspots: extractPrototypeHotspots(raw),
-        })
-      }
-    }
-
-    for (const [key, child] of Object.entries(raw)) {
-      if (["parent", "parentNode", "document"].includes(key)) continue
-      if (typeof child === "object" && child !== null) visit(child, depth + 1)
-    }
-  }
-
-  visit(value, 0)
-  return screens.slice(0, 200)
-}
-
-function metadataMatchesImage(metadata: PrototypeMetadataScreen, imagePath: string): boolean {
-  if (!metadata.imageRef) return false
-  const imageRef = normalizeZipEntryPath(metadata.imageRef).toLowerCase()
-  const zipPath = normalizeZipEntryPath(imagePath).toLowerCase()
-  const refBase = path.posix.basename(imageRef)
-  const pathBase = path.posix.basename(zipPath)
-  return imageRef === zipPath || refBase === pathBase || zipPath.endsWith(`/${imageRef}`)
-}
-
-function resolvePrototypeHotspotTarget(
-  hotspot: PrototypeHotspot,
-  screens: PrototypeImageScreen[],
-  metadataScreens: PrototypeMetadataScreen[]
-): number | undefined {
-  const rawTarget = hotspot.target?.trim()
-  if (!rawTarget) return undefined
-  const target = rawTarget.toLowerCase()
-  const directIndex = screens.findIndex((screen) => {
-    return (
-      screen.id.toLowerCase() === target ||
-      screen.metadataIds.some((id) => id.toLowerCase() === target) ||
-      screen.name.toLowerCase() === target ||
-      prototypeBaseName(screen.zipPath).toLowerCase() === target ||
-      normalizeZipEntryPath(screen.zipPath).toLowerCase() === target
-    )
-  })
-  if (directIndex >= 0) return directIndex
-
-  const metadataIndex = metadataScreens.findIndex((screen) => {
-    const candidates = [
-      ...screen.ids,
-      screen.name,
-      screen.imageRef,
-      screen.imageRef ? prototypeBaseName(screen.imageRef) : undefined,
-    ].filter((item): item is string => Boolean(item))
-    return candidates.some((candidate) => candidate.toLowerCase() === target)
-  })
-  if (metadataIndex >= 0) {
-    const metadata = metadataScreens[metadataIndex]
-    const screenIndex = screens.findIndex((screen) => metadataMatchesImage(metadata, screen.zipPath))
-    if (screenIndex >= 0) return screenIndex
-  }
-  return undefined
-}
-
-function buildPrototypeHtml(
-  title: string,
-  screens: PrototypeImageScreen[],
-  metadataCount: number,
-  sourceFileName: string
-): string {
-  const payload = screens.map((screen) => ({
-    id: screen.id,
-    name: screen.name,
-    zipPath: screen.zipPath,
-    width: screen.width,
-    height: screen.height,
-    dataUrl: screen.dataUrl,
-    hotspots: screen.hotspots.filter((hotspot) => {
-      return (
-        typeof hotspot.targetIndex === "number" &&
-        typeof screen.width === "number" &&
-        screen.width > 0 &&
-        typeof screen.height === "number" &&
-        screen.height > 0
-      )
-    }),
-  }))
-  const safeTitle = escapeHtmlText(title)
-  const firstScreen = screens[0]
-  const viewportMaxWidth = Math.min(1440, Math.max(390, firstScreen?.width ?? 1200))
-
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${safeTitle}</title>
-<style>
-:root{
-  --bg:#f6f4ef;
-  --panel:#ffffff;
-  --ink:#1f2328;
-  --muted:#707782;
-  --line:#ded9cf;
-  --accent:#2563eb;
-  --hotspot:rgba(37,99,235,.16);
-  --hotspot-border:rgba(37,99,235,.42);
-  --radius:12px;
-}
-*{box-sizing:border-box}
-html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-family:"Sora","Noto Sans SC",system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-body{height:100vh;overflow:hidden}
-.prototype-shell{height:100vh;display:grid;grid-template-columns:minmax(220px,280px) minmax(0,1fr);background:linear-gradient(180deg,#fbfaf7 0%,var(--bg) 100%)}
-.sidebar{border-right:1px solid var(--line);background:rgba(255,255,255,.86);display:flex;flex-direction:column;min-width:0}
-.brand{padding:18px 18px 14px;border-bottom:1px solid var(--line)}
-.brand h1{margin:0 0 6px;font-size:15px;line-height:1.35;font-weight:750;letter-spacing:0;color:var(--ink)}
-.brand p{margin:0;font-size:11px;line-height:1.5;color:var(--muted)}
-.screen-list{padding:10px;overflow:auto;display:flex;flex-direction:column;gap:6px}
-.screen-btn{width:100%;display:grid;grid-template-columns:38px minmax(0,1fr);align-items:center;gap:10px;padding:8px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
-.screen-btn:hover{background:#f3f1eb}
-.screen-btn.active{background:#eef4ff;border-color:#c8dcff}
-.screen-thumb{width:38px;height:38px;border:1px solid #e2ded6;border-radius:6px;background:#f7f7f7;object-fit:cover;object-position:top}
-.screen-meta{min-width:0}
-.screen-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:700}
-.screen-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;font-size:10px;color:var(--muted)}
-.stage{min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr);height:100vh}
-.topbar{height:54px;display:flex;align-items:center;gap:12px;padding:0 18px;border-bottom:1px solid var(--line);background:rgba(250,249,246,.9);backdrop-filter:blur(10px)}
-.screen-title{font-size:14px;font-weight:750;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.topbar-spacer{flex:1}
-.count-pill,.zoom-pill{border:1px solid var(--line);border-radius:999px;background:#fff;padding:5px 9px;font-size:11px;color:var(--muted);white-space:nowrap}
-.nav-btn{height:30px;min-width:30px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font:inherit;font-size:13px;cursor:pointer}
-.nav-btn:hover{border-color:#bfc7d5}
-.viewer{height:100%;overflow:auto;padding:28px;display:flex;align-items:flex-start;justify-content:center}
-.device{position:relative;width:min(100%,${viewportMaxWidth}px);border-radius:var(--radius);background:#fff;box-shadow:0 18px 50px rgba(31,35,40,.14),0 2px 8px rgba(31,35,40,.08);overflow:hidden}
-.prototype-image{display:block;width:100%;height:auto}
-.hotspot{position:absolute;border:1px solid var(--hotspot-border);background:var(--hotspot);border-radius:8px;cursor:pointer;transition:background .16s ease,border-color .16s ease,box-shadow .16s ease}
-.hotspot:hover{background:rgba(37,99,235,.26);border-color:rgba(37,99,235,.7);box-shadow:0 0 0 4px rgba(37,99,235,.12)}
-.empty-hotspots{position:absolute;right:12px;bottom:12px;border:1px solid rgba(0,0,0,.08);background:rgba(255,255,255,.85);border-radius:999px;padding:5px 9px;font-size:11px;color:var(--muted);pointer-events:none}
-@media (max-width: 820px){
-  body{overflow:auto}
-  .prototype-shell{height:auto;min-height:100vh;display:block}
-  .sidebar{position:sticky;top:0;z-index:4;border-right:0;border-bottom:1px solid var(--line);max-height:220px}
-  .screen-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
-  .stage{height:auto;min-height:calc(100vh - 220px)}
-  .topbar{position:sticky;top:220px;z-index:3}
-  .viewer{padding:14px}
-}
-</style>
-</head>
-<body>
-<div class="prototype-shell" data-design-anchor="pixso-prototype">
-  <aside class="sidebar">
-    <div class="brand">
-      <h1>${safeTitle}</h1>
-      <p>${screens.length} 个画板 · ${metadataCount} 个元数据文件 · ${escapeHtmlText(sourceFileName)}</p>
-    </div>
-    <div class="screen-list" id="screenList"></div>
-  </aside>
-  <main class="stage">
-    <div class="topbar">
-      <button class="nav-btn" id="prevBtn" type="button" aria-label="上一屏">‹</button>
-      <button class="nav-btn" id="nextBtn" type="button" aria-label="下一屏">›</button>
-      <div class="screen-title" id="screenTitle"></div>
-      <div class="topbar-spacer"></div>
-      <div class="count-pill" id="screenCount"></div>
-      <div class="zoom-pill" id="screenSize"></div>
-    </div>
-    <div class="viewer">
-      <div class="device" id="device">
-        <img class="prototype-image" id="prototypeImage" alt="">
-      </div>
-    </div>
-  </main>
-</div>
-<script>
-(function(){
-var screens=${escapeScriptJson(payload)};
-var current=0;
-var list=document.getElementById('screenList');
-var title=document.getElementById('screenTitle');
-var count=document.getElementById('screenCount');
-var size=document.getElementById('screenSize');
-var device=document.getElementById('device');
-var image=document.getElementById('prototypeImage');
-var prev=document.getElementById('prevBtn');
-var next=document.getElementById('nextBtn');
-function clamp(index){return Math.max(0,Math.min(screens.length-1,index));}
-function pct(value,total){if(!total)return 0;return value<=1&&value>=0?value*100:(value/total)*100;}
-function renderList(){
-  list.innerHTML='';
-  screens.forEach(function(screen,index){
-    var btn=document.createElement('button');
-    btn.type='button';
-    btn.className='screen-btn'+(index===current?' active':'');
-    btn.setAttribute('data-design-anchor','screen-nav-'+index);
-    btn.onclick=function(){show(index);};
-    var thumb=document.createElement('img');
-    thumb.className='screen-thumb';
-    thumb.src=screen.dataUrl;
-    thumb.alt='';
-    var meta=document.createElement('span');
-    meta.className='screen-meta';
-    var name=document.createElement('span');
-    name.className='screen-name';
-    name.textContent=screen.name||('画板 '+(index+1));
-    var path=document.createElement('span');
-    path.className='screen-path';
-    path.textContent=screen.zipPath||'';
-    meta.appendChild(name);
-    meta.appendChild(path);
-    btn.appendChild(thumb);
-    btn.appendChild(meta);
-    list.appendChild(btn);
-  });
-}
-function renderHotspots(screen){
-  device.querySelectorAll('.hotspot,.empty-hotspots').forEach(function(node){node.remove();});
-  var hotspots=screen.hotspots||[];
-  if(hotspots.length===0){
-    var hint=document.createElement('div');
-    hint.className='empty-hotspots';
-    hint.textContent='静态画板';
-    device.appendChild(hint);
-    return;
-  }
-  hotspots.forEach(function(hotspot,index){
-    var target=typeof hotspot.targetIndex==='number'?hotspot.targetIndex:undefined;
-    var area=document.createElement('button');
-    area.type='button';
-    area.className='hotspot';
-    area.disabled=typeof target!=='number';
-    area.title=hotspot.label||'跳转';
-    area.setAttribute('aria-label',area.title);
-    area.style.left=pct(hotspot.x,screen.width)+'%';
-    area.style.top=pct(hotspot.y,screen.height)+'%';
-    area.style.width=Math.max(.6,pct(hotspot.width,screen.width))+'%';
-    area.style.height=Math.max(.6,pct(hotspot.height,screen.height))+'%';
-    area.setAttribute('data-design-anchor','hotspot-'+current+'-'+index);
-    area.onclick=function(){if(typeof target==='number')show(target);};
-    device.appendChild(area);
-  });
-}
-function show(index){
-  current=clamp(index);
-  var screen=screens[current];
-  image.src=screen.dataUrl;
-  image.alt=screen.name||'prototype screen';
-  title.textContent=screen.name||('画板 '+(current+1));
-  count.textContent=(current+1)+' / '+screens.length;
-  size.textContent=(screen.width&&screen.height)?(screen.width+' × '+screen.height):'自适应';
-  prev.disabled=current===0;
-  next.disabled=current===screens.length-1;
-  renderList();
-  renderHotspots(screen);
-}
-prev.onclick=function(){show(current-1);};
-next.onclick=function(){show(current+1);};
-window.addEventListener('keydown',function(event){
-  if(event.key==='ArrowLeft')show(current-1);
-  if(event.key==='ArrowRight')show(current+1);
-});
-show(0);
-var TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/{"accent":"#2563eb","hotspot":true,"radius":12,"panelWidth":280}/*EDITMODE-END*/;
-function applyTweaks(edits){
-  var t=Object.assign({},TWEAK_DEFAULTS,edits||{});
-  var r=document.documentElement;
-  r.style.setProperty('--accent',String(t.accent));
-  r.style.setProperty('--hotspot',t.hotspot?'rgba(37,99,235,.16)':'rgba(37,99,235,0)');
-  r.style.setProperty('--hotspot-border',t.hotspot?'rgba(37,99,235,.42)':'rgba(37,99,235,0)');
-  r.style.setProperty('--radius',String(t.radius)+'px');
-  document.querySelector('.prototype-shell').style.gridTemplateColumns='minmax(220px,'+String(t.panelWidth)+'px) minmax(0,1fr)';
-}
-window.addEventListener('message',function(e){
-  if(e.data&&e.data.type==='__set_tweak_keys')applyTweaks(e.data.edits);
-  if(e.data&&e.data.type==='__activate_edit_mode')document.body.classList.add('edit-mode-ready');
-  if(e.data&&e.data.type==='__deactivate_edit_mode')document.body.classList.remove('edit-mode-ready');
-});
-window.parent.postMessage({type:'__edit_mode_available'},'*');
-applyTweaks({});
-})()
-</script>
-</body>
-</html>`
-}
-
-function importPrototypeZip(filePath: string | undefined): DesignImportPrototypeZipResult {
+function importPrototypeZipLegacy(filePath: string | undefined): DesignImportPrototypeZipResult {
   if (typeof filePath !== "string" || !filePath.trim()) {
     return { success: false, error: "请选择 Pixso 原型图压缩包" }
   }
@@ -2210,7 +1831,7 @@ function importPrototypeZip(filePath: string | undefined): DesignImportPrototype
         name: metadata?.name || prototypeBaseName(entryPath) || `画板 ${screens.length + 1}`,
         zipPath: entryPath,
         mimeType,
-        dataUrl: `data:${mimeType};base64,${data.toString("base64")}`,
+        imageSrc: `data:${mimeType};base64,${data.toString("base64")}`,
         size: data.byteLength,
         width: metadata?.width || dimensions.width,
         height: metadata?.height || dimensions.height,
@@ -2232,7 +1853,7 @@ function importPrototypeZip(filePath: string | undefined): DesignImportPrototype
     const title = path.basename(resolvedPath, path.extname(resolvedPath)) || "Pixso 原型"
     return {
       success: true,
-      html: buildPrototypeHtml(title, screens, metadataCount, path.basename(resolvedPath)),
+      html: buildSharedPrototypeHtml(title, screens, metadataCount, path.basename(resolvedPath)),
       title,
       imageCount: screens.length,
       metadataCount,
@@ -2564,6 +2185,28 @@ function sleepDesignRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
 // ─────────────────────────────────────────────────────────
 
 export function registerDesignHandlers(): void {
+  const watchedAssetOwners = new WeakSet<WebContents>()
+  const watchAssetOwner = (sender: WebContents | undefined): number => {
+    if (!sender || sender.isDestroyed()) return 0
+    const ownerId = sender.id
+    if (!watchedAssetOwners.has(sender)) {
+      watchedAssetOwners.add(sender)
+      const cleanup = () => {
+        designAssetRegistry.revokeOwner(ownerId)
+        void designPackageService.cancelOwner(ownerId)
+      }
+      sender.once("destroyed", cleanup)
+      sender.on("render-process-gone", cleanup)
+      sender.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+        if (isMainFrame && !isInPlace) cleanup()
+      })
+    }
+    return ownerId
+  }
+  designAssetRegistry.setOnPackageReleased((packageRoot) => {
+    designPackageService.tryCleanupRetired(packageRoot)
+  })
+
   const templatePackages = new DesignTemplatePackages(path.join(getOpenworkDir(), "design-template-packages"))
   // Register bundled packages before restoring sessions that may reference them.
   listDesignTemplates(templatePackages)
@@ -2616,36 +2259,73 @@ export function registerDesignHandlers(): void {
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue
       const subscribed = subscribers.get(window.webContents.id)?.has(change.id)
-      window.webContents.send(
-        "design:sessions-changed",
-        subscribed ? change : { ...change, snapshot: undefined },
-      )
+      try {
+        window.webContents.send("design:sessions-changed", subscribed ? change : { ...change, snapshot: undefined })
+      } catch (error) {
+        console.warn("[Design] Could not notify session subscriber", error)
+      }
     }
   }
   const manager = new DesignRunManager(new DesignSessionStore(getDb()), {
     validateDirectEdit: async (candidate, before) => {
-      const resolved = resolveDesignArtifactPath(`${before.id}_design-main`, before.workspacePath ?? undefined)
-      if (!resolved.filePath) throw new Error(resolved.error ?? "无法准备编辑校验")
-      fs.mkdirSync(path.dirname(resolved.filePath), { recursive: true })
-      const temporary = path.join(path.dirname(resolved.filePath), `.direct-${crypto.randomUUID()}.html`)
+      const layout = resolveDesignLayout({
+        sessionId: before.id,
+        workspacePath: before.workspacePath,
+        artifactPath: before.state.artifactPath,
+        artifactPackage: before.state.artifactPackage,
+      })
+      const htmlToValidate = materializeTweaks(candidate.html, candidate.tweaks)
+      if (layout.isPackage) {
+        const ticket = designAssetRegistry.issue({
+          ownerId: 0,
+          sessionId: `${before.id}:direct-edit`,
+          kind: "validation",
+          packageRoot: layout.packageRoot,
+          entryPath: layout.entryRelativePath,
+          revision: before.state.artifactRevision ?? 0,
+          getEntryHtml: () => htmlToValidate,
+        })
+        try {
+          const result = await validateDesignArtifactInHiddenBrowser("", new AbortController().signal, {
+            loadUrl: ticket.url,
+            sourceHtml: htmlToValidate,
+          })
+          if (!result.ok) throw new Error(formatDesignBrowserValidation(result))
+        } finally {
+          designAssetRegistry.revoke(ticket.token)
+        }
+        return
+      }
+      fs.mkdirSync(layout.draftDir, { recursive: true })
+      const temporary = path.join(layout.draftDir, `.direct-${crypto.randomUUID()}.html`)
       try {
-        fs.writeFileSync(temporary, materializeTweaks(candidate.html, candidate.tweaks), "utf8")
+        fs.writeFileSync(temporary, htmlToValidate, "utf8")
         const result = await validateDesignArtifactInHiddenBrowser(temporary, new AbortController().signal)
         if (!result.ok) throw new Error(formatDesignBrowserValidation(result))
       } finally { try { fs.unlinkSync(temporary) } catch { /* Already removed. */ } }
     },
     publish,
+    isMigrating: (id) => designPackageService.isMigrating(id),
     project: (snapshot) => {
       if (!snapshot.state.artifactPath) return
-      const resolved = resolveDesignArtifactPath(`${snapshot.id}_design-main`, snapshot.workspacePath ?? undefined)
-      if (!resolved.filePath || path.resolve(resolved.filePath) !== path.resolve(snapshot.state.artifactPath))
+      const layout = resolveDesignLayout({
+        sessionId: snapshot.id,
+        workspacePath: snapshot.workspacePath,
+        artifactPath: snapshot.state.artifactPath,
+        artifactPackage: snapshot.state.artifactPackage,
+      })
+      if (path.resolve(layout.entryFilePath) !== path.resolve(snapshot.state.artifactPath))
         throw new Error("局部修改投影路径不属于当前产物")
-      const file = resolved.filePath
+      const file = layout.entryFilePath
       fs.mkdirSync(path.dirname(file), { recursive: true })
       const temporary = `${file}.projection-${snapshot.state.artifactRevision}.tmp`
       fs.writeFileSync(temporary, materializeTweaks(snapshot.state.html, snapshot.state.tweaks), "utf8")
       fs.renameSync(temporary, file)
-      writeDesignArtifactMetadata(file, { tweaks: snapshot.state.tweaks })
+      writeDesignArtifactMetadata(
+        file,
+        { ...(snapshot.state.artifactPackage ? snapshot.state.artifactMetadata : {}), tweaks: snapshot.state.tweaks, artifactPackage: snapshot.state.artifactPackage ?? null },
+        layout.metadataPath
+      )
     },
     abort: (runId) => {
       activeSessions.get(runId)?.abort()
@@ -2654,10 +2334,17 @@ export function registerDesignHandlers(): void {
     recoverDraft: (snapshot) => {
       const workspace = snapshot.workspacePath
       if (!workspace) return null
-      const artifact = resolveDesignArtifactPath(`${snapshot.id}_design-main`, workspace)
-      return artifact.filePath
-        ? recoverDesignDraftCheckpoint(workspace, artifact.filePath, snapshot.state.messages)
-        : null
+      try {
+        const layout = resolveDesignLayout({
+          sessionId: snapshot.id,
+          workspacePath: workspace,
+          artifactPath: snapshot.state.artifactPath,
+          artifactPackage: snapshot.state.artifactPackage,
+        })
+        return recoverDesignDraftCheckpoint(workspace, layout.entryFilePath, snapshot.state.messages, layout.draftDir)
+      } catch {
+        return null
+      }
     },
     execute: async (request, runId, emit, snapshot) => {
       if (!snapshot.state.html && !snapshot.state.draftPreview) validateSelection(snapshot.state)
@@ -2671,9 +2358,13 @@ export function registerDesignHandlers(): void {
           buildDesignModelRetryHooks((data) => emit(data as DesignRunEvent)), 3) : null
         let localMetrics: DesignPatchMetrics | undefined
         if (!model || !request.patch) { activeSessions.delete(runId); throw new Error("未配置模型或局部修改目标无效") }
-        const resolved = resolveDesignArtifactPath(`${snapshot.id}_design-main`, snapshot.workspacePath ?? undefined)
-        if (!resolved.filePath) throw new Error(resolved.error)
-        const artifactPath = resolved.filePath
+        const layout = resolveDesignLayout({
+          sessionId: snapshot.id,
+          workspacePath: snapshot.workspacePath,
+          artifactPath: snapshot.state.artifactPath,
+          artifactPackage: snapshot.state.artifactPackage,
+        })
+        const artifactPath = layout.entryFilePath
         const hasFrameTargets = request.patch.targets.some((target) => splitFrameNodeId(target.nodeId))
         const candidateFiles = new Set<string>()
         activeSessions.set(runId, controller)
@@ -2718,19 +2409,86 @@ export function registerDesignHandlers(): void {
             onProposal: (summary) => emit({ type: "token", token: `候选修改：${summary}\n` }),
             validate: async (candidate, scope) => {
               if (controller.signal.aborted) throw createDesignAbortError()
-              const candidateFile = path.join(path.dirname(scope.frameId ? scope.artifactPath! : artifactPath), `.patch-${runId}.html`)
-              candidateFiles.add(candidateFile)
               const policyIssue = !scope.frameId && designVariantPolicyIssue(candidate.html, isSingleDesignVariant(snapshot.state, snapshot.meta))
               if (policyIssue) return [policyIssue]
+              const candidateHtml = decorateDesignNodes(materializeTweaks(candidate.html, candidate.tweaks))
+              const beforeHtml = decorateDesignNodes(materializeTweaks(scope.html, scope.tweaks))
+
+              if (!scope.frameId && layout.isPackage) {
+                const candidateTicket = designAssetRegistry.issue({
+                  ownerId: 0,
+                  sessionId: `${snapshot.id}:patch-cand:${runId}`,
+                  kind: "validation",
+                  packageRoot: layout.packageRoot,
+                  entryPath: layout.entryRelativePath,
+                  revision: snapshot.state.artifactRevision ?? 0,
+                  getEntryHtml: () => candidateHtml,
+                })
+                const beforeTicket = designAssetRegistry.issue({
+                  ownerId: 0,
+                  sessionId: `${snapshot.id}:patch-before:${runId}`,
+                  kind: "validation",
+                  packageRoot: layout.packageRoot,
+                  entryPath: layout.entryRelativePath,
+                  revision: snapshot.state.artifactRevision ?? 0,
+                  getEntryHtml: () => beforeHtml,
+                })
+                let probe: BrowserWindow | null = null
+                try {
+                  if (candidate.validationLevel === "interaction") {
+                    const validation = await validateDesignArtifactInHiddenBrowser("", controller.signal, {
+                      loadUrl: candidateTicket.url,
+                      sourceHtml: candidateHtml,
+                    })
+                    if (!validation.ok) return validation.issues.map((i) => i.message)
+                  }
+                  const issues: string[] = []
+                  probe = new BrowserWindow({
+                    width: 1440,
+                    height: 1000,
+                    show: false,
+                    webPreferences: {
+                      contextIsolation: true,
+                      nodeIntegration: false,
+                      sandbox: true,
+                      partition: `design-patch-probe-${crypto.randomUUID()}`,
+                    },
+                  })
+                  registerDesignAssetProtocolOnSession(probe.webContents.session)
+                  const currentWidth = Math.min(1920, Math.max(320, Math.round(scope.request.viewport?.width || 1440)))
+                  for (const width of [...new Set(candidate.validationLevel === "source" ? [currentWidth] : [currentWidth, 390])]) {
+                    if (controller.signal.aborted) throw createDesignAbortError()
+                    probe.setContentSize(width, 900)
+                    const measure = (targetUrl: string): Promise<DesignLayoutProbe> => withDesignValidationDeadline((async () => {
+                      await probe!.loadURL(targetUrl)
+                      await probe!.webContents.executeJavaScript(`(()=>{const s=document.createElement('style');s.textContent='*{transition:none!important;animation:none!important}';document.head.appendChild(s)})()`)
+                      const measured = await probe!.webContents.executeJavaScript(`document.fonts.ready.then(()=>new Promise(r=>requestAnimationFrame(()=>r((${designPatchLayoutProbe.toString()})()))))`, true) as DesignLayoutProbe
+                      if (targetUrl === candidateTicket.url) measured.expectations = await inspectDesignPatchStyles(probe!.webContents, candidate.styleChecks, width)
+                      return measured
+                    })(), controller.signal, DESIGN_BROWSER_VALIDATION_TIMEOUT_MS)
+                    if (candidate.validationLevel === "source") issues.push(...(await measure(candidateTicket.url)).expectations)
+                    else issues.push(...compareDesignPatchLayouts(await measure(beforeTicket.url), await measure(candidateTicket.url), new Set(candidate.allowedIds)))
+                  }
+                  return issues
+                } finally {
+                  probe?.destroy()
+                  designAssetRegistry.revoke(candidateTicket.token)
+                  designAssetRegistry.revoke(beforeTicket.token)
+                }
+              }
+
+              const baseDir = scope.frameId ? path.dirname(scope.artifactPath!) : layout.draftDir
+              const candidateFile = path.join(baseDir, `.patch-${runId}.html`)
+              candidateFiles.add(candidateFile)
               fs.mkdirSync(path.dirname(candidateFile), { recursive: true })
-              fs.writeFileSync(candidateFile, decorateDesignNodes(materializeTweaks(candidate.html, candidate.tweaks)), "utf8")
+              fs.writeFileSync(candidateFile, candidateHtml, "utf8")
               if (candidate.validationLevel === "interaction") {
                 const validation = await validateDesignArtifactInHiddenBrowser(candidateFile, controller.signal)
                 if (!validation.ok) return validation.issues.map((i) => i.message)
               }
               const beforeFile = `${candidateFile}.before.html`
               const issues: string[] = []
-              fs.writeFileSync(beforeFile, decorateDesignNodes(materializeTweaks(scope.html, scope.tweaks)), "utf8")
+              fs.writeFileSync(beforeFile, beforeHtml, "utf8")
               let probe: BrowserWindow | null = null
               try {
                 probe = new BrowserWindow({ width: 1440, height: 1000, show: false, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } })
@@ -2801,6 +2559,8 @@ export function registerDesignHandlers(): void {
           tabId: "design-main",
           workspacePath: snapshot.workspacePath ?? undefined,
           artifactId: `${request.designSessionId}_design-main`,
+          artifactPath: snapshot.state.artifactPath ?? undefined,
+          artifactPackage: snapshot.state.artifactPackage ?? undefined,
           currentHtml: request.isIteration
             ? request.currentHtml || (snapshot.state.creationSelection?.template.package
               ? materializeTweaks(snapshot.state.html, snapshot.state.tweaks, false)
@@ -2823,6 +2583,12 @@ export function registerDesignHandlers(): void {
       const artifactId = `${request.designSessionId}_design-main`
       // Agent runs already validate and save artifacts. Image runs use the same durable sink here.
       if (event.artifactPath) return event
+      const layout = resolveDesignLayout({
+        sessionId: artifactId,
+        workspacePath: snapshot.workspacePath,
+        artifactPath: snapshot.state.artifactPath,
+        artifactPackage: snapshot.state.artifactPackage,
+      })
       const result = saveDesignArtifact(
         artifactId,
         event.html,
@@ -2832,9 +2598,11 @@ export function registerDesignHandlers(): void {
           prompt: request.prompt,
           modelId: request.modelId ?? null,
           designSystemId: snapshot.state.selectedDesignSystemId,
+          artifactPackage: snapshot.state.artifactPackage ?? null,
           preview: { thumbnailText: makeDesignThumbnailText(event.html) },
           variations: extractDesignVariationMetadata(event.html),
-        }
+        },
+        layout
       )
       if (!result.success || !result.filePath)
         throw new Error(result.error ?? "设计产物保存失败")
@@ -2875,6 +2643,9 @@ export function registerDesignHandlers(): void {
     if (artifact.success && artifact.html) {
       seed.state.html = artifact.html
       seed.state.artifactPath = artifact.filePath ?? seed.state.artifactPath
+      if (artifact.metadata?.artifactPackage) {
+        seed.state.artifactPackage = artifact.metadata.artifactPackage
+      }
     }
     return { ...seed, workspacePath }
   }
@@ -2892,7 +2663,11 @@ export function registerDesignHandlers(): void {
     }
     ids.add(id)
     // Attaching the subscriber and taking the snapshot have no await between them.
-    return manager.get(id)
+    const snapshot = manager.get(id)
+    if (snapshot.workspacePath) {
+      designPackageService.sweepStaleStagingDirs(snapshot.workspacePath)
+    }
+    return snapshot
   })
   ipcMain.handle("design:session-close", (event, id: string) => {
     subscribers.get(event.sender.id)?.delete(id)
@@ -2907,6 +2682,7 @@ export function registerDesignHandlers(): void {
         meta,
       }: { id: string; patch: Partial<TabState>; meta?: Partial<SessionMeta> },
     ) => {
+      designPackageService.assertSessionAvailable(id)
       const current = manager.get(id).state
       if (!current.html && !current.draftPreview && (patch.creationSelection || patch.selectedDesignSystemId !== undefined))
         validateSelection({ ...current, ...patch })
@@ -2915,17 +2691,34 @@ export function registerDesignHandlers(): void {
   )
   ipcMain.handle("design:session-ui-patch", (_event, { id, patch }: { id: string; patch: import("../../shared/design-ui-patch").DesignUiPatch }) => manager.patchUi(id, patch))
   ipcMain.handle("design:session-tweak", (_event, { id, command }: { id: string; command: DesignTweakCommand }) => {
+    designPackageService.assertSessionAvailable(id)
     const snapshot = manager.tweak(id, command)
     if ((command.scope === "artifact" || !snapshot.state.draftPreview) && snapshot.state.artifactPath) {
-      try { writeDesignArtifactMetadata(snapshot.state.artifactPath, { tweaks: snapshot.state.tweaks }) } catch (error) { console.warn("[Design] Tweaks metadata projection failed; database state retained", error) }
+      try {
+        writeDesignArtifactMetadata(
+          snapshot.state.artifactPath,
+          { tweaks: snapshot.state.tweaks },
+          resolveMetadataPathForHtml(snapshot.state.artifactPath)
+        )
+      } catch (error) { console.warn("[Design] Tweaks metadata projection failed; database state retained", error) }
     }
     return snapshot
   })
   ipcMain.handle("design:preview-visible", (_event, { id, runId, revision }: { id: string; runId: string; revision: number }) => manager.previewVisible(id, runId, revision))
-  ipcMain.handle("design:inspect-editable", (_event, id: string) => manager.inspectEditable(id))
-  ipcMain.handle("design:direct-edit", (_event, { id, command }) => manager.edit(id, command))
-  ipcMain.handle("design:patch-history", (_event, { id, operation, revision }: { id: string; operation: "undo" | "redo"; revision: number }) => manager.patchHistory(id, operation, revision))
+  ipcMain.handle("design:inspect-editable", (_event, id: string) => {
+    designPackageService.assertSessionAvailable(id)
+    return manager.inspectEditable(id)
+  })
+  ipcMain.handle("design:direct-edit", (_event, { id, command }) => {
+    designPackageService.assertSessionAvailable(id)
+    return manager.edit(id, command)
+  })
+  ipcMain.handle("design:patch-history", (_event, { id, operation, revision }: { id: string; operation: "undo" | "redo"; revision: number }) => {
+    designPackageService.assertSessionAvailable(id)
+    return manager.patchHistory(id, operation, revision)
+  })
   ipcMain.handle("design:session-start", (_event, request: DesignRunRequest) => {
+    designPackageService.assertSessionAvailable(request.designSessionId)
     const state = manager.get(request.designSessionId).state
     if (!state.html && !state.draftPreview) validateSelection(state)
     return manager.start(request)
@@ -2935,15 +2728,55 @@ export function registerDesignHandlers(): void {
   )
   ipcMain.handle(
     "design:session-workspace",
-    (_event, { id, path }: { id: string; path: string }) =>
-      manager.setWorkspace(id, path),
+    async (_event, { id, path: nextWorkspacePath }: { id: string; path: string }) => {
+      designPackageService.assertSessionAvailable(id)
+      const current = manager.get(id)
+      if (!nextWorkspacePath?.trim()) throw new Error("工作目录不能为空")
+      manager.assertNoPendingEdit(id)
+      if (current.activeRunId) throw new Error("设计运行中无法切换工作目录，请先停止任务")
+      const oldWorkspacePath = current.workspacePath?.trim()
+      if (oldWorkspacePath && path.resolve(oldWorkspacePath) !== path.resolve(nextWorkspacePath)) {
+        const migrated = await designPackageService.migrateSessionArtifacts({
+          sessionId: id,
+          oldWorkspacePath,
+          newWorkspacePath: nextWorkspacePath,
+          artifactPackage: current.state.artifactPackage,
+          artifactPath: current.state.artifactPath,
+        })
+        let snapshot: DesignSessionSnapshot
+        try {
+          const artifactPath = migrated.newArtifactPath ?? undefined
+          snapshot = manager.setWorkspace(id, nextWorkspacePath, {
+            artifactPath,
+            artifactMetadata: current.state.artifactMetadata && {
+              ...current.state.artifactMetadata, htmlPath: artifactPath
+            }
+          })
+        } catch (error) {
+          await migrated.rollback()
+          throw error
+        }
+        try {
+          designAssetRegistry.revokeSession(id)
+        } finally {
+          await migrated.commitCleanup()
+        }
+        manager.syncArtifacts()
+        return snapshot
+      }
+      return manager.setWorkspace(id, nextWorkspacePath)
+    },
   )
   ipcMain.handle(
     "design:session-retry",
-    (_event, { id, requestId }: { id: string; requestId: string }) =>
-      manager.retry(id, requestId),
+    (_event, { id, requestId }: { id: string; requestId: string }) => {
+      designPackageService.assertSessionAvailable(id)
+      return manager.retry(id, requestId)
+    },
   )
   ipcMain.handle("design:session-delete", (_event, id: string) => {
+    designPackageService.assertSessionAvailable(id)
+    designAssetRegistry.revokeSession(id)
     const snapshot = manager.get(id)
     const workspacePath = snapshot.workspacePath?.trim()
     if (workspacePath) {
@@ -2973,10 +2806,344 @@ export function registerDesignHandlers(): void {
     return typeof stored === "string" && stored ? stored : app.getPath("userData")
   })
 
+  const resolveWorkspaceForImport = (requested?: string, sessionId?: string | null): string => {
+    if (typeof requested === "string" && requested.trim()) return requested.trim()
+    if (sessionId) {
+      try {
+        const ws = manager.get(sessionId).workspacePath?.trim()
+        if (ws) return ws
+      } catch {
+        // Session may not exist yet.
+      }
+    }
+    const stored = designAgentStore.get("workspacePath", null)
+    return typeof stored === "string" && stored.trim() ? stored.trim() : app.getPath("userData")
+  }
+
+  ipcMain.handle("design:pick-import-html-or-zip", async (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    const options: Electron.OpenDialogOptions = {
+      title: "导入 HTML / ZIP",
+      properties: ["openFile"],
+      filters: [{ name: "HTML / ZIP", extensions: ["html", "htm", "zip"] }],
+    }
+    const picked = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options)
+    if (picked.canceled || !picked.filePaths[0]) return { canceled: true }
+    return { canceled: false, filePath: picked.filePaths[0] }
+  })
+
+  ipcMain.handle(
+    "design:stage-import-package",
+    async (
+      event,
+      { filePath, workspacePath }: { filePath: string; workspacePath?: string }
+    ): Promise<DesignPackageStageResult> => {
+      try {
+        const ownerId = watchAssetOwner(event.sender)
+        const targetWorkspace = resolveWorkspaceForImport(workspacePath)
+        const staged = await designPackageService.stageImport(ownerId, filePath, targetWorkspace)
+        return { success: true, ...staged }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "design:cancel-import-package",
+    async (event, { stageId }: { stageId: string }) => {
+      if (!stageId) return { canceled: false }
+      return { canceled: await designPackageService.cancelStage(event.sender.id, stageId) }
+    }
+  )
+
+  ipcMain.handle(
+    "design:commit-import-package",
+    async (event, params: DesignPackageCommitParams) => {
+      let releaseSession: (() => void) | undefined
+      try {
+        const ownerId = watchAssetOwner(event.sender)
+        const createNew = params.createNew || !params.sessionId
+        const targetSessionId = createNew
+          ? `ds_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+          : params.sessionId!
+        const targetWorkspace = resolveWorkspaceForImport(params.workspacePath, createNew ? null : targetSessionId)
+
+        releaseSession = designPackageService.lockSession(targetSessionId, "import")
+        manager.assertNoPendingEdit(targetSessionId)
+        let oldPackageRoot: string | null = null
+        if (!createNew) {
+          const existing = manager.get(targetSessionId)
+          if (
+            existing.activeRunId ||
+            existing.state.generationState === "generating" ||
+            existing.state.generationState === "asking"
+          ) {
+            return { success: false, error: "请先停止当前设计生成，再导入新页面" }
+          }
+          if (existing.state.artifactPackage) {
+            try {
+              oldPackageRoot = resolveDesignLayout({
+                sessionId: existing.id,
+                workspacePath: existing.workspacePath,
+                artifactPath: existing.state.artifactPath,
+                artifactPackage: existing.state.artifactPackage,
+              }).packageRoot
+            } catch {
+              oldPackageRoot = null
+            }
+          }
+        }
+
+        const committed = await designPackageService.commitStage(ownerId, {
+          stageId: params.stageId,
+          entryPath: params.entryPath,
+          sessionId: targetSessionId,
+          workspacePath: targetWorkspace,
+        })
+
+        try {
+          const dsInfo = params.designSystemId ? getDesignSystemById(params.designSystemId).info : null
+          const artifactId = `${targetSessionId}_design-main`
+          const tweaks = reconcileTweaks(readTweakDeclaration(committed.html), null)
+          const baseTitle = path.basename(params.entryPath, path.extname(params.entryPath)) || "HTML 页面"
+          const sourceLabel =
+            committed.packageRef.entryPath === path.basename(committed.packageRef.entryPath)
+              ? baseTitle
+              : `${baseTitle} (${committed.packageRef.entryPath})`
+          const metadata = buildDesignArtifactMetadata(
+            committed.entryFilePath,
+            {
+              artifactId,
+              title: sourceLabel,
+              sourceKind: "import_html",
+              sourceLabel,
+              designSystemId: params.designSystemId ?? null,
+              designSystemName: dsInfo?.name ?? null,
+              designSystemCategory: dsInfo?.category ?? null,
+              artifactPackage: committed.packageRef,
+              tweaks,
+              preview: { thumbnailText: makeDesignThumbnailText(committed.html) },
+              variations: extractDesignVariationMetadata(committed.html),
+            },
+            resolveMetadataPathForHtml(committed.entryFilePath)
+          )
+          const snapshot = manager.commitImportedDesign(targetSessionId, {
+            createNew,
+            workspacePath: targetWorkspace,
+            html: committed.html,
+            artifactPath: committed.entryFilePath,
+            artifactPackage: committed.packageRef,
+            artifactMetadata: metadata,
+            sourceInfo: {
+              kind: "import_html",
+              label: sourceLabel,
+              detail: `${committed.packageRef.sourceKind.toUpperCase()} · ${committed.packageRef.entryPath}`,
+            },
+            userMessage: `[导入 ${committed.packageRef.sourceKind === "zip" ? "ZIP 项目包" : "HTML 文件"}：${committed.packageRef.entryPath}]`,
+            assistantMessage: `已导入本地页面 **${committed.packageRef.entryPath}**${committed.packageRef.assetCount > 0 ? `（包含 ${committed.packageRef.assetCount} 个独立资源文件，按路径按需加载）` : ""}。可以点击任意区域添加批注，直接编辑元素，或输入修改要求。`,
+            preserveComposerDraft: params.preserveComposerDraft,
+            designSystemId: params.designSystemId,
+            designSystemName: dsInfo?.name ?? null,
+            designSystemCategory: dsInfo?.category ?? null,
+          })
+
+          if (oldPackageRoot && oldPackageRoot !== committed.packageRoot) {
+            designPackageService.retirePackageRoot(oldPackageRoot)
+            designAssetRegistry.revokeSession(targetSessionId)
+          }
+
+          return {
+            success: true,
+            snapshot,
+            artifactPackage: committed.packageRef,
+            missingAssets: committed.missingAssets,
+            outOfScopeAssets: committed.outOfScopeAssets,
+            warnings: committed.warnings,
+          }
+        } catch (error) {
+          await committed.rollback()
+          throw error
+        }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) }
+      } finally {
+        releaseSession?.()
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "design:acquire-preview-url",
+    (
+      event,
+      { sessionId, kind, runId }: { sessionId: string; kind: "canvas" | "draft"; runId?: string }
+    ) => {
+      try {
+        const ownerId = watchAssetOwner(event.sender)
+        const snapshot = manager.get(sessionId)
+        const layout = resolveDesignLayout({
+          sessionId: snapshot.id,
+          workspacePath: snapshot.workspacePath,
+          artifactPath: snapshot.state.artifactPath,
+          artifactPackage: snapshot.state.artifactPackage,
+        })
+        if (!layout.isPackage) {
+          return { success: false, error: "当前设计未使用独立资源包模式" }
+        }
+        designAssetRegistry.revokeSession(sessionId, kind, ownerId)
+
+        if (kind === "draft") {
+          const currentDraft = manager.get(sessionId).state.draftPreview
+          const draftRunId = runId || currentDraft?.runId || "draft"
+          const draftRev = currentDraft?.revision ?? 0
+          const ticket = designAssetRegistry.issue({
+            ownerId,
+            sessionId,
+            kind: "draft",
+            packageRoot: layout.packageRoot,
+            entryPath: layout.entryRelativePath,
+            revision: draftRev,
+            draft: { runId: draftRunId, revision: draftRev },
+            getEntryHtml: () => manager.get(sessionId).state.draftPreview?.html || null,
+          })
+          return { success: true, ticket }
+        }
+
+        const ticket = designAssetRegistry.issue({
+          ownerId,
+          sessionId,
+          kind: "canvas",
+          packageRoot: layout.packageRoot,
+          entryPath: layout.entryRelativePath,
+          revision: snapshot.state.artifactRevision ?? 0,
+          getEntryHtml: () => {
+            const current = manager.get(sessionId).state
+            if (!current.html) return null
+            return materializeTweaks(current.html, current.tweaks)
+          },
+        })
+        return { success: true, ticket }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  ipcMain.handle("design:release-preview-url", (_event, { token }: { token: string }) => {
+    if (!token) return { released: false }
+    return { released: designAssetRegistry.revoke(token) }
+  })
+
   ipcMain.handle(
     "design:import-prototype-zip",
-    async (_event, { filePath }: DesignImportPrototypeZipParams): Promise<DesignImportPrototypeZipResult> =>
-      importPrototypeZip(filePath)
+    async (_event, params: DesignImportPrototypeZipParams): Promise<DesignImportPrototypeZipResult> => {
+      if (!params.workspacePath?.trim()) {
+        return importPrototypeZipLegacy(params.filePath)
+      }
+      let releaseSession: (() => void) | undefined
+      try {
+        const createNew = params.createNew || !params.sessionId
+        const targetSessionId = createNew
+          ? `ds_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+          : params.sessionId!
+        const targetWorkspace = resolveWorkspaceForImport(params.workspacePath, createNew ? null : targetSessionId)
+
+        releaseSession = designPackageService.lockSession(targetSessionId, "import")
+        manager.assertNoPendingEdit(targetSessionId)
+        let oldPackageRoot: string | null = null
+        if (!createNew) {
+          const existing = manager.get(targetSessionId)
+          if (
+            existing.activeRunId ||
+            existing.state.generationState === "generating" ||
+            existing.state.generationState === "asking"
+          ) {
+            return { success: false, error: "请先停止当前设计生成，再导入新页面" }
+          }
+          if (existing.state.artifactPackage) {
+            try {
+              oldPackageRoot = resolveDesignLayout({
+                sessionId: existing.id,
+                workspacePath: existing.workspacePath,
+                artifactPath: existing.state.artifactPath,
+                artifactPackage: existing.state.artifactPackage,
+              }).packageRoot
+            } catch {
+              oldPackageRoot = null
+            }
+          }
+        }
+
+        const committed = await designPackageService.stageAndBuildPixsoPackage(
+          params.filePath,
+          targetSessionId,
+          targetWorkspace
+        )
+        try {
+          const dsInfo = params.designSystemId ? getDesignSystemById(params.designSystemId).info : null
+          const artifactId = `${targetSessionId}_design-main`
+          const tweaks = reconcileTweaks(readTweakDeclaration(committed.html), null)
+          const metadata = buildDesignArtifactMetadata(
+            committed.entryFilePath,
+            {
+              artifactId,
+              title: committed.title,
+              sourceKind: "prototype_zip",
+              sourceLabel: committed.title,
+              designSystemId: params.designSystemId ?? null,
+              designSystemName: dsInfo?.name ?? null,
+              designSystemCategory: dsInfo?.category ?? null,
+              artifactPackage: committed.packageRef,
+              tweaks,
+              preview: { thumbnailText: makeDesignThumbnailText(committed.html) },
+              variations: extractDesignVariationMetadata(committed.html),
+            },
+            resolveMetadataPathForHtml(committed.entryFilePath)
+          )
+          const snapshot = manager.commitImportedDesign(targetSessionId, {
+            createNew,
+            workspacePath: targetWorkspace,
+            html: committed.html,
+            artifactPath: committed.entryFilePath,
+            artifactPackage: committed.packageRef,
+            artifactMetadata: metadata,
+            sourceInfo: {
+              kind: "prototype_zip",
+              label: committed.title,
+              detail: `${committed.imageCount} 个画板 · ${committed.metadataCount} 个元数据`,
+            },
+            userMessage: `[导入 Pixso 原型：${committed.title}（${committed.imageCount} 个画板）]`,
+            assistantMessage: `已从 **${committed.title}** 导入 ${committed.imageCount} 个原型画板（截图已按独立文件保存）。请告诉我你希望如何参考、改版，或直接添加批注开始编辑。`,
+            designSystemId: params.designSystemId,
+            designSystemName: dsInfo?.name ?? null,
+            designSystemCategory: dsInfo?.category ?? null,
+          })
+
+          if (oldPackageRoot && oldPackageRoot !== committed.packageRoot) {
+            designPackageService.retirePackageRoot(oldPackageRoot)
+            designAssetRegistry.revokeSession(targetSessionId)
+          }
+
+          return {
+            success: true,
+            html: committed.html,
+            title: committed.title,
+            imageCount: committed.imageCount,
+            metadataCount: committed.metadataCount,
+            snapshot,
+            artifactPackage: committed.packageRef,
+          }
+        } catch (error) {
+          await committed.rollback()
+          throw error
+        }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) }
+      } finally {
+        releaseSession?.()
+      }
+    }
   )
 
   ipcMain.handle(
@@ -2993,6 +3160,7 @@ export function registerDesignHandlers(): void {
       if (params.kind !== "attachments" && params.kind !== "code") {
         return { success: false, error: `Unsupported context kind: ${String((params as { kind?: unknown }).kind)}` }
       }
+      if (params.designSessionId) designPackageService.assertSessionAvailable(params.designSessionId)
       return syncDesignContextFiles(params)
     }
   )
@@ -3347,6 +3515,7 @@ export function registerDesignHandlers(): void {
       if (!tabId || !html) {
         return { success: false, error: "tabId and html are required" }
       }
+      designPackageService.assertSessionAvailable(tabId.replace(/_design-main$/, ""))
       const result = saveDesignArtifact(tabId, html, workspacePath, {
           ...(metadata ?? {}),
           artifactId: metadata?.artifactId || tabId,
@@ -3367,6 +3536,7 @@ export function registerDesignHandlers(): void {
       if (!filePath || !html) {
         return { success: false, error: "filePath and html are required" }
       }
+      assertArtifactFileAvailable(filePath)
       const result = saveDesignArtifactFile(filePath, html, workspacePath, {
           ...(metadata ?? {}),
           preview: metadata?.preview ?? { thumbnailText: makeDesignThumbnailText(html) },
@@ -3394,17 +3564,55 @@ export function registerDesignHandlers(): void {
 
   ipcMain.handle(
     "design:get-artifact-package-info",
-    (_event, { filePath, workspacePath }: DesignArtifactPackageParams) =>
-      getDesignArtifactPackageInfo(filePath, workspacePath)
+    (_event, { filePath, workspacePath, sessionId }: DesignArtifactPackageParams) => {
+      let resolvedSession: DesignSessionSnapshot | null = null
+      if (sessionId) {
+        try { resolvedSession = manager.get(sessionId) } catch { resolvedSession = null }
+      }
+      if (!resolvedSession && filePath) {
+        const meta = manager.list().find((item) => sameResolvedFilePath(item.artifactPath ?? undefined, filePath))
+        if (meta) resolvedSession = manager.get(meta.id)
+      }
+      return getDesignArtifactPackageInfo(
+        filePath ?? resolvedSession?.state.artifactPath ?? undefined,
+        workspacePath ?? resolvedSession?.workspacePath ?? undefined,
+        resolvedSession?.id ?? sessionId,
+        resolvedSession?.state.artifactPackage
+      )
+    }
   )
 
   ipcMain.handle(
     "design:export-artifact-package",
-    (_event, { filePath, workspacePath }: DesignArtifactPackageParams) => {
+    async (event, { filePath, workspacePath, sessionId, suggestedName, saveDialog }: DesignArtifactPackageParams) => {
       manager.syncArtifacts()
-      const session = manager.list().find((meta) => sameResolvedFilePath(meta.artifactPath ?? undefined, filePath))
-      const tweaks = session ? manager.get(session.id).state.tweaks : readDesignArtifactMetadata(filePath)?.tweaks
-      return exportDesignArtifactPackage(filePath, workspacePath, tweaks, session ? manager.get(session.id).state.html : undefined)
+      let sessionSnapshot: DesignSessionSnapshot | null = null
+      if (sessionId) {
+        try { sessionSnapshot = manager.get(sessionId) } catch { sessionSnapshot = null }
+      }
+      if (!sessionSnapshot && filePath) {
+        const meta = manager.list().find((item) => sameResolvedFilePath(item.artifactPath ?? undefined, filePath))
+        if (meta) sessionSnapshot = manager.get(meta.id)
+      }
+      if (filePath) assertArtifactFileAvailable(filePath)
+      if (sessionSnapshot) designPackageService.assertSessionAvailable(sessionSnapshot.id)
+      const resolvedFilePath = filePath ?? sessionSnapshot?.state.artifactPath ?? undefined
+      const tweaks = sessionSnapshot
+        ? sessionSnapshot.state.tweaks
+        : resolvedFilePath
+          ? readDesignArtifactMetadata(resolvedFilePath)?.tweaks
+          : undefined
+      return exportDesignArtifactPackage({
+        filePath: resolvedFilePath,
+        workspacePath: workspacePath ?? sessionSnapshot?.workspacePath ?? undefined,
+        sessionId: sessionSnapshot?.id ?? sessionId,
+        artifactPackage: sessionSnapshot?.state.artifactPackage,
+        tweaks,
+        htmlOverride: sessionSnapshot?.state.html || undefined,
+        suggestedName,
+        saveDialog,
+        sender: event.sender,
+      })
     }
   )
 
@@ -3423,7 +3631,7 @@ export function registerDesignHandlers(): void {
   registerDesignExecutor(
     "design:agent-generate",
     async (event, {
-      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId, templatePackage, singleVariant, resumeFromDraft, resumeOnly,
+      sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath: requestedWorkspacePath, artifactId, artifactPath: requestedArtifactPath, artifactPackage: requestedArtifactPackage, sourceArtifactPath, designSessionId, designSystemId, templatePackage, singleVariant, resumeFromDraft, resumeOnly,
     }: {
       sessionId: string
       prompt: string
@@ -3435,6 +3643,8 @@ export function registerDesignHandlers(): void {
       skill?: DesignSkillReference
       workspacePath?: string
       artifactId?: string
+      artifactPath?: string
+      artifactPackage?: DesignArtifactPackageRef | null
       sourceArtifactPath?: string
       designSessionId?: string
       designSystemId?: string
@@ -3553,23 +3763,29 @@ export function registerDesignHandlers(): void {
           }
         }
 
+        const liveStateAtStart = managedDesignStateReaders.get(sessionId)?.()
+        const resolvedPackageRef = requestedArtifactPackage ?? liveStateAtStart?.artifactPackage ?? undefined
+        const resolvedExistingArtifactPath = requestedArtifactPath ?? sourceArtifactPath ?? liveStateAtStart?.artifactPath ?? undefined
         const resolvedArtifactId = artifactId || tabId
         const htmlStoreKey = resolvedArtifactId
-        const preparedArtifact = tabId ? prepareDesignArtifact(resolvedArtifactId, workspacePath) : null
-        if (preparedArtifact?.error || !preparedArtifact?.filePath) {
+        const preparedArtifact = tabId
+          ? prepareDesignArtifact(resolvedArtifactId, workspacePath, resolvedPackageRef, resolvedExistingArtifactPath)
+          : null
+        if (preparedArtifact?.error || !preparedArtifact?.filePath || !preparedArtifact.layout) {
           send({
             type: "error",
             error: preparedArtifact?.error ?? "Failed to prepare design artifact file"
           })
           return
         }
+        const outputLayout = preparedArtifact.layout
         const existingOutputArtifact = readDesignArtifact(resolvedArtifactId, workspacePath)
         const sourceArtifact = readDesignArtifactFile(sourceArtifactPath, workspacePath)
         const currentHtmlSource = typeof currentHtml === "string" && currentHtml.trim()
           ? currentHtml
           : ""
         const outputArtifactPath = preparedArtifact.filePath
-        const draftArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath)
+        const draftArtifactPath = makeDesignArtifactDraftPath(outputArtifactPath, outputLayout.draftDir)
         const generationStartedAtMs = Date.now()
         const sourcePathIsOutput = sameResolvedFilePath(sourceArtifact.filePath, outputArtifactPath)
         let sourceFilePathForPrompt: string | undefined
@@ -3578,7 +3794,7 @@ export function registerDesignHandlers(): void {
           prepareDesignDraftResume(workspacePath, draftArtifactPath, currentHtmlSource)
           sourceFilePathForPrompt = draftArtifactPath
         } else if (currentHtmlSource) {
-          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, currentHtmlSource)
+          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, currentHtmlSource, outputLayout.draftDir)
           if (!snapshot.success || !snapshot.filePath) {
             send({ type: "error", error: snapshot.error ?? "Failed to snapshot current design HTML" })
             return
@@ -3587,14 +3803,14 @@ export function registerDesignHandlers(): void {
         } else if (sourceArtifact.success && sourceArtifact.filePath && !sourcePathIsOutput) {
           sourceFilePathForPrompt = sourceArtifact.filePath
         } else if (sourceArtifact.success && sourcePathIsOutput && sourceArtifact.html?.trim()) {
-          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, sourceArtifact.html)
+          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, sourceArtifact.html, outputLayout.draftDir)
           if (!snapshot.success || !snapshot.filePath) {
             send({ type: "error", error: snapshot.error ?? "Failed to snapshot source design artifact" })
             return
           }
           sourceFilePathForPrompt = snapshot.filePath
         } else if (sourceArtifactPath && existingOutputArtifact.success && existingOutputArtifact.html?.trim()) {
-          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, existingOutputArtifact.html)
+          const snapshot = writeDesignArtifactSourceSnapshot(outputArtifactPath, existingOutputArtifact.html, outputLayout.draftDir)
           if (!snapshot.success || !snapshot.filePath) {
             send({ type: "error", error: snapshot.error ?? "Failed to snapshot existing design artifact" })
             return
@@ -3653,6 +3869,12 @@ export function registerDesignHandlers(): void {
           )
           : ""
         const enforceSingleVariant = !!singleVariant || !!designSystemId
+        const packageAssetList = outputLayout.isPackage
+          ? listPackageFilesRelative(outputLayout.packageRoot, 200)
+          : []
+        const packageAssetPrompt = outputLayout.isPackage
+          ? `\n\n## Imported design package assets\nPackage root: ${outputLayout.packageRoot}\nEntry path (relative to package root): ${outputLayout.entryRelativePath}\nAvailable package files:\n${packageAssetList.map((file) => `- ${file}`).join("\n")}\n\nKeep all existing relative local asset links (images, fonts, CSS, JS, JSON) unchanged or referencing existing files in this package; do NOT convert local assets into Base64 data URIs or alter relative paths to local assets. Write only the updated entry HTML to the instructed draft path.`
+          : ""
         const artifactInstruction = resumeFromDraft
           ? buildDesignDraftResumeArtifactInstruction(draftArtifactPath)
           : isExistingDesignEdit
@@ -3714,7 +3936,7 @@ export function registerDesignHandlers(): void {
               : buildDesignCreationBasePrompt(workspacePath),
             mainFilesystemToolDescriptions: DESIGN_FILE_TOOL_DESCRIPTIONS,
             mainMiddleware: repairProgress ? [repairProgress.middleware] : undefined,
-            extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : resumeFromDraft ? DESIGN_DRAFT_RESUME_SYSTEM_PROMPT : isExistingDesignEdit ? DESIGN_ITERATION_SYSTEM_PROMPT : DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "")) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : ""),
+            extraSystemPrompt: (validationRepair ? DESIGN_VALIDATION_REPAIR_SYSTEM_PROMPT : resumeFromDraft ? DESIGN_DRAFT_RESUME_SYSTEM_PROMPT : isExistingDesignEdit ? DESIGN_ITERATION_SYSTEM_PROMPT : DESIGN_CREATION_SYSTEM_PROMPT + (templatePackage ? DESIGN_FRAMEWORK_EDITING_PROMPT : "")) + (enforceSingleVariant ? "\n\n" + SINGLE_DESIGN_VARIANT_PROMPT : "") + (templatePackage ? "\n\n## Selected template package\nUse the selected local template's framework, component library and theme. Its dependencies have already been copied by the host. Keep relative local script/style references instead of inlining vendor bundles or switching to remote CDNs. Produce exactly one complete HTML page, preserving React/Vue and JSX/Babel where present. These template rules override generic inline-only and variation instructions.\n" : "") + packageAssetPrompt,
             noSchedulerTool: true,
             noSkillEvolutionTool: true,
             disableSubagents: validationRepair || !!resumeFromDraft || isExistingDesignEdit || (isNewDesign && !selectedSkill),
@@ -4220,7 +4442,7 @@ export function registerDesignHandlers(): void {
           artifactHtml = installDesignEditDataRuntime(materializeTweaks(artifactHtml, tweaks))
           const validationStartedAt = Date.now()
           send({ type: "metrics", metrics: { validationStartedAt } })
-          const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath)
+          const validationDraftPath = makeDesignArtifactDraftPath(outputArtifactPath, outputLayout.draftDir)
           const validationHtml = injectDesignBrowserValidationProbe(artifactHtml)
           const draftSave = saveDesignArtifactFile(
             validationDraftPath,
@@ -4237,10 +4459,34 @@ export function registerDesignHandlers(): void {
           }
 
           sendValidationEvent("running", "浏览器校验中...")
-          const browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal, {
-            onRetry: () => sendValidationEvent("running", "浏览器加载或环境检查失败，正在用新窗口复查一次..."),
-            originalSource: sourceHtmlForReport, fullChecks: true,
-          })
+          let browserValidation: DesignBrowserValidationResult
+          if (outputLayout.isPackage) {
+            const validationTicket = designAssetRegistry.issue({
+              ownerId: 0,
+              sessionId: `${resolvedArtifactId}:validate:${sessionId}`,
+              kind: "validation",
+              packageRoot: outputLayout.packageRoot,
+              entryPath: outputLayout.entryRelativePath,
+              revision: 0,
+              getEntryHtml: () => validationHtml,
+            })
+            try {
+              browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal, {
+                onRetry: () => sendValidationEvent("running", "浏览器加载或环境检查失败，正在用新窗口复查一次..."),
+                originalSource: sourceHtmlForReport,
+                fullChecks: true,
+                loadUrl: validationTicket.url,
+                sourceHtml: validationHtml,
+              })
+            } finally {
+              designAssetRegistry.revoke(validationTicket.token)
+            }
+          } else {
+            browserValidation = await validateDesignArtifactInHiddenBrowser(draftSave.filePath, controller.signal, {
+              onRetry: () => sendValidationEvent("running", "浏览器加载或环境检查失败，正在用新窗口复查一次..."),
+              originalSource: sourceHtmlForReport, fullChecks: true,
+            })
+          }
           send({ type: "metrics", metrics: { validationFinishedAt: Date.now() } })
           const reportSource = {
             html: sourceHtmlForReport, filePath: candidateDraftPath,
@@ -4270,8 +4516,9 @@ export function registerDesignHandlers(): void {
               preview: { thumbnailText: makeDesignThumbnailText(artifactHtml) },
               variations: extractDesignVariationMetadata(artifactHtml),
               templatePackage,
+              artifactPackage: outputLayout.packageRef ?? undefined,
               tweaks,
-          })
+          }, outputLayout)
           if (!saved.success || !saved.filePath) {
             const message = `设计校验通过，但正式保存失败：${saved.error ?? "未知错误"}。已保留验证草稿。`
             sendValidationEvent("error", message, true)

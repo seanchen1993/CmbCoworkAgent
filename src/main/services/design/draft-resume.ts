@@ -6,10 +6,13 @@ import { readTweakDeclaration, reconcileTweaks } from "../../../shared/design-tw
 
 /** Older retries discarded the preview pointer. Recover only proven writes for this user turn. */
 export function recoverDesignDraftCheckpoint(
-  workspacePath: string, artifactPath: string, messages: Message[]
+  workspacePath: string,
+  artifactPath: string,
+  messages: Message[],
+  draftDir?: string
 ): DesignDraftPreview | null {
   try {
-    const directory = path.dirname(path.resolve(artifactPath))
+    const directory = path.resolve(draftDir ?? path.dirname(path.resolve(artifactPath)))
     const realDirectory = fs.realpathSync(directory)
     const relative = path.relative(fs.realpathSync(workspacePath), realDirectory)
     if (relative.startsWith("..") || path.isAbsolute(relative)) return null

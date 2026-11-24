@@ -1,5 +1,11 @@
 import type { DesignUrlImportApi } from "../shared/design-url-import"
-import type { DesignSessionApi, DesignSessionChange } from "../shared/managed-design-session"
+import type { DesignSessionApi, DesignSessionChange, DesignSessionSnapshot } from "../shared/managed-design-session"
+import type {
+  DesignArtifactPackageRef,
+  DesignAssetPreviewTicket,
+  DesignPackageCommitParams,
+  DesignPackageStageResult
+} from "../shared/design-package"
 import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
 import {
   DESIGN_SYSTEM_EXTRACTION_PROGRESS,
@@ -4966,22 +4972,66 @@ const api = {
       ipcRenderer.on("design:import-url-progress", listener)
       return () => ipcRenderer.removeListener("design:import-url-progress", listener)
     }) satisfies DesignUrlImportApi["onUrlImportProgress"],
+    pickImportHtmlOrZip: (): Promise<{
+      canceled: boolean
+      filePath?: string
+      error?: string
+    }> => ipcRenderer.invoke("design:pick-import-html-or-zip"),
+    stageImportPackage: (
+      filePath: string,
+      workspacePath?: string
+    ): Promise<DesignPackageStageResult> =>
+      ipcRenderer.invoke("design:stage-import-package", { filePath, workspacePath }),
+    cancelImportPackage: (stageId: string): Promise<{ canceled: boolean }> =>
+      ipcRenderer.invoke("design:cancel-import-package", { stageId }),
+    commitImportPackage: (
+      params: DesignPackageCommitParams
+    ): Promise<{
+      success: boolean
+      snapshot?: DesignSessionSnapshot
+      artifactPackage?: DesignArtifactPackageRef | null
+      missingAssets?: string[]
+      outOfScopeAssets?: string[]
+      warnings?: string[]
+      error?: string
+    }> => ipcRenderer.invoke("design:commit-import-package", params),
+    acquirePreviewUrl: (
+      sessionId: string,
+      kind: "canvas" | "draft",
+      runId?: string
+    ): Promise<{
+      success: boolean
+      ticket?: DesignAssetPreviewTicket
+      error?: string
+    }> => ipcRenderer.invoke("design:acquire-preview-url", { sessionId, kind, runId }),
+    releasePreviewUrl: (token: string): Promise<{ released: boolean }> =>
+      ipcRenderer.invoke("design:release-preview-url", { token }),
     importPrototypeZip: (
-      filePath: string
+      filePath: string,
+      options?: {
+        workspacePath?: string
+        sessionId?: string | null
+        createNew?: boolean
+        designSystemId?: string | null
+      }
     ): Promise<{
       success: boolean
       html?: string
       title?: string
       imageCount?: number
       metadataCount?: number
+      snapshot?: DesignSessionSnapshot
+      artifactPackage?: DesignArtifactPackageRef | null
       error?: string
     }> =>
-      ipcRenderer.invoke("design:import-prototype-zip", { filePath }) as Promise<{
+      ipcRenderer.invoke("design:import-prototype-zip", { filePath, ...options }) as Promise<{
         success: boolean
         html?: string
         title?: string
         imageCount?: number
         metadataCount?: number
+        snapshot?: DesignSessionSnapshot
+        artifactPackage?: DesignArtifactPackageRef | null
         error?: string
       }>,
     syncContextFiles: (params: {
@@ -5023,37 +5073,52 @@ const api = {
       }>,
     getArtifactPackageInfo: (
       filePath: string,
-      workspacePath?: string
+      workspacePath?: string,
+      sessionId?: string
     ): Promise<{
       success: boolean
       filePath?: string
       dirPath?: string
+      entryRelativePath?: string
       relatedFileCount?: number
+      isPackage?: boolean
       error?: string
     }> =>
       ipcRenderer.invoke("design:get-artifact-package-info", {
         filePath,
-        workspacePath
+        workspacePath,
+        sessionId
       }) as Promise<{
         success: boolean
         filePath?: string
         dirPath?: string
+        entryRelativePath?: string
         relatedFileCount?: number
+        isPackage?: boolean
         error?: string
       }>,
     exportArtifactPackage: (
       filePath: string,
-      workspacePath?: string
+      workspacePath?: string,
+      options?: { sessionId?: string; suggestedName?: string; saveDialog?: boolean }
     ): Promise<{
       success: boolean
       fileName?: string
+      savedPath?: string
+      canceled?: boolean
       buffer?: ArrayBuffer
       relatedFileCount?: number
       error?: string
     }> =>
-      ipcRenderer.invoke("design:export-artifact-package", { filePath, workspacePath }) as Promise<{
+      ipcRenderer.invoke("design:export-artifact-package", {
+        filePath,
+        workspacePath,
+        ...options
+      }) as Promise<{
         success: boolean
         fileName?: string
+        savedPath?: string
+        canceled?: boolean
         buffer?: ArrayBuffer
         relatedFileCount?: number
         error?: string

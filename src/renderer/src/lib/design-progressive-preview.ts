@@ -50,7 +50,7 @@ export function createDesignSectionPatch(
 }
 
 /** Only this host-owned code executes in a draft. Source business scripts wait for finalization. */
-function draftRuntime(): void {
+export function draftRuntime(): void {
   const root = document.documentElement
   const instance = root.dataset.designPreviewInstance
   let revision = Number(root.dataset.designPreviewRevision)

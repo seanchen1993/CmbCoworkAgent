@@ -64,6 +64,31 @@ function harness(options: Partial<DesignRunDependencies> = {}) {
 }
 
 describe("background design conversations", () => {
+  it("projects imported metadata only after the package is committed and retries a failed write", () => {
+    const project = vi.fn()
+    const h = harness({ project })
+    const artifactPackage = { version: "pkg_first", entryPath: "index.html", assetCount: 0, sourceKind: "html" } as const
+    const imported = {
+      createNew: true, workspacePath: "/workspace", html: "<h1>Hello</h1>",
+      artifactPackage, artifactPath: "/workspace/pkg_first/files/index.html",
+      artifactMetadata: { artifactId: "ds_a_design-main", createdAt: "", updatedAt: "", artifactPackage },
+      sourceInfo: { kind: "import_html" as const, label: "Hello" }, userMessage: "import", assistantMessage: "done"
+    }
+    project.mockImplementationOnce(() => { throw new Error("disk busy") })
+    h.manager.commitImportedDesign("ds_a", imported)
+    expect(h.store.pendingProjections()).toEqual([{ id: "ds_a", revision: 1 }])
+    h.manager.syncArtifacts()
+    expect(project.mock.lastCall?.[0].state.artifactMetadata).toEqual(imported.artifactMetadata)
+    expect(h.store.pendingProjections()).toEqual([])
+
+    vi.spyOn(h.store, "save").mockImplementationOnce(() => { throw new Error("database busy") })
+    expect(() => h.manager.commitImportedDesign("ds_a", {
+      ...imported, createNew: false, artifactPackage: { ...artifactPackage, version: "pkg_second" }
+    })).toThrow("database busy")
+    expect(project).toHaveBeenCalledTimes(2)
+    expect(h.manager.get("ds_a").state.artifactPackage).toEqual(artifactPackage)
+  })
+
   it.each([
     ["custom:builtin:minimax", "builtin:minimax"],
     ["builtin:minimax", "builtin:minimax"],

@@ -155,18 +155,18 @@ export class DesignSessionStore {
     this.db.run("BEGIN IMMEDIATE")
     try {
       const previous = this.rows(
-        "SELECT json_extract(state, '$.html') AS html, json_extract(meta, '$.lastSubmittedAt') AS lastSubmittedAt FROM design_sessions WHERE id=?",
+        "SELECT json_extract(state, '$.html') AS html, json_extract(state, '$.artifactPackage.version') AS packageVersion, json_extract(meta, '$.lastSubmittedAt') AS lastSubmittedAt FROM design_sessions WHERE id=?",
         [snapshot.id]
       )[0]
-      if (!patchJournal && previous && previous.html !== snapshot.state.html) {
+      const artifactChanged = previous && (
+        previous.html !== snapshot.state.html ||
+        (previous.packageVersion ?? null) !== (snapshot.state.artifactPackage?.version ?? null)
+      )
+      const newPackage = !previous && snapshot.state.artifactPackage
+      if (!patchJournal && artifactChanged) {
         this.db.run("UPDATE design_patch_journal SET status='discarded' WHERE session_id=?", [
           snapshot.id
         ])
-        if (snapshot.state.artifactPath)
-          this.db.run(
-            "INSERT INTO design_artifact_outbox VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET revision=excluded.revision",
-            [snapshot.id, snapshot.state.artifactRevision ?? 0]
-          )
       }
       if (patchJournal) {
         if (patchJournal.action === "apply") {
@@ -189,6 +189,8 @@ export class DesignSessionStore {
             snapshot.id,
             patchJournal.id
           ])
+      }
+      if (patchJournal || (snapshot.state.artifactPath && (artifactChanged || newPackage))) {
         this.db.run(
           "INSERT INTO design_artifact_outbox VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET revision=excluded.revision",
           [snapshot.id, snapshot.state.artifactRevision ?? 0]

@@ -39,21 +39,6 @@ export function parseMediaByteRange(header: string | null, size: number): MediaB
   return { start, end: Math.min(requestedEnd, size - 1) }
 }
 
-export function registerWorkspaceFilePreviewScheme(): void {
-  protocol.registerSchemesAsPrivileged([
-    {
-      scheme: WORKSPACE_FILE_PREVIEW_SCHEME,
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-        stream: true
-      }
-    }
-  ])
-}
-
 export async function handleWorkspaceFilePreviewProtocolRequest(
   request: Request,
   registry: WorkspaceFilePreviewMediaRegistry = workspaceFilePreviewMediaRegistry

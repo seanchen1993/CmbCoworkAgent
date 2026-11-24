@@ -92,6 +92,12 @@ function detectFramework(html: string): string {
       : "HTML"
 }
 
+export function rankTemplateEntryPages(files: string[]): string[] {
+  return files
+    .filter((file) => /\.html?$/i.test(file))
+    .sort((a, b) => entryRank(a) - entryRank(b) || a.localeCompare(b))
+}
+
 function entryRank(file: string): number {
   const name = path.posix.basename(file).toLowerCase()
   return (
@@ -330,9 +336,7 @@ export class DesignTemplatePackages {
         }
       }
       files.sort()
-      const pages = files
-        .filter((file) => /\.html?$/i.test(file))
-        .sort((a, b) => entryRank(a) - entryRank(b) || a.localeCompare(b))
+      const pages = rankTemplateEntryPages(files)
       if (!pages.length)
         throw new Error(
           "未找到 HTML 入口。只有框架资源时请补充示例页面；Vue/React 源码工程请先构建为静态页面。"

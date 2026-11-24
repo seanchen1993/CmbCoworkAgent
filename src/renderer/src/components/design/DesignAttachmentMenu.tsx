@@ -127,7 +127,7 @@ export function DesignAttachmentMenu({
                 <span aria-hidden="true">🌐</span>通过内置浏览器打开
               </DropdownMenuItem>
               <DropdownMenuItem disabled={importDisabled} onSelect={selectAfterClose(onImportHtml)}>
-                <span aria-hidden="true">📄</span>上传 HTML 文件
+                <span aria-hidden="true">📄</span>导入 HTML / ZIP
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={onAttachCode}>
                 <span aria-hidden="true">🗂️</span>关联代码

@@ -4,6 +4,7 @@ import type { DesignDraftPreview, DesignGenerationMetrics } from "../../../../sh
 import type { DesignLiveOutput } from "../../../../shared/design-live-output"
 import type { DesignTweaksState } from "../../../../shared/design-tweaks"
 import type { DesignAppliedPatch, DesignPatchMetrics, DesignPatchStatus } from "../../../../shared/design-patch"
+import type { DesignArtifactPackageRef } from "../../../../shared/design-package"
 
 export type FileAttachment = BaseFileAttachment & {
   /** A captured page kept as a per-message reference, rather than a generated design. */
@@ -277,6 +278,7 @@ export interface DirectionCard {
 
 export interface DesignArtifactMetadata {
   templatePackage?: DesignTemplateReference
+  artifactPackage?: DesignArtifactPackageRef | null
   tweaks?: DesignTweaksState | null
   artifactId: string
   title?: string
@@ -401,6 +403,7 @@ export interface TabState {
   retryCleanMsg: string | null
   retrySkill: DesignSkillReference | null
   artifactPath: string | null
+  artifactPackage?: DesignArtifactPackageRef | null
   artifactMetadata: DesignArtifactMetadata | null
   variationPanelPosition: FloatingPanelPosition | null
   apiHistory: Array<{ role: "user" | "assistant"; content: string }>

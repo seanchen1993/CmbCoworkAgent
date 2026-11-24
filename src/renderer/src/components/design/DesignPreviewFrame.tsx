@@ -17,7 +17,9 @@ import type { DesignDraftPreview } from "../../../../shared/design-progressive"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { createDesignLiveDelta } from "@/lib/design-live-patch"
 import type { DesignAppliedPatch } from "../../../../shared/design-patch"
+import { decorateDesignNodes } from "../../../../shared/design-node-ids"
 import { splitFrameNodeId } from "../../../../shared/design-captured-frame"
+import type { DesignAssetPreviewTicket } from "../../../../shared/design-package"
 
 interface Props {
   appliedPatch?: DesignAppliedPatch | null
@@ -31,6 +33,8 @@ interface Props {
   onLoad: (draft: boolean, html?: string) => void
   initialScroll?: { x: number; y: number }
   onVisible: (runId: string, revision: number, html?: string) => void
+  assetPreview?: DesignAssetPreviewTicket | null
+  onAssetResync?: () => void
 }
 
 function createFrameLoad(html: string, draft?: DesignDraftPreview | null, artifactRevision = 0) {
@@ -45,7 +49,8 @@ function createFrameLoad(html: string, draft?: DesignDraftPreview | null, artifa
 
 /** Drafts and local edits retain their browsing context; structural revisions reload explicitly. */
 export function DesignPreviewFrame(props: Props) {
-  const draftPath = props.draft?.draftPath
+  const assetPreview = props.assetPreview ?? null
+  const draftPath = assetPreview ? undefined : props.draft?.draftPath
   const sourceHtml = props.html
   const owners = useRef(new Map<string, DesignPreviewResources>())
   useEffect(() => () => { for (const resource of owners.current.values()) resource.dispose(); owners.current.clear() }, [])
@@ -53,7 +58,7 @@ export function DesignPreviewFrame(props: Props) {
     null
   )
   useEffect(() => {
-    if (!draftPath) return
+    if (!draftPath || assetPreview) return
     let cancelled = false
     const resources = new DesignPreviewResources()
     void buildDesignHtmlPreviewDocument({
@@ -77,7 +82,13 @@ export function DesignPreviewFrame(props: Props) {
     return () => {
       cancelled = true
     }
-  }, [sourceHtml, draftPath])
+  }, [sourceHtml, draftPath, assetPreview])
+
+  if (assetPreview) {
+    const assetKey = `${props.scopeId}:asset:${assetPreview.token}:${props.draft ? `draft:${props.draft.runId}` : "final"}`
+    return <AssetDesignPreviewContext key={assetKey} {...props} assetPreview={assetPreview} />
+  }
+
   const contextKey = props.draft
     ? `${props.scopeId}:draft:${props.draft.runId}`
     : `${props.scopeId}:final`
@@ -94,6 +105,256 @@ export function DesignPreviewFrame(props: Props) {
   return <DesignPreviewContext key={contextKey} {...props} html={html}
     onLoad={(draft, loadedHtml) => { releasePrevious(loadedHtml); props.onLoad(draft, loadedHtml) }}
     onVisible={(run, revision, visibleHtml) => { releasePrevious(visibleHtml); props.onVisible(run, revision, visibleHtml) }} />
+}
+
+function AssetDesignPreviewContext({
+  assetPreview,
+  html,
+  draft,
+  tweaks,
+  frameRef,
+  style,
+  onLoad,
+  onVisible,
+  onAssetResync,
+  initialScroll,
+  appliedPatch,
+  artifactRevision = 0
+}: Props & { assetPreview: DesignAssetPreviewTicket }) {
+  const [tick, setTick] = useState(0)
+  const [liveTick, setLiveTick] = useState(0)
+  const [failed, setFailed] = useState(false)
+  const recoveries = useRef(0)
+  const readyRef = useRef(false)
+  const latest = useRef({ draft, tweaks, onLoad, onVisible, onAssetResync, html, appliedPatch, initialScroll, artifactRevision })
+  useLayoutEffect(() => {
+    latest.current = { draft, tweaks, onLoad, onVisible, onAssetResync, html, appliedPatch, initialScroll, artifactRevision }
+  }, [draft, tweaks, onLoad, onVisible, onAssetResync, html, appliedPatch, initialScroll, artifactRevision])
+
+  const live = useRef({ html, revision: artifactRevision, ready: false })
+  const livePending = useRef<{ html: string; revision: number; timer: ReturnType<typeof setTimeout> } | null>(null)
+  const applied = useRef<{ revision: number; ready: boolean }>({ revision: draft?.revision ?? 0, ready: false })
+  const appliedHtml = useRef(html)
+  const inFlight = useRef<{ revision: number; html: string; timer: ReturnType<typeof setTimeout> } | null>(null)
+  const resync = useRef(false)
+
+  const postToCanvas = (payload: Record<string, unknown>) => {
+    frameRef.current?.contentWindow?.postMessage(
+      { previewInstanceId: assetPreview.previewInstanceId, ...payload },
+      assetPreview.origin
+    )
+  }
+
+  useEffect(() => {
+    const listener = (event: MessageEvent) => {
+      if (
+        event.source !== frameRef.current?.contentWindow ||
+        event.origin !== assetPreview.origin ||
+        event.data?.previewInstanceId !== assetPreview.previewInstanceId
+      ) {
+        return
+      }
+      const message = event.data
+      if (message.type === "__design_canvas_ready") {
+        if (readyRef.current) return
+        readyRef.current = true
+        const cur = latest.current
+        if (!cur.draft) {
+          live.current = { html: cur.html, revision: Number(message.artifactRevision ?? cur.artifactRevision), ready: true }
+          if (cur.appliedPatch) cur.onVisible(cur.appliedPatch.id, live.current.revision, cur.html)
+          setLiveTick((v) => v + 1)
+        }
+        cur.onLoad(!!cur.draft, cur.html)
+        if (cur.initialScroll) {
+          requestAnimationFrame(() => {
+            postToCanvas({ type: "__design_scroll_to", x: cur.initialScroll!.x, y: cur.initialScroll!.y })
+          })
+        }
+        if (cur.tweaks) {
+          postToCanvas({
+            type: "__design_set_tweak_keys",
+            protocol: 2,
+            tweakRevision: cur.tweaks.revision,
+            keys: effectiveTweaks(cur.tweaks)
+          })
+        }
+        return
+      }
+
+      if (!latest.current.draft) {
+        if (
+          message.type === "__design_live_applied" &&
+          livePending.current &&
+          message.revision === livePending.current.revision
+        ) {
+          clearTimeout(livePending.current.timer)
+          live.current = { html: livePending.current.html, revision: livePending.current.revision, ready: true }
+          livePending.current = null
+          latest.current.onVisible(String(message.patchId), message.revision, live.current.html)
+          setLiveTick((v) => v + 1)
+        } else if (message.type === "__design_live_resync") {
+          if (livePending.current) clearTimeout(livePending.current.timer)
+          livePending.current = null
+          latest.current.onAssetResync?.()
+        }
+        return
+      }
+
+      if (message.type === "__design_preview_ready" || message.type === "__design_preview_applied") {
+        if (message.runId !== latest.current.draft.runId) return
+        applied.current = {
+          revision: Math.max(applied.current.revision, Number(message.revision ?? 0)),
+          ready: true
+        }
+        if (inFlight.current && Number(message.revision ?? 0) >= inFlight.current.revision) {
+          appliedHtml.current = inFlight.current.html
+          clearTimeout(inFlight.current.timer)
+          inFlight.current = null
+        }
+        latest.current.onVisible(message.runId, message.revision, appliedHtml.current)
+        setTick((v) => v + 1)
+      } else if (message.type === "__design_preview_resync") {
+        if (inFlight.current) clearTimeout(inFlight.current.timer)
+        inFlight.current = null
+        resync.current = true
+        setTick((v) => v + 1)
+      }
+    }
+    window.addEventListener("message", listener)
+    return () => {
+      window.removeEventListener("message", listener)
+      if (livePending.current) clearTimeout(livePending.current.timer)
+      livePending.current = null
+      if (inFlight.current) clearTimeout(inFlight.current.timer)
+      inFlight.current = null
+    }
+  }, [assetPreview.origin, assetPreview.previewInstanceId, frameRef])
+
+  useEffect(() => {
+    if (
+      draft ||
+      !live.current.ready ||
+      livePending.current ||
+      (html === live.current.html && artifactRevision === live.current.revision)
+    ) {
+      return
+    }
+    const frameTarget = splitFrameNodeId(appliedPatch?.targetIds[0])
+    const delta =
+      appliedPatch?.mode === "live" && artifactRevision === live.current.revision + 1
+        ? createDesignLiveDelta(decorateDesignNodes(live.current.html), decorateDesignNodes(html), frameTarget ?? undefined)
+        : null
+    if (!delta) {
+      const frame = requestAnimationFrame(() => latest.current.onAssetResync?.())
+      return () => cancelAnimationFrame(frame)
+    }
+    const timer = setTimeout(() => {
+      livePending.current = null
+      latest.current.onAssetResync?.()
+    }, 1200)
+    livePending.current = { html, revision: artifactRevision, timer }
+    frameRef.current?.contentWindow?.postMessage(
+      {
+        type: "__design_live_patch",
+        previewInstanceId: assetPreview.previewInstanceId,
+        baseRevision: live.current.revision,
+        revision: artifactRevision,
+        patchId: appliedPatch?.id,
+        delta
+      },
+      assetPreview.origin
+    )
+    return undefined
+  }, [html, draft, artifactRevision, appliedPatch, liveTick, assetPreview.origin, assetPreview.previewInstanceId, frameRef])
+
+  useEffect(() => {
+    if (
+      !draft ||
+      !applied.current.ready ||
+      inFlight.current ||
+      (draft.revision <= applied.current.revision && html === appliedHtml.current && !resync.current)
+    ) {
+      return
+    }
+    const patch = resync.current ? null : createDesignSectionPatch(appliedHtml.current, html)
+    const message = {
+      type: "__design_preview_update",
+      previewInstanceId: assetPreview.previewInstanceId,
+      runId: draft.runId,
+      baseRevision: resync.current ? null : applied.current.revision,
+      revision: draft.revision,
+      ...(patch ? { patch } : { html: sanitizeDesignDraft(html) }),
+      keys: tweaks ? effectiveTweaks(tweaks) : {}
+    }
+    resync.current = false
+    const timer = setTimeout(() => {
+      inFlight.current = null
+      if (message.baseRevision === null) {
+        if (recoveries.current >= 2) setFailed(true)
+        else {
+          recoveries.current++
+          latest.current.onAssetResync?.()
+        }
+      } else {
+        resync.current = true
+        setTick((v) => v + 1)
+      }
+    }, 1000)
+    inFlight.current = { revision: draft.revision, html, timer }
+    frameRef.current?.contentWindow?.postMessage(message, assetPreview.origin)
+  }, [draft, html, tweaks, tick, assetPreview.origin, assetPreview.previewInstanceId, frameRef])
+
+  useEffect(() => {
+    if (!tweaks || !readyRef.current) return
+    frameRef.current?.contentWindow?.postMessage(
+      {
+        type: "__design_set_tweak_keys",
+        protocol: 2,
+        previewInstanceId: assetPreview.previewInstanceId,
+        tweakRevision: tweaks.revision,
+        keys: effectiveTweaks(tweaks)
+      },
+      assetPreview.origin
+    )
+  }, [tweaks, tick, liveTick, assetPreview.origin, assetPreview.previewInstanceId, frameRef])
+
+  return (
+    <>
+      <iframe
+        ref={frameRef}
+        key={assetPreview.token}
+        src={assetPreview.url}
+        style={style}
+        sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
+        title="Design Preview"
+      />
+      {failed && (
+        <div
+          role="alert"
+          style={{
+            position: "absolute",
+            left: 16,
+            bottom: 16,
+            padding: 12,
+            background: "white",
+            border: "1px solid #ddd",
+            borderRadius: 8
+          }}
+        >
+          预览更新失败{" "}
+          <button
+            onClick={() => {
+              recoveries.current = 0
+              setFailed(false)
+              latest.current.onAssetResync?.()
+            }}
+          >
+            重新加载
+          </button>
+        </div>
+      )}
+    </>
+  )
 }
 
 function DesignPreviewContext({

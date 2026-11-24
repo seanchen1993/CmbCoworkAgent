@@ -16,7 +16,7 @@ import {
   Menu,
   nativeImage,
   powerSaveBlocker,
-  shell,
+  protocol,
   type IpcMainEvent
 } from "electron"
 import {
@@ -346,9 +346,15 @@ import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client
 import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
 import {
   closeWorkspaceFilePreviewProtocol,
-  registerWorkspaceFilePreviewProtocol,
-  registerWorkspaceFilePreviewScheme
+  registerWorkspaceFilePreviewProtocol
 } from "./workspace-file-preview/media-protocol"
+import {
+  closeDesignAssetProtocol,
+  designAssetRegistry,
+  registerDesignAssetProtocol
+} from "./services/design/asset-protocol"
+import { WORKSPACE_FILE_PREVIEW_SCHEME } from "./workspace-file-preview/media-registry"
+import { DESIGN_ASSET_SCHEME } from "../shared/design-package"
 import { registerSkillsHandlers } from "./ipc/skills"
 import { closeSkillPluginCatalogWorker } from "./skill-plugin-catalog/client"
 import { registerMcpHandlers } from "./ipc/mcp"
@@ -491,7 +497,12 @@ import {
 
 // Custom schemes must be declared before app readiness. The handler itself is
 // installed after readiness, together with the IPC endpoints below.
-registerWorkspaceFilePreviewScheme()
+protocol.registerSchemesAsPrivileged(
+  [WORKSPACE_FILE_PREVIEW_SCHEME, DESIGN_ASSET_SCHEME].map((scheme) => ({
+    scheme,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true }
+  }))
+)
 
 let loginWindow: BrowserWindow | null = null
 let browserService: ReturnType<typeof registerBuiltinBrowserIpc> | null = null
@@ -767,20 +778,36 @@ function createWindow(): void {
     console.info("[Main] BrowserWindow recovered responsiveness")
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
-    return { action: "deny" }
-  })
+  // The main renderer opens external links explicitly. A popup has no reliable sender frame.
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
 
   // CSP blocks subresources, but does not block a scripted iframe's own location changes.
   // Only the trusted app frame may initiate a new embedded document. The built-in browser
   // has separate webContents and keeps its own navigation policy.
   const previewWebContents = mainWindow.webContents
   previewWebContents.on("will-frame-navigate", (event) => {
-    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) {
+      event.preventDefault()
+      return
+    }
+    if (
+      event.url.startsWith(`${DESIGN_ASSET_SCHEME}://`) &&
+      !designAssetRegistry.isAuthorizedEntryNavigation(event.url, previewWebContents.id)
+    ) {
+      event.preventDefault()
+    }
   })
   previewWebContents.on("will-redirect", (event) => {
-    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) {
+      event.preventDefault()
+      return
+    }
+    if (
+      event.url.startsWith(`${DESIGN_ASSET_SCHEME}://`) &&
+      !designAssetRegistry.isAuthorizedEntryNavigation(event.url, previewWebContents.id)
+    ) {
+      event.preventDefault()
+    }
   })
 
   // Every new top-level document must opt in again from its trusted main frame.
@@ -1178,6 +1205,7 @@ if (browserNativeMessagingHostLaunch) {
     registerModelHandlers(ipcMain)
     registerWorkspaceFilePreviewHandlers(ipcMain)
     registerWorkspaceFilePreviewProtocol()
+    registerDesignAssetProtocol()
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
     registerScheduledTaskHandlers(ipcMain)
@@ -1861,6 +1889,7 @@ if (browserNativeMessagingHostLaunch) {
         console.warn("[Main] flushTraceWriteQueue error:", err)
       ),
       Promise.resolve().then(() => closeWorkspaceFilePreviewProtocol()),
+      Promise.resolve().then(() => closeDesignAssetProtocol()),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ]).finally(() => {
       disposeBuiltinBrowserAfterAppCleanup()

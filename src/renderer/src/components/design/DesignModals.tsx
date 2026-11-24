@@ -1,5 +1,6 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import type { DesignSystemInfo } from "./types"
+import type { DesignPackageStageResult } from "../../../../shared/design-package"
 
 type ExportFormat = "html" | "package"
 
@@ -260,9 +261,9 @@ export function CreateDesignModal({
             }}
           >
             <span style={{ fontSize: 20 }}>{loadingKind === "html" ? "⏳" : "📄"}</span>
-            <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>导入 HTML</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>导入 HTML / ZIP</span>
             <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>
-              读取本地 HTML，并尽量保留同级依赖与资源引用。
+              读取本地 HTML 或 ZIP 项目包，独立保留图片、字体与脚本资源。
             </span>
           </button>
           <button
@@ -455,7 +456,16 @@ export function ExportDesignModal({
   onClose: () => void
 }) {
   const [exportName, setExportName] = useState(defaultName)
-  const [format, setFormat] = useState<ExportFormat>(packageAvailable ? "package" : "html")
+  const [format, setFormat] = useState<ExportFormat>(
+    packageAvailable && relatedFileCount > 0 ? "package" : "html"
+  )
+
+  useEffect(() => {
+    if (open) {
+      setExportName(defaultName)
+      setFormat(packageAvailable && relatedFileCount > 0 ? "package" : "html")
+    }
+  }, [open, defaultName, packageAvailable, relatedFileCount])
 
   if (!open) return null
   const trimmedName = exportName.trim()
@@ -579,10 +589,19 @@ export function ExportDesignModal({
             </select>
           </label>
 
-          <p style={{ margin: 0, fontSize: 12, color: "#667085", lineHeight: 1.65 }}>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 12,
+              color: !isPackageExport && relatedFileCount > 0 ? "#b45309" : "#667085",
+              lineHeight: 1.65
+            }}
+          >
             {isPackageExport
               ? `将导出当前设计、${relatedFileCount} 个关联资源${includesMetadata ? "及 artifact.json 元数据" : ""}。`
-              : `将导出可直接预览的单文件 HTML${includesMetadata ? "，并附带 artifact.json 元数据" : ""}。`}
+              : relatedFileCount > 0
+                ? "单独导出 HTML 仅保存入口页面，关联的本地图片、样式和脚本需与资源目录一起使用。"
+                : `将导出可直接预览的单文件 HTML${includesMetadata ? "，并附带 artifact.json 元数据" : ""}。`}
           </p>
         </div>
 
@@ -623,6 +642,191 @@ export function ExportDesignModal({
             }}
           >
             {primaryLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function ImportPackageEntryModal({
+  open,
+  stage,
+  confirming,
+  onConfirm,
+  onClose
+}: {
+  open: boolean
+  stage: DesignPackageStageResult | null
+  confirming: boolean
+  onConfirm: (entryPath: string) => void
+  onClose: () => void
+}) {
+  const pages = stage?.pages ?? []
+  const [selectedEntry, setSelectedEntry] = useState(stage?.defaultEntryPath || pages[0] || "")
+
+  useEffect(() => {
+    if (open) {
+      setSelectedEntry(stage?.defaultEntryPath || stage?.pages?.[0] || "")
+    }
+  }, [open, stage])
+
+  if (!open || !stage) return null
+  const totalMb = ((stage.totalBytes ?? 0) / (1024 * 1024)).toFixed(2)
+  const missing = stage.missingAssets ?? []
+  const outOfScope = stage.outOfScopeAssets ?? []
+
+  return (
+    <div
+      data-cmb-modal-dialog="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.38)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+        padding: 20
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "#fff",
+          borderRadius: 10,
+          border: "1px solid #d9dfe8",
+          padding: 24,
+          width: 520,
+          maxWidth: "100%",
+          maxHeight: "82vh",
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
+          boxShadow: "0 20px 52px rgba(15, 23, 42, 0.22)"
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#172033" }}>选择项目包入口页面</h3>
+            <p style={{ margin: "6px 0 0", fontSize: 12, color: "#667085", lineHeight: 1.5 }}>
+              {stage.label || "ZIP 项目包"} · 共 {stage.fileCount ?? 0} 个文件 · {totalMb} MB
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭入口选择弹窗"
+            onClick={onClose}
+            style={{
+              background: "transparent",
+              border: "none",
+              fontSize: 20,
+              cursor: "pointer",
+              color: "#667085"
+            }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            maxHeight: 240,
+            overflowY: "auto",
+            padding: 2
+          }}
+        >
+          {pages.map((page) => {
+            const active = selectedEntry === page
+            return (
+              <label
+                key={page}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: active ? "1px solid #2f6df6" : "1px solid #e2e8f0",
+                  background: active ? "#eff6ff" : "#fff",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  color: "#172033"
+                }}
+              >
+                <input
+                  type="radio"
+                  name="package-entry"
+                  checked={active}
+                  onChange={() => setSelectedEntry(page)}
+                />
+                <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", wordBreak: "break-all" }}>
+                  {page}
+                </span>
+              </label>
+            )
+          })}
+        </div>
+
+        {(missing.length > 0 || outOfScope.length > 0) && (
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              background: "#fffbeb",
+              border: "1px solid #fde68a",
+              fontSize: 12,
+              color: "#92400e",
+              lineHeight: 1.55
+            }}
+          >
+            {missing.length > 0 && <div>缺失资源：{missing.slice(0, 5).join("、")}</div>}
+            {outOfScope.length > 0 && <div>超出范围：{outOfScope.slice(0, 5).join("、")}</div>}
+          </div>
+        )}
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={confirming}
+            style={{
+              height: 42,
+              padding: "0 16px",
+              background: "#fff",
+              border: "1px solid #c8d0dc",
+              borderRadius: 6,
+              cursor: "pointer",
+              color: "#344054",
+              fontSize: 14,
+              fontWeight: 600,
+              fontFamily: "inherit"
+            }}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            disabled={!selectedEntry || confirming}
+            onClick={() => selectedEntry && onConfirm(selectedEntry)}
+            style={{
+              flex: 1,
+              height: 42,
+              borderRadius: 6,
+              border: "none",
+              background: selectedEntry && !confirming ? "#2f6df6" : "#a9b8d4",
+              color: "#fff",
+              cursor: selectedEntry && !confirming ? "pointer" : "default",
+              fontSize: 14,
+              fontWeight: 700,
+              fontFamily: "inherit"
+            }}
+          >
+            {confirming ? "正在导入..." : "确认导入并加载"}
           </button>
         </div>
       </div>

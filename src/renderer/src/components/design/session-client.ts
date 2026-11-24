@@ -97,6 +97,10 @@ export class DesignSessionClient {
     return this.snapshots.get(snapshot.id)!
   }
 
+  ingest(snapshot: DesignSessionSnapshot): DesignSessionSnapshot {
+    return this.apply(snapshot)
+  }
+
   private notify(): void {
     for (const listener of this.listeners) listener()
   }
