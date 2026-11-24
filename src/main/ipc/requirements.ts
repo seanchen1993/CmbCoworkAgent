@@ -117,7 +117,10 @@ type GeneratedRequirementModule = {
 }
 
 type MammothMarkdownConverter = typeof mammoth & {
-  convertToMarkdown: (input: { path: string }) => Promise<{
+  convertToMarkdown: (
+    input: { path: string },
+    options?: { convertImage?: () => Promise<never[]> }
+  ) => Promise<{
     value: string
     messages: Array<{ type: string; message: string }>
   }>
@@ -810,7 +813,15 @@ async function convertRequirementSourceToMarkdown(sourcePath: string): Promise<s
     return preview
   }
 
-  const result = await (mammoth as MammothMarkdownConverter).convertToMarkdown({ path: sourcePath })
+  const result = await (mammoth as MammothMarkdownConverter).convertToMarkdown(
+    { path: sourcePath },
+    {
+      // Mammoth's default converter reads every DOCX image and embeds it as a
+      // base64 data URI. Requirement previews only need text, so omit image
+      // nodes without reading their binary contents.
+      convertImage: async () => []
+    }
+  )
   const errors = result.messages.filter((message) => message.type === "error")
   if (errors.length > 0) {
     throw new Error(errors.map((message) => message.message).join("；"))

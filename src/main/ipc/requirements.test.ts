@@ -421,6 +421,39 @@ describe("requirement source preview", () => {
     expect(deletedIndex.list).toEqual([])
   })
 
+  it("omits DOCX images from the generated Markdown preview", async () => {
+    const sourcePath = resolve("node_modules/mammoth/test/test-data/tiny-picture.docx")
+    const workDir = join(tempHome, "requirement-image-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")!
+    const getSourcePreview = handlers.get("requirements:get-source-preview")!
+    const remove = handlers.get("requirements:delete")!
+
+    const created = (await create(null, {
+      systemId: "system-a",
+      title: "带图片的 DOCX 需求",
+      workDir,
+      source: { type: "file", fileName: "images.docx", sourcePath }
+    })) as {
+      success: boolean
+      requirement?: { reqId: string; requirementPath: string }
+      error?: string
+    }
+
+    expect(created.success, created.error).toBe(true)
+    const previewPath = join(created.requirement!.requirementPath, "source-preview.md")
+    const preview = readFileSync(previewPath, "utf-8")
+    expect(preview).not.toMatch(/data:image|base64|!\[[^\]]*\]\(/i)
+
+    const loaded = (await getSourcePreview(null, created.requirement!.reqId)) as {
+      success: boolean
+      content?: string
+    }
+    expect(loaded.success).toBe(true)
+    expect(loaded.content).not.toMatch(/data:image|base64|!\[[^\]]*\]\(/i)
+    await remove(null, created.requirement!.reqId)
+  })
+
   it("stores text requirements without creating a source file", async () => {
     const workDir = join(tempHome, "blank-requirement-workspace")
     mkdirSync(workDir)
