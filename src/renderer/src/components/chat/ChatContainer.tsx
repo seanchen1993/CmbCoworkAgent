@@ -276,6 +276,7 @@ import {
 import {
   getSubmitInFlightReleaseVersion,
   releaseSubmitInFlightLock,
+  sharedSubmitInFlightLockRef,
   shouldQueueBehindInFlightSubmit,
   shouldUseSubmitInFlightLock,
   subscribeSubmitInFlightRelease,
@@ -1111,7 +1112,10 @@ type PendingAttachmentInput =
 // all ChatContainer instances is safe: different threads never collide, and if
 // two instances ever pointed at the SAME thread, sharing the lock is the
 // correct behavior anyway.
-const submitInFlightLockStore: SubmitInFlightLockRef = { current: new Set<string>() }
+// The instance itself lives in submit-in-flight-lock.ts so that non-ChatContainer
+// submitters (visual-edit's useVisualEditSubmit) contend on the SAME lock rather
+// than a second, independent Set.
+const submitInFlightLockStore: SubmitInFlightLockRef = sharedSubmitInFlightLockRef
 // Distinguishes a live Enter/send that is still preparing its payload from other
 // users of the shared submit lock (notably the queue pump). A second Enter during
 // this preparation window is a duplicate gesture and must be rejected; a genuinely

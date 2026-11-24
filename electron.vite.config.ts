@@ -143,6 +143,7 @@ export default defineConfig({
     },
     plugins: [optionalMmjModule(), react(), tailwindcss()],
     server: {
+      host: "127.0.0.1",
       fs: {
         // Worktrees may share node_modules through a symlink; allow its static assets too.
         allow: [resolve("."), realpathSync(resolve("node_modules"))]

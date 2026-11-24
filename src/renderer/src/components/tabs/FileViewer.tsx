@@ -22,6 +22,66 @@ import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
+import { useVisualEditSubmit } from "@/components/visual-edit/useVisualEditSubmit"
+import {
+  getVisualEditStoreKey,
+  useVisualEditAnnotations
+} from "@/components/visual-edit/visual-edit-store"
+
+// Visual edit needs a live thread to submit into, so its hooks live in a child
+// that is only mounted when threadId is present. FileViewer itself is also used
+// without a thread (external knowledge-base previews), where visual edit is off.
+function HtmlPreviewWithVisualEdit({
+  threadId,
+  content,
+  displayPath,
+  fillHeight,
+  viewMode,
+  readDependencyFile
+}: {
+  threadId: string
+  content: string
+  displayPath: string
+  fillHeight: boolean
+  viewMode?: "preview" | "source"
+  readDependencyFile: (resolvedPath: string) => Promise<string | null>
+}): React.JSX.Element {
+  const { submitVisualFeedback, canSubmitVisualFeedback, submitDisabledReason } =
+    useVisualEditSubmit(threadId)
+  const visualEditStoreKey = useMemo(
+    () =>
+      getVisualEditStoreKey({
+        threadId,
+        targetKind: "html-preview",
+        targetPath: displayPath
+      }),
+    [displayPath, threadId]
+  )
+  const { annotations: visualEditAnnotations, setAnnotations: setVisualEditAnnotations } =
+    useVisualEditAnnotations(visualEditStoreKey)
+
+  return (
+    <HtmlPreview
+      content={content}
+      path={displayPath}
+      fillHeight={fillHeight}
+      showHeader={false}
+      showModeToggle={false}
+      viewMode={viewMode}
+      readDependencyFile={readDependencyFile}
+      visualEdit={{
+        threadId,
+        targetKind: "html-preview",
+        targetPath: displayPath,
+        submitDisabled: !canSubmitVisualFeedback,
+        submitDisabledReason,
+        annotations: visualEditAnnotations,
+        onAnnotationsChange: setVisualEditAnnotations,
+        onSubmit: submitVisualFeedback
+      }}
+    />
+  )
+}
 import {
   formatFilePreviewError,
   normalizeFilePreviewError,
@@ -612,18 +672,35 @@ export function FileViewer({
           whiteBackground
           className="markdown-preview"
           readBinaryFile={readBinaryDependencyFile}
+          readHtmlFile={readHtmlDependencyFile}
         />
       </div>
     )
   } else if (previewKind === "html") {
-    body = (
-      <HtmlPreview
-        content={content}
-        path={displayPath}
-        fillHeight
-        readDependencyFile={readHtmlDependencyFile}
-      />
-    )
+    if (!threadId || botDelivery) {
+      body = (
+        <HtmlPreview
+          content={content}
+          path={displayPath}
+          fillHeight
+          showHeader={false}
+          showModeToggle={false}
+          viewMode="preview"
+          readDependencyFile={readHtmlDependencyFile}
+        />
+      )
+    } else {
+      body = (
+        <HtmlPreviewWithVisualEdit
+          threadId={threadId}
+          content={content}
+          displayPath={displayPath}
+          fillHeight
+          viewMode="preview"
+          readDependencyFile={readHtmlDependencyFile}
+        />
+      )
+    }
   } else if (TextPreview && !textPage?.truncated) {
     body = <TextPreview content={content} filePath={displayPath} />
   } else {

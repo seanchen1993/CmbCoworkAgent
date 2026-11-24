@@ -445,6 +445,7 @@ import {
   createAllowedSkillsBackend,
   resolveAllowedSkillRootDirs
 } from "./library/runtime-capabilities"
+import { parseAllowedNames } from "./library/requirement-mode"
 import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot,
@@ -5227,7 +5228,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const projectModeTaskSubagentConfig =
     runtimePolicy.isProjectMode && mainSubagentsEnabled ? subagentConfig : undefined
   // Trusted transport policy only; undefined preserves beta's complete expert registry.
-  const sessionAllowedExpertNames = allowedExpertNames
+  const sessionAllowedExpertNames =
+    allowedExpertNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedExperts")
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -5864,7 +5866,8 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
-  const sessionAllowedSkillNames = allowedSkillNames
+  const sessionAllowedSkillNames =
+    allowedSkillNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedSkills")
   const allowedSkillRootDirs =
     sessionAllowedSkillNames === undefined
       ? undefined

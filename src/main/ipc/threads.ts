@@ -1389,6 +1389,20 @@ function buildForkMetadata(input: {
 
   const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
   next.title = nextTitle
+  for (const key of [
+    "requirementId",
+    "requirementTitle",
+    "requirementSystem",
+    "requirementSourceType",
+    "requirementSourceName"
+  ]) {
+    const value = sourceMetadata[key]
+    if (typeof value === "string" && value.trim()) next[key] = value
+  }
+  for (const key of ["allowedSkills", "allowedExperts"]) {
+    const value = sourceMetadata[key]
+    if (Array.isArray(value)) next[key] = value.filter((item) => typeof item === "string")
+  }
   if (input.sourceTitleHidden && !overrides?.title?.trim() && !title?.trim())
     Object.assign(next, protectedBotHistoryTitle(nextTitle))
   next.forkedFromThreadId = sourceThreadId

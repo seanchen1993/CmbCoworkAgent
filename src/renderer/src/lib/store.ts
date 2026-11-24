@@ -18,6 +18,7 @@ import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 // Relative, not "@/": store.ts is loaded by tsx-run specs (via electron-transport)
 // where the "@/" alias isn't resolvable, and this is a runtime (non-type) import.
+import { clearVisualEditAnnotationsForThread } from "../components/visual-edit/visual-edit-store"
 import type {
   Thread,
   ModelConfig,
@@ -103,6 +104,10 @@ export function applyCommittedThreadDeletion(threadId: string, deferDirectoryUpd
     {
       label: "Failed to clear deleted thread scroll state",
       run: () => chatScrollSessionStore.delete(threadId)
+    },
+    {
+      label: "Failed to clear deleted thread visual edit annotations",
+      run: () => clearVisualEditAnnotationsForThread(threadId)
     },
     ...(deferDirectoryUpdate
       ? []

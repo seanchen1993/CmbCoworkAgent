@@ -1114,6 +1114,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
   return {
     id: item.id,
     text: item.text,
+    contextLabel: item.contextLabel === "requirement-workbench" ? item.contextLabel : undefined,
     ...(isBotMessageReply(item.botReplyTo) ? { botReplyTo: item.botReplyTo } : {}),
     // Legacy queued request identity is retained only for exact receipt reconciliation.
     // The composer no longer creates or edits private mention bindings.

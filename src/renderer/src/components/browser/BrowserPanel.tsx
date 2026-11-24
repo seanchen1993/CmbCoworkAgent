@@ -287,7 +287,6 @@ export function BrowserPanel({
   const lastDeviceMetricsRef = useRef("")
   const boundsSyncRevisionRef = useRef(0)
   const viewportIdRef = useRef(crypto.randomUUID())
-  const hasVisibleBoundsRef = useRef(false)
   const isSessionCreatedRef = useRef(false)
   const isInitialBrowserPageRef = useRef(true)
   const isUrlFocusedRef = useRef(false)
@@ -521,14 +520,14 @@ export function BrowserPanel({
       height: Math.max(0, Math.ceil(scaledBottom) - Math.floor(scaledTop))
     }
     const layoutVisible = rect.width >= 8 && rect.height >= 8
+    // Drawers keep their children mounted during exit animations. A late
+    // resize/state update must not show their native view again after close.
+    const panelHidden = Boolean(element.closest('[aria-hidden="true"], [inert]'))
     const modalDialogOpen = hasOpenModalDialog()
     const initialBrowserPage = isInitialBrowserPageRef.current
-    const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
+    const visible = layoutVisible && !panelHidden && !modalDialogOpen && !initialBrowserPage
     const metrics = layoutVisible ? deviceLayout.metrics : null
     const metricsKey = JSON.stringify(metrics)
-    if (!layoutVisible && hasVisibleBoundsRef.current) {
-      return
-    }
     const boundsChanged = !isSameBounds(lastBoundsRef.current, bounds)
     const visibilityChanged = lastBrowserViewVisibleRef.current !== visible
     const metricsChanged = lastDeviceMetricsRef.current !== metricsKey
@@ -536,7 +535,6 @@ export function BrowserPanel({
     lastBoundsRef.current = bounds
     lastBrowserViewVisibleRef.current = visible
     lastDeviceMetricsRef.current = metricsKey
-    if (layoutVisible) hasVisibleBoundsRef.current = true
     const revision = ++boundsSyncRevisionRef.current
     void window.api.browser
       .setViewport({ viewportId: viewportIdRef.current, revision, bounds, visible, metrics })
@@ -550,6 +548,30 @@ export function BrowserPanel({
         reportBrowserError(formatError(error) || "浏览器视图同步失败")
       })
   }, [applyBrowserState, getDeviceLayout, reportBrowserError])
+
+  useEffect(
+    () => () => {
+      // WebContentsView outlives React so switching modules or removing a panel
+      // must explicitly hide it even when the host lifecycle also unmounts.
+      // Route through setViewport with this instance's viewportId so a late unmount
+      // cannot hide a replacement BrowserPanel that already claimed the session.
+      const revision = ++boundsSyncRevisionRef.current
+      void window.api.browser
+        .setViewport({
+          viewportId: viewportIdRef.current,
+          revision,
+          bounds: { x: 0, y: 0, width: 0, height: 0 },
+          visible: false,
+          metrics: null
+        })
+        .catch((error) => {
+          console.error(
+            `${BROWSER_PANEL_LOG_PREFIX} Browser unmount hide failed: ${formatError(error)}.`
+          )
+        })
+    },
+    []
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -761,7 +783,6 @@ export function BrowserPanel({
       lastBoundsRef.current = null
       lastBrowserViewVisibleRef.current = null
       lastDeviceMetricsRef.current = ""
-      hasVisibleBoundsRef.current = false
       // A detached session is recreated here, so it must be claimed by this
       // mounted panel again. Without viewportId, every later setViewport update
       // is rejected as belonging to a different panel and the next replay waits
