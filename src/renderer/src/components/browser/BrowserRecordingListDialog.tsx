@@ -569,7 +569,7 @@ export function BrowserRecordingListDialog({
                               <col className="w-[76px]" />
                               <col className="w-[72px]" />
                               <col className="w-[94px]" />
-                              <col className="w-[144px]" />
+                              <col className="w-[124px]" />
                               <col className="w-[120px]" />
                             </colgroup>
                             <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-muted/85">

@@ -74,7 +74,7 @@ const BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME =
   "h-8 min-w-8 shrink-0 rounded-md px-1 transition-colors hover:bg-muted"
 const BROWSER_PANEL_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserPanel]`
 const APP_DOWNLOAD_URL = import.meta.env.VITE_APP_DOWNLOAD_URL?.trim()
-const AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS = [1500, 4000, 8000] as const
+const AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS = [1500, 4000, 8000, 5000] as const
 const AUTO_COOKIE_IMPORT_RETRYABLE_ERROR_CODES = new Set([
   "extension_not_connected",
   "import_timeout",
@@ -433,12 +433,18 @@ export function BrowserPanel({
       )
       if (retryDelay === undefined || !isAutomaticCookieImportRetryable(result.errorCode)) {
         reportBrowserError(
-          `未能自动导入 Cookie：${message}。请重启 Chrome 后点击钥匙按钮手动重试。`
+          result.errorCode === "extension_not_connected"
+            ? "Chrome 插件仍未连接，请稍后点击钥匙按钮手动重试，无需重启 Chrome。"
+            : `未能自动导入 Cookie：${message}。请点击钥匙按钮手动重试。`
         )
         markBrowserProfileImportFeedback(false)
         return
       }
-      reportBrowserNotice(`自动导入 Cookie 暂未完成：${message}，正在重试...`)
+      reportBrowserNotice(
+        result.errorCode === "extension_not_connected"
+          ? "自动导入 Cookie 暂未完成：浏览器标签页打开时，Chrome 插件仍在初始化连接，请稍候，系统正在重试..."
+          : `自动导入 Cookie 暂未完成：${message}，正在重试...`
+      )
       await new Promise((resolve) => window.setTimeout(resolve, retryDelay))
     }
   }, [clearPanelError, markBrowserProfileImportFeedback, reportBrowserError, reportBrowserNotice])
