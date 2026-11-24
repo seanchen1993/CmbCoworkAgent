@@ -20,9 +20,7 @@ If a browser request cannot start, navigation fails because the browser service 
 3. Wait for the user's explicit answer covering both conditions. Tool presence, an earlier App session, or an assumption that it was enabled does not count as confirmation for the current App session.
 4. If it is not enabled, tell the user to open the upper-right **“浏览器”** tab, click the enable button, and then restart the App. Stop troubleshooting until they complete those actions.
 5. If it is enabled but the App has not been restarted afterward, tell the user to restart the App and open a new conversation. Stop troubleshooting until they do so.
-6. Only if the user explicitly confirms both enablement and the subsequent App restart may you continue to Node.js, npm registry, or Playwright MCP diagnostics.
-
-Do not run `node --version`, `npm config get registry`, `npx`, or any other diagnostic command before this gate is satisfied. Do not combine the enablement question with shell diagnostics in the same step.
+6. Only if the user explicitly confirms both enablement and the subsequent App restart may you continue troubleshooting tool availability.
 
 1. Inspect the tools available in the current conversation for `inAppBrowser` capabilities. Page-control tools normally begin with `mcp__inAppBrowser__browser_`; product helpers include `inAppBrowser_list_recordings`, `inAppBrowser_execute_recording`, `inAppBrowser_extract_iframes`, and `inAppBrowser_read_wps_document`.
 2. Treat the built-in browser as usable only when at least one relevant page-control tool is available. A product helper by itself does not prove that the agent can open or operate a page. When usable page-control tools are available, prefer them over external browser tools and follow the operating guidance below.
@@ -60,24 +58,4 @@ Do not enter credentials, bypass authentication, or treat the login page as perm
 
 Enter this section only after the mandatory gate above has been satisfied. If the user has not explicitly confirmed both that the built-in browser is enabled and that the App was restarted afterward, return to that gate and do not execute commands.
 
-After confirmation, if the current conversation still has no usable `inAppBrowser` page-control tools or browser access still cannot start, check these causes strictly in order:
-
-1. The Node.js version is below 20. Check with `node --version` when command execution is available. Parse the major version rather than comparing version strings lexically. The required version is Node.js 20 or newer.
-2. The npm registry is misconfigured. Check with `npm config get registry`. The expected value is the official npm registry. If it is `https://registry.npmmirror.com/`, tell the user that this mirror is unsupported for the built-in-browser setup and ask them to switch:
-
-   ```bash
-   npm config set registry https://registry.npmjs.org/
-   ```
-
-3. If none of the above explains the issue and command execution is available, run this diagnostic command, following any environment approval requirements:
-
-   ```bash
-   npx -y --prefer-offline @playwright/mcp@0.0.82
-   ```
-
-   - Treat this as a diagnostic server process, not a completed browser task.
-   - If it exits or prints an error, analyze the concrete error and give the user a targeted resolution.
-   - If it starts successfully and remains running without an error, terminate that exact process promptly. Tell the user that the Playwright MCP package itself works and ask them to contact the product's developers for further investigation.
-   - Do not leave the diagnostic process running.
-
-If command execution is unavailable, provide the checks as user-run commands rather than claiming to have executed them.
+After confirmation, inspect the tools available in the current conversation again. If there are still no usable `inAppBrowser` page-control tools or browser access still cannot start, report that the in-app browser integration remains unavailable and ask the user to contact the product's developers for further investigation. Include the concrete browser or tool error when one is available.
