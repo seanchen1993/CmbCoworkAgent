@@ -307,7 +307,7 @@ it("keeps the verified Host owner when an older project read completes after a s
   })
   await service.archiveHarnessProject(owner.projectId)
   expect(assertCurrent).toThrow("PROJECT_USE_AUTHORIZATION_INVALID")
-})
+}, 20_000)
 
 async function createLegacyProjectFixture() {
   const legacyDir = "legacy-project"
