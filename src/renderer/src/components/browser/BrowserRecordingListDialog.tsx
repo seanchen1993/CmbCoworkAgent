@@ -138,33 +138,21 @@ function PlaybackHistoryStatus({
           <XCircle className="size-3.5 shrink-0" strokeWidth={2} />
           {label}
           {error ? (
-            <IconPopoverButton
-              icon={<Info className="size-3.5" strokeWidth={2} />}
-              popoverContent={
-                <div className="flex min-w-0 flex-col gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-7 self-end px-2 text-[11px]"
-                    onClick={() => void handleCopyError()}
-                  >
-                    {errorCopied ? (
-                      <Check className="size-3.5" strokeWidth={1.8} />
-                    ) : (
-                      <Copy className="size-3.5" strokeWidth={1.8} />
-                    )}
-                    {errorCopied ? "已复制" : "复制异常"}
-                  </Button>
-                  <span className="whitespace-pre-wrap break-words">{error}</span>
-                </div>
-              }
-              popoverClassName="max-h-64 w-80 max-w-80 overflow-auto text-destructive"
-              className="size-5 p-0 text-red-500 hover:text-red-600"
-              aria-label="查看回放错误信息"
-              side="left"
-              align="center"
-            />
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-5 shrink-0 p-0 text-red-500 hover:bg-red-500/10 hover:text-red-600"
+              aria-label="复制完整错误信息"
+              title={errorCopied ? "已复制" : "复制完整错误信息"}
+              onClick={() => void handleCopyError()}
+            >
+              {errorCopied ? (
+                <Check className="size-3.5" strokeWidth={1.8} />
+              ) : (
+                <Copy className="size-3.5" strokeWidth={1.8} />
+              )}
+            </Button>
           ) : null}
         </span>
       )
@@ -956,7 +944,11 @@ export function BrowserRecordingListDialog({
             </div>
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto p-5">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-5">
+            <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              <Info className="size-3.5 shrink-0" strokeWidth={1.8} />
+              回放历史最多保留最近 100 条，超出后将自动删除最早的记录。
+            </div>
             {playbackHistory.length === 0 ? (
               <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-12 text-center text-sm text-muted-foreground">
                 暂无回放历史。执行可复用操作后，运行结果会保存在这里。

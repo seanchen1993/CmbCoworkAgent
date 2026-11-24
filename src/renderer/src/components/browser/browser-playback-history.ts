@@ -38,7 +38,17 @@ export function readBrowserPlaybackHistory(): BrowserPlaybackHistoryEntry[] {
     const raw = window.localStorage.getItem(BROWSER_PLAYBACK_HISTORY_STORAGE_KEY)
     if (!raw) return []
     const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter(isPlaybackHistoryEntry) : []
+    if (!Array.isArray(parsed)) return []
+
+    const validEntries = parsed.filter(isPlaybackHistoryEntry)
+    const recentEntries = validEntries.slice(0, MAX_BROWSER_PLAYBACK_HISTORY_ENTRIES)
+    if (validEntries.length > MAX_BROWSER_PLAYBACK_HISTORY_ENTRIES) {
+      window.localStorage.setItem(
+        BROWSER_PLAYBACK_HISTORY_STORAGE_KEY,
+        JSON.stringify(recentEntries)
+      )
+    }
+    return recentEntries
   } catch (error) {
     console.warn("[BrowserPlaybackHistory] Failed to read playback history:", error)
     return []
