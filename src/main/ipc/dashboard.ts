@@ -6400,6 +6400,8 @@ interface AdvFeatureMetrics {
   hookBlocked: number
   codeExec: number
   savedTool: number
+  inAppBrowserCalls: number
+  inAppBrowserUsers: number
 }
 
 function assembleAdvancedFeatureCards(
@@ -6505,6 +6507,17 @@ function assembleAdvancedFeatureCards(
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
           { label: "保存工具", count: m.savedTool, tone: "neutral" }
         ]
+      },
+      {
+        key: "inAppBrowser",
+        label: "内置浏览器",
+        value: m.inAppBrowserCalls,
+        valueLabel: "调用次数",
+        hint: `去重用户 ${m.inAppBrowserUsers} 人`,
+        items: [
+          { label: "调用次数", count: m.inAppBrowserCalls, tone: "neutral" },
+          { label: "用户数", count: m.inAppBrowserUsers, tone: "neutral" }
+        ]
       }
     ]
   }
@@ -6574,6 +6587,36 @@ async function fetchAdvancedFeatures(
           size: 10
         }
       },
+      tool_usage_complete: {
+        filter: {
+          bool: {
+            filter: [{ term: { toolUsageSchemaVersion: 1 } }, { term: { toolUsageComplete: true } }]
+          }
+        },
+        aggs: {
+          usage: {
+            nested: { path: "toolUsage" },
+            aggs: {
+              in_app_browser: {
+                filter: {
+                  wildcard: { "toolUsage.name": "*inAppBrowser_*" }
+                },
+                aggs: {
+                  calls: { sum: { field: "toolUsage.count" } },
+                  traces: {
+                    reverse_nested: {},
+                    aggs: {
+                      users: {
+                        cardinality: { field: "sapId", precision_threshold: 40000 }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       evolved_traces: { filter: { exists: { field: "evolvedSkills" } } },
       evolved_usages: { value_count: { field: "evolvedSkills" } }
     }
@@ -6584,10 +6627,14 @@ async function fetchAdvancedFeatures(
       projection: { kind: "advanced-event" },
       outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
     }),
-    esQuery(getEsIndex("trace"), traceBody, {
-      projection: { kind: "advanced-trace" },
-      outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
-    })
+    queryWithToolUsageMappingFallback(
+      (body) =>
+        esQuery(getEsIndex("trace"), body, {
+          projection: { kind: "advanced-trace" },
+          outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+        }),
+      traceBody
+    )
   ])
   const metrics = {
     ...asRecord(eventResRaw),
@@ -6640,7 +6687,9 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    savedTool: k(6)
+    savedTool: k(6),
+    inAppBrowserCalls: k(45),
+    inAppBrowserUsers: k(8)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")

@@ -318,7 +318,15 @@ describe("dashboard worker view-model projection", () => {
               ]
             },
             evolved_traces: { doc_count: 2 },
-            evolved_usages: { value: 3 }
+            evolved_usages: { value: 3 },
+            tool_usage_complete: {
+              usage: {
+                in_app_browser: {
+                  calls: { value: 14 },
+                  traces: { users: { value: 5 } }
+                }
+              }
+            }
           }
         },
         { kind: "advanced-trace" }
@@ -332,6 +340,8 @@ describe("dashboard worker view-model projection", () => {
       hookBlocked: 3,
       memSearch: 6,
       codeExec: 9,
+      inAppBrowserCalls: 14,
+      inAppBrowserUsers: 5,
       evolvedTraces: 2,
       evolvedUsages: 3
     })

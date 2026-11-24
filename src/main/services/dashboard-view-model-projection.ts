@@ -547,6 +547,9 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
 function projectAdvancedTrace(raw: unknown): Record<string, unknown> {
   const aggs = asRecord(asRecord(raw).aggregations)
   const tools = buckets(aggs.by_tool)
+  const browser = asRecord(
+    asRecord(asRecord(asRecord(aggs.tool_usage_complete).usage).in_app_browser)
+  )
   const countTool = (key: string): number => {
     const bucket = tools.find((entry) => asString(asRecord(entry).key) === key)
     return asNumber(asRecord(bucket).doc_count)
@@ -558,7 +561,9 @@ function projectAdvancedTrace(raw: unknown): Record<string, unknown> {
     evolvedTraces: asNumber(asRecord(aggs.evolved_traces).doc_count),
     evolvedUsages: aggValue(aggs.evolved_usages),
     codeExec: countTool("code_exec"),
-    savedTool: countTool("save_code_exec_tool")
+    savedTool: countTool("save_code_exec_tool"),
+    inAppBrowserCalls: aggValue(browser.calls),
+    inAppBrowserUsers: aggValue(asRecord(browser.traces).users)
   }
 }
 
