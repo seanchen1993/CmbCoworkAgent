@@ -14,7 +14,7 @@ export const IDLE_MODEL_SAP_REQUIRED_MESSAGE = "请先完善当前用户的八�
 export const IDLE_MODEL_UAT_NOTICE = "当前使用 UAT 测试环境。"
 
 export function isValidSapId(value: unknown): value is string {
-  return typeof value === "string" && /^\d{8}$/.test(value.trim())
+  return typeof value === "string" && value.trim().length === 8
 }
 
 export function isModelAvailable<T extends { apiKey?: string; unavailableReason?: string }>(
