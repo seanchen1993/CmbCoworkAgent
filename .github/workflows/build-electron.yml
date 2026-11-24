@@ -12,6 +12,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   # ------------------------------------------------------------------
@@ -908,6 +909,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload unpacked (Windows)
+        id: upload-win-unpacked
         if: matrix.platform == 'win'
         uses: actions/upload-artifact@v4
         with:
@@ -917,11 +919,30 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      - name: Wait for the uploaded Windows artifact
+        if: matrix.platform == 'win'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload-win-unpacked.outputs.artifact-id }}
+        run: |
+          if ($env:ARTIFACT_ID -notmatch '^\d+$') { throw 'Missing Windows artifact ID' }
+          $uri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:ARTIFACT_ID"
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          for ($attempt = 0; $attempt -lt 12; $attempt++) {
+            $response = Invoke-WebRequest -Uri $uri -Headers $headers -SkipHttpErrorCheck
+            if ($response.StatusCode -eq 200) { return }
+            if ($response.StatusCode -ne 404) { throw "Artifact lookup failed with HTTP $($response.StatusCode)" }
+            Start-Sleep -Seconds 5
+          }
+          throw 'Uploaded Windows artifact never became available'
+
       - name: Download published Windows artifact
         if: matrix.platform == 'win'
         uses: actions/download-artifact@v4
         with:
-          name: CMBDevClaw-win-unpacked-${{ steps.pkg.outputs.version }}
+          artifact-ids: ${{ steps.upload-win-unpacked.outputs.artifact-id }}
+          github-token: ${{ github.token }}
           path: output/downloaded-win-unpacked
 
       - name: Verify published Windows artifact integrity
