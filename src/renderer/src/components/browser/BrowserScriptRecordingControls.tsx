@@ -8,7 +8,7 @@ import {
   type ScriptRecordingVariable
 } from "../../../../shared/browser-script-recording"
 import type {
-  BrowserDeviceViewport,
+  BrowserDeviceSize,
   BrowserRecordingSession,
   BrowserScriptExecutionState,
   BrowserScriptLibraryEntry
@@ -37,7 +37,7 @@ import {
 interface BrowserScriptRecordingControlsProps {
   browserCreated: boolean
   currentUrl?: string | null
-  getDeviceViewport?: () => BrowserDeviceViewport | undefined
+  getDeviceViewport?: () => BrowserDeviceSize | undefined
   threadId?: string | null
   workspacePath?: string | null
 }

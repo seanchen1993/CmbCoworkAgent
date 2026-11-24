@@ -14,7 +14,7 @@ describe("browser script recording", () => {
   it("stores and reads only the recorded device viewport size", () => {
     const script = generateScriptRecording([], {
       source: "script",
-      deviceViewport: { width: 1920, height: 1080, scale: 0.625 }
+      deviceViewport: { width: 1920, height: 1080 }
     })
 
     expect(script).toContain("// cmb-browser-device-viewport: 1920x1080")

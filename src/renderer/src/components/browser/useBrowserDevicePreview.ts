@@ -16,7 +16,7 @@ export function useBrowserDevicePreview(onClose: () => void): {
   deviceFrameRef: RefObject<HTMLDivElement | null>
   applyViewport: (viewport: BrowserDeviceSize | undefined) => void
   getLayout: (rect: DOMRect) => BrowserDevicePreviewLayout
-  getRecordingViewport: () => BrowserDeviceViewport | undefined
+  getRecordingViewport: () => BrowserDeviceSize | undefined
   reset: () => void
   scale: number
   settings: BrowserDeviceSettings
@@ -131,7 +131,7 @@ export function useBrowserDevicePreview(onClose: () => void): {
   const getRecordingViewport = useCallback(() => {
     const device = settingsRef.current
     return device.open && device.width > 0 && device.height > 0
-      ? { width: device.width, height: device.height, scale: scaleRef.current }
+      ? { width: device.width, height: device.height }
       : undefined
   }, [])
 

@@ -2,7 +2,7 @@ import { webFrameMain } from "electron"
 import type { WebFrameMain } from "electron"
 import type {
   BrowserRecordedAction,
-  BrowserDeviceViewport,
+  BrowserDeviceSize,
   BrowserRecordingSession,
   BrowserRecordingEnvironment,
   BrowserLocatorMetadata,
@@ -33,23 +33,20 @@ let pendingExplicitNavigation: { expiresAt: number; url?: string } | null = null
 const EXPLICIT_NAVIGATION_TTL_MS = 10_000
 
 function normalizeDeviceViewport(
-  viewport?: BrowserDeviceViewport
-): BrowserDeviceViewport | undefined {
+  viewport?: BrowserDeviceSize
+): BrowserDeviceSize | undefined {
   if (
     !viewport ||
     !Number.isFinite(viewport.width) ||
     viewport.width <= 0 ||
     !Number.isFinite(viewport.height) ||
-    viewport.height <= 0 ||
-    !Number.isFinite(viewport.scale) ||
-    viewport.scale <= 0
+    viewport.height <= 0
   ) {
     return undefined
   }
   return {
     width: Math.round(viewport.width),
-    height: Math.round(viewport.height),
-    scale: viewport.scale
+    height: Math.round(viewport.height)
   }
 }
 

@@ -1,7 +1,6 @@
 import type {
   BrowserRecordedAction,
   BrowserDeviceSize,
-  BrowserDeviceViewport,
   BrowserLocatorMetadata,
   BrowserRecordingSource
 } from "./browser-types"
@@ -52,7 +51,7 @@ export interface ScriptRecordingOptions {
   variableActionIds?: Iterable<string>
   variableActionNames?: Record<string, string>
   source?: BrowserRecordingSource
-  deviceViewport?: BrowserDeviceViewport
+  deviceViewport?: BrowserDeviceSize
 }
 
 const BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN =

@@ -17,7 +17,7 @@ export interface BrowserDeviceSize {
 }
 
 export interface BrowserRecordingEnvironment {
-  deviceViewport?: BrowserDeviceViewport
+  deviceViewport?: BrowserDeviceSize
 }
 
 export interface BrowserViewportUpdate {
@@ -113,7 +113,7 @@ interface BrowserRecordedActionBase {
 export interface BrowserPanelRequest {
   threadId?: string
   panelWidth?: number
-  deviceViewport?: BrowserDeviceViewport
+  deviceViewport?: BrowserDeviceSize
   restoreDefaultPanelWidth?: boolean
 }
 
@@ -197,7 +197,7 @@ export interface ScriptRecordingStartOptions {
   /** Continue recording from an existing browser script file. */
   libraryFileName?: string | null
   libraryDisplayName?: string | null
-  deviceViewport?: BrowserDeviceViewport
+  deviceViewport?: BrowserDeviceSize
 }
 
 export interface BrowserRecordingSession {
@@ -211,7 +211,7 @@ export interface BrowserRecordingSession {
   scriptPrefixActionCount?: number
   libraryFileName?: string
   libraryDisplayName?: string
-  deviceViewport?: BrowserDeviceViewport
+  deviceViewport?: BrowserDeviceSize
   variableActionIds?: string[]
   variableActionNames?: Record<string, string>
   actions: BrowserRecordedAction[]
