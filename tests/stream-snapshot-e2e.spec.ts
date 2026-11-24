@@ -11,6 +11,7 @@ import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents, MessageBoxOptions } from "electron"
 import { createStreamDataSerializer } from "../src/main/ipc/stream-data-serialization"
 import { createManagedTransportAgentRunDelivery } from "../src/main/agent/managed-transport-delivery"
+import { verifyStreamingTableScroll } from "./support/streaming-table-scroll"
 
 interface MainFixture {
   fixtureWindowId: number
@@ -34,6 +35,7 @@ interface FixtureWindow {
 }
 
 const root = resolve(import.meta.dirname, "..")
+const appRoot = resolve(process.env.STREAM_SNAPSHOT_APP_ROOT || root)
 const require = createRequire(import.meta.url)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-stream-snapshot-e2e-"))
 const artifacts = resolve(
@@ -84,9 +86,9 @@ async function main() {
         (process.platform === "win32"
           ? join(root, "tests/support/electron-launcher.cmd")
           : require("electron")),
-      args: [...(packaged ? [] : [root]), `--user-data-dir=${join(isolated, "profile")}`],
+      args: [...(packaged ? [] : [appRoot]), `--user-data-dir=${join(isolated, "profile")}`],
       env,
-      cwd: root,
+      cwd: appRoot,
       timeout: 45_000
     })
     await app.context().route(/^https?:/, (route) => route.abort())
@@ -122,7 +124,7 @@ async function main() {
     )
     const workspace = join(isolated, "workspace")
     mkdirSync(workspace)
-    const titles = ["快照白屏回归", "工具流切换对照"]
+    const titles = ["快照白屏回归", "工具流切换对照", "流式表格滚动回归"]
     const ids = await page.evaluate(
       async ({ workspace, titles }) => {
         const api = (window as unknown as FixtureWindow).api
@@ -137,11 +139,11 @@ async function main() {
           if (!id) throw new Error("Missing fixture thread ID")
           ids.push(id)
           await api.workspace.set(id, workspace)
-          if (index === 1)
+          if (index > 0)
             await api.threads.appendMessages(
               id,
-              Array.from({ length: 160 }, (_, n) => ({
-                id: `history-${n}`,
+              Array.from({ length: index === 1 ? 160 : 60 }, (_, n) => ({
+                id: `history-${index}-${n}`,
                 role: n % 2 ? "assistant" : "user",
                 content: `历史 ${n}。`.repeat(30),
                 created_at: new Date()
@@ -153,17 +155,22 @@ async function main() {
       { workspace, titles }
     )
     await page.reload({ waitUntil: "domcontentloaded" })
-    await page.getByText(titles[0], { exact: true }).first().click()
-    await page.locator(`[data-chat-thread-id="${ids[0]}"]`).waitFor()
-    await until(async () => {
-      if (await app!.evaluate(() => Boolean((globalThis as unknown as MainFixture).fixtureRun)))
-        return true
-      const composer = page.locator("textarea.composer-textarea")
-      await composer.fill("运行快照与工具显示回归")
-      const submit = composer.locator("xpath=ancestor::form").locator('button[type="submit"]')
-      if (await submit.isEnabled()) await submit.click()
-      return false
-    }, "UI stream submission")
+    const startStream = async (index: number, prompt: string): Promise<void> => {
+      await page.getByText(titles[index], { exact: true }).first().click()
+      await page.locator(`[data-chat-thread-id="${ids[index]}"]`).waitFor()
+      await until(async () => {
+        const started = await app!.evaluate((_electron, id) => {
+          const run = (globalThis as unknown as MainFixture).fixtureRun
+          return run?.channel.startsWith(`agent:stream:${id}:request:`)
+        }, ids[index])
+        if (started) return true
+        const composer = page.locator("textarea.composer-textarea")
+        await composer.fill(prompt)
+        const submit = composer.locator("xpath=ancestor::form").locator('button[type="submit"]')
+        if (await submit.isEnabled()) await submit.click()
+        return false
+      }, prompt)
+    }
     const send = async (payload: unknown) => {
       await app!.evaluate((_electron, payload) => {
         const run = (globalThis as unknown as MainFixture).fixtureRun
@@ -185,6 +192,18 @@ async function main() {
         mode: "messages",
         data: [serialized(kind, kwargs), { langgraph_node: "agent" }]
       })
+    await startStream(2, "生成一张逐行输出的表格")
+    const tableScroll = await verifyStreamingTableScroll(page, (content) =>
+      chunk("AIMessageChunk", { id: "streaming-scroll-table", content })
+    )
+    await send({ type: "done" })
+    assert.deepEqual(errors, [])
+    results.push("streaming table preserves an upward wheel and only anchors preceding row growth")
+    if (process.argv.includes("--table-scroll-only")) {
+      console.log(JSON.stringify({ results, errors, tableScroll }))
+      return
+    }
+    await startStream(0, "运行快照与工具显示回归")
     await chunk("ToolMessage", {
       id: "sparse-1",
       tool_call_id: "tool-1",
@@ -678,7 +697,7 @@ async function main() {
     writeFileSync(
       join(artifacts, "result.json"),
       JSON.stringify(
-        { results, errors, metrics, responsiveness, isolated, packaged: Boolean(packaged) },
+        { results, errors, metrics, responsiveness, tableScroll, isolated, packaged: Boolean(packaged) },
         null,
         2
       )

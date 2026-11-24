@@ -5,6 +5,7 @@ import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
+import { virtuosoResizeAnchor } from "./scripts/vite-virtuoso-resize-anchor"
 // import {app} from "electron"
 
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"))
@@ -129,6 +130,8 @@ export default defineConfig({
   preload: {},
   renderer: {
     cacheDir: resolve("node_modules/.vite/renderer"),
+    // Run the same Virtuoso transform in dev instead of pre-bundling past it.
+    optimizeDeps: { exclude: ["react-virtuoso"] },
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
       // __APP_VERSION__: app.getVersion(),
@@ -141,7 +144,7 @@ export default defineConfig({
         "@renderer": resolve("src/renderer/src")
       }
     },
-    plugins: [optionalMmjModule(), react(), tailwindcss()],
+    plugins: [optionalMmjModule(), virtuosoResizeAnchor(), react(), tailwindcss()],
     server: {
       fs: {
         // Worktrees may share node_modules through a symlink; allow its static assets too.
