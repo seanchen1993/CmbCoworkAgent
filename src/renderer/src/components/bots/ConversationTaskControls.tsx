@@ -302,7 +302,7 @@ export function ConversationTaskControls({
       <div
         className="shrink-0 border-b border-border/60 px-4 py-2 text-xs text-muted-foreground"
         data-floating-task-controls
-        data-bot-task-header={link ? " : undefined}
+        data-bot-task-header={link ? "" : undefined}
       >
         {link ? (
           <div className="flex min-w-0 items-center gap-3">
