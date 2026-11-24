@@ -445,12 +445,20 @@ describe("requirement source preview", () => {
     const preview = readFileSync(previewPath, "utf-8")
     expect(preview).not.toMatch(/data:image|base64|!\[[^\]]*\]\(/i)
 
+    writeFileSync(
+      previewPath,
+      '保留前文\n\n!\\[IMG\\_256\\]\\(data:image/png;base64,aGVsbG8=\\)\n\n保留后文\n<img src="data:image/jpeg;base64,aGVsbG8=" alt="legacy">',
+      "utf-8"
+    )
     const loaded = (await getSourcePreview(null, created.requirement!.reqId)) as {
       success: boolean
       content?: string
     }
     expect(loaded.success).toBe(true)
     expect(loaded.content).not.toMatch(/data:image|base64|!\[[^\]]*\]\(/i)
+    expect(loaded.content).toContain("保留前文")
+    expect(loaded.content).toContain("保留后文")
+    expect(readFileSync(previewPath, "utf-8")).not.toMatch(/data:image|base64/i)
     await remove(null, created.requirement!.reqId)
   })
 

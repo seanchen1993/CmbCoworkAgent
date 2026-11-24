@@ -826,9 +826,18 @@ async function convertRequirementSourceToMarkdown(sourcePath: string): Promise<s
   if (errors.length > 0) {
     throw new Error(errors.map((message) => message.message).join("；"))
   }
-  const preview = result.value.trim()
+  const preview = removeEmbeddedBase64Images(result.value).trim()
   validateTextContent(preview, "需求预览内容")
   return preview
+}
+
+function removeEmbeddedBase64Images(markdown: string): string {
+  return markdown
+    .replace(
+      /!\\?\[[^\]\r\n]*\\?\]\\?\(\s*data:image\/[^;,\s)]+(?:;[^,\s)]*)*;base64,[a-z0-9+/=\s]+\\?\)/gi,
+      ""
+    )
+    .replace(/<img\b[^>]*\bsrc=["']data:image\/[^"']+;base64,[^"']*["'][^>]*>/gi, "")
 }
 
 async function readRequirementSourcePreview(item: RequirementIndexItem): Promise<string> {
@@ -838,7 +847,12 @@ async function readRequirementSourcePreview(item: RequirementIndexItem): Promise
   const previewPath = getRequirementSourcePreviewPath(item)
 
   try {
-    return (await fs.readFile(previewPath, "utf-8")).trim()
+    const cachedPreview = await fs.readFile(previewPath, "utf-8")
+    const preview = removeEmbeddedBase64Images(cachedPreview).trim()
+    if (preview !== cachedPreview.trim()) {
+      await fs.writeFile(previewPath, `${preview}\n`, "utf-8")
+    }
+    return preview
   } catch {
     const preview = await convertRequirementSourceToMarkdown(getRequirementSourcePath(item))
     await fs.writeFile(previewPath, `${preview}\n`, "utf-8")
