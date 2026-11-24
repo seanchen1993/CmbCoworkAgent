@@ -1,6 +1,7 @@
-import { AIMessage, ToolMessage } from "@langchain/core/messages"
+import { AIMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import type { BotTask } from "../../shared/bots/contracts"
+import { botToolControlMessage } from "../bots/tool-feedback"
 import { parseSkillUseBlock } from "./skill-lifecycle/marker"
 
 export const BOT_SKILL_DISPATCH_TOOL = "bot_skill_dispatch"
@@ -53,10 +54,7 @@ export function createBotSkillDispatchMiddleware() {
     wrapToolCall: (request, handler) => {
       if (attempted || request.toolCall.name !== BOT_SKILL_DISPATCH_TOOL) {
         attempted = true
-        return new ToolMessage({
-          name: request.toolCall.name, tool_call_id: request.toolCall.id!, status: "error",
-          content: "The selected-skill dispatch did not execute this call. Only one bot_skill_dispatch call is allowed in this main turn. Explain the actual blocker; do not perform the work here or claim acceptance without its receipt."
-        })
+        return botToolControlMessage("skill_dispatch_scope", request.toolCall)
       }
       attempted = true
       return handler(request)

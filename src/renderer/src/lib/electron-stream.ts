@@ -7,6 +7,7 @@ import {
   type EventStreamEvent
 } from "@langchain/langgraph-sdk/ui"
 import { replaceLiveStreamMessageId, type LiveStreamMessage } from "./live-stream-messages"
+import { captureModelRetryBaseline, hasModelRetryProgress } from "./model-retry-indicator"
 
 type StreamValues = Record<string, unknown>
 type SubmitOptions = Parameters<UseStreamCustom<StreamValues>["submit"]>[1]
@@ -202,6 +203,7 @@ export function createElectronStream(options: ElectronStreamOptions) {
           }
         })
         return (async function* () {
+          let retryBaseline: Map<string, string> | undefined
           for await (const transportEvent of events) {
             // ElectronIPCTransport owns the wire conversion. As with the SDK's
             // custom hook, bridge its open event name to StreamManager's union here.
@@ -210,6 +212,22 @@ export function createElectronStream(options: ElectronStreamOptions) {
               Partial<StreamValues>,
               unknown
             >
+            const custom =
+              event.event === "custom" && event.data && typeof event.data === "object"
+                ? (event.data as Record<string, unknown>)
+                : undefined
+            if (
+              custom?.type === "model_retry" &&
+              typeof custom.attempt === "number" &&
+              typeof custom.maxRetries === "number"
+            ) {
+              retryBaseline = captureModelRetryBaseline(readMessages(manager.values))
+              yield event
+              continue
+            }
+            if (custom?.type === "model_retry_clear") retryBaseline = undefined
+
+            const previousMessages = retryBaseline ? readMessages(manager.values) : undefined
             if (event.event === "values" && event.data && typeof event.data === "object") {
               // IPC also emits todos/workspace-only values; absence of messages
               // means no message update, whereas messages: [] is an explicit reset.
@@ -220,21 +238,12 @@ export function createElectronStream(options: ElectronStreamOptions) {
               yield { ...event, data }
             } else {
               if (
-                event.event === "custom" &&
-                event.data &&
-                typeof event.data === "object" &&
-                "type" in event.data &&
-                event.data.type === "message_id_alias" &&
-                "role" in event.data &&
-                event.data.role === "assistant" &&
-                "fromId" in event.data &&
-                typeof event.data.fromId === "string" &&
-                "toId" in event.data &&
-                typeof event.data.toId === "string"
+                custom?.type === "message_id_alias" &&
+                custom.role === "assistant" &&
+                typeof custom.fromId === "string" &&
+                typeof custom.toId === "string"
               ) {
-                const data = event.data,
-                  fromId = event.data.fromId,
-                  toId = event.data.toId
+                const { fromId, toId, providerSourceId, providerOccurrence } = custom
                 // Let the renderer rekey its accumulator first; the next frame
                 // must already carry the same identity, not reintroduce the old one.
                 yield event
@@ -242,34 +251,19 @@ export function createElectronStream(options: ElectronStreamOptions) {
                   readMessages(manager.values),
                   fromId,
                   toId,
-                  "providerSourceId" in data && typeof data.providerSourceId === "string"
-                    ? data.providerSourceId
-                    : undefined,
-                  "providerOccurrence" in data && typeof data.providerOccurrence === "number"
-                    ? data.providerOccurrence
-                    : undefined
+                  typeof providerSourceId === "string" ? providerSourceId : undefined,
+                  typeof providerOccurrence === "number" ? providerOccurrence : undefined
                 )
+                // Rekeying an existing reply must not look like new assistant output.
+                if (retryBaseline) captureModelRetryBaseline(messages, retryBaseline)
                 manager.setStreamValues({ ...manager.values, messages })
                 continue
               }
-              if (
-                event.event === "custom" &&
-                event.data &&
-                typeof event.data === "object" &&
-                "type" in event.data &&
-                event.data.type === "stream_retry_reset"
-              ) {
+              if (custom?.type === "stream_retry_reset") {
                 tuples.clear()
               }
-              if (
-                event.event === "custom" &&
-                event.data &&
-                typeof event.data === "object" &&
-                "type" in event.data &&
-                event.data.type === "coordinator_ai_snapshot_message" &&
-                "assistantMessage" in event.data
-              ) {
-                const snapshot = event.data.assistantMessage as Partial<Message> | undefined
+              if (custom?.type === "coordinator_ai_snapshot_message") {
+                const snapshot = custom.assistantMessage as Partial<Message> | undefined
                 if (
                   snapshot?.type === "ai" &&
                   typeof snapshot.id === "string" &&
@@ -286,6 +280,14 @@ export function createElectronStream(options: ElectronStreamOptions) {
                 }
               }
               yield event
+            }
+            if (retryBaseline) {
+              // The SDK has applied the frame by the time the generator resumes.
+              const messages = readMessages(manager.values)
+              if (messages !== previousMessages && hasModelRetryProgress(retryBaseline, messages)) {
+                retryBaseline = undefined
+                yield { event: "custom", data: { type: "model_retry_clear" } }
+              }
             }
           }
         })()

@@ -1096,6 +1096,10 @@ ${help.instruction.slice(0, 500)}
       .map((row) => this.fileStatus(row))
       .filter((row): row is BotFileDeliveryStatus => Boolean(row))
   }
+  private retrying(row: Record<string, unknown>): boolean {
+    return (row.state === "pending" || row.state === "sending") &&
+      (Number(row.attempts) > 0 || Boolean(row.retry_requested))
+  }
   private fileStatus(row: Record<string, unknown>): BotFileDeliveryStatus | undefined {
     const file = parseBotFileDelivery(row.files_json)?.[0]
     return file
@@ -1104,6 +1108,7 @@ ${help.instruction.slice(0, 500)}
           file,
           state: row.state as BotMockOutbox["state"],
           progress: Number(row.progress ?? 0),
+          ...(this.retrying(row) ? { retrying: true } : {}),
           ...(row.reason_code ? { reasonCode: String(row.reason_code) } : {})
         }
       : undefined
@@ -1385,9 +1390,9 @@ ${help.instruction.slice(0, 500)}
       }
     const rows = this.rows(
       `SELECT * FROM (
-        SELECT * FROM (SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,t.work_id,e.created_at,NULL AS files_json,t.thread_id,NULL AS progress,NULL AS reason_code
+        SELECT * FROM (SELECT 'event-'||e.event_id AS id,'user' AS kind,json_extract(e.payload_json,'$.text') AS text,json_extract(e.payload_json,'$.senderId') AS sender,json_extract(e.payload_json,'$.replyToMessageId') AS reply,COALESCE(t.state,e.execution_state) AS state,t.work_id,e.created_at,NULL AS files_json,t.thread_id,NULL AS progress,NULL AS reason_code,0 AS attempts,0 AS retry_requested
           FROM bot_mock_events e LEFT JOIN bot_tasks t ON t.id=e.task_id WHERE e.binding_id=? AND (e.created_at<? OR (e.created_at=? AND 'event-'||e.event_id<?)) ORDER BY e.created_at DESC,e.event_id DESC LIMIT 41)
-        UNION ALL SELECT * FROM (SELECT id,'bot',text,'Bot',reply_to_message_id,state,work_id,created_at,files_json,COALESCE(thread_id,(SELECT thread_id FROM bot_tasks WHERE id=source_task_id),(SELECT thread_id FROM bot_work_items WHERE id=work_id),(SELECT thread_id FROM bot_mock_conversations WHERE id=conversation_id)),progress,reason_code FROM bot_mock_outbox WHERE binding_id=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 41)
+        UNION ALL SELECT * FROM (SELECT id,'bot',text,'Bot',reply_to_message_id,state,work_id,created_at,files_json,COALESCE(thread_id,(SELECT thread_id FROM bot_tasks WHERE id=source_task_id),(SELECT thread_id FROM bot_work_items WHERE id=work_id),(SELECT thread_id FROM bot_mock_conversations WHERE id=conversation_id)),progress,reason_code,attempts,retry_requested FROM bot_mock_outbox WHERE binding_id=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 41)
       ) ORDER BY created_at DESC,id DESC LIMIT 41`,
       [bindingId, time, time, key, bindingId, time, time, key]
     )
@@ -1405,6 +1410,7 @@ ${help.instruction.slice(0, 500)}
       senderId: String(row.sender),
       replyToMessageId: row.reply == null ? null : String(row.reply),
       state: row.state as BotMockFeedEntry["state"],
+      ...(this.retrying(row) ? { retrying: true } : {}),
       ...(row.work_id ? { workId: String(row.work_id) } : {}),
       createdAt: Number(row.created_at)
     }))

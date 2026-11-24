@@ -146,7 +146,10 @@ describe("builtin model registry", () => {
       baseUrl: "http://idle.example.test/pattern/llm/v1",
       apiKey: "idle-test-key",
       model: "pro",
-      idleModelEnvironment: "production"
+      idleModelEnvironment: "production",
+      enableThinking: true,
+      enableThinkingEffort: true,
+      thinkingEffort: "high"
     })
     state.idleModelUseUat = true
     expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
@@ -154,12 +157,28 @@ describe("builtin model registry", () => {
       apiKey: "idle-uat-test-key",
       idleModelEnvironment: "uat",
       model: "pro",
+      enableThinking: true,
+      enableThinkingEffort: true,
+      thinkingEffort: "high",
       notice: "当前使用 UAT 测试环境。",
       maxTokens: 200_000
     })
     state.idleModelUseUat = false
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBe("idle-test-key")
     expect(getModelConfigByRef("ultra")?.ref).toBe("builtin:idle-ultra")
+  })
+
+  it("keeps saved Pro thinking overrides", () => {
+    configureIdleModel()
+    updateBuiltinModelOverride("idle-ultra", {
+      enableThinking: false,
+      thinkingEffort: "max"
+    })
+    expect(getModelConfigByRef("builtin:idle-ultra")).toMatchObject({
+      enableThinking: false,
+      enableThinkingEffort: false,
+      thinkingEffort: "max"
+    })
   })
 
   it.each([false, true])("does not borrow credentials across environments (UAT %s)", (useUat) => {

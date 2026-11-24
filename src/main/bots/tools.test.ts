@@ -930,6 +930,31 @@ it("keeps a peer import identity across tool rebuilds without overwriting the re
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+it("confirms recovery for the same retained file but leaves uncertain sends unresolved", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "bot-delivery-recovery-"))
+  try {
+    const publish = vi.fn()
+    const [send] = createBotDeliveryTools(workspace, new AbortController().signal, publish)
+    const invoke = (id: string, file: string) =>
+      send.invoke({ type: "tool_call", id, name: send.name, args: { files: [file] } })
+    const missing = await invoke("missing", "report.md")
+    expect(missing).toMatchObject({ status: "error", id: expect.stringMatching(/^bot-attempt-/) })
+    await writeFile(join(workspace, "other.md"), "another output")
+    expect(String((await invoke("unrelated", "other.md")).id)).not.toMatch(/^bot-recovery-/)
+    await writeFile(join(workspace, "report.md"), "verified output")
+    const sent = await invoke("retry", "report.md")
+    expect(sent).toMatchObject({ status: "success", id: missing.id.replace("bot-attempt-", "bot-recovery-") })
+    expect(JSON.parse(sent.content)).toMatchObject({ kind: "bot-file-delivery", files: [{ name: "report.md" }] })
+    publish.mockImplementationOnce(() => { throw Error("delivery acknowledgement lost") })
+    const unknown = await invoke("lost", "report.md")
+    expect(unknown.status).toBe("error")
+    expect(String(unknown.id)).not.toMatch(/^bot-attempt-/)
+    expect(String((await invoke("after-lost", "report.md")).id)).not.toMatch(/^bot-recovery-/)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
 it("does not return a verified file if retaining its bytes fails", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "bot-return-failed-")), capture = vi.fn()
   try {
@@ -1397,6 +1422,22 @@ it.each([{ ref: "page:e1" }, { role: "textbox", name: "Name" }])(
   }
 )
 
+it("confirms a retried browser read on the same page and keeps login and other pages independent", async () => {
+  const act = vi.fn()
+  const [browser] = createBotBrowserTools({ id: "owner" } as BotDefinition,
+    { act } as unknown as BotBrowserService, new AbortController().signal, vi.fn())
+  const observe = (id: string, pageId: string) =>
+    browser.invoke({ type: "tool_call", id, name: browser.name, args: { action: "observe", pageId } })
+  act.mockRejectedValueOnce(Error("temporarily unavailable"))
+  const failure = await observe("first", "one")
+  act.mockResolvedValueOnce(JSON.stringify({ pageId: "two", pages: [] }))
+  expect(String((await observe("other", "two")).id)).not.toMatch(/^bot-recovery-/)
+  act.mockResolvedValueOnce(JSON.stringify({ pageId: "one", control: "human", pages: [] }))
+  expect(String((await observe("control", "one")).id)).not.toMatch(/^bot-recovery-/)
+  act.mockResolvedValueOnce(JSON.stringify({ pageId: "one", pages: [] }))
+  expect((await observe("later", "one")).id).toBe(failure.id.replace("bot-attempt-", "bot-recovery-"))
+})
+
 it("passes an explicit browser new-tab request through the original conversation scope", async () => {
   const act = vi.fn().mockResolvedValue("new owned page evidence")
   const controller = new AbortController(),
@@ -1521,6 +1562,17 @@ function fixture(
 }
 
 describe("Bot schedule tool contract", () => {
+  it("confirms a retried save only for the exact schedule request", async () => {
+    const { schedule, saveFollowUp } = fixture()
+    const invoke = (id: string, requestKey: string) => schedule.invoke({ type: "tool_call", name: schedule.name, id,
+      args: { action: "save", kind: "fixed_reminder", name: "Later", message: "Call", afterSeconds: 60, requestKey } })
+    saveFollowUp.mockImplementationOnce(() => { throw Error("temporary store error") })
+    const failure = await invoke("first", "schedule-one")
+    expect(failure.status).toBe("error")
+    expect(String((await invoke("separate", "schedule-two")).id)).not.toMatch(/^bot-recovery-/)
+    expect((await invoke("retry", "schedule-one")).id).toBe(failure.id.replace("bot-attempt-", "bot-recovery-"))
+  })
+
   it.each([
     { kind: "fixed_reminder", message: "Call" },
     { workMonitor: { workId: "report", mode: "report" } },

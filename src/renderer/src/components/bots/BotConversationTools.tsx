@@ -33,7 +33,6 @@ import {
   ChatReplySourceContext,
   ChatActivityPresentationContext,
   ChatExecutionDetailsContext,
-  ChatFoldedToolCallsContext,
   ChatFilePresentationContext,
   ChatMessageVisibilityContext,
   ChatMessagePresentationContext,
@@ -54,7 +53,7 @@ import { BotFileDeliveryPreview } from "./BotMessageFilePreview"
 import type { OpenResourcePreviewDetail } from "@/lib/resource-preview-events"
 import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
 import { botImBrowserScope } from "../../../../shared/bots/im-channel"
-import { projectBotExecution, visibleBotDelivery } from "@/lib/bot-execution-visibility"
+import { visibleBotDelivery } from "@/lib/bot-execution-visibility"
 import { botProfileEvent } from "@/lib/bot-profile-event"
 import { botScheduleReceipt } from "@/lib/bot-schedule-view"
 import { BotScheduleEditor } from "./BotScheduleEditor"
@@ -296,22 +295,12 @@ export function BotConversationTools({
   const executionView = useMemo(() => {
     if (!threadId)
       return {
-        hiddenMessages: new Set<string>(),
-        foldedTools: new Set<string>(),
         quietMessages: new Set<string>(),
         stoppedQuestions: new Map<string, QuestionHistory>()
       }
     const messages = context.getThreadState(threadId).messages
-    let view = { hiddenMessages: new Set<string>(), foldedTools: new Set<string>() }
-    if (!showExecutionDetails) {
-      const running = tasks.some((task) =>
-        ["queued", "running", "waiting_user"].includes(task.state)
-      )
-      view = projectBotExecution(messages, running, undefined, null, undefined, desktopWorkId)
-    }
     return {
-      ...view,
-      quietMessages: hiddenBotTaskMessageIds(messages, taskByMessage),
+      quietMessages: hiddenBotTaskMessageIds(messages, taskByMessage, showExecutionDetails),
       stoppedQuestions: showExecutionDetails
         ? new Map<string, QuestionHistory>()
         : stoppedBotQuestionHistory(messages, taskByMessage)
@@ -322,9 +311,7 @@ export function BotConversationTools({
     taskByMessage,
     windowKey,
     streamingQuietMessage,
-    showExecutionDetails,
-    desktopWorkId,
-    tasks
+    showExecutionDetails
   ])
   useEffect(() => {
     if (!exchangeId && exchangeTrigger.current?.isConnected) exchangeTrigger.current.focus()
@@ -753,8 +740,7 @@ export function BotConversationTools({
             <ChatMessageVisibilityContext.Provider value={executionView.quietMessages}>
               <ChatPresentationContext.Provider value="bot">
                 <ChatDesktopWorkIdContext.Provider value={desktopWorkId}>
-                <ChatExecutionDetailsContext.Provider value={showExecutionDetails}>
-                  <ChatFoldedToolCallsContext.Provider value={executionView.foldedTools}>
+                  <ChatExecutionDetailsContext.Provider value={showExecutionDetails}>
                     <ChatFilePresentationContext.Provider value={presentFile}>
                       <ChatActivityPresentationContext.Provider
                         value={
@@ -775,8 +761,7 @@ export function BotConversationTools({
                         </ChatReplySourceContext.Provider>
                       </ChatActivityPresentationContext.Provider>
                     </ChatFilePresentationContext.Provider>
-                  </ChatFoldedToolCallsContext.Provider>
-                </ChatExecutionDetailsContext.Provider>
+                  </ChatExecutionDetailsContext.Provider>
                 </ChatDesktopWorkIdContext.Provider>
               </ChatPresentationContext.Provider>
             </ChatMessageVisibilityContext.Provider>
