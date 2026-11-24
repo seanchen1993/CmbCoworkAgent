@@ -960,7 +960,7 @@ export function RequirementEntryView({
           description={
             requirementDialogOpen
               ? "切换后，本次需求将关联新的业务系统；已填写的内容会保留。"
-              : "先关联需求使用的业务系统，需求内容和规范 PRD 将归档到对应目录。"
+              : "请选择已有系统，或在下方新增系统。"
           }
           confirmLabel={requirementDialogOpen ? "确认切换" : "确认并创建需求"}
         />

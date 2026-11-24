@@ -57,6 +57,45 @@ afterAll(() => {
 })
 
 describe("requirement source preview", () => {
+  it("removes unreferenced PRD assets when saving Markdown", async () => {
+    const workDir = join(tempHome, "asset-cleanup-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")!
+    const savePrdFile = handlers.get("requirements:save-prd-file")!
+    const remove = handlers.get("requirements:delete")!
+    const created = (await create(null, {
+      systemId: "system-assets",
+      title: "附件清理",
+      workDir,
+      source: { type: "text", fileName: "" }
+    })) as {
+      success: boolean
+      requirement: { reqId: string; requirementPath: string }
+    }
+    expect(created.success).toBe(true)
+
+    const prdDir = join(created.requirement.requirementPath, "prd")
+    const assetsDir = join(prdDir, "assets")
+    mkdirSync(assetsDir)
+    writeFileSync(join(prdDir, "main.md"), "![保留](assets/keep.png)\n![删除](assets/remove.png)")
+    writeFileSync(join(prdDir, "shared.md"), "[共享附件](ASSETS\\SHARED.HTML)")
+    writeFileSync(join(assetsDir, "keep.png"), "keep")
+    writeFileSync(join(assetsDir, "remove.png"), "remove")
+    writeFileSync(join(assetsDir, "shared.html"), "shared")
+
+    const result = (await savePrdFile(null, {
+      reqId: created.requirement.reqId,
+      filePath: "main.md",
+      content: "![保留](assets/keep.png)"
+    })) as { success: boolean; error?: string }
+
+    expect(result.success, result.error).toBe(true)
+    expect(existsSync(join(assetsDir, "keep.png"))).toBe(true)
+    expect(existsSync(join(assetsDir, "shared.html"))).toBe(true)
+    expect(existsSync(join(assetsDir, "remove.png"))).toBe(false)
+    await remove(null, created.requirement.reqId)
+  })
+
   it("keeps an uploaded HTML prototype at its original path", async () => {
     const source = join(tempHome, "external-prototype.html")
     writeFileSync(source, "<!doctype html><title>Prototype</title>", "utf-8")

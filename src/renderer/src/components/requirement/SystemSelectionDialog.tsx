@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ArrowRight, Check, Loader2, Search } from "lucide-react"
+import { ArrowRight, Check, ChevronsUpDown, Loader2, Search } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
@@ -11,6 +11,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import { useRequirementStore } from "./requirement-store"
 
@@ -30,6 +31,8 @@ export function SystemSelectionDialog({
   confirmLabel?: string
 }): React.JSX.Element {
   const [query, setQuery] = useState("")
+  const [systemSelectOpen, setSystemSelectOpen] = useState(false)
+  const [dialogContent, setDialogContent] = useState<HTMLDivElement | null>(null)
   const [selectedSystemId, setSelectedSystemId] = useState(initialSystemId)
   const [customSystemName, setCustomSystemName] = useState("")
   const [loading, setLoading] = useState(false)
@@ -68,91 +71,108 @@ export function SystemSelectionDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
-      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-4xl">
+      <DialogContent ref={setDialogContent} className="gap-0 overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader>
           <div className="px-6 pt-5">
             <DialogTitle>{title}</DialogTitle>
             <DialogDescription className="mt-1.5">{description}</DialogDescription>
           </div>
         </DialogHeader>
-        <div className="px-6 pb-3 pt-4">
-          <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
-            <span>全部系统</span>
-            <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold">
-              {loading ? "..." : systemList.length}
-            </span>
-            <label className="relative ml-auto block">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索系统名称 / 分类"
-                aria-label="搜索系统"
-                className="h-8 w-56 bg-white pl-8 text-sm"
-              />
-            </label>
-          </div>
-        </div>
-        <div className="mx-6 max-h-[330px] overflow-y-auto rounded-xl border border-border bg-[#fbf9f6] p-2.5">
-          {loading ? (
-            <div className="flex items-center justify-center gap-2 px-4 py-10 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" />
-              正在加载系统...
-            </div>
-          ) : (
-            <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-              {visibleSystems.map((system) => {
-                const selected = selectedSystem?.id === system.id
-                return (
-                  <button
-                    key={system.id}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => setSelectedSystemId(system.id)}
-                    className={cn(
-                      "relative flex h-[142px] flex-col overflow-hidden rounded-lg border bg-white p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      selected
-                        ? "border-primary shadow-[0_0_0_3px_rgba(196,107,79,0.14)]"
-                        : "border-border hover:border-border-emphasis"
-                    )}
-                  >
-                    {selected && (
-                      <span className="absolute right-2.5 top-2.5 flex size-5 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                        <Check className="size-3" strokeWidth={3} />
-                      </span>
-                    )}
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="flex size-8 items-center justify-center rounded-lg text-sm font-bold text-white"
-                        style={{ backgroundColor: system.tokens?.accent ?? "#c4956a" }}
+        <div className="px-6 pb-2 pt-5">
+          <label className="mb-2 block text-sm font-semibold text-foreground">业务系统</label>
+          <Popover
+            open={systemSelectOpen}
+            onOpenChange={(open) => {
+              setSystemSelectOpen(open)
+              if (!open) setQuery("")
+            }}
+          >
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                role="combobox"
+                aria-expanded={systemSelectOpen}
+                aria-label="选择业务系统"
+                className="flex h-10 w-full items-center gap-2 rounded-md border border-input bg-white px-3 text-left text-sm shadow-sm outline-none transition-colors hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                {loading ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
+                <span className={cn("min-w-0 flex-1 truncate", !selectedSystem && "text-muted-foreground")}>
+                  {selectedSystem ? selectedSystem.name : loading ? "正在加载系统..." : "请选择业务系统"}
+                </span>
+                <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent
+              portalContainer={dialogContent}
+              align="start"
+              sideOffset={6}
+              className="w-[var(--radix-popover-trigger-width)] overflow-hidden p-0"
+            >
+              <div className="relative border-b border-border p-2">
+                <Search className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="搜索系统名称、分类或编号"
+                  aria-label="搜索系统"
+                  className="h-9 bg-white pl-8"
+                  autoFocus
+                />
+              </div>
+              <div
+                role="listbox"
+                className="max-h-64 overscroll-contain overflow-y-auto p-1.5"
+              >
+                {loading ? (
+                  <div className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" />
+                    正在加载系统...
+                  </div>
+                ) : visibleSystems.length === 0 ? (
+                  <div className="px-3 py-8 text-center text-sm text-muted-foreground">
+                    没有找到匹配的系统
+                  </div>
+                ) : (
+                  visibleSystems.map((system) => {
+                    const selected = selectedSystem?.id === system.id
+                    return (
+                      <button
+                        key={system.id}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        onClick={() => {
+                          setSelectedSystemId(system.id)
+                          setSystemSelectOpen(false)
+                          setQuery("")
+                        }}
+                        className={cn(
+                          "flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none",
+                          selected && "bg-muted/70"
+                        )}
                       >
-                        {system.name.slice(0, 1)}
-                      </span>
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-bold text-foreground">
-                          {system.name}
+                        <span
+                          className="flex size-8 shrink-0 items-center justify-center rounded-md text-xs font-bold text-white"
+                          style={{ backgroundColor: system.tokens?.accent ?? "#c4956a" }}
+                        >
+                          {system.name.slice(0, 1)}
                         </span>
-                        <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
-                          {system.category || system.id}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium text-foreground">
+                            {system.name}
+                          </span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {system.category || system.id}
+                          </span>
                         </span>
-                      </span>
-                    </span>
-                    <span className="mt-2 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                      {system.description}
-                    </span>
-                    <span className="mt-auto rounded-md border border-[#d3e6da] bg-[#e9f2ec] px-2 py-1 text-[10px] font-semibold text-[#44715a]">
-                      主题规范design.md
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-          )}
-          {!loading && visibleSystems.length === 0 && (
-            <div className="px-4 py-10 text-center text-sm text-muted-foreground">
-              没有找到匹配的系统
-            </div>
-          )}
+                        <Check className={cn("size-4 shrink-0 text-primary", !selected && "invisible")} />
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
         <div className="mx-6 mt-4 rounded-xl border border-dashed border-[#d7b899] bg-[#fffaf5] p-4">
           <div className="text-sm font-semibold text-foreground">列表里没有？新增一个系统</div>
@@ -182,12 +202,7 @@ export function SystemSelectionDialog({
             </Button>
           </div>
         </div>
-        <DialogFooter className="mt-5 items-center gap-3 border-t border-border bg-[#fbf8f4] px-6 py-3 sm:justify-between">
-          <p className="mr-auto text-sm text-muted-foreground">
-            {selectedSystem
-              ? `已选：${selectedSystem.name}${selectedSystem.theme === "" ? " · 暂无主题" : " · 系统规范"}`
-              : "请选择已有系统，或在上方新增系统"}
-          </p>
+        <DialogFooter className="mt-5 items-center gap-3 border-t border-border bg-[#fbf8f4] px-6 py-3">
           <Button type="button" variant="outline" onClick={onCancel}>
             取消
           </Button>

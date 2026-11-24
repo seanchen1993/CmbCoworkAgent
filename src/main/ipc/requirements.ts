@@ -148,6 +148,60 @@ const SOURCE_PREVIEW_FILENAME = "source-preview.md"
 const REQUIREMENT_SETTINGS_FILENAME = "settings.json"
 const IMPORTED_HTML_DIRNAME = "imported-html"
 
+async function listFilesRecursively(directory: string): Promise<string[]> {
+  const entries = await fs.readdir(directory, { withFileTypes: true })
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      const entryPath = path.join(directory, entry.name)
+      return entry.isDirectory() ? listFilesRecursively(entryPath) : [entryPath]
+    })
+  )
+  return files.flat()
+}
+
+async function pruneUnreferencedPrdAssets(prdRoot: string): Promise<void> {
+  const assetsDir = path.join(prdRoot, "assets")
+  try {
+    if (!(await fs.stat(assetsDir)).isDirectory()) return
+  } catch {
+    return
+  }
+
+  const allPrdFiles = await listFilesRecursively(prdRoot)
+  const markdownFiles = allPrdFiles.filter(
+    (filePath) =>
+      path.extname(filePath).toLowerCase() === ".md" &&
+      !filePath.startsWith(`${assetsDir}${path.sep}`)
+  )
+  const markdownDocuments = await Promise.all(
+    markdownFiles.map(async (filePath) => ({
+      filePath,
+      content: await fs.readFile(filePath, "utf-8")
+    }))
+  )
+  const assetFiles = allPrdFiles.filter((filePath) =>
+    filePath.startsWith(`${assetsDir}${path.sep}`)
+  )
+
+  await Promise.all(
+    assetFiles.map(async (assetPath) => {
+      const referenced = markdownDocuments.some(({ filePath, content }) => {
+        const relativePath = path
+          .relative(path.dirname(filePath), assetPath)
+          .split(path.sep)
+          .join("/")
+        const normalizedContent = content.replace(/\\/g, "/").toLocaleLowerCase("en-US")
+        const normalizedRelativePath = relativePath.toLocaleLowerCase("en-US")
+        return (
+          normalizedContent.includes(normalizedRelativePath) ||
+          normalizedContent.includes(encodeURI(normalizedRelativePath).toLocaleLowerCase("en-US"))
+        )
+      })
+      if (!referenced) await fs.rm(assetPath)
+    })
+  )
+}
+
 type RequirementsIndexFile = {
   list?: Array<
     RequirementIndexItem & {
@@ -1615,6 +1669,11 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "文件路径超出当前需求的 PRD 目录" }
         }
         await fs.writeFile(targetPath, payload.content, "utf-8")
+        try {
+          await pruneUnreferencedPrdAssets(prdRoot)
+        } catch (error) {
+          console.error("[requirements] Failed to clean up unreferenced PRD assets", error)
+        }
         return { success: true }
       } catch (error) {
         return {

@@ -6,7 +6,6 @@ import {
   EllipsisVertical,
   FilePlus2,
   Loader2,
-  Share2,
   Trash2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -19,7 +18,6 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Select,
   SelectContent,
@@ -31,7 +29,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
@@ -201,7 +198,6 @@ export function RequirementHistoryList({
           ) : pageItems.length ? (
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
               {pageItems.map((item) => {
-                const generated = isRequirementGenerated(item) || isRequirementPublished(item)
                 const owner = item.owner ?? (item.origin === "local" ? currentUser : null)
                 const spaceDesign =
                   item.origin === "space" ? findRequirementDesignEntry(item.id) : null
@@ -291,22 +287,6 @@ export function RequirementHistoryList({
                           align="end"
                           onClick={(event) => event.stopPropagation()}
                         >
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <DropdownMenuItem
-                                aria-disabled
-                                onSelect={(event) => event.preventDefault()}
-                                className="text-muted-foreground opacity-60"
-                              >
-                                <Share2 />
-                                分享
-                              </DropdownMenuItem>
-                            </TooltipTrigger>
-                            <TooltipContent side="left">
-                              {generated ? "分享功能敬请期待" : "生成规范 PRD 后才能分享"}
-                            </TooltipContent>
-                          </Tooltip>
-                          <DropdownMenuSeparator />
                           <DropdownMenuItem
                             variant="destructive"
                             disabled={item.readOnly}

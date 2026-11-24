@@ -332,6 +332,10 @@ export function RequirementDetailsPanel({
     RequirementPrdManifest["functions"][number] | null
   >(null)
   const [clearStarting, setClearStarting] = useState(false)
+  const [workflowConfirmKind, setWorkflowConfirmKind] = useState<"design" | "development" | null>(
+    null
+  )
+  const workflowConfirmActionRef = useRef<(() => void) | null>(null)
   const batchStartingRef = useRef(false)
   const [selectedFunction, setSelectedFunction] = useState<
     RequirementPrdManifest["functions"][number] | null
@@ -360,6 +364,13 @@ export function RequirementDetailsPanel({
         Boolean(item.functionInfo.htmlFile?.trim()) ||
         Boolean(item.functionInfo.htmlId?.trim())
     )
+  const confirmWorkflowStart = (
+    kind: "design" | "development",
+    action: () => void
+  ): void => {
+    workflowConfirmActionRef.current = action
+    setWorkflowConfirmKind(kind)
+  }
   const prototypeStatusByFunction = useMemo(
     () =>
       new Map(
@@ -662,10 +673,14 @@ export function RequirementDetailsPanel({
               hasFullPrdDesignSession
                 ? undefined
                 : () => {
-                    if (selectedPrototypeStatus?.skipped) {
-                      updatePrototypeFunctionDesign(selectedFunction, "1")
+                    const startDesign = (): void => {
+                      if (selectedPrototypeStatus?.skipped) {
+                        updatePrototypeFunctionDesign(selectedFunction, "1")
+                      }
+                      requestPrototypeDesign(selectedFunction)
                     }
-                    requestPrototypeDesign(selectedFunction)
+                    if (selectedFunction.htmlId?.trim()) startDesign()
+                    else confirmWorkflowStart("design", startDesign)
                   }
             }
           />
@@ -920,7 +935,7 @@ export function RequirementDetailsPanel({
                             )
                             return
                           }
-                          setBatchDialogOpen(true)
+                          confirmWorkflowStart("design", () => setBatchDialogOpen(true))
                         }}
                       >
                         {batchStarting ? (
@@ -942,7 +957,7 @@ export function RequirementDetailsPanel({
                           className="h-7 px-2 text-[11px]"
                           disabled={batchStarting}
                           onClick={() => {
-                            setBatchDialogOpen(true)
+                            confirmWorkflowStart("design", () => setBatchDialogOpen(true))
                           }}
                         >
                           无需设计
@@ -1065,7 +1080,9 @@ export function RequirementDetailsPanel({
                   </div>
                   <RequirementDevelopmentActions
                     requirement={requirement}
-                    onStartDevelopment={onStartDevelopment}
+                    onStartDevelopment={() =>
+                      confirmWorkflowStart("development", () => void onStartDevelopment())
+                    }
                     onContinueDevelopment={onContinueDevelopment}
                     onResetDevelopment={onResetDevelopment}
                   />
@@ -1129,8 +1146,12 @@ export function RequirementDetailsPanel({
                                     updatePrototypeFunctionDesign(functionInfo, needDesign)
                                   }
                                   onDesign={() => {
-                                    updatePrototypeFunctionDesign(functionInfo, "1")
-                                    requestPrototypeDesign(functionInfo)
+                                    const startDesign = (): void => {
+                                      updatePrototypeFunctionDesign(functionInfo, "1")
+                                      requestPrototypeDesign(functionInfo)
+                                    }
+                                    if (functionInfo.htmlId?.trim()) startDesign()
+                                    else confirmWorkflowStart("design", startDesign)
                                   }}
                                   onClear={() => {
                                     setClearTargetFunction(functionInfo)
@@ -1144,16 +1165,26 @@ export function RequirementDetailsPanel({
                                 needDesign={functionInfo.needDesign}
                                 choiceMade={prototypeStatus?.choiceMade ?? false}
                                 disabled={false}
-                                onChange={(needDesign) =>
-                                  updatePrototypeFunctionDesign(functionInfo, needDesign)
-                                }
+                                onChange={(needDesign) => {
+                                  if (prototypeStatus?.choiceMade) {
+                                    updatePrototypeFunctionDesign(functionInfo, needDesign)
+                                  } else {
+                                    confirmWorkflowStart("design", () =>
+                                      updatePrototypeFunctionDesign(functionInfo, needDesign)
+                                    )
+                                  }
+                                }}
                                 onClear={() => {
                                   setClearTargetFunction(functionInfo)
                                   setClearDialogOpen(true)
                                 }}
                                 onDesign={() => {
-                                  updatePrototypeFunctionDesign(functionInfo, "1")
-                                  requestPrototypeDesign(functionInfo)
+                                  const startDesign = (): void => {
+                                    updatePrototypeFunctionDesign(functionInfo, "1")
+                                    requestPrototypeDesign(functionInfo)
+                                  }
+                                  if (functionInfo.htmlId?.trim()) startDesign()
+                                  else confirmWorkflowStart("design", startDesign)
                                 }}
                               />
                             )
@@ -1182,6 +1213,51 @@ export function RequirementDetailsPanel({
         prototypeStatuses={prototypeStatuses}
         onStart={startBatchPrototypeDesign}
       />
+      <Dialog
+        open={workflowConfirmKind !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            workflowConfirmActionRef.current = null
+            setWorkflowConfirmKind(null)
+          }
+        }}
+      >
+        <DialogContent className="rounded-2xl sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>
+              {workflowConfirmKind === "development"
+                ? "确认开始需求开发？"
+                : "确认开始原型设计？"}
+            </DialogTitle>
+            <DialogDescription className="pt-2 leading-6">
+              {"请确认当前 PRD 已完整、规范，并可作为后续工作的基准。开始原型设计或开发后，若重新规范 PRD，已有的原型设计和开发会话也会被重置，请谨慎操作。"}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                workflowConfirmActionRef.current = null
+                setWorkflowConfirmKind(null)
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                const action = workflowConfirmActionRef.current
+                workflowConfirmActionRef.current = null
+                setWorkflowConfirmKind(null)
+                action?.()
+              }}
+            >
+              确认并继续
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={clearDialogOpen}
         onOpenChange={(open) => {
