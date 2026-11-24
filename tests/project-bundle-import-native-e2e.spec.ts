@@ -361,7 +361,7 @@ async function existingProjectReview(project: HarnessProjectListItem) {
 async function submitOriginalProject(name: string, code: string, pluginId: string) {
   const dialog = page!.getByRole("dialog", { name: "新建项目", exact: true })
   const previous = await page!.evaluate(() => window.api.harnessBoard.listProjects())
-  await dialog.getByPlaceholder("输入项目编号搜索", { exact: true }).fill(code)
+  await dialog.getByPlaceholder(/^输入项目编号搜索/).fill(code)
   await dialog.getByRole("textbox", { name: "项目名称 *", exact: true }).fill(name)
   await dialog.getByRole("textbox", { name: "系统编号 *", exact: true }).fill("FIXTURE_SYSTEM")
   await dialog.getByRole("textbox", { name: "系统名称 *", exact: true }).fill("原界面回归系统")
@@ -370,7 +370,7 @@ async function submitOriginalProject(name: string, code: string, pluginId: strin
   const projectDirectory = join(projectContainers, projectDir)
   mkdirSync(projectDirectory, { recursive: true })
   await chooseDirectory(projectDirectory, () =>
-    dialog.getByRole("button", { name: /插件工作区.*选择文件夹/ }).click()
+    dialog.getByRole("button", { name: /插件工作区.*选择空文件夹/ }).click()
   )
   await dialog.getByText(projectDirectory, { exact: true }).waitFor()
   await dialog.locator('[aria-label="创建项目时授权"]').waitFor()
@@ -1154,7 +1154,7 @@ async function main() {
     for (const name of ["项目编号 *", "系统编号 *", "系统名称 *", "项目开发配置"])
       await dialog.getByText(name, { exact: true }).waitFor()
     for (const field of [
-      dialog.getByPlaceholder("输入项目编号搜索", { exact: true }),
+      dialog.getByPlaceholder(/^输入项目编号搜索/),
       dialog.getByRole("textbox", { name: "项目名称 *", exact: true }),
       dialog.getByRole("textbox", { name: "系统编号 *", exact: true }),
       dialog.getByRole("textbox", { name: "系统名称 *", exact: true })
