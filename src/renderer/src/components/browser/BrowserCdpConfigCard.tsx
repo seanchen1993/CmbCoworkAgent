@@ -362,14 +362,8 @@ export function BrowserCdpConfigCard({
             <DialogDescription>
               {pendingSwitchConfirmation === "agent" ? (
                 <>
-                  1. 使用 Agent 操控内置浏览器，必须使用{" "}
-                  <span className="font-semibold text-amber-600 dark:text-amber-400">
-                    Node.js 20 或更高版本
-                  </span>
-                  。请确认你的系统已满足要求。
-                  <span className="mt-4 block">
-                    2. 开启后会额外占用资源、内存和上下文；如果不使用，建议不要开启。
-                  </span>
+                  开启后会启动一个 MCP
+                  服务，该服务会额外占用系统资源、内存和上下文；如果不使用，建议不要开启。
                 </>
               ) : (
                 <>
