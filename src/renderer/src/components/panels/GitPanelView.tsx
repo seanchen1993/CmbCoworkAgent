@@ -805,6 +805,7 @@ function GitPanelWorkspaceView({
       showToast("请先在“操作仓库”中选择要推送的子仓库", "error")
       return
     }
+    setPushMetaLoading(true)
     setSubmitAction("push")
   }, [activeRepository, hasMultipleRepositories, showToast])
 
