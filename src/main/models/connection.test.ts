@@ -52,7 +52,8 @@ describe("idle gateway OpenAI transport", () => {
     expect(send).toHaveBeenCalledTimes(4)
   })
 
-  it("sends Pro, employee identity and gateway key with stable per-thread sessions", async () => {
+  it.each(["12345678", "IT123456", "ABCDEFGH", "IT-12345"])("forwards SAP ID %s", async (sapId) => {
+    state.sapId = ` ${sapId} `
     const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = []
     const send = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       requests.push({
@@ -82,7 +83,7 @@ describe("idle gateway OpenAI transport", () => {
     ])
     expect(new Set(requests.map((item) => item.headers.get("x-request-id"))).size).toBe(3)
     for (const { headers } of requests) {
-      expect(headers.get("x-spaid")).toBe("12345678")
+      expect(headers.get("x-spaid")).toBe(sapId)
       expect(headers.get("x-gateway-key")).toBe(config.apiKey)
       expect(headers.has("authorization")).toBe(false)
     }
@@ -149,7 +150,7 @@ describe("idle gateway OpenAI transport", () => {
     expect(sessionIds[2]).not.toBe(sessionIds[0])
   })
 
-  it.each([undefined, "", "123456", "abcdefgh"])(
+  it.each([undefined, "", "ABCDEFG", "ABCDEFGHI"])(
     "blocks missing or invalid SAP identity %s before sending",
     (sapId) => {
       state.sapId = sapId

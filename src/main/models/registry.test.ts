@@ -300,9 +300,10 @@ describe("builtin model registry", () => {
     expect(getModelByTier("premium")?.ref).toBe(minimaxRef)
   })
 
-  it.each([false, true])("keeps Pro available all day with a valid SAP identity (UAT %s)", (useUat) => {
+  it.each([false, true])("keeps Pro available all day with a letter-only SAP ID (UAT %s)", (useUat) => {
     configureIdleModel()
     state.idleModelUseUat = useUat
+    state.sapId = "ABCDEFGH"
     state.storedDefault = "builtin:idle-ultra"
     for (const hour of ["00", "07", "12", "21", "22"]) {
       vi.setSystemTime(new Date(`2026-10-28T${hour}:00:00+08:00`))
