@@ -13,6 +13,7 @@ async function main(): Promise<void> {
       contents: `
 import { createRoot } from "react-dom/client"
 import { Toaster } from "sonner"
+import { Dialog, DialogContent, DialogTitle } from "./src/renderer/src/components/ui/dialog"
 import { GitPanelView } from "./src/renderer/src/components/panels/GitPanelView"
 import { GIT_BRANCH_REFRESH_EVENT } from "./src/shared/git-branches"
 import { normalizeWorkspaceFilesChangedPayload } from "./src/shared/workspace-files-changed"
@@ -30,6 +31,14 @@ let rejectDiff
 let finishNewMeta
 let finishPull
 let filesChanged
+let holdMeta = false
+let finishPushMeta
+let approval = false
+let finishPush
+let backgroundEscapes = 0
+window.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !event.defaultPrevented) backgroundEscapes++
+})
 let metaReads = 0
 let diffReads = 0
 const gitRoot = () => workspacePath === newWorkspace ? "/new-repo" : oldWorkspace
@@ -46,6 +55,12 @@ window.api = {
     getGitPanelMeta: async () => {
       metaReads++
       const result = { ...base, repositoryRoots: [gitRoot()], worktreeBranch: branch }
+      if (holdMeta) {
+        holdMeta = false
+        return new Promise(resolve => { finishPushMeta = () => resolve({
+          ...result, pendingCommits: [{ hash: "abcdef0", message: "pending change", date: "" }]
+        }) })
+      }
       if (branch !== "new-main") return result
       return new Promise(resolve => { finishNewMeta = () => resolve(result) })
     },
@@ -63,16 +78,25 @@ window.api = {
         totals: { fileCount: 1, additions: 1, deletions: 0 }
       }
     },
+    pushWorktree: () => new Promise(resolve => { finishPush = () => resolve({ success: true }) }),
     pullWorktree: () => new Promise(resolve => { finishPull = resolve })
   }
 }
 function render() {
   root.render(<>
     <GitPanelView threadId={threadId} workspacePath={workspacePath} initialGitContext={initialGitContext} />
+    <Dialog open={approval} onOpenChange={open => { approval = open; render() }}>
+      <DialogContent><DialogTitle>审批</DialogTitle><button>查看审批</button></DialogContent>
+    </Dialog>
     <Toaster />
   </>)
 }
 window.fixture = {
+  finishPush: () => finishPush(),
+  backgroundEscapes: () => backgroundEscapes,
+  holdPushMeta: () => { holdMeta = true },
+  finishPushMeta: () => finishPushMeta(),
+  showApproval: () => { approval = true; render() },
   delayDiff: () => { delayDiff = true },
   hasPendingDiff: () => Boolean(rejectDiff),
   hasPendingPull: () => Boolean(finishPull),
@@ -121,11 +145,70 @@ render()
     page.on("pageerror", (error) => pageErrors.push(error))
     page.setDefaultTimeout(4000)
     await page.setContent('<main id="root"></main>')
+    await page.addStyleTag({ content: `
+      [popover="manual"]:popover-open { inset: 0; margin: 0; width: 100%; height: 100%; max-width: none; display: grid; place-items: center; padding: 0 }
+    ` })
     await page.addScriptTag({ content: outputFiles[0].text })
 
     const oldFile = page.getByRole("button", { name: "查看 old.txt 的 diff" })
     const newFile = page.getByRole("button", { name: "查看 new.txt 的 diff" })
     await oldFile.waitFor()
+    const pushTrigger = page.getByRole("button", { name: "Push 推送", exact: true })
+    const dialog = page.getByRole("dialog", { name: "Git 推送" })
+    const push = dialog.getByRole("button", { name: "Push 推送" })
+    const cancel = dialog.getByRole("button", { name: "取消" })
+    const close = dialog.getByRole("button", { name: "Close" })
+    const focused = (element: typeof push) => element.evaluate(node => node === document.activeElement)
+
+    await page.evaluate("window.fixture.holdPushMeta()")
+    await pushTrigger.click()
+    await dialog.waitFor()
+    assert.ok(await push.isDisabled())
+    assert.ok(await focused(cancel))
+    await page.keyboard.press("Shift+Tab")
+    assert.ok(await focused(close))
+    await page.keyboard.press("Tab")
+    assert.ok(await focused(cancel))
+    await page.evaluate("window.fixture.finishPushMeta()")
+    await dialog.getByText("pending change").waitFor()
+    assert.ok(await focused(cancel))
+    await page.keyboard.press("Shift+Tab")
+    assert.ok(await focused(push))
+    await page.evaluate("window.fixture.showApproval()")
+    await page.getByRole("dialog", { name: "审批" }).waitFor()
+    await page.waitForFunction(() => document.activeElement?.textContent === "查看审批")
+    await page.keyboard.press("Escape")
+    await dialog.waitFor()
+    assert.ok(await focused(push))
+    await page.keyboard.press("Escape")
+    await dialog.waitFor({ state: "hidden" })
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Push 推送")
+
+    await pushTrigger.press("Enter")
+    await dialog.getByText("没有可 Push 的 commit").waitFor()
+    assert.ok(await push.isDisabled())
+    await cancel.press("Enter")
+    await dialog.waitFor({ state: "hidden" })
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Push 推送")
+    await pushTrigger.click()
+    await close.click()
+    await dialog.waitFor({ state: "hidden" })
+    await pushTrigger.click()
+    await dialog.waitFor()
+    await page.mouse.click(2, 2)
+    await dialog.waitFor({ state: "hidden" })
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Push 推送")
+    await page.evaluate("window.fixture.holdPushMeta()")
+    await pushTrigger.click()
+    await dialog.waitFor()
+    await page.evaluate("window.fixture.finishPushMeta()")
+    await push.click()
+    await dialog.getByText(/推送中/).waitFor()
+    const escapes = await page.evaluate("window.fixture.backgroundEscapes()")
+    await page.keyboard.press("Escape")
+    await dialog.waitFor({ state: "hidden" })
+    assert.equal(await page.evaluate("window.fixture.backgroundEscapes()"), escapes)
+    await page.evaluate("window.fixture.finishPush()")
     await page.getByRole("button", { name: "Pull 远端代码" }).click()
     await page.waitForFunction("window.fixture.hasPendingPull()")
     await page.evaluate("window.fixture.delayDiff()")
