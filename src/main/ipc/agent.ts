@@ -9411,7 +9411,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   augmentedUserFields,
                   "notification"
                 )
-            : effectiveMessage === message
+            : modsSubmittedText === undefined && effectiveMessage === message
               ? new HumanMessage({
                   id: userMessageId,
                   content: effectiveMessage,
