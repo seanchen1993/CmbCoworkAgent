@@ -9,18 +9,13 @@ import {
   ChevronDown,
   GitGraph,
   Search,
+  X,
   Plus
 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { GitGraphDialog } from "@/components/git/GitGraphDialog"
 import { mapScrollPosition, maxScrollHeight } from "@/components/git/git-graph-layout"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogTitle
-} from "@/components/ui/dialog"
+import { DialogFooter } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { observeWorkbenchDialogOpen } from "@/lib/modal-dialog"
 import { cn } from "@/lib/utils"
@@ -273,6 +268,8 @@ function GitBranchSwitcherImpl({
   const selectedRepositoryPathRef = useRef<string | null>(null)
   const createDialogOpen = useRef(false)
   const newBranchNameId = useId()
+  const newBranchDialogRef = useRef<HTMLDialogElement>(null)
+  const creatingBranch = newBranchName !== null
   const branchMenuId = useId()
   const branchLabelId = `${branchMenuId}-current`
   const branchAnchorName = `--git-branch-${branchMenuId}`
@@ -284,8 +281,46 @@ function GitBranchSwitcherImpl({
 
   const closeCreateDialog = useCallback((): void => {
     createDialogOpen.current = false
+    // Let Chromium restore focus while the input is still mounted.
+    newBranchDialogRef.current?.close()
     setNewBranchName(null)
   }, [])
+
+  useLayoutEffect(() => {
+    const dialog = newBranchDialogRef.current
+    if (!creatingBranch || !dialog) return
+    const input = newBranchInputRef.current
+    if (input) input.autofocus = true
+    dialog.showModal()
+    // A workbench dialog can open asynchronously while Git is still running.
+    const unsubscribe = observeWorkbenchDialogOpen((incoming) => {
+      closeCreateDialog()
+      if (!incoming.contains(document.activeElement)) incoming.focus({ preventScroll: true })
+    })
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (!dialog.open || event.defaultPrevented) return
+      if (event.key === "Escape") {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        if (!event.isComposing) closeCreateDialog()
+      } else if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        // Chromium can move focus out of the renderer at either end of a modal dialog.
+        const last = dialog.querySelector<HTMLButtonElement>(":scope > button")
+        const active = document.activeElement
+        if (active === dialog || active === (event.shiftKey ? input : last) || !dialog.contains(active)) {
+          event.preventDefault()
+          const next = event.shiftKey ? last : input
+          next?.focus({ preventScroll: true })
+        }
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown, true)
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true)
+      unsubscribe()
+      dialog.close()
+    }
+  }, [creatingBranch, closeCreateDialog])
 
   const handleMenuClosed = useCallback((): void => {
     if (!menuOpen.current) return
@@ -801,9 +836,15 @@ function GitBranchSwitcherImpl({
 
         const label = create ? "已创建并检出新分支" : "已切换分支"
         const sourceLabel = foreground ? repoLabel : `${targetCwd} `
-        toast.success(`${sourceLabel}${label} ${result.branch}`, {
+        const showSuccess = () => toast.success(`${sourceLabel}${label} ${result.branch}`, {
           description: result.warning
         })
+        if (create && foreground && !document.hidden) {
+          // Sonner synchronously measures new notifications. Paint the restored workbench first.
+          requestAnimationFrame(() => setTimeout(showSuccess, 0))
+        } else {
+          showSuccess()
+        }
       } catch (err) {
         reportFailure(err instanceof Error ? err.message : failure)
       } finally {
@@ -1275,6 +1316,8 @@ function GitBranchSwitcherImpl({
                 onClick={() => {
                   menuOpensDialog.current = true
                   closeMenu()
+                  // showModal restores focus to this invoker when the dialog closes.
+                  triggerRef.current?.focus({ preventScroll: true })
                   setActionError(null)
                   createDialogOpen.current = true
                   React.startTransition(() => setNewBranchName(""))
@@ -1297,75 +1340,81 @@ function GitBranchSwitcherImpl({
             </button>
           </div>
         </BranchMenu>
-      {newBranchName !== null && (
-        <Dialog
-          open
-          onOpenChange={(next) => {
-            if (!next) closeCreateDialog()
+      {newBranchName !== null && createPortal(
+        <dialog
+          ref={newBranchDialogRef}
+          closedby="any"
+          data-cmb-modal-dialog="true"
+          aria-labelledby={`${newBranchNameId}-title`}
+          aria-describedby={`${newBranchNameId}-description`}
+          className="fixed inset-0 m-auto w-[min(32rem,94vw)] max-w-lg rounded-2xl border border-border bg-popover p-6 text-foreground shadow-lg backdrop:bg-black/35 [-webkit-app-region:no-drag]"
+          onCancel={(event) => {
+            event.preventDefault()
+            closeCreateDialog()
           }}
         >
-          <DialogContent
-            className="w-[min(32rem,94vw)] gap-0 rounded-2xl bg-popover p-6 sm:rounded-2xl"
-            onEscapeKeyDown={(event) => {
-              if (event.isComposing) event.preventDefault()
-            }}
-            onCloseAutoFocus={(event) => {
+          <h2 id={`${newBranchNameId}-title`} className="text-lg font-medium leading-none tracking-tight">
+            创建并检出新分支
+          </h2>
+          <p id={`${newBranchNameId}-description`} className="mt-2 text-sm leading-6 text-muted-foreground">
+            基于当前 HEAD 创建一个新的本地分支，并在创建成功后立即切换过去。
+            {busy && "关闭后，Git 操作会继续。"}
+          </p>
+          <form
+            className="mt-6 space-y-2"
+            onSubmit={(event) => {
               event.preventDefault()
-              triggerRef.current?.focus()
+              void changeBranch({ name: trimGitBranchInput(newBranchName), kind: "local" }, true)
             }}
           >
-            <DialogTitle className="text-lg font-medium">创建并检出新分支</DialogTitle>
-            <DialogDescription className="leading-6">
-              基于当前 HEAD 创建一个新的本地分支，并在创建成功后立即切换过去。
-              {busy && "关闭后，Git 操作会继续。"}
-            </DialogDescription>
-            <form
-              className="mt-6 space-y-2"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void changeBranch({ name: trimGitBranchInput(newBranchName), kind: "local" }, true)
+            <label className="block text-sm font-medium" htmlFor={newBranchNameId}>
+              分支名
+            </label>
+            <input
+              id={newBranchNameId}
+              ref={newBranchInputRef}
+              value={newBranchName}
+              readOnly={busy}
+              placeholder="例如 feature/git-branch-switcher"
+              onChange={(event) => {
+                setNewBranchName(event.target.value)
+                setActionError(null)
               }}
-            >
-              <label className="block text-sm font-medium" htmlFor={newBranchNameId}>
-                分支名
-              </label>
-              <input
-                id={newBranchNameId}
-                ref={newBranchInputRef}
-                value={newBranchName}
-                readOnly={busy}
-                placeholder="例如 feature/git-branch-switcher"
-                onChange={(event) => {
-                  setNewBranchName(event.target.value)
-                  setActionError(null)
-                }}
-                className="h-10 w-full rounded-lg border bg-background px-3 text-sm focus-visible:outline-ring"
-              />
-              {actionError && (
-                <p role="alert" className="text-sm text-destructive">
-                  {actionError}
-                </p>
-              )}
-              <DialogFooter className="pt-5">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="h-10 rounded-lg px-5"
-                  onClick={closeCreateDialog}
-                >
-                  {busy ? "关闭" : "取消"}
-                </Button>
-                <Button
-                  type="submit"
-                  className="h-10 rounded-lg bg-foreground px-5 text-background hover:bg-foreground/90"
-                  disabled={busy || !trimGitBranchInput(newBranchName)}
-                >
-                  {busy && <Loader2 className="size-4 animate-spin" />}创建并切换
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+              className="h-10 w-full rounded-lg border bg-background px-3 text-sm focus-visible:outline-ring"
+            />
+            {actionError && (
+              <p role="alert" className="text-sm text-destructive">
+                {actionError}
+              </p>
+            )}
+            <DialogFooter className="pt-5">
+              <Button
+                type="button"
+                variant="secondary"
+                className="h-10 rounded-lg px-5"
+                onClick={closeCreateDialog}
+              >
+                {busy ? "关闭" : "取消"}
+              </Button>
+              <Button
+                type="submit"
+                className="h-10 rounded-lg bg-foreground px-5 text-background hover:bg-foreground/90"
+                disabled={busy || !trimGitBranchInput(newBranchName)}
+              >
+                {busy && <Loader2 className="size-4 animate-spin" />}创建并切换
+              </Button>
+            </DialogFooter>
+          </form>
+          <button
+            type="button"
+            aria-label="关闭创建分支弹窗"
+            className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus-visible:ring-2"
+            onClick={closeCreateDialog}
+          >
+            <X className="size-4" />
+          </button>
+        </dialog>,
+        document.body
       )}
       {graphOpen && (
         <GitGraphDialog

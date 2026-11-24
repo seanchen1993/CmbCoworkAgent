@@ -239,6 +239,17 @@ export const isThreadDeletionPending = () => false;
       ["graph-skill-request", false], ["branch-skill-request", false]
     ])
 
+    await page.getByRole("button", { name: "切换 Git 分支" }).click()
+    await page.getByRole("button", { name: "创建并检出新分支…" }).click()
+    const createDialog = page.getByRole("dialog", { name: "创建并检出新分支" })
+    await createDialog.waitFor()
+    await page.evaluate("window.receiveSkillApproval('create-skill-request')")
+    await createDialog.waitFor({ state: "detached" })
+    await skillApproval.waitFor()
+    assert.equal(await skillApproval.evaluate((node) => node.contains(document.activeElement)), true)
+    await page.keyboard.press("Escape")
+    await skillApproval.waitFor({ state: "detached" })
+
     await shortcut()
     await searchInput.waitFor()
     await shortcut()

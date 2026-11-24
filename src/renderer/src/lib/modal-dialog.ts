@@ -19,12 +19,13 @@ export function hasOpenModalDialog(): boolean {
 
 // Workbench DialogContent portals to body. Native popovers need to yield their
 // top-layer position when an asynchronous dialog takes keyboard focus.
-export function observeWorkbenchDialogOpen(onOpen: () => void): () => void {
+export function observeWorkbenchDialogOpen(onOpen: (dialog: HTMLElement) => void): () => void {
   const body = document.body
   const check = (): void => {
-    if (!body.querySelector(`:scope > ${MODAL_DIALOG_SELECTOR}[data-state="open"]`)) return
+    const dialog = body.querySelector<HTMLElement>(`:scope > ${MODAL_DIALOG_SELECTOR}[data-state="open"]`)
+    if (!dialog) return
     observer.disconnect()
-    onOpen()
+    onOpen(dialog)
   }
   const observer = new MutationObserver(check)
   observer.observe(body, { childList: true })
