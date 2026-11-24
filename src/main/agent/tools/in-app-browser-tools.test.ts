@@ -1,5 +1,8 @@
-const browserConfig = vi.hoisted(() => ({ config: vi.fn(), port: vi.fn() }))
-vi.mock("../../storage", () => ({ getBrowserCdpConfigAsync: browserConfig.config }))
+const browserConfig = vi.hoisted(() => ({ config: vi.fn(), save: vi.fn(), port: vi.fn() }))
+vi.mock("../../storage", () => ({
+  getBrowserCdpConfigAsync: browserConfig.config,
+  saveBrowserCdpConfigAsync: browserConfig.save
+}))
 vi.mock("../../browser/cdp/browser-cdp", () => ({ getCurrentBrowserCdpPort: browserConfig.port }))
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { McpCapabilityTool } from "../../mcp/capability-types"
@@ -31,7 +34,11 @@ vi.mock("../../browser/record/common/browser-script-execution-service", () => ({
   cancelRecordingScriptExecutionInBuiltinBrowser: mocks.cancel,
   getBrowserScriptExecutionState: mocks.state
 }))
-import { createInAppBrowserTools } from "./in-app-browser-tools"
+import {
+  createInAppBrowserAgentTools,
+  createInAppBrowserBootstrapTools,
+  createInAppBrowserTools
+} from "./in-app-browser-tools"
 const capabilities = [
   { providerDisplayName: "In-app-browser", toolName: "browser_snapshot" }
 ] as McpCapabilityTool[]
@@ -40,6 +47,10 @@ const input = { fileName: "recording.spec.ts", variableValues: { 变量_企业: 
 beforeEach(() => {
   vi.resetAllMocks()
   browserConfig.config.mockReturnValue({ enabled: true })
+  browserConfig.save.mockImplementation(async (updates) => ({
+    enabled: updates.enabled ?? false,
+    profileImportEnabled: false
+  }))
   browserConfig.port.mockReturnValue(9222)
   mocks.list.mockResolvedValue([
     { fileName: input.fileName, displayName: "市场系统查询企业管户信息", description: "按企业查询" }
@@ -54,6 +65,65 @@ beforeEach(() => {
   mocks.readWpsDocument.mockResolvedValue({ text: "第一段\n第二段" })
 })
 describe("in-app browser agent tools", () => {
+  it("assembles bootstrap and ready browser tools behind one runtime entry point", async () => {
+    expect(
+      (await createInAppBrowserAgentTools(capabilities, context)).map((tool) => tool.name)
+    ).toEqual([
+      "inAppBrowser_enable_control",
+      "inAppBrowser_list_recordings",
+      "inAppBrowser_execute_recording",
+      "inAppBrowser_extract_iframes",
+      "inAppBrowser_read_wps_document"
+    ])
+
+    browserConfig.config.mockReturnValue({ enabled: false })
+    browserConfig.port.mockReturnValue(null)
+    expect(
+      (await createInAppBrowserAgentTools(capabilities, context)).map((tool) => tool.name)
+    ).toEqual(["inAppBrowser_enable_control"])
+  })
+
+  it("exposes an idempotent bootstrap tool while browser control is disabled", async () => {
+    browserConfig.config.mockResolvedValue({ enabled: false, profileImportEnabled: false })
+    browserConfig.port.mockReturnValue(null)
+
+    const [enable] = createInAppBrowserBootstrapTools()
+    const result = JSON.parse((await enable.invoke({ userConfirmed: true })) as string)
+
+    expect(enable.name).toBe("inAppBrowser_enable_control")
+    expect(browserConfig.save).toHaveBeenCalledWith({ enabled: true })
+    expect(result).toMatchObject({
+      enabled: true,
+      profileImportEnabled: false,
+      changed: true,
+      restartRequired: true
+    })
+  })
+
+  it("does not alter profile import or rewrite an already enabled config", async () => {
+    browserConfig.config.mockResolvedValue({ enabled: true, profileImportEnabled: true })
+    browserConfig.port.mockReturnValue(9222)
+
+    const result = JSON.parse(
+      (await createInAppBrowserBootstrapTools()[0].invoke({ userConfirmed: true })) as string
+    )
+
+    expect(browserConfig.save).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      enabled: true,
+      profileImportEnabled: true,
+      changed: false,
+      restartRequired: false
+    })
+  })
+
+  it("requires an explicit confirmation marker before changing browser control", async () => {
+    browserConfig.config.mockResolvedValue({ enabled: false, profileImportEnabled: false })
+
+    await expect(createInAppBrowserBootstrapTools()[0].invoke({})).rejects.toThrow()
+    expect(browserConfig.save).not.toHaveBeenCalled()
+  })
+
   it.each([false, undefined])(
     "does not inject without explicit browser opt-in: %s",
     async (enabled) => {

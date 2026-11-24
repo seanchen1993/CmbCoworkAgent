@@ -1,4 +1,7 @@
-import { BOT_TOOL_LABELS } from "../../../shared/tool-call-summary"
+import {
+  BOT_TOOL_LABELS,
+  IN_APP_BROWSER_HELPER_TOOL_LABELS
+} from "../../../shared/tool-call-summary"
 
 export const IN_APP_BROWSER_TOOL_LABELS: Record<string, string> = {
   mcp__inAppBrowser__browser_close: "内置浏览器-关闭",
@@ -62,10 +65,7 @@ const TOOL_LABELS: Record<string, string> = {
   inspect_tool: "查看工具定义",
   search_tool: "搜索工具",
   ...BOT_TOOL_LABELS,
-  inAppBrowser_extract_iframes: "内置浏览器-提取 iframe 内容",
-  inAppBrowser_read_wps_document: "内置浏览器-读取 WPS 文档全文",
-  inAppBrowser_list_recordings: "内置浏览器-检索可复用操作",
-  inAppBrowser_execute_recording: "内置浏览器-执行可复用操作",
+  ...IN_APP_BROWSER_HELPER_TOOL_LABELS,
   ...IN_APP_BROWSER_TOOL_LABELS
 }
 

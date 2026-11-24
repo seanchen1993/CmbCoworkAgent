@@ -17,8 +17,17 @@ export const BOT_TOOL_LABELS: Record<string, string> = {
   bot_forget: "删除 Bot 记忆"
 }
 
+export const IN_APP_BROWSER_HELPER_TOOL_LABELS: Record<string, string> = {
+  inAppBrowser_enable_control: "内置浏览器-开启 Agent 控制",
+  inAppBrowser_extract_iframes: "内置浏览器-提取 iframe 内容",
+  inAppBrowser_read_wps_document: "内置浏览器-读取 WPS 文档全文",
+  inAppBrowser_list_recordings: "内置浏览器-检索可复用操作",
+  inAppBrowser_execute_recording: "内置浏览器-执行可复用操作"
+}
+
 const COLLAPSED_TOOL_LABELS: Record<string, string> = {
   ...BOT_TOOL_LABELS,
+  ...IN_APP_BROWSER_HELPER_TOOL_LABELS,
   read_file: "读取文件",
   write_file: "写入文件",
   edit_file: "编辑文件",
@@ -38,10 +47,6 @@ const COLLAPSED_TOOL_LABELS: Record<string, string> = {
   invoke_deferred_tool: "调用延迟加载的工具",
   inspect_tool: "查看工具定义",
   search_tool: "搜索工具",
-  inAppBrowser_extract_iframes: "内置浏览器-提取 iframe 内容",
-  inAppBrowser_read_wps_document: "内置浏览器-读取 WPS 文档全文",
-  inAppBrowser_list_recordings: "内置浏览器-检索可复用操作",
-  inAppBrowser_execute_recording: "内置浏览器-执行可复用操作",
   mcp__inAppBrowser__browser_close: "内置浏览器-关闭",
   mcp__inAppBrowser__browser_resize: "内置浏览器-调整窗口大小",
   mcp__inAppBrowser__browser_console_messages: "内置浏览器-获取控制台消息",

@@ -420,7 +420,7 @@ import {
   getActionStationarityHaltError
 } from "./action-stationarity"
 import { createLspTool } from "./tools/lsp-tool"
-import { createInAppBrowserTools } from "./tools/in-app-browser-tools"
+import { createInAppBrowserAgentTools } from "./tools/in-app-browser-tools"
 import { detectJavaProject } from "../lsp"
 import {
   buildAgentsPromptLoadStatusItems,
@@ -6072,7 +6072,7 @@ The workspace root is: ${fileRoot}`
 
   if (!disableMcpTools && !isConstrainedCoordinatorWorker) {
     extraTools.push(
-      ...(await createInAppBrowserTools(allMcpTools, {
+      ...(await createInAppBrowserAgentTools(allMcpTools, {
         workspacePath,
         threadId: options.threadId,
         abortSignal: options.abortSignal

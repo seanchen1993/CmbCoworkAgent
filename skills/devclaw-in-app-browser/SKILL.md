@@ -16,11 +16,12 @@ The built-in browser is disabled by default.
 If a browser request cannot start, navigation fails because the browser service is unavailable, or the expected page-control tools are missing, follow this gate before doing anything else:
 
 1. Tell the user that the built-in browser is disabled by default.
-2. Ask the user to confirm both of the following: the built-in browser has been enabled by opening the **“浏览器”** tab in the upper-right corner and clicking its enable button, and the App has been restarted after enablement.
-3. Wait for the user's explicit answer covering both conditions. Tool presence, an earlier App session, or an assumption that it was enabled does not count as confirmation for the current App session.
-4. If it is not enabled, tell the user to open the upper-right **“浏览器”** tab, click the enable button, and then restart the App. Stop troubleshooting until they complete those actions.
-5. If it is enabled but the App has not been restarted afterward, tell the user to restart the App and open a new conversation. Stop troubleshooting until they do so.
-6. Only if the user explicitly confirms both enablement and the subsequent App restart may you continue troubleshooting tool availability.
+2. Explain that enabling Agent control changes an App security setting, does not import Chrome login state, and requires an App restart. Ask whether the user wants you to enable it. A request to open, visit, read, or operate a web page is not consent to change this setting.
+3. Wait for the user's explicit confirmation in a subsequent message. Do not call an enablement tool in the same turn in which you first explain or ask. Tool presence, an earlier App session, or an assumption that the user probably wants it enabled does not count as confirmation.
+4. After that confirmation, call `inAppBrowser_enable_control` with `userConfirmed: true` when it is available. When it returns `restartRequired=true`, tell the user to restart the App and stop browser work for the current turn.
+5. If the enablement tool is unavailable, tell the user to open the upper-right **“浏览器”** tab, click the enable button, and then restart the App. Stop troubleshooting until they complete those actions.
+6. If the user says it is already enabled, ask whether the App was restarted afterward. If not, tell the user to restart it and open a new conversation.
+7. Only if the tool reports the runtime ready, or the user explicitly confirms both enablement and the subsequent App restart, may you continue troubleshooting tool availability.
 
 1. Inspect the tools available in the current conversation for `inAppBrowser` capabilities. Page-control tools normally begin with `mcp__inAppBrowser__browser_`; product helpers include `inAppBrowser_list_recordings`, `inAppBrowser_execute_recording`, `inAppBrowser_extract_iframes`, and `inAppBrowser_read_wps_document`.
 2. Treat the built-in browser as usable only when at least one relevant page-control tool is available. A product helper by itself does not prove that the agent can open or operate a page. When usable page-control tools are available, prefer them over external browser tools and follow the operating guidance below.

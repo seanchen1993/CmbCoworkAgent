@@ -1,7 +1,7 @@
 import { tool } from "langchain"
 import type { DynamicStructuredTool } from "@langchain/core/tools"
 import { z } from "zod"
-import { getBrowserCdpConfigAsync } from "../../storage"
+import { getBrowserCdpConfigAsync, saveBrowserCdpConfigAsync } from "../../storage"
 import { getCurrentBrowserCdpPort } from "../../browser/cdp/browser-cdp"
 import { preparePlaywrightInAppBrowser } from "../../browser/cdp/playwright-mcp-bridge"
 import { getGlobalBrowserService } from "../../browser/core/browser-service-registry"
@@ -18,6 +18,57 @@ import {
 import { extractScriptRecordingVariables } from "../../../shared/browser-script-recording"
 
 type BrowserScriptLibraryEntry = Awaited<ReturnType<typeof listBrowserScriptLibraryEntries>>[number]
+
+/**
+ * This bootstrap tool must remain available while browser control is disabled.
+ * Enabling the persisted setting cannot start Chromium's CDP endpoint in the
+ * current process, so callers are told explicitly when a restart is required.
+ */
+export function createInAppBrowserBootstrapTools(): DynamicStructuredTool[] {
+  return [
+    tool(
+      async ({ userConfirmed }) => {
+        // The literal schema makes the consent hand-off visible in the tool call and transcript.
+        void userConfirmed
+        const current = await getBrowserCdpConfigAsync()
+        const saved = current.enabled ? current : await saveBrowserCdpConfigAsync({ enabled: true })
+        const runtimeReady = getCurrentBrowserCdpPort() !== null
+        return JSON.stringify({
+          enabled: saved.enabled,
+          profileImportEnabled: saved.profileImportEnabled,
+          changed: !current.enabled,
+          restartRequired: !runtimeReady,
+          message: runtimeReady
+            ? "内置浏览器控制已开启。"
+            : "内置浏览器控制配置已保存，需要用户重启应用后生效。请勿声称当前回合已经可以操控浏览器。"
+        })
+      },
+      {
+        name: "inAppBrowser_enable_control",
+        description:
+          "修改 App 安全设置，开启 Agent 对内置浏览器的控制能力。用户仅要求打开或操作网页不构成授权：必须先说明该设置默认关闭、不会导入 Chrome 登录状态且需要重启 App，询问是否开启，并等待用户在后续消息中明确同意后才能调用。此工具不会自动重启应用。若返回 restartRequired=true，告知用户重启应用；不要在当前回合继续尝试浏览器操作。",
+        schema: z
+          .object({
+            userConfirmed: z
+              .literal(true)
+              .describe("仅在用户已于后续消息中明确同意开启 Agent 浏览器控制后传 true。")
+          })
+          .strict()
+      }
+    )
+  ]
+}
+
+/** Assemble the complete in-app-browser surface without leaking its lifecycle to Runtime. */
+export async function createInAppBrowserAgentTools(
+  capabilities: McpCapabilityTool[],
+  context: { workspacePath: string; threadId?: string; abortSignal?: AbortSignal }
+): Promise<DynamicStructuredTool[]> {
+  return [
+    ...createInAppBrowserBootstrapTools(),
+    ...(await createInAppBrowserTools(capabilities, context))
+  ]
+}
 
 function resolveRecordingEntry(
   entries: BrowserScriptLibraryEntry[],

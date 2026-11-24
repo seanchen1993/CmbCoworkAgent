@@ -33,6 +33,9 @@ describe("collapsed tool-call search summary", () => {
   })
 
   it("preserves the localized in-app browser titles", () => {
+    expect(getCollapsedToolCallSummary({ name: "inAppBrowser_enable_control" })).toBe(
+      "内置浏览器-开启 Agent 控制"
+    )
     expect(getCollapsedToolCallSummary({ name: "inAppBrowser_extract_iframes" })).toBe(
       "内置浏览器-提取 iframe 内容"
     )
