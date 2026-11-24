@@ -854,18 +854,20 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     detachedHookLogEnd
   )
   const historyHeader = historyHasMore ? (
-    <button
-      type="button"
-      data-chat-history-boundary="older"
-      onClick={onLoadEarlierHistoryPage}
-      disabled={historyPageLoading}
-      className="mx-auto mb-4 flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-60"
-    >
-      {historyPageLoading && <Loader2 className="size-3 animate-spin" />}
-      {historyPageLoading
-        ? "正在加载更早消息"
-        : `加载更早的 ${Math.max(1, Math.min(500, historyRemainingCount))} 条消息`}
-    </button>
+    <div data-chat-message-inset>
+      <button
+        type="button"
+        data-chat-history-boundary="older"
+        onClick={onLoadEarlierHistoryPage}
+        disabled={historyPageLoading}
+        className="mx-auto mb-4 flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+      >
+        {historyPageLoading && <Loader2 className="size-3 animate-spin" />}
+        {historyPageLoading
+          ? "正在加载更早消息"
+          : `加载更早的 ${Math.max(1, Math.min(500, historyRemainingCount))} 条消息`}
+      </button>
+    </div>
   ) : null
   const footerContent = (
     <>
