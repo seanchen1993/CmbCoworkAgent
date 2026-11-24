@@ -1,4 +1,8 @@
 import type { Message } from "../types"
+import { preserveAssistantReasoningByRoleCollisionIdentity } from "../../../shared/message-role-collision"
+import { compareTranscriptPositions } from "../../../shared/thread-message-order"
+import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../shared/goal-events"
+import { insertPageGoalMessages } from "./goal-transcript"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
 import { mergeDurableTranscriptSnapshot } from "./live-stream-transcript"
 
@@ -22,7 +26,7 @@ export type ThreadMessagePageReloadCursor =
 
 export interface ThreadMessageWindowGap {
   afterMessageId: string
-  beforeMessageId: string
+  beforeMessageId: string | null
   evictedMessageCount: number
   reloadBeforeOrdinal: number | null
   reloadBeforeMessageId: string | null
@@ -34,6 +38,7 @@ export interface ThreadMessageWindowGap {
 export interface ThreadMessageWindowResult {
   messages: Message[]
   gap: ThreadMessageWindowGap | null
+  reusedLayout?: boolean
 }
 
 interface BoundedThreadMessageWindowOptions {
@@ -55,21 +60,31 @@ interface BoundedThreadMessageWindowOptions {
 export interface ThreadMessagePageWindow {
   firstMessageId: string
   lastMessageId: string
+  firstDurableMessageId?: string
+  lastDurableMessageId?: string
   reloadCursor: ThreadMessagePageReloadCursor | null
+  beforeCreatedAt?: Date
 }
 
 const THREAD_MESSAGE_PAGE_WINDOW_LIMIT = 2_048
 
 export function createThreadMessagePageWindow(
   messages: readonly Message[],
-  reloadCursor: ThreadMessagePageReloadCursor | null
+  reloadCursor: ThreadMessagePageReloadCursor | null,
+  beforeCreatedAt?: Date,
+  rawPage?: readonly Pick<Message, "id">[]
 ): ThreadMessagePageWindow {
   const first = messages[0]
   const last = messages.at(-1)
+  const firstDurable = rawPage?.[0]?.id
+  const lastDurable = rawPage?.at(-1)?.id
   return {
     firstMessageId: first?.id ?? "",
     lastMessageId: last?.id ?? "",
-    reloadCursor: reloadCursor ? { ...reloadCursor } : null
+    ...(firstDurable && firstDurable !== first?.id && { firstDurableMessageId: firstDurable }),
+    ...(lastDurable && lastDurable !== last?.id && { lastDurableMessageId: lastDurable }),
+    reloadCursor: reloadCursor ? { ...reloadCursor } : null,
+    ...(beforeCreatedAt && { beforeCreatedAt })
   }
 }
 
@@ -94,6 +109,18 @@ export function isForwardThreadMessagePageCursor(
   cursor: ThreadMessagePageReloadCursor | null
 ): boolean {
   return Boolean(cursor && "anchorMessageId" in cursor)
+}
+
+/** Backward reads require a real SQLite row, even when the page displays only Goal sidecars. */
+export function getForwardPageBackwardBoundary(
+  displayed: readonly Message[], rawPage: readonly Message[]
+): Message | undefined {
+  const firstDisplayed = displayed.find(({ id, ordinal }) =>
+    ordinal !== undefined && !id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX))
+  const firstRaw = rawPage[0]
+  if (firstRaw?.ordinal === undefined) return firstDisplayed
+  return !firstDisplayed || compareTranscriptPositions(firstRaw, firstDisplayed) <= 0
+    ? firstRaw : firstDisplayed
 }
 
 /** Backward/latest pages may advance only when their overlap proves no durable row was skipped. */
@@ -167,6 +194,8 @@ export function attachThreadMessageGapReload(
   knownDurableBoundaryMessageIds?: ReadonlySet<string>
 ): ThreadMessageWindowGap | null {
   if (!gap) return null
+  if (gap.reloadAnchorMessageId && gap.reloadTargetMessageId === gap.reloadAnchorMessageId)
+    return gap
   const boundaryIndex = pageWindows.findIndex(
     (window) => window.lastMessageId === gap.afterMessageId
   )
@@ -194,7 +223,7 @@ export function attachThreadMessageGapReload(
     reloadAnchorMessageId: forwardAnchor,
     // A null cursor on a known latest-page descriptor means "reload the latest page", not
     // "unavailable". `reloadTargetMessageId` is therefore the availability discriminator.
-    reloadTargetMessageId: nextWindow?.firstMessageId ?? forwardAnchor
+    reloadTargetMessageId: nextWindow?.firstDurableMessageId ?? nextWindow?.firstMessageId ?? forwardAnchor
   }
 }
 
@@ -217,11 +246,13 @@ export function prependThreadMessagePage(
   olderPage: readonly Message[]
 ): Message[] {
   if (olderPage.length === 0) return existing as Message[]
+  const retainedIds = new Set(existing.map(({ id }) => id))
   const retainedIdentities = new Set(existing.map(threadMessagePageIdentity))
   const prefix: Message[] = []
   for (const message of olderPage) {
     const identity = threadMessagePageIdentity(message)
-    if (retainedIdentities.has(identity)) continue
+    if (retainedIds.has(message.id) || retainedIdentities.has(identity)) continue
+    retainedIds.add(message.id)
     retainedIdentities.add(identity)
     prefix.push(message)
   }
@@ -258,6 +289,47 @@ export function prependBoundedThreadMessagePage(
   )
   if (merged.length <= sizes.maximum) {
     return { messages: merged, gap: options.existingGap ?? null }
+  }
+
+  const knownGap = options.existingGap
+  if (knownGap?.reloadTargetMessageId) {
+    const gapTailStart = findThreadMessageGapTailStart(merged, knownGap)
+    if (gapTailStart > 0) {
+      // The detached prefix cannot fill spare capacity reserved for the latest
+      // tail. Doing so would split the known missing interval into two gaps.
+      const retainedTail = merged.slice(Math.max(gapTailStart, merged.length - sizes.tail))
+      const prefixLimit = Math.min(gapTailStart, sizes.maximum - retainedTail.length)
+      const beforeMessageId = retainedTail[0]?.id ?? null
+      if (prefixLimit === gapTailStart) {
+        const messages = [...merged.slice(0, prefixLimit), ...retainedTail]
+        return {
+          messages,
+          gap: {
+            ...knownGap, beforeMessageId,
+            evictedMessageCount: knownGap.evictedMessageCount + merged.length - messages.length
+          }
+        }
+      }
+      const durableIds = options.fallbackReloadBoundaryMessageIds
+      for (let index = prefixLimit - 1; index >= 0; index -= 1) {
+        const id = merged[index].id
+        if (!durableIds?.has(id) || id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) continue
+        const messages = [...merged.slice(0, index + 1), ...retainedTail]
+        return {
+          messages,
+          gap: {
+            afterMessageId: id,
+            beforeMessageId,
+            evictedMessageCount: knownGap.evictedMessageCount + merged.length - messages.length,
+            reloadBeforeOrdinal: null,
+            reloadBeforeMessageId: null,
+            reloadExactMessageId: null,
+            reloadAnchorMessageId: id,
+            reloadTargetMessageId: id
+          }
+        }
+      }
+    }
   }
 
   const tailStart = merged.length - sizes.tail
@@ -353,6 +425,20 @@ interface AdvanceThreadMessageWindowAcrossGapOptions {
   gap: ThreadMessageWindowGap
   maximumResidentMessages: number
   protectedTailMessages: number
+  activeMessageIds?: ReadonlySet<string>
+  rawPage?: readonly Message[]
+  hasMore?: boolean
+}
+
+function refreshThreadMessageFromPage(durable: Message, local: Message | undefined, active?: ReadonlySet<string>): Message {
+  if (!local) return durable
+  const [refreshed] = preserveAssistantReasoningByRoleCollisionIdentity([local], [durable])
+  if (active?.has(durable.id) && local.role === "assistant" && durable.role === "assistant" &&
+      typeof local.content === "string" && typeof durable.content === "string" &&
+      local.content.startsWith(durable.content) && local.content.length > durable.content.length) {
+    return { ...refreshed, content: local.content, tool_calls: local.tool_calls ?? refreshed.tool_calls }
+  }
+  return refreshed
 }
 
 /** Move the detached historical window one known durable page toward the protected latest tail. */
@@ -361,17 +447,24 @@ export function advanceThreadMessageWindowAcrossGap(
   reloadedPage: readonly Message[],
   options: AdvanceThreadMessageWindowAcrossGapOptions
 ): ThreadMessageWindowResult {
-  const gapTailStart = existing.findIndex(
-    (message) => message.id === options.gap.beforeMessageId
-  )
+  const gapTailStart = findThreadMessageGapTailStart(existing, options.gap)
   const tailCandidates = gapTailStart >= 0 ? existing.slice(gapTailStart) : []
   const protectedTailCount = Math.max(0, Math.floor(options.protectedTailMessages))
-  const retainedTail = tailCandidates.slice(-protectedTailCount)
-  const retainedTailIdentities = new Set(retainedTail.map(threadMessagePageIdentity))
-  const pageOverlapsTail = reloadedPage.some((message) =>
-    retainedTailIdentities.has(threadMessagePageIdentity(message))
-  )
-  const merged = prependThreadMessagePage(retainedTail, reloadedPage)
+  const retainedTail = protectedTailCount ? tailCandidates.slice(-protectedTailCount) : []
+  const before = new Map(retainedTail.map((message) => [message.id, message]))
+  const pageIds = new Set(reloadedPage.map(({ id }) => id))
+  const pageIdentities = threadMessagePageIdentitySet(reloadedPage)
+  const newest = retainedTail.filter((message) =>
+    !pageIds.has(message.id) && !pageIdentities.has(threadMessagePageIdentity(message)))
+  const rawPage = options.rawPage ?? reloadedPage
+  const rawIds = new Set(rawPage.map(({ id }) => id))
+  const rawIdentities = threadMessagePageIdentitySet(rawPage)
+  const pageOverlapsTail = retainedTail.some((message) =>
+    !message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX) &&
+    (rawIds.has(message.id) || rawIdentities.has(threadMessagePageIdentity(message))))
+  const refreshed = reloadedPage.map((message) => refreshThreadMessageFromPage(
+    message, before.get(message.id), options.activeMessageIds))
+  const merged = [...refreshed, ...newest]
   const maximum = Math.max(1, Math.floor(options.maximumResidentMessages))
   const messages = merged.length > maximum ? merged.slice(-maximum) : merged
   const pageTail = reloadedPage.at(-1)
@@ -380,10 +473,11 @@ export function advanceThreadMessageWindowAcrossGap(
   return {
     messages,
     gap:
-      !pageOverlapsTail && pageTail && tailHead
+      !pageOverlapsTail && pageTail && options.hasMore !== false &&
+      (tailHead || options.hasMore === true)
         ? {
             afterMessageId: pageTail.id,
-            beforeMessageId: tailHead.id,
+            beforeMessageId: tailHead?.id ?? null,
             evictedMessageCount: Math.max(
               1,
               options.gap.evictedMessageCount - reloadedPage.length
@@ -403,6 +497,29 @@ interface TargetedThreadMessageWindowOptions {
   protectedTailMessages: number
   maximumResidentMessages: number
   existingGap?: ThreadMessageWindowGap | null
+  residentOrdinals?: ReadonlyMap<string, number | null>
+  goalAnchors?: ReadonlyMap<string, string>
+  activeMessageIds?: ReadonlySet<string>
+  hasNewerMessages?: boolean
+}
+
+export function findThreadMessageGapTailStart(
+  messages: readonly Message[], gap: ThreadMessageWindowGap
+): number {
+  const before = gap.beforeMessageId
+    ? messages.findIndex(({ id }) => id === gap.beforeMessageId) : -1
+  if (before >= 0) return before
+  const after = messages.findIndex(({ id }) => id === gap.afterMessageId)
+  return after < 0 ? -1 : after + 1
+}
+
+export function selectTargetedThreadMessageTail(
+  existing: readonly Message[], limit: number, gap?: ThreadMessageWindowGap | null
+): readonly Message[] {
+  if (limit <= 0) return []
+  if (!gap) return existing.slice(-limit)
+  const start = findThreadMessageGapTailStart(existing, gap)
+  return start < 0 ? [] : existing.slice(Math.max(start, existing.length - limit))
 }
 
 /** Build a bounded historical search window while keeping the active newest tail resident. */
@@ -413,6 +530,31 @@ export function createTargetedThreadMessageWindow(
 ): ThreadMessageWindowResult {
   const targetIndex = targetPage.findIndex((message) => message.id === options.targetMessageId)
   if (targetIndex < 0) return { messages: existing as Message[], gap: null }
+  const resident = existing.findIndex((message) => message.id === options.targetMessageId)
+  const before = new Map(existing.map((message) => [message.id, message]))
+  const fetched = new Map(targetPage.map((message) => [message.id, message]))
+  const refresh = (durable: Message) => refreshThreadMessageFromPage(
+    durable, before.get(durable.id), options.activeMessageIds)
+  const firstSaved = existing.find(({ ordinal }) => ordinal !== undefined)
+  const lastSaved = existing.findLast(({ ordinal }) => ordinal !== undefined)
+  const obsoleteGap = options.hasNewerMessages === false && options.existingGap?.afterMessageId === options.targetMessageId
+  const consistent = resident >= 0 && !obsoleteGap && existing.every((message) => {
+    const current = fetched.get(message.id)
+    const anchor = options.goalAnchors?.get(message.id)
+    if (anchor && anchor !== message.transcript_anchor_message_id) return false
+    if (options.residentOrdinals?.has(message.id) &&
+        options.residentOrdinals.get(message.id) !== message.ordinal) return false
+    if (current && current.ordinal !== message.ordinal) return false
+    return message.ordinal === undefined || current !== undefined || options.residentOrdinals?.has(message.id)
+  }) && (!firstSaved || !lastSaved || targetPage.every((message) =>
+    before.has(message.id) || (message.ordinal !== undefined
+      ? compareTranscriptPositions(message, firstSaved) < 0 || compareTranscriptPositions(message, lastSaved) > 0
+      : !message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX))))
+  if (consistent) {
+    const messages = [...existing]
+    messages[resident] = refresh(targetPage[targetIndex])
+    return { messages, gap: options.existingGap ?? null, reusedLayout: true }
+  }
 
   const sizes = boundedWindowSizes(
     targetPage.length + existing.length,
@@ -420,19 +562,37 @@ export function createTargetedThreadMessageWindow(
     options.protectedTailMessages
   )
   const targetPageStart = Math.max(0, targetIndex - sizes.prefix + 1)
-  const retainedPage = targetPage.slice(targetPageStart, targetPageStart + sizes.prefix)
+  const retainedPage = targetPage.slice(targetPageStart, targetPageStart + sizes.prefix).map(refresh)
+  const retainedIds = new Set(retainedPage.map(({ id }) => id))
   const retainedIdentities = new Set(retainedPage.map(threadMessagePageIdentity))
-  const gapTailStart = options.existingGap
-    ? existing.findIndex((message) => message.id === options.existingGap?.beforeMessageId)
-    : -1
-  const tailCandidates = options.existingGap
-    ? gapTailStart >= 0
-      ? existing.slice(gapTailStart)
-      : []
-    : existing
-  const retainedTail = tailCandidates
-    .slice(-sizes.tail)
-    .filter((message) => !retainedIdentities.has(threadMessagePageIdentity(message)))
+  const lastTarget = retainedPage.at(-1)
+  const savedTail: Message[] = []
+  const unanchoredGoals: Message[] = []
+  const localTail: Message[] = []
+  for (const message of selectTargetedThreadMessageTail(existing, sizes.tail, options.existingGap)) {
+    if (retainedIds.has(message.id) || retainedIdentities.has(threadMessagePageIdentity(message))) continue
+    const savedOrdinal = options.residentOrdinals?.get(message.id)
+    const ordinal = options.residentOrdinals?.has(message.id) ? savedOrdinal :
+      options.residentOrdinals && message.ordinal !== undefined ? undefined : message.ordinal
+    if (ordinal === null || (options.residentOrdinals && message.ordinal !== undefined && ordinal === undefined))
+      continue
+    if (ordinal === undefined) {
+      if (message.role === "user" && message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) {
+        if (!lastTarget || message.created_at >= lastTarget.created_at) unanchoredGoals.push(message)
+      } else {
+        localTail.push(message)
+      }
+      continue
+    }
+    const anchor = options.goalAnchors?.get(message.id) ?? message.transcript_anchor_message_id
+    const refreshed = ordinal !== message.ordinal || anchor !== message.transcript_anchor_message_id
+      ? { ...message, ordinal, transcript_anchor_message_id: anchor } : message
+    if (lastTarget?.ordinal !== undefined && compareTranscriptPositions(refreshed, lastTarget) <= 0) continue
+    savedTail.push(refreshed)
+  }
+  const retainedTail = [
+    ...insertPageGoalMessages(savedTail.sort(compareTranscriptPositions), unanchoredGoals), ...localTail
+  ]
   const messages = [...retainedPage, ...retainedTail].slice(-sizes.maximum)
   const pageTail = retainedPage.at(-1)
   const liveHead = retainedTail[0]
@@ -440,10 +600,11 @@ export function createTargetedThreadMessageWindow(
   return {
     messages,
     gap:
-      pageTail && liveHead
+      pageTail && options.hasNewerMessages !== false &&
+      (liveHead || options.hasNewerMessages === true)
         ? {
             afterMessageId: pageTail.id,
-            beforeMessageId: liveHead.id,
+            beforeMessageId: liveHead?.id ?? null,
             evictedMessageCount: Math.max(1, existing.length - retainedTail.length),
             reloadBeforeOrdinal: null,
             reloadBeforeMessageId: null,
@@ -468,9 +629,7 @@ export function restoreLatestThreadMessageWindow(
   options: RestoreLatestThreadMessageWindowOptions
 ): ThreadMessageWindowResult {
   const protectedTailCount = Math.max(0, Math.floor(options.protectedLocalTailMessages))
-  const gapTailStart = options.existingGap
-    ? existing.findIndex((message) => message.id === options.existingGap?.beforeMessageId)
-    : -1
+  const gapTailStart = options.existingGap ? findThreadMessageGapTailStart(existing, options.existingGap) : -1
   const localTailCandidates = options.existingGap
     ? gapTailStart >= 0
       ? existing.slice(gapTailStart)

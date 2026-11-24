@@ -1,0 +1,18 @@
+{"name": "architecture", "args": ["--import", "tsx", "tests/standard-thread-turn-architecture.spec.ts"], "exitCode": 1, "seconds": 0.13, "log": "before-architecture.log.txt"}
+<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/standard-thread-turn-architecture.spec.ts:16
+  if (!condition) throw new Error(message)
+                        ^
+
+Error: all ten desktop Thread metadata reads use the shared parser, including the managed conversation guard
+    at assert (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/standard-thread-turn-architecture.spec.ts:16:25)
+    at <anonymous> (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/standard-thread-turn-architecture.spec.ts:152:1)
+    at Object.<anonymous> (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/standard-thread-turn-architecture.spec.ts:206:63)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object.transformer (<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/tsx/dist/register-OY9cqBEN.cjs:9:3619)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at loadCJSModuleWithModuleLoad (node:internal/modules/esm/translators:335:3)
+    at ModuleWrap.<anonymous> (node:internal/modules/esm/translators:235:7)
+
+Node.js v22.23.5

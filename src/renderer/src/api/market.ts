@@ -1,3 +1,8 @@
+import {
+  MARKET_SKILL_LIST_MAX_ITEMS,
+  MARKET_SKILL_LIST_MAX_RESPONSE_BYTES,
+  type MarketSkillCatalogPage
+} from "../../../shared/market-skill-catalog"
 import { MOCK_MARKET_DATA } from "../components/customize/MarketPanel/MarketMockData"
 import { toast } from "sonner"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
@@ -49,8 +54,7 @@ export interface DownloadedItemBytes {
   contentType: string
 }
 
-export const MARKET_SKILL_LIST_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-export const MARKET_SKILL_LIST_MAX_ITEMS = 4096
+export { MARKET_SKILL_LIST_MAX_RESPONSE_BYTES, MARKET_SKILL_LIST_MAX_ITEMS }
 export const MARKET_INSTALL_FILE_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 export interface MarketItem {
@@ -340,6 +344,54 @@ const setCachedData = (key: string, data: MarketApiResponse): void => {
   })
 }
 
+async function readMarketSkillPage(signal?: AbortSignal): Promise<MarketSkillCatalogPage> {
+  signal?.throwIfAborted()
+  const catalog = typeof window === "undefined" ? undefined : window.api?.skills?.marketCatalog
+  if (catalog) {
+    const pending = catalog()
+    if (!signal) return pending
+    // Cancel this consumer while any other callers can still use the shared request.
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason)
+      signal.addEventListener("abort", abort, { once: true })
+      void pending.then(
+        (page) => {
+          signal.removeEventListener("abort", abort)
+          resolve(page)
+        },
+        (error) => {
+          signal.removeEventListener("abort", abort)
+          reject(error)
+        }
+      )
+    })
+  }
+
+  const response = await fetch(ENDPOINTS.list("skill"), {
+    method: "GET",
+    signal,
+    headers: { "Content-Type": "application/json" }
+  })
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`)
+  }
+
+  const contentType = response.headers.get("content-type")
+  if (!contentType || !contentType.includes("application/json")) {
+    console.error("Expected JSON but received content type:", contentType || "unknown")
+    throw new Error("Response is not JSON")
+  }
+
+  const data = await readBoundedMarketJsonResponse<MarketListResponse>(
+    response,
+    MARKET_SKILL_LIST_MAX_RESPONSE_BYTES,
+    signal
+  )
+  const items = Array.isArray(data.items) ? data.items : []
+  return { items: items.slice(0, MARKET_SKILL_LIST_MAX_ITEMS), total: items.length }
+}
+
 // Updated API functions with caching
 export const marketApi = {
   async fetchInstallBytes(
@@ -425,36 +477,12 @@ export const marketApi = {
 
     console.log("Fetching skills from API...")
     try {
-      const response = await fetch(ENDPOINTS.list("skill"), {
-        method: "GET",
-        signal: options?.signal,
-        headers: {
-          "Content-Type": "application/json"
-          // Remove placeholder auth token for now
-        }
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-
-      const contentType = response.headers.get("content-type")
-      if (!contentType || !contentType.includes("application/json")) {
-        console.error("Expected JSON but received content type:", contentType || "unknown")
-        throw new Error("Response is not JSON")
-      }
-
-      const data = await readBoundedMarketJsonResponse<MarketListResponse>(
-        response,
-        MARKET_SKILL_LIST_MAX_RESPONSE_BYTES,
-        options?.signal
-      )
-      const items = Array.isArray(data.items) ? data.items : []
+      const { items, total } = await readMarketSkillPage(options?.signal)
       const result = {
         success: true,
-        data: items.slice(0, MARKET_SKILL_LIST_MAX_ITEMS),
-        total: items.length,
-        hasNextPage: items.length > MARKET_SKILL_LIST_MAX_ITEMS
+        data: items as MarketItem[],
+        total,
+        hasNextPage: total > MARKET_SKILL_LIST_MAX_ITEMS
       }
 
       // Cache the result
@@ -632,7 +660,10 @@ export const marketApi = {
   ): Promise<DownloadResponse> {
     void _isFeatured
     if (downloadToLocal && ["skill", "orgSkill", "plugin"].includes(type)) {
-      return { success: false, error: "受保护资源仅支持安装到平台使用" }
+      const access = type === "skill" || type === "plugin"
+        ? await window.api.plugins.marketSourceAccess(type, name, item?.id).catch(() => undefined)
+        : undefined
+      if (!access) return { success: false, error: "受保护资源仅支持安装到平台使用" }
     }
     console.log(`Downloading ${type} item: ${name}`)
     const orgSkillFile =
@@ -659,7 +690,8 @@ export const marketApi = {
         const arrayBuffer = await getBuffer()
         if (typeof window.api?.skills?.upload === "function") {
           const uploadResult = await window.api.skills.upload(arrayBuffer, filename, {
-            origin: "market"
+            origin: "market",
+            ...(type === "skill" ? { marketplace: { name, id: item?.id } } : {})
           })
           return {
             success: uploadResult.success,

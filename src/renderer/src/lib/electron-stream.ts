@@ -6,6 +6,8 @@ import {
   toMessageDict,
   type EventStreamEvent
 } from "@langchain/langgraph-sdk/ui"
+import { replaceLiveStreamMessageId, type LiveStreamMessage } from "./live-stream-messages"
+import { captureModelRetryBaseline, hasModelRetryProgress } from "./model-retry-indicator"
 
 type StreamValues = Record<string, unknown>
 type SubmitOptions = Parameters<UseStreamCustom<StreamValues>["submit"]>[1]
@@ -105,6 +107,47 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
     return messages
   }
 
+  /** Rekey both the cumulative frame and the SDK chunk seed at a steer boundary.
+   * Rekeying only ThreadContext leaves the provider row in subsequent frames. */
+  renameAssistant(
+    frame: Message[],
+    fromId: string,
+    toId: string,
+    providerSourceId?: string,
+    providerOccurrence?: number
+  ): Message[] {
+    if (!fromId || !toId || fromId === toId) return frame
+    const source = frame.find((message) => message.id === fromId)
+    const target = frame.find((message) => message.id === toId)
+    const sourceTuple = super.get(fromId)
+    const targetTuple = super.get(toId)
+    if (
+      (source && source.type !== "ai") ||
+      (target && target.type !== "ai") ||
+      (sourceTuple?.chunk && sourceTuple.chunk.getType() !== "ai") ||
+      (targetTuple?.chunk && targetTuple.chunk.getType() !== "ai")
+    )
+      return frame
+    const renamed = replaceLiveStreamMessageId(
+      frame as LiveStreamMessage[],
+      fromId,
+      toId,
+      providerSourceId,
+      providerOccurrence
+    ) as Message[]
+    const replacement = renamed.find((message) => message.id === toId)
+    if (replacement) {
+      const seed = new MessageTupleManager()
+      seed.add(replacement, targetTuple?.metadata ?? sourceTuple?.metadata)
+      this.chunks[toId] = seed.get(toId)!
+      delete this.chunks[fromId]
+      if (this.authoritativeContentIds.delete(fromId)) this.authoritativeContentIds.add(toId)
+    }
+    this.indexes = null
+    this.writtenId = null
+    return renamed
+  }
+
   override get(id: string | null | undefined, defaultIndex?: number) {
     const tuple = super.get(id)
     if (!tuple || id == null || defaultIndex == null) return tuple
@@ -160,6 +203,7 @@ export function createElectronStream(options: ElectronStreamOptions) {
           }
         })
         return (async function* () {
+          let retryBaseline: Map<string, string> | undefined
           for await (const transportEvent of events) {
             // ElectronIPCTransport owns the wire conversion. As with the SDK's
             // custom hook, bridge its open event name to StreamManager's union here.
@@ -168,6 +212,22 @@ export function createElectronStream(options: ElectronStreamOptions) {
               Partial<StreamValues>,
               unknown
             >
+            const custom =
+              event.event === "custom" && event.data && typeof event.data === "object"
+                ? (event.data as Record<string, unknown>)
+                : undefined
+            if (
+              custom?.type === "model_retry" &&
+              typeof custom.attempt === "number" &&
+              typeof custom.maxRetries === "number"
+            ) {
+              retryBaseline = captureModelRetryBaseline(readMessages(manager.values))
+              yield event
+              continue
+            }
+            if (custom?.type === "model_retry_clear") retryBaseline = undefined
+
+            const previousMessages = retryBaseline ? readMessages(manager.values) : undefined
             if (event.event === "values" && event.data && typeof event.data === "object") {
               // IPC also emits todos/workspace-only values; absence of messages
               // means no message update, whereas messages: [] is an explicit reset.
@@ -178,23 +238,32 @@ export function createElectronStream(options: ElectronStreamOptions) {
               yield { ...event, data }
             } else {
               if (
-                event.event === "custom" &&
-                event.data &&
-                typeof event.data === "object" &&
-                "type" in event.data &&
-                event.data.type === "stream_retry_reset"
+                custom?.type === "message_id_alias" &&
+                custom.role === "assistant" &&
+                typeof custom.fromId === "string" &&
+                typeof custom.toId === "string"
               ) {
+                const { fromId, toId, providerSourceId, providerOccurrence } = custom
+                // Let the renderer rekey its accumulator first; the next frame
+                // must already carry the same identity, not reintroduce the old one.
+                yield event
+                const messages = tuples.renameAssistant(
+                  readMessages(manager.values),
+                  fromId,
+                  toId,
+                  typeof providerSourceId === "string" ? providerSourceId : undefined,
+                  typeof providerOccurrence === "number" ? providerOccurrence : undefined
+                )
+                // Rekeying an existing reply must not look like new assistant output.
+                if (retryBaseline) captureModelRetryBaseline(messages, retryBaseline)
+                manager.setStreamValues({ ...manager.values, messages })
+                continue
+              }
+              if (custom?.type === "stream_retry_reset") {
                 tuples.clear()
               }
-              if (
-                event.event === "custom" &&
-                event.data &&
-                typeof event.data === "object" &&
-                "type" in event.data &&
-                event.data.type === "coordinator_ai_snapshot_message" &&
-                "assistantMessage" in event.data
-              ) {
-                const snapshot = event.data.assistantMessage as Partial<Message> | undefined
+              if (custom?.type === "coordinator_ai_snapshot_message") {
+                const snapshot = custom.assistantMessage as Partial<Message> | undefined
                 if (
                   snapshot?.type === "ai" &&
                   typeof snapshot.id === "string" &&
@@ -211,6 +280,14 @@ export function createElectronStream(options: ElectronStreamOptions) {
                 }
               }
               yield event
+            }
+            if (retryBaseline) {
+              // The SDK has applied the frame by the time the generator resumes.
+              const messages = readMessages(manager.values)
+              if (messages !== previousMessages && hasModelRetryProgress(retryBaseline, messages)) {
+                retryBaseline = undefined
+                yield { event: "custom", data: { type: "model_retry_clear" } }
+              }
             }
           }
         })()

@@ -437,6 +437,7 @@ async function executeHeartbeat(): Promise<void> {
       extraSystemPrompt: heartbeatContext,
       enableAgentsPrompt: false,
       noSchedulerTool: true,
+      autoBackgroundHandoff: false,
       abortSignal: controller.signal
     })
 
@@ -510,14 +511,7 @@ async function executeHeartbeat(): Promise<void> {
       // Restore pre-heartbeat checkpoint: only prune this HEARTBEAT_OK round,
       // preserving any previous actionable history. Aligns with Moltbot's pruneHeartbeatTranscript.
       try {
-        await checkpointer.deleteThread(threadId)
-        if (preHeartbeatSnapshot?.metadata) {
-          await checkpointer.put(
-            preHeartbeatSnapshot.config,
-            preHeartbeatSnapshot.checkpoint,
-            preHeartbeatSnapshot.metadata
-          )
-        }
+        await checkpointer.restoreThreadCheckpoint(threadId, preHeartbeatSnapshot)
         console.log("[Heartbeat] Pruned HEARTBEAT_OK round, previous history preserved")
       } catch (e) {
         console.warn("[Heartbeat] Failed to prune checkpoint:", e)

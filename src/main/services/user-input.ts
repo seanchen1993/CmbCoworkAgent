@@ -13,6 +13,7 @@ interface AutoResolvedUserInputResponse {
 type UserInputResult = UserInputResponse | AutoResolvedUserInputResponse
 
 interface PendingUserInput {
+  originalGroupSenderOnly?: boolean
   request: UserInputRequest
   resolve: (response: UserInputResult) => void
   reject: (error: Error) => void
@@ -26,7 +27,10 @@ type PendingUserInputListener = (request: Readonly<UserInputRequest>) => void
 type RemovedUserInputListener = (requestId: string, threadId: string) => void
 
 interface RequestUserInputParams {
+  originalGroupSenderOnly?: boolean
   threadId: string
+  /** A local conversation-management choice may only be shown and answered in the desktop App. */
+  kind?: UserInputRequest["kind"]
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   autoResolution?: {
@@ -65,6 +69,23 @@ export function getPendingUserInputForThread(threadId: string): UserInputRequest
   const requestId = pendingUserInputThreads.get(threadId)
   if (!requestId) return null
   return pendingUserInputs.get(requestId)?.request ?? null
+}
+
+/** Bounded descriptions for a parent's live status; includes only its own child runtimes. */
+export function summarizePendingUserInputForRuntimeThread(threadId: string): { count: number; questions: string[] } {
+  const questions: string[] = []
+  let count = 0
+  for (const [pendingThreadId, requestId] of pendingUserInputThreads) {
+    if (pendingThreadId !== threadId && !pendingThreadId.startsWith(`${threadId}__`)) continue
+    const request = pendingUserInputs.get(requestId)?.request
+    if (!request) continue
+    count++
+    for (const question of request.questions) {
+      if (questions.length === 3) break
+      questions.push(question.question.slice(0, 500))
+    }
+  }
+  return { count, questions }
 }
 
 export function subscribePendingUserInput(listener: PendingUserInputListener): () => void {
@@ -136,11 +157,11 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
   const {
     threadId,
     questions,
-    autoResolutionMs,
     autoResolution,
     abortSignal,
     allowDeferredRenderer = false
   } = params
+  const autoResolutionMs = params.kind ? undefined : params.autoResolutionMs
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }
@@ -168,6 +189,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
   const request: UserInputRequest = {
     requestId: randomUUID(),
     threadId,
+    ...(params.kind ? { kind: params.kind } : {}),
     questions,
     autoResolutionMs,
     createdAt: new Date().toISOString()
@@ -201,42 +223,50 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
           )
         }, USER_INPUT_ACK_TIMEOUT_MS)
 
-    const autoResolutionTimeout = autoResolutionMs === undefined
-      ? undefined
-      : setTimeout(() => {
-          const pending = cleanupPending(request.requestId)
-          if (!pending) return
-          const selectedFirstOption = autoResolution?.type === "select_first"
-          sendToThread(threadId, "cancel", {
-            requestId: request.requestId,
-            reason: "The user input request was automatically resolved."
-          })
-          const answers: UserInputResponse["answers"] = {}
-          if (selectedFirstOption) {
-            for (const question of questions) {
-              const firstOption = question.options[0]
-              if (!firstOption) continue
-              answers[question.id] = {
-                type: "option",
-                questionId: question.id,
-                optionIndex: 0,
-                label: firstOption.label,
-                description: firstOption.description
+    const autoResolutionTimeout =
+      autoResolutionMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            const pending = cleanupPending(request.requestId)
+            if (!pending) return
+            const selectedFirstOption = autoResolution?.type === "select_first"
+            sendToThread(threadId, "cancel", {
+              requestId: request.requestId,
+              reason: "The user input request was automatically resolved."
+            })
+            const answers: UserInputResponse["answers"] = {}
+            if (selectedFirstOption) {
+              for (const question of questions) {
+                const firstOption = question.options[0]
+                if (!firstOption) continue
+                answers[question.id] = question.allowMultiple
+                  ? {
+                      type: "options",
+                      questionId: question.id,
+                      options: [{ optionIndex: 0, ...firstOption }]
+                    }
+                  : {
+                      type: "option",
+                      questionId: question.id,
+                      optionIndex: 0,
+                      label: firstOption.label,
+                      description: firstOption.description
+                    }
               }
             }
-          }
-          const response: AutoResolvedUserInputResponse = {
-            requestId: request.requestId,
-            autoResolved: true,
-            answers
-          }
-          if (autoResolution?.type === "user_message" && autoResolution.message) {
-            response.message = autoResolution.message
-          }
-          pending.resolve(response)
-        }, autoResolutionMs)
+            const response: AutoResolvedUserInputResponse = {
+              requestId: request.requestId,
+              autoResolved: true,
+              answers
+            }
+            if (autoResolution?.type === "user_message" && autoResolution.message) {
+              response.message = autoResolution.message
+            }
+            pending.resolve(response)
+          }, autoResolutionMs)
 
     pendingUserInputs.set(request.requestId, {
+      originalGroupSenderOnly: params.originalGroupSenderOnly,
       request,
       resolve,
       reject,
@@ -254,6 +284,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       key: `user-input:${request.requestId}`
     })
     sendToThread(threadId, "request", request)
+    if (request.kind === "bot_conversation_action") return
     for (const listener of pendingUserInputListeners) {
       try {
         listener(request)
@@ -276,8 +307,13 @@ export function acknowledgeUserInputRequest(requestId: string, threadId: string)
 
 export function submitUserInputResponse(
   response: UserInputResponse,
-  options: { notifyRenderer?: boolean; reason?: string } = {}
+  options: { notifyRenderer?: boolean; reason?: string; desktopMainFrame?: boolean; verifiedGroupSender?: true } = {}
 ): boolean {
+  const entry = pendingUserInputs.get(response.requestId)
+  if (entry?.originalGroupSenderOnly && !options.verifiedGroupSender && !response.ignored) return false
+  if (entry?.request.kind === "bot_conversation_action" && !options.desktopMainFrame && !response.ignored) return false
+  const request = entry?.request
+  if (request && !validMultipleChoiceResponse(request, response)) return false
   const pending = cleanupPending(response.requestId)
   if (!pending) return false
   if (options.notifyRenderer) {
@@ -291,6 +327,50 @@ export function submitUserInputResponse(
     submittedAt: response.submittedAt ?? new Date().toISOString()
   })
   return true
+}
+
+/** Only the additive Bot protocol is checked here; legacy single-choice callers retain their contract. */
+function validMultipleChoiceResponse(
+  request: UserInputRequest,
+  response: UserInputResponse
+): boolean {
+  const answers = response.answers as Record<string, unknown>
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+  if (!record(answers)) return false
+  if (
+    !request.questions.some((q) => q.allowMultiple) &&
+    !Object.values(answers).some((answer) => record(answer) && answer.type === "options")
+  )
+    return true
+  if (response.ignored) return Object.keys(answers).length === 0
+  if (Object.keys(answers).length !== request.questions.length) return false
+  return request.questions.every((question) => {
+    const answer = answers[question.id]
+    if (!record(answer) || answer.questionId !== question.id) return false
+    if (answer.type === "other") return typeof answer.text === "string" && !!answer.text.trim()
+    const matches = (option: unknown): boolean => {
+      if (!record(option) || !Number.isInteger(option.optionIndex)) return false
+      const expected = question.options[Number(option.optionIndex)]
+      return (
+        !!expected && expected.label === option.label && expected.description === option.description
+      )
+    }
+    if (question.allowMultiple) {
+      if (
+        answer.type !== "options" ||
+        !Array.isArray(answer.options) ||
+        !answer.options.length ||
+        answer.options.length > question.options.length ||
+        !answer.options.every(matches)
+      )
+        return false
+      return (
+        new Set(answer.options.map((option) => option.optionIndex)).size === answer.options.length
+      )
+    }
+    return answer.type === "option" && matches(answer)
+  })
 }
 
 export function cancelUserInputsForThread(threadId: string, reason: string): number {

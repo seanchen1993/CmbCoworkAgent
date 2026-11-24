@@ -49,11 +49,13 @@ describe("chat message virtual list initial location", () => {
       "utf8"
     )
 
-    expect(source).toMatch(/key=\{threadId\}/)
+    expect(source).toMatch(/key=\{`\$\{threadId\}:\$\{historyWindowRevision\}`\}/)
     expect(source).toMatch(
       /initialTopMostItemIndex=\{resolvedInitialTopMostItemIndex\}/
     )
-    expect(source).toMatch(/context=\{\{ header: historyHeader, footer: footerContent \}\}/)
+    expect(source).toMatch(
+      /context=\{\{\s*header: historyHeader,\s*footer: footerContent,\s*anchorUpwardResize: true\s*\}\}/
+    )
     expect(source).toMatch(/return message \? `\$\{message\.role\}:\$\{message\.id\}`/)
     expect(source).toMatch(/totalListHeightChanged=\{onContentHeightChanged\}/)
     expect(source).toMatch(/followOutput=\{\(\) => false\}/)

@@ -1,10 +1,11 @@
-import { prepareMarketCommand, persistMarketRuntimeDirectory } from "../services/market-content"
+import { prepareMarketCommand } from "../services/market-content"
 import {
   harnessStageWatches,
   markHarnessStageAttributionDirty
 } from "../services/harness-stage-attribution"
 import { normalizeHarnessAdapterWatchRefs } from "./adapter-detail-normalizer"
 import { harnessRunInspections } from "./run-inspect-cache"
+import { beginHarnessFeatureCatalogRead, harnessProjectDeleted } from "./feature-catalog-lifecycle"
 import {
   assertHarnessConfigAvailable,
   readHarnessConfigV2File,
@@ -22,21 +23,29 @@ import {
   MISSING_FEATURE_WORKSPACE
 } from "../../shared/harness-feature-workspace"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
+import {
+  assertSelectableKnowledgeBaseIds,
+  prepareKnowledgeDeposition,
+  resolveKnowledgeDepositionPath,
+  resolveProjectKnowledgeBases
+} from "../services/knowledge-base-manager"
+import type { KnowledgeDepositionWorkspace } from "../../shared/knowledge-base-types"
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
-import { access, stat } from "node:fs/promises"
+import { access, mkdir, readFile, stat } from "node:fs/promises"
 import { assertEmptyProjectDirectory } from "./project-workspace"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
-import { v4 as uuid } from "uuid"
+import { v4 as uuid, validate as validateUuid, version as uuidVersion } from "uuid"
 import { getOpenworkDir, getPlugins, getUserInfo } from "../storage"
 import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 import { managedRunStore } from "./managed-run-store"
 import type { PluginMetadata } from "../types"
 import type { HarnessConfigReadSnapshot } from "./service-read-snapshot"
+import { formatHarnessStageName } from "../../shared/harness-stage-bucket"
 import { normalizeHarnessAgentmdLoadStatus } from "../../shared/harness-board-types"
 import { resolveHarnessNextAction } from "../../shared/harness-run-next-action"
 import {
@@ -102,7 +111,6 @@ import type {
   HarnessFeatureStatus,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessProjectCreatorMetadata,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -186,7 +194,6 @@ type HarnessInspectCommandName =
   | "dynamicWorkflow"
   | "skipNode"
   | "sessionContext"
-  | "pullKnowledge"
 type HarnessInspectCommandConfigKey =
   | "project_status"
   | "feature_status"
@@ -195,13 +202,12 @@ type HarnessInspectCommandConfigKey =
   | "dynamic_workflow"
   | "skip_node"
   | "session_context_inject"
-  | "pull_knowledge"
+type HarnessTemplateMode = HarnessInspectCommandName | "pullKnowledge"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "system_prompt_inject"
   | "plugin_dir_hook"
   | "dialog_tips"
-  | "knowledge_path"
 
 const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   HarnessInspectCommandName,
@@ -213,16 +219,34 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   createFeature: "create_feature",
   dynamicWorkflow: "dynamic_workflow",
   skipNode: "skip_node",
-  sessionContext: "session_context_inject",
-  pullKnowledge: "pull_knowledge"
+  sessionContext: "session_context_inject"
 }
 
 interface ConfiguredHarnessInvocation {
   cwd: string
+  pluginName: string
+  configKey: HarnessInspectCommandConfigKey
   invocation: {
     executable: string
     args: string[]
   }
+}
+
+class HarnessPluginCommandError extends Error {
+  constructor(
+    command: Pick<ConfiguredHarnessInvocation, "pluginName" | "configKey">,
+    readonly detail: string,
+    message = formatHarnessPluginCommandFailure(command.pluginName, command.configKey)
+  ) {
+    super(message)
+  }
+}
+
+function formatHarnessPluginCommandFailure(
+  pluginName: string,
+  configKey: HarnessInspectCommandConfigKey
+): string {
+  return `插件「${pluginName}」执行「${configKey}」失败，请联系插件开发者`
 }
 
 type HarnessInvocationSuccessLogMode = "full" | "summary" | "none"
@@ -272,6 +296,7 @@ interface HarnessCommandParseOptions {
   workflowNodes?: string
   nodeId?: string
   eventJson?: string
+  knowledgePathJson?: string
   preserveMissingPlaceholders?: boolean
 }
 
@@ -281,7 +306,6 @@ const HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE = join(getOpenworkDir(), FEATURE_
 const HARNESS_LEAN_TOKEN_FILE = join(getOpenworkDir(), "leanstar-config.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
-const HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS = 45_000
 const HARNESS_ADAPTER_MAX_BUFFER = HARNESS_ADAPTER_DETAIL_MAX_INPUT_BYTES
 const HARNESS_INVOCATION_MAX_CONCURRENCY = 2
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
@@ -547,19 +571,6 @@ function readBoardConfigPlatformTextFromValue(
   return command || null
 }
 
-function hasPullKnowledgeCommand(
-  _plugin: PluginMetadata,
-  configSnapshot?: HarnessBoardConfigReadSnapshot
-): boolean {
-  if (configSnapshot) {
-    return (
-      !configSnapshot.error &&
-      readBoardConfigPlatformTextFromValue(configSnapshot.value, "pull_knowledge") !== null
-    )
-  }
-  return false
-}
-
 function pluginToHarnessAdapter(
   plugin: PluginMetadata,
   configSnapshot?: HarnessBoardConfigReadSnapshot
@@ -573,7 +584,6 @@ function pluginToHarnessAdapter(
     type: "plugin",
     description: normalizeText(plugin.description),
     ...(useScenario ? { useScenario } : {}),
-    pullKnowledgeAvailable: hasPullKnowledgeCommand(plugin, configSnapshot),
     boardCompatibility: evaluateBoardPluginCompatibility(
       plugin,
       normalizeText(plugin.name) || id,
@@ -686,7 +696,7 @@ async function resolveHarnessAdapterSnapshot(
   return pluginToHarnessAdapterSnapshot(plugin, snapshot)
 }
 
-function adapterPluginDir(project: HarnessProjectMetadata): string {
+function requireAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata {
   const adapter = project["harness-adapter"]
   if (adapter.type !== "plugin") {
     throw new Error(`Unsupported harness adapter type: ${adapter.type}`)
@@ -696,7 +706,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
   if (!plugin) {
     throw new Error(`Harness adapter plugin not found: ${adapter.name || adapter.id}`)
   }
-  return plugin.path
+  return plugin
 }
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
@@ -927,7 +937,7 @@ function tokenizeInspectCommand(command: string): string[] {
 function replaceHarnessConfigPlaceholders(
   value: string,
   project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
+  mode: HarnessTemplateMode,
   cwd: string,
   options: HarnessCommandParseOptions = {}
 ): string {
@@ -947,16 +957,32 @@ function replaceHarnessConfigPlaceholders(
     workflowTemplate: options.workflowTemplate ?? "",
     workflowNodes: options.workflowNodes ?? "",
     nodeId: options.nodeId ?? "",
-    eventJson: options.eventJson ?? ""
+    eventJson: options.eventJson ?? "",
+    knowledgePath: options.knowledgePathJson ?? "[]"
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson|knowledgePath)\}/g,
     (placeholder: string, key: string) => {
       const replacement = replacements[key]
       if (replacement) return replacement
       return options.preserveMissingPlaceholders ? placeholder : ""
     }
   )
+}
+
+function isProjectBatchPlaceholder(token: string): boolean {
+  return token === "${projectDirs...}" || token === "${projectCodes...}"
+}
+
+function getProjectInspectBatchSize(command: string | null): number {
+  if (command) {
+    try {
+      if (!tokenizeInspectCommand(command).some(isProjectBatchPlaceholder)) return 1
+    } catch {
+      // Invocation handles malformed commands through the existing per-batch error path.
+    }
+  }
+  return HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
 }
 
 function parseInspectCommand(
@@ -986,7 +1012,7 @@ function parseInspectCommand(
   const tokens = tokenizeInspectCommand(command.trim())
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
-    if ((token === "${projectCodes...}" || token === "${projectDirs...}") && options.projectDirs) {
+    if (isProjectBatchPlaceholder(token) && options.projectDirs) {
       args.push(...options.projectDirs)
       continue
     }
@@ -1008,6 +1034,29 @@ function parseInspectCommand(
     throw new Error("Inspect adapter command is empty")
   }
   return { executable, args: restArgs }
+}
+
+function configureHarnessInvocation(
+  command: string,
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName,
+  plugin: PluginMetadata,
+  options: HarnessCommandParseOptions
+): ConfiguredHarnessInvocation {
+  const cwd = plugin.path
+  const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+  const commandContext = { pluginName: plugin.name, configKey }
+  try {
+    return {
+      cwd,
+      ...commandContext,
+      invocation: parseInspectCommand(command, project, mode, cwd, options)
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    console.error(`[HarnessBoard] [${configKey}] ${detail}`)
+    throw new HarnessPluginCommandError(commandContext, detail)
+  }
 }
 
 async function readBoardConfig(cwd: string): Promise<Record<string, unknown> | null> {
@@ -1156,9 +1205,11 @@ function isProjectMissingError(message: string): boolean {
 
 function formatProjectDetailError(project: HarnessProjectMetadata, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  if (isProjectMissingError(message)) {
+  const detail = error instanceof HarnessPluginCommandError ? error.detail : message
+  if (isProjectMissingError(detail)) {
     return projectDirectoryMissingMessage(project)
   }
+  if (error instanceof HarnessPluginCommandError) return error.message
   return message.startsWith("读取项目状态失败") ? message : `读取项目状态失败：${message}`
 }
 
@@ -1167,10 +1218,11 @@ async function buildOptionalConfiguredHarnessInvocation(
   mode: HarnessInspectCommandName,
   options: HarnessCommandParseOptions = {}
 ): Promise<ConfiguredHarnessInvocation | null> {
-  const cwd = adapterPluginDir(project)
+  const plugin = requireAdapterPlugin(project)
+  const cwd = plugin.path
   const config = await readBoardConfig(cwd)
   const compatibility = evaluateBoardPluginCompatibility(
-    findAdapterPlugin(project),
+    plugin,
     project["harness-adapter"].name || project["harness-adapter"].id,
     { value: config, error: null }
   )
@@ -1184,13 +1236,10 @@ async function buildOptionalConfiguredHarnessInvocation(
   if (!configuredCommand) return null
   const leanToken = options.leanToken ?? (await readLeanTokenStore()).leanToken
 
-  return {
-    cwd,
-    invocation: parseInspectCommand(configuredCommand, project, mode, cwd, {
-      ...options,
-      leanToken
-    })
-  }
+  return configureHarnessInvocation(configuredCommand, project, mode, plugin, {
+    ...options,
+    leanToken
+  })
 }
 
 async function buildConfiguredHarnessInvocation(
@@ -1246,6 +1295,15 @@ function harnessDetailCancelledError(): Error {
   const error = new Error("Harness detail request was superseded")
   error.name = "AbortError"
   return error
+}
+
+async function isPythonCommandNotFound(error: unknown): Promise<boolean> {
+  if (!(error instanceof Error)) return false
+  const { code, path, cwd } = error as NodeJS.ErrnoException & { cwd?: string }
+  if (code !== "ENOENT" || !path || !/^python3?(?:\.exe)?$/i.test(path) || !cwd) return false
+
+  // spawn also reports ENOENT if the working directory is missing.
+  return (await stat(cwd).catch(() => null))?.isDirectory() === true
 }
 
 async function runHarnessInvocationAsync(
@@ -1325,7 +1383,7 @@ async function runHarnessInvocationAsync(
         const stdout = Buffer.concat(stdoutChunks, stdoutLength)
         const stderr = Buffer.concat(stderrChunks, stderrLength)
         settle(() => {
-          rejectPromise(createHarnessInvocationError(error.message, { stdout, stderr }))
+          rejectPromise(Object.assign(error, { stdout, stderr, cwd: executable.cwd }))
         })
       })
       child.once("close", (code, signal) => {
@@ -1373,8 +1431,13 @@ async function runHarnessInvocationAsync(
     if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
     return stdoutBuffer
   } catch (error) {
+    if (signal?.aborted) throw harnessDetailCancelledError()
     if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
-    throw new Error(formatAdapterError(error))
+    const message =
+      configured.configKey === "create_project" && (await isPythonCommandNotFound(error))
+        ? "请安装最新版 Python 3"
+        : undefined
+    throw new HarnessPluginCommandError(configured, formatAdapterError(error), message)
   } finally {
     release()
   }
@@ -1411,13 +1474,9 @@ function parseInspectAdapterOutput(
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
-    logHarnessStatusResultFailure(
-      invocation,
-      configKey,
-      stdoutBuffer,
-      "Inspect adapter returned empty output"
-    )
-    throw new Error("Inspect adapter returned empty output")
+    const detail = "Inspect adapter returned empty output"
+    logHarnessStatusResultFailure(invocation, configKey, stdoutBuffer, detail)
+    throw new HarnessPluginCommandError(invocation, detail)
   }
 
   try {
@@ -1428,13 +1487,9 @@ function parseInspectAdapterOutput(
     return parsed
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    logHarnessStatusResultFailure(
-      invocation,
-      configKey,
-      stdoutBuffer,
-      `Inspect adapter returned invalid JSON: ${message}`
-    )
-    throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
+    const detail = `Inspect adapter returned invalid JSON: ${message}`
+    logHarnessStatusResultFailure(invocation, configKey, stdoutBuffer, detail)
+    throw new HarnessPluginCommandError(invocation, detail)
   }
 }
 
@@ -1469,7 +1524,7 @@ function assertSkipNodeInvocationResult(
 
   const message = normalizeText(parsed.message).trim() || "插件返回跳过节点失败"
   logHarnessStatusResultFailure(configured, "skip_node", stdoutBuffer, message)
-  throw new Error(message)
+  throw new HarnessPluginCommandError(configured, message)
 }
 
 function uniqueStringsInOrder(values: unknown): string[] {
@@ -1630,7 +1685,7 @@ function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction 
 function resolveHarnessDialogTipsTemplate(
   template: string,
   project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
+  mode: HarnessTemplateMode,
   cwd: string,
   options: HarnessCommandParseOptions = {}
 ): string | undefined {
@@ -1640,7 +1695,7 @@ function resolveHarnessDialogTipsTemplate(
 function resolveHarnessNextActionTemplate(
   value: unknown,
   project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
+  mode: HarnessTemplateMode,
   cwd: string,
   options: HarnessCommandParseOptions = {},
   config: { replaceUserMessagePlaceholders?: boolean } = {}
@@ -1761,7 +1816,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     .trim()
     .slice(0, 128)
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
-  const now = new Date().toISOString()
+  const now = formatGmt8Timestamp()
 
   return {
     projectId: value.projectId.slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
@@ -1777,6 +1832,11 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       0,
       HARNESS_PROJECT_PATH_MAX_CHARS
     ),
+    knowledgeBaseIds: Array.isArray(value.knowledgeBaseIds)
+      ? value.knowledgeBaseIds
+          .filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+          .map((id) => id.trim())
+      : [],
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
     ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
@@ -2190,19 +2250,20 @@ async function requireProject(projectId: string): Promise<HarnessProjectMetadata
   return (await requireProjectContext(projectId)).project
 }
 
-function validateCreateInput(input: HarnessProjectCreateInput): void {
+function validateCreateInput(input: HarnessProjectCreateInput): {
+  workspacePath: string
+  projectDir: string
+} {
   const required = [
     input.adapterId,
     input.adapterType,
     input.name,
     input.projectCode,
-    input.projectDir,
     input.systemId,
-    input.systemName,
-    input.workspacePath
+    input.systemName
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, system and workspace are required")
+    throw new Error("Project name, code and system are required")
   }
   if (typeof input.isTestProject !== "boolean") {
     throw new Error("请选择是否作为测试项目")
@@ -2211,7 +2272,20 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
     throw new Error("Project description must be a string")
   }
   validateHarnessName(input.projectCode, "项目编号")
-  validateHarnessName(input.projectDir, "项目文件夹")
+  if (
+    [input.workspacePath, input.projectDir].some(
+      (value) => value !== undefined && typeof value !== "string"
+    )
+  ) {
+    throw new Error("请选择完整的插件工作区文件夹")
+  }
+  const workspacePath = input.workspacePath?.trim() ?? ""
+  const projectDir = input.projectDir?.trim() ?? ""
+  if (Boolean(workspacePath) !== Boolean(projectDir)) {
+    throw new Error("请选择完整的插件工作区文件夹")
+  }
+  if (projectDir) validateHarnessName(input.projectDir, "项目文件夹")
+  return { workspacePath, projectDir }
 }
 
 function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput): void {
@@ -2424,27 +2498,6 @@ function makeWatchRefs(slug?: string): HarnessWatchRef[] {
     : [{ path: `${base}/STATE.md`, purpose: "run-list" }]
 }
 
-function resolveProjectKnowledgePath(
-  project: HarnessProjectMetadata,
-  cwd: string,
-  config: Record<string, unknown> | null,
-  options: HarnessCommandParseOptions = {}
-): string | null {
-  const rawPath = readBoardConfigPlatformTextFromValue(config, "knowledge_path")
-  if (!rawPath) return null
-
-  const replaced = replaceHarnessConfigPlaceholders(
-    rawPath,
-    project,
-    "pullKnowledge",
-    cwd,
-    options
-  ).trim()
-  if (!replaced) return null
-
-  return isAbsolute(replaced) ? resolve(replaced) : resolve(cwd, replaced)
-}
-
 interface HarnessProjectConfigContext {
   plugin: PluginMetadata | null
   configSnapshot?: HarnessBoardConfigReadSnapshot
@@ -2475,14 +2528,10 @@ function buildConfiguredHarnessInvocationFromContext(
   if (!command) {
     throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
   }
-  const cwd = context.plugin.path
-  return {
-    cwd,
-    invocation: parseInspectCommand(command, project, mode, cwd, {
-      ...options,
-      leanToken: context.leanToken
-    })
-  }
+  return configureHarnessInvocation(command, project, mode, context.plugin, {
+    ...options,
+    leanToken: context.leanToken
+  })
 }
 
 function hasConfiguredHarnessInvocationInContext(
@@ -2551,10 +2600,10 @@ function projectConfigContextFromWorker(
   }
 }
 
-function resolveSystemConstraintUpdateConfig(
+async function resolveSystemConstraintUpdateConfig(
   project: HarnessProjectMetadata,
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel["systemConstraintUpdate"] | undefined {
+): Promise<HarnessProjectDetailViewModel["systemConstraintUpdate"] | undefined> {
   try {
     if (!context?.plugin || context.configSnapshot?.error) return undefined
     const cwd = context.plugin.path
@@ -2578,13 +2627,15 @@ function resolveSystemConstraintUpdateConfig(
         { replaceUserMessagePlaceholders: true }
       ) ?? {}
 
-    const knowledgePath = resolveProjectKnowledgePath(project, cwd, config, {
-      leanToken: context.leanToken
-    })
-    return {
-      syncType: "invoke_session",
-      nextAction,
-      ...(knowledgePath ? { knowledgePath } : {})
+    try {
+      const knowledgePath = await resolveKnowledgeDepositionPath(project.knowledgeBaseIds ?? [])
+      return { syncType: "invoke_session", nextAction, knowledgePath }
+    } catch (error) {
+      return {
+        syncType: "invoke_session",
+        nextAction,
+        knowledgeUnavailableReason: error instanceof Error ? error.message : "知识沉淀工作区不可用"
+      }
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to resolve system constraint update config:", {
@@ -2593,6 +2644,15 @@ function resolveSystemConstraintUpdateConfig(
     })
     return undefined
   }
+}
+
+export async function prepareHarnessKnowledgeDeposition(
+  projectId: string,
+  targetId?: string
+): Promise<KnowledgeDepositionWorkspace> {
+  const project = (await readProjectStore()).projects.find((item) => item.projectId === projectId)
+  if (!project) throw new Error("项目不存在")
+  return prepareKnowledgeDeposition(project.knowledgeBaseIds ?? [], targetId)
 }
 
 function resolveArtifactAccumulationConfig(
@@ -2617,7 +2677,7 @@ function resolveArtifactAccumulationConfig(
   return nextAction ? { syncType: "invoke_session", nextAction } : undefined
 }
 
-function makeProjectDetailViewModel(
+async function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
     workflow: HarnessWorkflow
@@ -2627,8 +2687,8 @@ function makeProjectDetailViewModel(
     error: string | null
   },
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel {
-  const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project, context)
+): Promise<HarnessProjectDetailViewModel> {
+  const systemConstraintUpdate = await resolveSystemConstraintUpdateConfig(project, context)
   const runs = data.runs.map((run) => {
     const managedRun = managedRunStore.getLatestRun(project.projectId, run.slug)
     return managedRun
@@ -2676,6 +2736,7 @@ async function initializeHarnessProject(project: HarnessProjectMetadata): Promis
       HARNESS_ADAPTER_TIMEOUT_MS
     )
   } catch (error) {
+    if (error instanceof HarnessPluginCommandError) throw error
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`创建项目失败：${raw}`)
   }
@@ -2869,6 +2930,20 @@ async function readHarnessFeatureSessionContextAgentPrompt(
   }
 
   try {
+    const command = readBoardConfigPlatformTextFromValue(
+      context.configSnapshot?.value ?? null,
+      "session_context_inject"
+    )
+    const knowledgeBases = command?.includes("${knowledgePath}")
+      ? await resolveProjectKnowledgeBases(project.knowledgeBaseIds ?? [])
+      : undefined
+    const knowledgePathJson = knowledgeBases ? JSON.stringify(knowledgeBases) : undefined
+    const knowledgeWarning =
+      knowledgeBases && knowledgeBases.length < (project.knowledgeBaseIds?.length ?? 0)
+        ? knowledgeBases.length === 0
+          ? "项目绑定的知识库当前不可用，本次会话未加载知识库"
+          : "部分项目知识库当前不可用，本次会话仅加载可用知识库"
+        : undefined
     const configured = buildConfiguredHarnessInvocationFromContext(
       project,
       context,
@@ -2880,7 +2955,8 @@ async function readHarnessFeatureSessionContextAgentPrompt(
           featureId,
           options.selectedDeployUnits
         )),
-        sessionWorkspacePath: options.sessionWorkspacePath
+        sessionWorkspacePath: options.sessionWorkspacePath,
+        knowledgePathJson
       }
     )
     const result = await runHarnessJsonInvocation(configured, "sessionContext")
@@ -2894,7 +2970,9 @@ async function readHarnessFeatureSessionContextAgentPrompt(
           message
         }
       )
-      return { warning: formatSessionContextInjectWarning(message) }
+      return {
+        warning: formatHarnessPluginCommandFailure(configured.pluginName, configured.configKey)
+      }
     }
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
     const sessionContext = requireCompleteHarnessSessionContext(
@@ -2904,11 +2982,13 @@ async function readHarnessFeatureSessionContextAgentPrompt(
     if (!sessionContext) {
       return {
         agentmdLoadStatus,
+        ...(knowledgeWarning ? { warning: knowledgeWarning } : {}),
         ...(agentConfig ? { agentConfig } : {})
       }
     }
     return {
       prompt: sessionContext,
+      ...(knowledgeWarning ? { warning: knowledgeWarning } : {}),
       agentmdLoadStatus,
       ...(agentConfig ? { agentConfig } : {})
     }
@@ -2923,6 +3003,7 @@ async function readHarnessFeatureSessionContextAgentPrompt(
         error
       }
     )
+    if (error instanceof HarnessPluginCommandError) return { warning: detail }
     return { warning: formatSessionContextInjectWarning(detail) }
   }
 }
@@ -3188,10 +3269,8 @@ function resolveCurrentStageFromWorkflow(
   labelOnly = false
 ): { name: string; status: string | null } | null {
   const node = workflow.nodes.find((item) => item.id === currentNodeId)
-  const label = normalizeText(node?.label).trim()
-  if (!label) return null
-  const group = normalizeText(node?.group).trim()
-  const name = group && !labelOnly ? `${group}-${label}` : label
+  const name = formatHarnessStageName(normalizeText(node?.label), labelOnly ? undefined : node?.group)
+  if (!name) return null
   const nodeStatus = normalizeNodeStatus(rawStatus)
   const status = nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
 
@@ -3257,7 +3336,42 @@ export async function getHarnessProjectPublicAgentmdDeployUnits(
     configContext.configSnapshot
   )
   if (!boardCompatibility.compatible) return []
-  return uniqueStringsInOrder(configContext.configSnapshot?.value?.supported_deploy_units)
+  const command = readBoardConfigPlatformTextFromValue(
+    configContext.configSnapshot?.value ?? null,
+    "session_context_inject"
+  )
+  if (!command?.trim()) return []
+  if (!command.includes("${knowledgePath}")) {
+    return uniqueStringsInOrder(configContext.configSnapshot?.value?.supported_deploy_units)
+  }
+
+  const knowledgeBases = await resolveProjectKnowledgeBases(context.project.knowledgeBaseIds ?? [])
+  const deployUnitIds: string[] = []
+  for (const knowledgeBase of knowledgeBases) {
+    const manifestPath = join(knowledgeBase.path, "agents.manifest.json")
+    try {
+      const manifest: unknown = JSON.parse(await readFile(manifestPath, "utf8"))
+      if (!isObject(manifest) || !Array.isArray(manifest.systems)) {
+        throw new Error("系统约束清单缺少 systems 数组")
+      }
+      const ids: string[] = []
+      for (const system of manifest.systems) {
+        if (!isObject(system) || !Array.isArray(system.deployUnits)) {
+          throw new Error("系统约束清单缺少 deployUnits 数组")
+        }
+        for (const unit of system.deployUnits) {
+          if (!isObject(unit) || typeof unit.deployUnitId !== "string") {
+            throw new Error("系统约束清单的 deployUnitId 必须是字符串")
+          }
+          ids.push(unit.deployUnitId)
+        }
+      }
+      deployUnitIds.push(...ids)
+    } catch (error) {
+      console.warn("[HarnessBoard] 读取公共系统约束清单失败：", { manifestPath, error })
+    }
+  }
+  return uniqueStringsInOrder(deployUnitIds)
 }
 
 export async function getHarnessLocalAgentmdDeployUnitMappings(
@@ -3313,24 +3427,54 @@ export async function getHarnessProjectAdapterSnapshot(
   }
 }
 
+function getDefaultHarnessWorkspacePath(): string {
+  return join(getOpenworkDir(), "project-workspaces")
+}
+
+function normalizeProjectCreateId(projectId: unknown): string {
+  if (typeof projectId !== "string" || !validateUuid(projectId) || uuidVersion(projectId) !== 4) {
+    throw new Error("项目 ID 无效")
+  }
+  return projectId.toLowerCase()
+}
+
+function validateNewProjectIdentity(
+  projectId: string,
+  projectCode: string,
+  store: HarnessProjectStoreFile
+): void {
+  validateProjectCodeUnique(projectCode, store)
+  if (store.projects.some((project) => project.projectId === projectId)) {
+    throw new Error("项目 ID 已被使用，请重新打开创建项目窗口")
+  }
+}
+
+export function getDefaultHarnessProjectDirectoryPreview(projectId: string): string {
+  return join(getDefaultHarnessWorkspacePath(), normalizeProjectCreateId(projectId))
+}
+
 export async function createHarnessProject(
   input: HarnessProjectCreateInput
 ): Promise<HarnessProjectMetadata> {
-  validateCreateInput(input)
+  const { workspacePath, projectDir } = validateCreateInput(input)
+  const projectId =
+    input.projectId === undefined ? uuid() : normalizeProjectCreateId(input.projectId)
   const store = await readProjectStore()
-  validateProjectCodeUnique(input.projectCode, store)
+  validateNewProjectIdentity(projectId, input.projectCode, store)
   const harnessAdapter = await resolveHarnessAdapter(input.adapterId, input.adapterType)
+  const knowledgeBaseIds = await assertSelectableKnowledgeBaseIds(input.knowledgeBaseIds)
   const project: HarnessProjectMetadata = {
-    projectId: uuid(),
+    projectId,
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
     projectFromLean: input.projectFromLean === true,
     isTestProject: input.isTestProject,
-    projectDir: input.projectDir.trim(),
+    projectDir: projectDir || projectId,
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
-    workspacePath: input.workspacePath.trim(),
+    workspacePath: workspacePath || getDefaultHarnessWorkspacePath(),
+    knowledgeBaseIds,
     "harness-adapter": harnessAdapter,
     creator: getCurrentProjectCreator(),
     lifecycle: {
@@ -3340,9 +3484,19 @@ export async function createHarnessProject(
   }
   normalizeProject(project)
 
+  const managedProjectPath = workspacePath ? null : projectDirectoryPath(project)
+  if (managedProjectPath) {
+    try {
+      await mkdir(project.workspacePath, { recursive: true })
+      await mkdir(managedProjectPath)
+    } catch (error) {
+      console.error("[HarnessBoard] Failed to create managed project directory", error)
+      throw new Error("无法自动创建插件工作区，请在高级设置中选择文件夹")
+    }
+  }
   await initializeHarnessProject(project)
   await mutateProjectStore((latest) => {
-    validateProjectCodeUnique(input.projectCode, latest)
+    validateNewProjectIdentity(projectId, input.projectCode, latest)
     latest.projects.unshift(project)
   })
   return project
@@ -3388,9 +3542,11 @@ export async function createHarnessFeature(
     )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
-    if (raw.includes("已存在")) {
+    const detail = error instanceof HarnessPluginCommandError ? error.detail : raw
+    if (detail.includes("已存在")) {
       throw new Error("该特性在当前项目路径下已存在")
     }
+    if (error instanceof HarnessPluginCommandError) throw error
     throw new Error(`创建特性失败：${raw}`)
   }
 
@@ -3460,6 +3616,7 @@ export async function skipHarnessRunNode(
     assertSkipNodeInvocationResult(configured, stdoutBuffer)
     logHarnessInvocationSuccess(stdoutBuffer, harnessCommandLogOptions("skipNode"))
   } catch (error) {
+    if (error instanceof HarnessPluginCommandError) throw error
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`跳过节点失败：${raw}`)
   } finally {
@@ -3488,7 +3645,7 @@ export async function getHarnessDynamicWorkflowConfig(
  */
 export async function markHarnessProjectSystemConstraintsLoaded(
   projectId: string,
-  loadedAt = new Date().toISOString()
+  loadedAt = formatGmt8Timestamp()
 ): Promise<boolean> {
   const id = normalizeText(projectId).trim()
   if (!id) return false
@@ -3497,9 +3654,11 @@ export async function markHarnessProjectSystemConstraintsLoaded(
     const index = store.projects.findIndex((item) => item.projectId === id)
     if (index === -1 || store.projects[index].systemConstraintFirstLoadedAt) return false
     const parsedLoadedAt = new Date(loadedAt)
-    const firstLoadedAt = Number.isNaN(parsedLoadedAt.getTime())
-      ? new Date().toISOString()
-      : parsedLoadedAt.toISOString()
+    const firstLoadedAt = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(loadedAt)
+      ? loadedAt
+      : Number.isNaN(parsedLoadedAt.getTime())
+        ? formatGmt8Timestamp()
+        : formatGmt8Timestamp(parsedLoadedAt)
     store.projects[index] = {
       ...store.projects[index],
       systemConstraintFirstLoadedAt: firstLoadedAt
@@ -3548,6 +3707,13 @@ export async function updateHarnessProjectMetadata(
     if (index === -1) throw new Error("Project not found")
     validateProjectCodeUnique(input.projectCode, store, projectId)
     const existing = store.projects[index]
+    const knowledgeBaseIds =
+      input.knowledgeBaseIds === undefined
+        ? (existing.knowledgeBaseIds ?? [])
+        : await assertSelectableKnowledgeBaseIds(
+            input.knowledgeBaseIds,
+            existing.knowledgeBaseIds ?? []
+          )
     const existingAdapter = existing["harness-adapter"]
     const harnessAdapter =
       existingAdapter.type === input.adapterType && existingAdapter.id === input.adapterId.trim()
@@ -3571,6 +3737,7 @@ export async function updateHarnessProjectMetadata(
       systemId: input.systemId.trim(),
       systemName: input.systemName.trim(),
       workspacePath: existing.workspacePath,
+      knowledgeBaseIds,
       "harness-adapter": harnessAdapter,
       lifecycle: { ...existing.lifecycle, updateAt: formatGmt8Timestamp() }
     }
@@ -3588,7 +3755,7 @@ export async function archiveHarnessProject(projectId: string): Promise<HarnessP
       lifecycle: {
         ...store.projects[index].lifecycle,
         status: "archived",
-        updateAt: new Date().toISOString()
+        updateAt: formatGmt8Timestamp()
       }
     }
     store.projects[index] = archived
@@ -3597,108 +3764,50 @@ export async function archiveHarnessProject(projectId: string): Promise<HarnessP
 }
 
 export async function deleteHarnessProject(projectId: string): Promise<HarnessProjectMetadata> {
-  return mutateProjectStore((store) => {
+  const project = await mutateProjectStore((store) => {
     const index = store.projects.findIndex((item) => item.projectId === projectId)
     if (index === -1) throw new Error("Project not found")
     const [deleted] = store.projects.splice(index, 1)
     return normalizeProject(deleted)!
   })
+  harnessProjectDeleted(project.projectId)
+  return project
 }
 
-async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
-  plugin: PluginMetadata
-  adapter: HarnessAdapterRegistryItem
-  config: Record<string, unknown>
-}> {
-  const normalizedAdapterId = normalizeText(adapterId).trim()
-  const plugin = getPlugins().find((item) => pluginMatchesAdapterId(item, normalizedAdapterId))
-  if (!plugin) {
-    throw new Error("插件未安装或不支持项目模式")
-  }
-
-  const config = await readBoardConfig(plugin.path)
-  if (!config) throw new Error("插件未安装或不支持项目模式")
-  const adapter = pluginToHarnessAdapter(plugin, { value: config, error: null })
-  if (!adapter.boardCompatibility.compatible) {
-    throw new Error(adapter.boardCompatibility.message || adapter.boardCompatibility.label)
-  }
-
-  return { plugin, adapter, config }
-}
-
-function createKnowledgeCommandProject(
-  plugin: PluginMetadata,
-  adapter: HarnessAdapterRegistryItem
-): HarnessProjectMetadata {
-  return {
-    projectId: "__project_constraints__",
-    name: adapter.name,
-    description: adapter.description,
-    projectCode: adapter.id,
-    projectFromLean: false,
-    projectDir: "project-constraints",
-    systemId: "",
-    systemName: "",
-    workspacePath: getOpenworkDir(),
-    "harness-adapter": pluginToHarnessAdapterSnapshot(plugin),
-    lifecycle: {
-      status: "active",
-      createAt: ""
-    }
-  }
-}
-
-export async function syncHarnessProjectConstraints(
-  adapterId: string
-): Promise<HarnessProjectConstraintSyncResult> {
-  const { plugin, adapter, config } = await findCompatibleKnowledgePlugin(adapterId)
-  const configuredCommand = readBoardConfigPlatformTextFromValue(config, "pull_knowledge")
-  if (!configuredCommand) {
-    throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
-  }
-
-  const commandProject = createKnowledgeCommandProject(plugin, adapter)
-  const configured: ConfiguredHarnessInvocation = {
-    cwd: plugin.path,
-    invocation: parseInspectCommand(
-      configuredCommand,
-      commandProject,
-      "pullKnowledge",
-      plugin.path,
-      {
-        leanToken: (await readLeanTokenStore()).leanToken
-      }
-    )
-  }
-
-  const stdoutBuffer = await runHarnessInvocationAsync(
-    configured,
-    harnessCommandLogOptions("pullKnowledge", adapter.name),
-    HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS
+/** Recover links left by older versions or offline plugin changes. Only an intact local registry
+ * can confirm a missing project; normal UI catalog searches can be filtered or unavailable. */
+export async function refreshFollowedHarnessProjects(projectIds: readonly string[]): Promise<void> {
+  if (!projectIds.length) return
+  assertHarnessConfigAvailable()
+  const raw = await readHarnessJsonFileBounded(
+    HARNESS_BOARD_FILE,
+    HARNESS_PROJECT_STORE_MAX_BYTES,
+    "Harness project store"
   )
-  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
-  let message = ""
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw) as unknown
-  } catch {
-    throw new Error("公共系统约束同步返回格式异常")
+  if (
+    !isObject(raw) ||
+    !Array.isArray(raw.projects) ||
+    raw.projects.length > HARNESS_PROJECT_STORE_MAX_PROJECTS
+  )
+    return
+  const registered = new Set<string>()
+  for (const row of raw.projects) {
+    if (!isObject(row) || typeof row.projectId !== "string" || !row.projectId.trim()) return
+    registered.add(row.projectId)
   }
-  if (!isObject(parsed) || typeof parsed.ok !== "boolean") {
-    throw new Error("公共系统约束同步返回格式异常")
+  const existing: string[] = []
+  for (const id of projectIds) {
+    if (registered.has(id)) existing.push(id)
+    else harnessProjectDeleted(id)
   }
-  message = normalizeText(parsed.message).trim()
-  const outputPath = normalizeText(parsed.path).trim()
-  if (!parsed.ok) {
-    throw new Error(message || "公共系统约束同步失败")
-  }
-  const knowledgePath = resolveProjectKnowledgePath(commandProject, plugin.path, config)
-  if (knowledgePath) persistMarketRuntimeDirectory(plugin.path, knowledgePath)
-  return {
-    adapterId: adapter.id,
-    adapterName: adapter.name,
-    ...(message ? { message } : {}),
-    ...(knowledgePath || outputPath ? { path: knowledgePath || outputPath } : {})
+  for (let i = 0; i < existing.length; i += HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH) {
+    try {
+      await getHarnessProjectDetails(
+        existing.slice(i, i + HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH)
+      )
+    } catch (error) {
+      console.warn("[HarnessBoard] Could not refresh followed Features", error)
+    }
   }
 }
 
@@ -3712,12 +3821,13 @@ export async function getHarnessProjectDetail(
 async function runInspectAdapterBatch(
   projects: HarnessProjectMetadata[],
   mode: "project",
-  cwd: string,
+  plugin: PluginMetadata,
   configSnapshot?: HarnessBoardConfigReadSnapshot,
   leanToken = "",
   adapterScope?: string,
   signal?: AbortSignal
 ): Promise<HarnessAdapterDetailBatchResult> {
+  const cwd = plugin.path
   const firstProject = projects[0]
   const configuredCommand = configSnapshot
     ? readBoardConfigPlatformTextFromValue(
@@ -3731,18 +3841,11 @@ async function runInspectAdapterBatch(
   }
 
   const projectDirs = projects.map((project) => projectDirectoryName(project))
-  const { executable, args } = parseInspectCommand(configuredCommand, firstProject, mode, cwd, {
+  const configured = configureHarnessInvocation(configuredCommand, firstProject, mode, plugin, {
     projectDirs,
     leanToken
   })
 
-  const configured: ConfiguredHarnessInvocation = {
-    cwd,
-    invocation: {
-      executable,
-      args
-    }
-  }
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = await runHarnessInvocationAsync(
     configured,
@@ -3768,19 +3871,24 @@ async function runInspectAdapterBatch(
       `[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
     )
     console.error(`[HarnessBoard] [${configKey}] CWD: ${configured.cwd}`)
-    if (error instanceof HarnessAdapterDetailWorkerResultError && error.preview) {
-      console.error(`[HarnessBoard] [${configKey}] Result preview:\n${error.preview}`)
+    if (error instanceof HarnessAdapterDetailWorkerResultError) {
+      if (error.preview) {
+        console.error(`[HarnessBoard] [${configKey}] Result preview:\n${error.preview}`)
+      }
+      if (error.code !== "HARNESS_ADAPTER_DETAIL_CANCELLED") {
+        throw new HarnessPluginCommandError(configured, message)
+      }
     }
     throw error
   }
 }
 
-function makeProjectErrorDetail(
+async function makeProjectErrorDetail(
   project: HarnessProjectMetadata,
   label: string,
   error: string,
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel {
+): Promise<HarnessProjectDetailViewModel> {
   return makeProjectDetailViewModel(
     project,
     {
@@ -3794,10 +3902,10 @@ function makeProjectErrorDetail(
   )
 }
 
-function makeArchivedProjectDetail(
+async function makeArchivedProjectDetail(
   project: HarnessProjectMetadata,
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel {
+): Promise<HarnessProjectDetailViewModel> {
   return makeProjectDetailViewModel(
     project,
     {
@@ -3822,14 +3930,26 @@ export async function getHarnessProjectDetails(
 ): Promise<Record<string, HarnessProjectDetailViewModel>> {
   const scope = options.scope ?? makeHarnessDetailScope("harness-project-details")
   const request = beginHarnessDetailRequest(scope)
+  const catalog = beginHarnessFeatureCatalogRead(projectIds)
+  const complete = new Set<string>()
   try {
-    return await loadHarnessProjectDetails(
+    const details = await loadHarnessProjectDetails(
       projectIds,
       scope,
       request.signal,
+      complete,
       options.maxResponseBytes
     )
+    throwIfHarnessDetailCancelled(request.signal)
+    await Promise.all([...complete].map((id) => {
+      const detail = details[id]
+      if (detail && !detail.error) return catalog.observed(id, detail.runs)
+      return undefined
+    }))
+    throwIfHarnessDetailCancelled(request.signal)
+    return details
   } finally {
+    catalog.finish()
     request.finish()
   }
 }
@@ -3838,6 +3958,7 @@ async function loadHarnessProjectDetails(
   projectIds: string[],
   scope: string,
   signal: AbortSignal,
+  complete: Set<string>,
   maxResponseBytes?: number
 ): Promise<Record<string, HarnessProjectDetailViewModel>> {
   if (projectIds.length === 0) return {}
@@ -3862,7 +3983,7 @@ async function loadHarnessProjectDetails(
   const groups = new Map<
     string,
     {
-      cwd: string
+      plugin: PluginMetadata
       projects: HarnessProjectMetadata[]
       configSnapshot?: HarnessBoardConfigReadSnapshot
       leanToken: string
@@ -3878,7 +3999,7 @@ async function loadHarnessProjectDetails(
     configContextByProjectId.set(project.projectId, configContext)
     projectDirectoryExistsById.set(project.projectId, workerContext.projectDirectoryExists)
     if (project.lifecycle.status === "archived") {
-      result[project.projectId] = makeArchivedProjectDetail(project, configContext)
+      result[project.projectId] = await makeArchivedProjectDetail(project, configContext)
       continue
     }
 
@@ -3889,7 +4010,7 @@ async function loadHarnessProjectDetails(
       configSnapshot
     )
     if (!compatibility.compatible) {
-      result[project.projectId] = makeProjectErrorDetail(
+      result[project.projectId] = await makeProjectErrorDetail(
         project,
         compatibility.label,
         compatibility.message || "项目使用的插件与当前 APP 不兼容。",
@@ -3900,7 +4021,7 @@ async function loadHarnessProjectDetails(
     if (!plugin) continue
 
     if (!projectDirectoryExistsById.get(project.projectId)) {
-      result[project.projectId] = makeProjectErrorDetail(
+      result[project.projectId] = await makeProjectErrorDetail(
         project,
         "项目目录不存在",
         projectDirectoryMissingMessage(project),
@@ -3915,7 +4036,7 @@ async function loadHarnessProjectDetails(
       existing.projects.push(project)
     } else {
       groups.set(key, {
-        cwd: plugin.path,
+        plugin,
         projects: [project],
         configSnapshot,
         leanToken: configContext.leanToken
@@ -3925,20 +4046,16 @@ async function loadHarnessProjectDetails(
 
   for (const group of groups.values()) {
     throwIfHarnessDetailCancelled(signal)
-    for (
-      let offset = 0;
-      offset < group.projects.length;
-      offset += HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
-    ) {
-      const batch = group.projects.slice(
-        offset,
-        offset + HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
-      )
+    const batchSize = getProjectInspectBatchSize(
+      readBoardConfigPlatformTextFromValue(group.configSnapshot?.value ?? null, "project_status")
+    )
+    for (let offset = 0; offset < group.projects.length; offset += batchSize) {
+      const batch = group.projects.slice(offset, offset + batchSize)
       try {
         const snapshot = await runInspectAdapterBatch(
           batch,
           "project",
-          group.cwd,
+          group.plugin,
           group.configSnapshot,
           group.leanToken,
           `${scope}:adapter`,
@@ -3951,16 +4068,19 @@ async function loadHarnessProjectDetails(
           const projectDir = projectDirectoryName(project)
           const projectData = snapshot.projects[projectDir]
           if (!projectData) {
-            result[project.projectId] = makeProjectErrorDetail(
+            console.error(
+              `[HarnessBoard] [project_status] Inspect adapter did not return status for ${projectDir}`
+            )
+            result[project.projectId] = await makeProjectErrorDetail(
               project,
               "Inspect 读取失败",
-              `读取项目状态失败：Inspect adapter 未返回项目文件夹 ${projectDir} 的状态`,
+              formatHarnessPluginCommandFailure(group.plugin.name, "project_status"),
               configContextByProjectId.get(project.projectId)
             )
             continue
           }
 
-          result[project.projectId] = makeProjectDetailViewModel(
+          result[project.projectId] = await makeProjectDetailViewModel(
             project,
             {
               workflow,
@@ -3971,11 +4091,12 @@ async function loadHarnessProjectDetails(
             },
             configContextByProjectId.get(project.projectId)
           )
+          if (!projectData.incompleteRuns) complete.add(project.projectId)
         }
       } catch (error) {
         if (signal.aborted) throw harnessDetailCancelledError()
         for (const project of batch) {
-          result[project.projectId] = makeProjectErrorDetail(
+          result[project.projectId] = await makeProjectErrorDetail(
             project,
             "Inspect 读取失败",
             formatProjectDetailError(project, error),
@@ -4045,8 +4166,13 @@ async function loadHarnessRunDetail(
       `[HarnessBoard] [feature_status] Command: ${formatHarnessCommand(configured.invocation)}`
     )
     console.error(`[HarnessBoard] [feature_status] CWD: ${configured.cwd}`)
-    if (error instanceof HarnessAdapterDetailWorkerResultError && error.preview) {
-      console.error(`[HarnessBoard] [feature_status] Result preview:\n${error.preview}`)
+    if (error instanceof HarnessAdapterDetailWorkerResultError) {
+      if (error.preview) {
+        console.error(`[HarnessBoard] [feature_status] Result preview:\n${error.preview}`)
+      }
+      if (error.code !== "HARNESS_ADAPTER_DETAIL_CANCELLED") {
+        throw new HarnessPluginCommandError(configured, message)
+      }
     }
     throw error
   }

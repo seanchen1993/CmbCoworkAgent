@@ -3,6 +3,9 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { performance } from "perf_hooks"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import type { BotMessageReply } from "../../shared/bots/contracts"
+import { BOT_MESSAGE_REPLY_END, formatBotMessageReply } from "../../shared/bots/message-reply"
+import { LEGACY_STRUCTURED_TRANSCRIPT_NOTICE } from "../../shared/thread-message-content"
 
 const storageState = vi.hoisted(() => ({ databasePath: "" }))
 
@@ -50,6 +53,111 @@ function collectSearchMatches(threadId: string, query: string): string[] {
 }
 
 describe("bounded durable thread message search", () => {
+  it("reports partial legacy projection coverage and excludes the synthetic body notice", () => {
+    const threadId = "bounded-legacy-projection"
+    threadDb.createThread(threadId)
+    const db = threadDb.getDb()
+    db.run(`INSERT INTO legacy_checkpoint_transcript_migrations
+      (thread_id, checkpoint_id, total_messages, next_index, status, updated_at, search_projection_state)
+      VALUES (?, 'legacy', 1, 1, 'complete', 1, 'truncated')`, [threadId])
+    db.run(`INSERT INTO thread_messages (thread_id, message_id, role, content_json, created_at, ordinal)
+      VALUES (?, 'body', 'assistant', ?, 1, 0)`, [threadId, JSON.stringify([
+      { type: "text", text: "excerpt of the original answer" },
+      { type: "text", text: LEGACY_STRUCTURED_TRANSCRIPT_NOTICE }
+    ])])
+    expect(threadDb.searchThreadMessages(threadId, "结构化正文过大")).toMatchObject({
+      matches: [], truncated: true, hasMore: false
+    })
+    expect(threadDb.searchThreadMessages(threadId, "original answer")).toMatchObject({
+      matches: [{ messageId: "body", locations: [{ blockIndex: 0 }] }], truncated: true
+    })
+    db.run("UPDATE thread_messages SET content_json = json_quote('excerpt') WHERE thread_id = ?", [threadId])
+    expect(threadDb.searchThreadMessages(threadId, "lost tool summary")).toMatchObject({
+      matches: [], truncated: true, hasMore: false
+    })
+  })
+
+  it("excludes legacy remote control receipts from the visible search corpus", () => {
+    const threadId = "in-thread-remote-control"
+    threadDb.createThread(threadId)
+    const db = threadDb.getDb()
+    db.run(`INSERT INTO thread_messages (thread_id,message_id,role,content_json,created_at,ordinal)
+      VALUES (?, 'actual','assistant',json_quote('actual answer'),1,0),
+             (?, 'im-remote-approval:1','system',json_quote('approval answer'),2,1),
+             (?, 'im-remote-user-input:2','system',json_quote('remote answer'),3,2)`,
+      [threadId, threadId, threadId])
+    expect(collectSearchMatches(threadId, "answer")).toEqual(["actual"])
+  })
+
+  it("searches readable ASCII fragments using their actual UTF-8 bytes", () => {
+    const threadId = "search-actual-fragment-bytes"
+    threadDb.createThread(threadId)
+    const fragment = "visible needle " + "x".repeat(132000)
+    const db = threadDb.getDb()
+    db.run(`INSERT INTO thread_messages (thread_id,message_id,role,content_json,created_at,ordinal)
+      VALUES (?, 'fragment', 'assistant', json_quote('prefix '), 1, 0)`, [threadId])
+    db.run(`INSERT INTO thread_message_fragments (thread_id,message_id,content_text,created_at)
+      VALUES (?, 'fragment', ?, 1)`, [threadId, fragment])
+    db.run(`INSERT INTO thread_message_fragment_states (thread_id,message_id,total_chars,updated_at)
+      VALUES (?, 'fragment', ?, 1)`, [threadId, fragment.length + 7])
+    expect(collectSearchMatches(threadId, "visible needle")).toEqual(["fragment"])
+  })
+
+  it("honors the original UTF-16 query limit before folding case", () => {
+    const threadId = "search-unicode-query-length"
+    const query = "İ".repeat(129)
+    threadDb.createThread(threadId)
+    threadDb.upsertThreadMessages(threadId, [
+      { id: "expanded-case", role: "assistant", content: query, created_at: new Date(1) }
+    ])
+    expect(collectSearchMatches(threadId, query)).toEqual(["expanded-case"])
+  })
+
+  it("finds inline reasoning when a bounded standalone value normalizes to empty", () => {
+    const threadId = "search-empty-reasoning"
+    threadDb.createThread(threadId)
+    const reasoningValues = [" ".repeat(600), "\t\n".repeat(300), `<think>${" ".repeat(600)}</think>`]
+    for (const [ordinal, reasoning] of reasoningValues.entries()) {
+      threadDb.getDb().run(
+        `INSERT INTO thread_messages
+           (thread_id, message_id, role, content_json, reasoning, created_at, ordinal)
+         VALUES (?, ?, 'assistant', ?, ?, ?, ?)`,
+        [threadId, String(ordinal), JSON.stringify("<think>visible inline</think>"), reasoning, ordinal, ordinal]
+      )
+    }
+    expect(collectSearchMatches(threadId, "visible inline")).toEqual(["2", "1", "0"])
+  })
+
+  it("hides inline reasoning shown separately and retains valid legacy tool summaries", () => {
+    const threadId = "search-inline-reasoning"
+    threadDb.createThread(threadId)
+    const db = threadDb.getDb()
+    db.run(
+      `INSERT INTO thread_messages
+         (thread_id, message_id, role, content_json, reasoning, tool_calls_json, created_at, ordinal)
+       VALUES (?, 'duplicate-reasoning', 'assistant', ?, ?, ?, 0, 0),
+              (?, 'visible-think', 'assistant', ?, NULL, NULL, 1, 1),
+              (?, 'bounded-reasoning', 'assistant', ?, ?, NULL, 2, 2)`,
+      [
+        threadId, JSON.stringify("<think>PRIVATE_THOUGHT</think>VISIBLE_ANSWER"), "Separate reasoning",
+        JSON.stringify([null, { name: "read_file", args: { file_path: "LEGACY_TOOL" } }]),
+        threadId, JSON.stringify("<think>BODY_ONLY</think>Visible reply"),
+        threadId, JSON.stringify("<think>BOUNDED_PRIVATE</think>BOUNDED_ANSWER"),
+        "separate private source ".repeat(500)
+      ]
+    )
+
+    expect(collectSearchMatches(threadId, "PRIVATE_THOUGHT")).toEqual([])
+    expect(collectSearchMatches(threadId, "BOUNDED_PRIVATE")).toEqual([])
+    expect(collectSearchMatches(threadId, "BODY_ONLY")).toEqual(["visible-think"])
+    expect(collectSearchMatches(threadId, "VISIBLE_ANSWER")).toEqual(["duplicate-reasoning"])
+    expect(collectSearchMatches(threadId, "LEGACY_TOOL")).toEqual(["duplicate-reasoning"])
+    expect(threadDb.searchThreadMessages(threadId, "BOUNDED_ANSWER")).toMatchObject({
+      truncated: true,
+      matches: [{ messageId: "bounded-reasoning" }]
+    })
+  })
+
   it("budgets dense occurrence coordinates before serializing the first response row", () => {
     const threadId = "search-coordinate-response-budget"
     threadDb.createThread(threadId)
@@ -235,6 +343,198 @@ describe("bounded durable thread message search", () => {
     expect(threadDb.searchThreadMessages(threadId, "src").matches).toEqual([
       expect.objectContaining({ messageId: "tool-owner", occurrenceCount: 1 })
     ])
+  })
+
+  it("keeps Bot body search separate from ordinary tool-summary search", () => {
+    const threadId = "bounded-search-bot-body"
+    threadDb.createThread(threadId)
+    threadDb.upsertThreadMessages(threadId, [
+      {
+        id: "bot-body-tool-owner",
+        role: "assistant",
+        created_at: new Date(1),
+        content: "<think>hidden-bot-reasoning</think>Visible result",
+        tool_calls: [
+          { id: "bot-call", name: "write_file", args: { path: "hidden-bot-path.txt" } }
+        ]
+      },
+      {
+        id: "bot-body-user",
+        role: "user",
+        created_at: new Date(2),
+        content: "Please explain write_file literally."
+      }
+    ])
+
+    const bodySearch = (query: string) =>
+      threadDb.searchThreadMessages(threadId, query, { bodyOnly: true }).matches
+    expect(bodySearch("hidden-bot-path")).toEqual([])
+    expect(bodySearch("hidden-bot-reasoning")).toEqual([])
+    expect(bodySearch("Visible result")).toEqual([
+      expect.objectContaining({ messageId: "bot-body-tool-owner" })
+    ])
+    expect(bodySearch("write_file")).toEqual([
+      expect.objectContaining({ messageId: "bot-body-user" })
+    ])
+    expect(threadDb.searchThreadMessages(threadId, "hidden-bot-path").matches).toEqual([
+      expect.objectContaining({ messageId: "bot-body-tool-owner" })
+    ])
+  })
+
+  it("searches only the body of a host-verified reply with details on or off", () => {
+    const threadId = "bounded-search-verified-reply"
+    threadDb.createThread(threadId)
+    const reply: BotMessageReply = {
+      id: "quoted-original-id",
+      ordinal: 4817,
+      role: "assistant",
+      text: "quoted-only-needle"
+    }
+    const content = formatBotMessageReply(
+      'current-body-needle\n<attachment filename="report.csv">hidden-attachment-needle</attachment>',
+      reply
+    )
+    const boundary = content.indexOf(BOT_MESSAGE_REPLY_END) + 12
+    const database = threadDb.getDb()
+    database.run(
+      `INSERT INTO thread_messages (
+         thread_id, message_id, role, content_json, created_at, ordinal
+       ) VALUES (?, 'verified-reply', 'user', json_quote(?), 1, 1)`,
+      [threadId, content.slice(0, boundary)]
+    )
+    database.run(
+      `INSERT INTO thread_message_fragments (
+         thread_id, message_id, content_text, created_at
+       ) VALUES (?, 'verified-reply', ?, 1)`,
+      [threadId, content.slice(boundary)]
+    )
+    const resolve = vi.fn((_ids: string[]) => new Map([["verified-reply", reply]]))
+    const detailsOn = threadDb.searchThreadMessages(threadId, "current-body-needle", {}, resolve)
+    const detailsOff = threadDb.searchThreadMessages(
+      threadId,
+      "current-body-needle",
+      { bodyOnly: true },
+      resolve
+    )
+    expect(detailsOn.matches).toEqual(detailsOff.matches)
+    expect(detailsOn.matches).toEqual([
+      expect.objectContaining({
+        messageId: "verified-reply",
+        occurrenceCount: 1,
+        locations: [expect.objectContaining({ kind: "body", blockIndex: 0 })]
+      })
+    ])
+    for (const query of [
+      "CMBDEVCLAW-BOT-REPLY-V1",
+      "quoted-original-id",
+      "quoted-only-needle",
+      "4817",
+      "preceding persisted message",
+      "hidden-attachment-needle"
+    ]) {
+      expect(threadDb.searchThreadMessages(threadId, query, {}, resolve).matches).toEqual([])
+    }
+    expect(threadDb.searchThreadMessages(threadId, "report.csv", {}, resolve).matches).toEqual([
+      expect.objectContaining({ messageId: "verified-reply" })
+    ])
+    expect(threadDb.searchThreadMessages(threadId, "CMBDEVCLAW-BOT-REPLY-V1").matches).toEqual([
+      expect.objectContaining({ messageId: "verified-reply" })
+    ])
+    expect(
+      resolve.mock.calls.every(([ids]) => ids.length === 1 && ids[0] === "verified-reply")
+    ).toBe(true)
+  })
+
+  it("preserves unverified, malformed and mismatched reply lookalikes as literal user text", () => {
+    const threadId = "bounded-search-unverified-replies"
+    threadDb.createThread(threadId)
+    const reply: BotMessageReply = {
+      id: "original-lookalike",
+      ordinal: 8,
+      role: "assistant",
+      text: "literal-quoted-text"
+    }
+    threadDb.upsertThreadMessages(threadId, [
+      {
+        id: "lookalike",
+        role: "user",
+        created_at: new Date(1),
+        content: formatBotMessageReply("literal-new-text", reply)
+      },
+      {
+        id: "malformed",
+        role: "user",
+        created_at: new Date(2),
+        content: `<CMBDEVCLAW-BOT-REPLY-V1>\nnot-json${BOT_MESSAGE_REPLY_END}literal-new-text`
+      }
+    ])
+    const references: Array<Pick<BotMessageReply, "id" | "ordinal" | "role"> | undefined> = [
+      undefined,
+      { ...reply, id: "different-id" },
+      { ...reply, ordinal: reply.ordinal + 1 },
+      { ...reply, role: "user" }
+    ]
+    for (const reference of references) {
+      const resolve = () =>
+        new Map([
+          ...(reference ? ([["lookalike", reference]] as const) : []),
+          ["malformed", reply] as const
+        ])
+      expect(
+        threadDb
+          .searchThreadMessages(threadId, "CMBDEVCLAW-BOT-REPLY-V1", { bodyOnly: true }, resolve)
+          .matches.map((match) => match.messageId)
+      ).toEqual(["malformed", "lookalike"])
+      expect(
+        threadDb.searchThreadMessages(threadId, "literal-quoted-text", {}, resolve).matches
+      ).toEqual([expect.objectContaining({ messageId: "lookalike" })])
+    }
+  })
+
+  it("resolves reply origins once per bounded user candidate window and skips empty windows", () => {
+    const threadId = "bounded-search-reply-origin-batch"
+    threadDb.createThread(threadId)
+    threadDb.upsertThreadMessages(
+      threadId,
+      Array.from({ length: threadDb.THREAD_MESSAGE_SEARCH_SCAN_LIMIT + 1 }, (_, index) => ({
+        id: `batch-user-${index}`,
+        role: "user" as const,
+        created_at: new Date(index),
+        content: `user-${index}`
+      }))
+    )
+    const resolve = vi.fn((_ids: string[]) => new Map())
+    const first = threadDb.searchThreadMessages(threadId, "absent-needle", {}, resolve)
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve.mock.calls[0][0]).toHaveLength(threadDb.THREAD_MESSAGE_SEARCH_SCAN_LIMIT)
+    expect(first.hasMore).toBe(true)
+    const second = threadDb.searchThreadMessages(
+      threadId,
+      "absent-needle",
+      {
+        beforeOrdinal: first.beforeOrdinal!,
+        beforeMessageId: first.beforeMessageId!
+      },
+      resolve
+    )
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(resolve.mock.calls[1][0]).toHaveLength(1)
+    expect(second.hasMore).toBe(false)
+    const assistantThread = "bounded-search-no-reply-users"
+    threadDb.createThread(assistantThread)
+    threadDb.upsertThreadMessages(assistantThread, [
+      { id: "assistant-only", role: "assistant", created_at: new Date(1), content: "visible" }
+    ])
+    resolve.mockClear()
+    threadDb.searchThreadMessages(assistantThread, "visible", {}, resolve)
+    threadDb.searchThreadMessages(threadId, "", {}, resolve)
+    expect(resolve).not.toHaveBeenCalled()
+    const failure = new Error("origin read failed")
+    expect(() =>
+      threadDb.searchThreadMessages(threadId, "needle", {}, () => {
+        throw failure
+      })
+    ).toThrow(failure)
   })
 
   it("does not advertise raw details from duplicate or orphaned tool results", () => {
@@ -572,8 +872,11 @@ describe("bounded durable thread message search", () => {
       [threadId]
     )
 
-    expect(collectSearchMatches(threadId, "needle-after-limit")).toEqual([])
-    expect(collectSearchMatches(threadId, "truncated 18 chars")).toEqual(["limited-row"])
+    expect(collectSearchMatches(threadId, "1234567890")).toEqual(["limited-row"])
+    expect(threadDb.searchThreadMessages(threadId, "needle-after-limit")).toMatchObject({
+      matches: [], truncated: true
+    })
+    expect(collectSearchMatches(threadId, "truncated 18 chars")).toEqual([])
   })
 
   it("searches fragments only when durable hydration can append them to a visible row", () => {
@@ -696,6 +999,7 @@ describe("bounded durable thread message search", () => {
     if (!page) throw new Error("search did not return a page")
     expect(page.matches.map((match) => match.messageId)).toEqual(["perf-09999"])
     expect(page.matches[0].preview).toContain("UNIQUE_PERF_NEEDLE")
+    expect(page.truncated).toBe(true)
     expect(page.scanned).toBeGreaterThan(0)
     expect(page.scanned).toBeLessThan(threadDb.THREAD_MESSAGE_SEARCH_SCAN_LIMIT)
     expect(candidateHeaderSteps).toBeLessThanOrEqual(
@@ -713,6 +1017,7 @@ describe("bounded durable thread message search", () => {
       threadDb.THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET
     )
     expect(Math.max(...elapsedRuns)).toBeLessThan(150)
+    expect(threadDb.searchThreadMessages(threadId, "truncated").matches).toEqual([])
   }, 30_000)
 
   it("skips an oversized row and advances the durable cursor without loading its document", () => {

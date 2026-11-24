@@ -22,7 +22,13 @@ function inject(
   owner = runToken,
   signal?: AbortSignal
 ) {
-  const middleware = createCurrentRunMessageQueueMiddleware(owner, onInjected) as unknown as {
+  const middleware = createCurrentRunMessageQueueMiddleware(
+    owner,
+    undefined,
+    undefined,
+    undefined,
+    onInjected
+  ) as unknown as {
     beforeModel: QueueHook | { hook: QueueHook }
     afterModel: { hook: QueueHook }
   }
@@ -50,6 +56,45 @@ afterEach(() => {
 })
 
 describe("raw input at the steering injection boundary", () => {
+  it("keeps Bot admission, model activity and staged input effects independent", async () => {
+    const events: string[] = []
+    const onRawInput = vi.fn((value?: string) => events.push(`raw:${value}`))
+    const onModelState = vi.fn()
+    const onDiscarded = vi.fn()
+    const middleware = createCurrentRunMessageQueueMiddleware(
+      runToken,
+      onModelState,
+      undefined,
+      undefined,
+      onRawInput
+    ) as unknown as {
+      beforeModel: QueueHook
+      wrapModelCall: (request: unknown, handler: (request: unknown) => Promise<AIMessage>) => Promise<AIMessage>
+    }
+    queueCurrentRunMessage(threadId, {
+      id: "cancelled-bot-message",
+      content: "cancelled",
+      rawUserInput: "discarded original",
+      beforeInject: () => false,
+      onDiscarded
+    }, runToken)
+    enqueue("accepted", "original", () => events.push("injected"))
+    setCurrentRunInjectionNotifier(() => { events.push("persisted") })
+    await middleware.beforeModel({ messages: [new HumanMessage("A")] }, {
+      configurable: { thread_id: threadId }
+    })
+    expect(events).toEqual(["persisted", "raw:original", "injected"])
+    expect(onDiscarded).toHaveBeenCalledOnce()
+    expect(onRawInput).toHaveBeenCalledExactlyOnceWith("original")
+    const response = new AIMessage("reply")
+    await expect(middleware.wrapModelCall({
+      messages: [new HumanMessage("accepted")],
+      runtime: { configurable: { thread_id: threadId } }
+    }, async () => response)).resolves.toBe(response)
+    expect(onModelState.mock.calls).toEqual([[true], [false]])
+    expect(onRawInput).toHaveBeenCalledOnce()
+  })
+
   it.each(["beforeModel", "afterModel"] as const)(
     "updates the active original input only after durable acknowledgement in %s",
     async (phase) => {

@@ -1,3 +1,14 @@
+import { ImDeliveryOrder, nextImDeliveryOrder } from "./delivery-order"
+import { BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION, BOT_IM_FILE_PARALLEL_EXTENSION, type BotImFileCommand, type BotImFileResult } from "../../../shared/bots/im-file"
+import {
+  BOT_IM_EXTENSION,
+  assertBotImEvent,
+  assertBotImBindingResult,
+  type BotImEvent,
+  type BotImCommand,
+  type BotImBinding,
+  type BotImBindingPage
+} from "../../../shared/bots/im-channel"
 import { randomUUID } from "node:crypto"
 import WebSocket from "ws"
 import {
@@ -69,6 +80,7 @@ export interface ImGatewayWsClientOptions {
   appVersion: string
   capabilities?: string[]
   onRemoteEvent: (event: RemoteImEventV1) => void | Promise<void>
+  onBotEvent?: (event: BotImEvent) => void | Promise<void>
   onLeaseRevoked?: (payload: Record<string, unknown>) => void | Promise<void>
   onCardReceipt?: (receipt: RemoteImCardReceiptV1) => void | Promise<void>
   onAuthenticationRequired?: (rejectedToken: string) => boolean | Promise<boolean>
@@ -79,6 +91,7 @@ export interface ImGatewayWsClientOptions {
   ) => void | Promise<void>
   isProactiveRouteConfirmed?: (conversationKey: string, principalId: string) => boolean
   onStatusChange?: (status: ImGatewayWsStatus) => void
+  deliveryOrder?: ImDeliveryOrder
   now?: () => number
 }
 
@@ -178,6 +191,16 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private syncCommandId: string | null = null
   /** Set by this connection's WELCOME only; every new connection starts at text. */
   private markdownReplies = false
+  private botChannel = false
+  private botCards = false
+  private parallelBotFiles = false
+  private botFileReceipts = false
+  private botFiles = false
+  private readonly fileCommands = new Map<string, PendingCommand<BotImFileResult>>()
+  private readonly botCommands = new Map<
+    string,
+    PendingCommand<BotImBinding | BotImBindingPage> & { request: BotImCommand }
+  >()
   private readonly permitCommands = new Map<string, PendingCommand<ImExecutionPermitResult>>()
   private readonly permitCommandByEvent = new Map<string, string>()
   private readonly replyCommands = new Map<string, PendingCommand<ImReplySubmissionResult>>()
@@ -202,6 +225,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     routes: []
   }
 
+  get deliveryOrder(): ImDeliveryOrder | undefined {
+    return this.options.deliveryOrder
+  }
+
   constructor(private readonly options: ImGatewayWsClientOptions) {
     this.now = options.now ?? Date.now
   }
@@ -216,6 +243,81 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
 
   supportsMarkdownReplies(): boolean {
     return this.markdownReplies
+  }
+
+  supportsBotCards(): boolean {
+    return this.supportsBotChannel() && this.botCards
+  }
+
+  supportsParallelBotFiles(): boolean { return this.supportsBotFiles() && this.parallelBotFiles }
+  supportsBotFileReceipts(): boolean { return this.supportsBotFiles() && this.botFileReceipts }
+
+  supportsBotFiles(): boolean { return this.supportsBotChannel() && this.botFiles }
+
+  botFileCommand(request: BotImFileCommand): Promise<BotImFileResult> {
+    if (!this.supportsBotFiles()) return Promise.reject(new ImGatewayCommandError("当前网关不支持发送附件，请升级网关", { permanent: true }))
+    const commandId = randomUUID()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.fileCommands.delete(commandId)
+        // Retrying begin checks the durable outbox before uploading or posting again.
+        reject(new ImGatewayCommandError("附件传输确认超时，稍后重试"))
+      }, request.action === "finish" ? 300_000 : COMMAND_TIMEOUT_MS)
+      this.fileCommands.set(commandId, { resolve, reject, timer })
+      try { this.sendCommand("BOT_FILE_COMMAND", request, commandId) }
+      catch (error) {
+        clearTimeout(timer); this.fileCommands.delete(commandId)
+        reject(error)
+      }
+    })
+  }
+
+  supportsBotChannel(): boolean {
+    return this.isAuthenticated() && this.botChannel
+  }
+
+  botBindingCommand(
+    request: BotImCommand,
+    commandId: string = randomUUID()
+  ): Promise<BotImBinding | BotImBindingPage> {
+    if (!this.supportsBotChannel())
+      return Promise.reject(
+        new ImGatewayCommandError("网关尚未启用 Bot 接入", {
+          reasonCode: "BOT_CHANNEL_UNAVAILABLE"
+        })
+      )
+    if (this.botCommands.has(commandId)) return Promise.reject(new Error("该绑定操作正在处理中"))
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.botCommands.delete(commandId)
+        reject(
+          new ImGatewayCommandError("绑定操作结果尚未确认，请刷新后重试", { resultUnknown: true })
+        )
+      }, COMMAND_TIMEOUT_MS)
+      this.botCommands.set(commandId, { resolve, reject, timer, request })
+      try {
+        this.sendCommand(
+          "BOT_BINDING_COMMAND",
+          request as unknown as Record<string, unknown>,
+          commandId
+        )
+      } catch (error) {
+        clearTimeout(timer)
+        this.botCommands.delete(commandId)
+        reject(error instanceof Error ? error : new Error("绑定操作发送失败"))
+      }
+    })
+  }
+
+  acquireBotPermit(
+    event: Pick<ImEventRecord, "eventId" | "leaseId">
+  ): Promise<ImExecutionPermitResult> {
+    return this.requestPermit("EXECUTION_PERMIT_ACQUIRE", event)
+  }
+  renewBotPermit(
+    event: Pick<ImEventRecord, "eventId" | "leaseId">
+  ): Promise<ImExecutionPermitResult> {
+    return this.requestPermit("EXECUTION_PERMIT_RENEW", event)
   }
 
   start(): void {
@@ -233,6 +335,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.helloCommandId = null
     this.syncCommandId = null
     this.markdownReplies = false
+    this.botChannel = false
+    this.botCards = false
+    this.botFiles = false
+    this.parallelBotFiles = false
+    this.botFileReceipts = false
     this.clearTimers()
     this.rejectPending(
       new ImGatewayCommandError("统一机器人连接已断开", { reasonCode: "DESKTOP_OFFLINE" })
@@ -274,11 +381,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
    * short code that actually answer the request — a thrown error would only
    * tempt a caller into treating a cosmetic failure as a fatal one.
    */
-  sendCard(card: RemoteImCardSendV1): Promise<ImCardSubmissionResult> {
+  sendCard(card: RemoteImCardSendV1, switchCardOrder?: number): Promise<ImCardSubmissionResult> {
     return this.submitCard(
       "CARD_SEND",
       card.interactionId,
-      card as unknown as Record<string, unknown>
+      card as unknown as Record<string, unknown>,
+      switchCardOrder
     )
   }
 
@@ -297,7 +405,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private submitCard(
     type: "CARD_SEND" | "CARD_UPDATE",
     interactionId: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    switchCardOrder?: number
   ): Promise<ImCardSubmissionResult> {
     if (!this.isAuthenticated()) {
       return Promise.resolve({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" })
@@ -308,9 +417,23 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     // the update dropped it for good, leaving a decided request showing live
     // buttons in Zhaohu forever.
     const previous = this.cardChains.get(interactionId) ?? Promise.resolve()
-    const chained = previous
-      .catch(() => undefined)
-      .then(() => this.sendCardCommand(type, interactionId, payload))
+    const admission = type === "CARD_SEND" && this.deliveryOrder
+      ? this.deliveryOrder.acquire(String(payload.conversationKey), switchCardOrder === undefined ? "card" : "switch", switchCardOrder ?? nextImDeliveryOrder())
+      : undefined
+    const chained = Promise.all([previous.catch(() => undefined), admission])
+      .then(async ([, release]) => {
+        let result: ImCardSubmissionResult
+        try {
+          result = await this.sendCardCommand(type, interactionId, payload)
+        } finally {
+          // The gateway now owns platform delivery and its retries. Only the card's
+          // own update needs the platform receipt; other messages can be admitted.
+          release?.()
+        }
+        if (type !== "CARD_SEND" || result.state !== "accepted" || !this.supportsBotCards())
+          return result
+        return this.waitForCardDelivery(interactionId)
+      }, (): ImCardSubmissionResult => ({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" }))
     const link = chained.then(
       () => undefined,
       () => undefined
@@ -325,13 +448,48 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     return chained
   }
 
+  private async waitForCardDelivery(interactionId: string): Promise<ImCardSubmissionResult> {
+    const deadline = Date.now() + 15_000
+    for (let attempt = 0; attempt < 10 && Date.now() < deadline; attempt++) {
+      if (!this.isAuthenticated()) break
+      const result = await this.sendCardCommand(
+        "CARD_STATUS",
+        interactionId,
+        { interactionId },
+        Math.min(3_000, deadline - Date.now())
+      )
+      if (result.state === "rejected")
+        return {
+          ...result,
+          resultUnknown:
+            result.resultUnknown ||
+            ![
+              "CARD_DELIVERY_FAILED",
+              "CARD_SEND_NOT_FOUND",
+              "BOT_CARD_ROUTE_INVALID",
+              "ROUTE_NOT_FOUND"
+            ].includes(result.reasonCode ?? "")
+        }
+      if (result.deliveryState === "sent") return result
+      if (result.deliveryState !== "pending") break
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+    }
+    // Queued or unknown: keep the interaction live and expose the text answer path.
+    return { state: "rejected", reasonCode: "CARD_DELIVERY_PENDING", resultUnknown: true }
+  }
+
   private sendCardCommand(
-    type: "CARD_SEND" | "CARD_UPDATE",
+    type: "CARD_SEND" | "CARD_UPDATE" | "CARD_STATUS",
     interactionId: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    timeoutMs = COMMAND_TIMEOUT_MS
   ): Promise<ImCardSubmissionResult> {
     if (!this.isAuthenticated()) {
-      return Promise.resolve({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" })
+      return Promise.resolve({
+        state: "rejected",
+        reasonCode: "DESKTOP_OFFLINE",
+        resultUnknown: type === "CARD_STATUS"
+      })
     }
     return new Promise<ImCardSubmissionResult>((resolve) => {
       const commandId = randomUUID()
@@ -345,7 +503,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       const timer = setTimeout(
         () =>
           settle({ state: "rejected", reasonCode: "GATEWAY_CARD_TIMEOUT", resultUnknown: true }),
-        COMMAND_TIMEOUT_MS
+        timeoutMs
       )
       this.cardCommands.set(commandId, {
         resolve: (result) => {
@@ -369,7 +527,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.sendCommand(type, payload, commandId)
       } catch {
         clearTimeout(timer)
-        settle({ state: "rejected", reasonCode: "GATEWAY_CARD_FAILED" })
+        settle({
+          state: "rejected",
+          reasonCode: "GATEWAY_CARD_FAILED",
+          resultUnknown: type === "CARD_STATUS"
+        })
       }
     })
   }
@@ -378,7 +540,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (!commandId) throw new ImGatewayProtocolError("Card result is missing correlation fields")
     const pending = this.cardCommands.get(commandId)
     if (!pending) return
-    assertOnlyKeys(payload, ["interactionId", "state", "reasonCode"], "CARD_ACCEPTED payload")
+    assertOnlyKeys(
+      payload,
+      ["interactionId", "state", "reasonCode", "deliveryState"],
+      "CARD_ACCEPTED payload"
+    )
     const interactionId = nonEmptyString(payload.interactionId)
     if (!interactionId || this.cardCommandByInteraction.get(interactionId) !== commandId) {
       throw new ImGatewayProtocolError("Card result correlation does not match")
@@ -387,10 +553,24 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (state !== "ACCEPTED" && state !== "REJECTED") {
       throw new ImGatewayProtocolError("Card result has an invalid state")
     }
+    const delivery = payload.deliveryState
+    if (delivery !== undefined && !["PENDING", "SENT", "UNKNOWN"].includes(String(delivery)))
+      throw new ImGatewayProtocolError("Card result has an invalid delivery state")
+    const deliveryFields =
+      delivery === undefined
+        ? {}
+        : {
+            deliveryState: String(delivery).toLowerCase() as "pending" | "sent" | "unknown",
+            ...(delivery === "UNKNOWN" ? { resultUnknown: true } : {})
+          }
     pending.resolve(
       state === "ACCEPTED"
-        ? { state: "accepted" }
-        : { state: "rejected", reasonCode: nonEmptyString(payload.reasonCode) ?? "CARD_REJECTED" }
+        ? { state: "accepted", ...deliveryFields }
+        : {
+            state: "rejected",
+            reasonCode: nonEmptyString(payload.reasonCode) ?? "CARD_REJECTED",
+            ...deliveryFields
+          }
     )
   }
 
@@ -471,7 +651,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
 
   private requestPermit(
     type: "EXECUTION_PERMIT_ACQUIRE" | "EXECUTION_PERMIT_RENEW",
-    event: ImEventRecord
+    event: Pick<ImEventRecord, "eventId" | "leaseId">
   ): Promise<ImExecutionPermitResult> {
     if (this.permitCommandByEvent.has(event.eventId)) {
       return Promise.resolve({ status: "denied", reasonCode: "PERMIT_DENIED" })
@@ -509,6 +689,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.helloCommandId = null
     this.syncCommandId = null
     this.markdownReplies = false
+    this.botChannel = false
+    this.botCards = false
+    this.botFiles = false
+    this.parallelBotFiles = false
+    this.botFileReceipts = false
     const url = this.options.url()?.trim()
     const token = this.options.token()?.trim()
     if (!url || !token) {
@@ -583,7 +768,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         capabilities: this.options.capabilities ?? ["inbox", "feature", "scheduler", "hitl"],
         // Asking is safe on every gateway: released ones ignore extensions they
         // do not know, and only a gateway that knows this one answers it.
-        protocolExtensions: [DEFAULT_ROUTE_SYNC_EXTENSION, IM_MARKDOWN_REPLY_EXTENSION]
+        protocolExtensions: [
+          DEFAULT_ROUTE_SYNC_EXTENSION,
+          IM_MARKDOWN_REPLY_EXTENSION,
+          ...(this.options.onBotEvent ? [BOT_IM_EXTENSION, "bot-cards-v1", BOT_IM_FILE_EXTENSION, BOT_IM_FILE_RECEIPTS_EXTENSION, BOT_IM_FILE_PARALLEL_EXTENSION] : [])
+        ]
       })
     })
     socket.on("message", (data) => {
@@ -736,6 +925,16 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         ) {
           throw new ImGatewayProtocolError("WELCOME payload is invalid")
         }
+        this.botChannel = Boolean(
+          this.options.onBotEvent &&
+          Array.isArray(extensions) &&
+          extensions.includes(BOT_IM_EXTENSION)
+        )
+        this.parallelBotFiles = Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_PARALLEL_EXTENSION)
+        this.botFileReceipts = Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_RECEIPTS_EXTENSION)
+        this.botFiles = this.botChannel && Array.isArray(extensions) && extensions.includes(BOT_IM_FILE_EXTENSION)
+        this.botCards =
+          this.botChannel && Array.isArray(extensions) && extensions.includes("bot-cards-v1")
         this.markdownReplies =
           Array.isArray(extensions) && extensions.includes(IM_MARKDOWN_REPLY_EXTENSION)
         console.log(
@@ -761,6 +960,55 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.startHeartbeat(heartbeatIntervalSeconds)
         this.scheduleAuthenticationRefresh()
         this.syncCommandId = this.sendEnvelope("SYNC_REQUEST", {})
+        return
+      }
+      case "BOT_FILE_RESULT": {
+        const pending = commandId ? this.fileCommands.get(commandId) : undefined
+        if (!pending || !commandId) return
+        if (!["uploading", "accepted", "aborted", "unknown", "failed", "sent", "receipts"].includes(String(payload.state)) ||
+            (payload.uploadId !== undefined && !nonEmptyString(payload.uploadId)) ||
+            (payload.version !== undefined && (!Number.isSafeInteger(payload.version) || Number(payload.version) < 0)) ||
+            (payload.offset !== undefined && (!Number.isSafeInteger(payload.offset) || Number(payload.offset) < 0)))
+          throw new ImGatewayProtocolError("附件回执格式无效")
+        if (payload.state === "receipts" && (!Array.isArray(payload.receipts) || payload.receipts.length > 16 ||
+            payload.receipts.some((item: unknown) => {
+              if (!item || typeof item !== "object") return true
+              const receipt = item as Record<string, unknown>
+              return (receipt.version !== undefined && (!Number.isSafeInteger(receipt.version) || Number(receipt.version) < 0)) || !nonEmptyString(receipt.deliveryId) || String(receipt.deliveryId).length > 128 ||
+                !["accepted", "sent", "failed", "unknown", "missing"].includes(String(receipt.state)) ||
+                (receipt.reasonCode !== undefined && (typeof receipt.reasonCode !== "string" || !/^[A-Z0-9_]{1,80}$/.test(receipt.reasonCode)))
+            }))) throw new ImGatewayProtocolError("附件送达回执格式无效")
+        clearTimeout(pending.timer); this.fileCommands.delete(commandId)
+        pending.resolve(payload as unknown as BotImFileResult)
+        break
+      }
+      case "BOT_BINDING_RESULT": {
+        const pending = commandId ? this.botCommands.get(commandId) : undefined
+        if (!pending || !commandId) return
+        assertBotImBindingResult(payload)
+        const request = pending.request
+        if (
+          request.action === "list"
+            ? !("items" in payload) ||
+              (payload.items as BotImBinding[]).some((binding) => binding.botId !== request.botId)
+            : "items" in payload ||
+              (request.action === "create"
+                ? payload.botId !== request.botId || payload.kind !== request.kind
+                : payload.id !== request.bindingId)
+        )
+          throw new ImGatewayProtocolError("Bot binding result correlation does not match")
+        clearTimeout(pending.timer)
+        this.botCommands.delete(commandId)
+        pending.resolve(payload)
+        return
+      }
+      case "BOT_EVENT": {
+        if (!this.botChannel || !messageId || !this.options.onBotEvent)
+          throw new ImGatewayProtocolError("Bot channel was not negotiated")
+        assertBotImEvent(payload)
+        if (payload.event.principalId !== this.status.principalId)
+          throw new ImGatewayProtocolError("Bot event principal does not match WELCOME")
+        await this.options.onBotEvent(payload)
         return
       }
       case "REMOTE_EVENT": {
@@ -1042,6 +1290,34 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       this.socket?.close(4002, "robot OpenID is not configured")
       return
     }
+    const filePending = commandId ? this.fileCommands.get(commandId) : undefined
+    if (filePending && commandId) {
+      clearTimeout(filePending.timer); this.fileCommands.delete(commandId)
+      filePending.reject(new ImGatewayCommandError(`附件发送失败：${reasonCode}`, {
+        reasonCode, permanent: !["FILE_UPLOAD_RETRY", "FILE_UPLOAD_MISSING", "FILE_UPLOAD_BUSY", "SESSION_SUPERSEDED"].includes(reasonCode)
+      }))
+      return
+    }
+    const botPending = commandId ? this.botCommands.get(commandId) : undefined
+    if (botPending && commandId) {
+      clearTimeout(botPending.timer)
+      this.botCommands.delete(commandId)
+      const messages: Record<string, string> = {
+        BINDING_LIMIT: "有效绑定已达上限，请先撤销不再使用的绑定。",
+        BINDING_VERSION_CONFLICT: "绑定状态已变化，请刷新后重试。",
+        BINDING_NOT_FOUND: "当前账号没有此绑定，请检查登录账号。",
+        BOT_CHANNEL_DISABLED: "网关尚未开启 Bot 接入。",
+        BOT_CHANNEL_UNAVAILABLE: "当前网关未提供 Bot 接入，请升级后重试。",
+        SESSION_SUPERSEDED: "当前连接已失效，请重新连接 IM 网关。",
+        BINDING_CONFLICT: "绑定状态发生冲突，请刷新后重试。"
+      }
+      botPending.reject(
+        new ImGatewayCommandError(messages[reasonCode] ?? `IM 绑定操作失败：${reasonCode}`, {
+          reasonCode
+        })
+      )
+      return
+    }
     const eventId = nonEmptyString(payload.eventId)
     const permitPending = commandId ? this.permitCommands.get(commandId) : undefined
     if (permitPending) {
@@ -1095,7 +1371,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private sendCommand(
     type: string,
     payload: Record<string, unknown>,
-    commandId = randomUUID()
+    commandId: string = randomUUID()
   ): string {
     if (!this.status.sessionId || !this.status.principalId) {
       throw new ImGatewayCommandError("统一机器人当前未连接")
@@ -1106,7 +1382,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private sendEnvelope(
     type: string,
     payload: Record<string, unknown>,
-    commandId = randomUUID()
+    commandId: string = randomUUID()
   ): string {
     const socket = this.socket
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -1342,10 +1618,13 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   }
 
   private rejectPending(error: Error): void {
+    this.deliveryOrder?.disconnect(error)
     for (const pending of [
       ...this.permitCommands.values(),
       ...this.replyCommands.values(),
-      ...this.cardCommands.values()
+      ...this.cardCommands.values(),
+      ...this.botCommands.values(),
+      ...this.fileCommands.values()
     ]) {
       clearTimeout(pending.timer)
       pending.reject(error)
@@ -1354,6 +1633,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.permitCommandByEvent.clear()
     this.replyCommands.clear()
     this.replyCommandByIdempotencyKey.clear()
+    this.botCommands.clear()
+    this.fileCommands.clear()
     this.cardCommands.clear()
     this.cardCommandByInteraction.clear()
     this.cardChains.clear()

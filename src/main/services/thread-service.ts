@@ -130,7 +130,7 @@ export async function createThreadService(
   const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
   nextMetadata.title = title
 
-  const thread = dbCreateThread(threadId, nextMetadata)
+  const thread = dbCreateThread(threadId, nextMetadata, { newDurableTranscript: true })
   if (harnessFeatureMetadata && options.grantFeatureAccess) {
     try {
       const grant = await materializeHarnessFeatureThreadGrant({

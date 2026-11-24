@@ -1,0 +1,594 @@
+{
+  "kind": "same-build-real-model-case-coverage",
+  "model": "deepseek-v4-flash",
+  "commit": "606b232c6db5269b33b07d65c325e9a9e9ec6cd1",
+  "builtAt": "2026-11-19T02:09:19.725Z",
+  "promptSha256": "b965bff592cccb9fc99dd494e0626690409d517c2d7e88cd6e91ead1a1954c5f",
+  "initialCases": 23,
+  "expectedTurns": 32,
+  "observed": 32,
+  "passed": 31,
+  "failed": [
+    "event-plan/revision"
+  ],
+  "missing": [],
+  "records": [
+    {
+      "runId": "20261119T020920Z-fbfa5bba",
+      "status": "failed",
+      "selectedBaseCases": 23
+    },
+    {
+      "runId": "20261119T020920Z-2ab7e815",
+      "status": "passed",
+      "selectedBaseCases": 1
+    },
+    {
+      "runId": "20261119T021959Z-b0b56430",
+      "status": "passed",
+      "selectedBaseCases": 17
+    }
+  ],
+  "cases": [
+    {
+      "case": "delivery-review",
+      "label": "主 Bot 复核正式附件后交付",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 6.8,
+      "endToEndSeconds": 28.6,
+      "parentPublications": 1,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "execute",
+        "bot_work_create"
+      ],
+      "evidence": "runs/20261119T020920Z-fbfa5bba/record.json"
+    },
+    {
+      "case": "delivery-confirm",
+      "label": "复核后等本人批准再发送",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 7.4,
+      "endToEndSeconds": 44.7,
+      "parentPublications": 1,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "ls",
+        "bot_work_create"
+      ],
+      "evidence": "runs/20261119T020920Z-fbfa5bba/record.json"
+    },
+    {
+      "case": "browser-lookup",
+      "label": "自然要求读取网页，主 Bot 无浏览器工具，任务浏览后回传",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 3.6,
+      "endToEndSeconds": 13.2,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_work_create"
+      ],
+      "foregroundProbe": {
+        "overlapped": true,
+        "seconds": 3.1,
+        "exactFormat": true
+      },
+      "evidence": "runs/20261119T020920Z-fbfa5bba/record.json"
+    },
+    {
+      "case": "document-inputs",
+      "label": "材料准备",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 3.4,
+      "endToEndSeconds": 3.7,
+      "parentPublications": 0,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "read_file"
+      ],
+      "userAcknowledgements": 1,
+      "evidence": "runs/20261119T020920Z-fbfa5bba/record.json"
+    },
+    {
+      "case": "named-skill-help",
+      "label": "点名咨询输入",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 3.8,
+      "endToEndSeconds": 4,
+      "parentPublications": 0,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "read_file"
+      ],
+      "userAcknowledgements": 1,
+      "evidence": "runs/20261119T020920Z-fbfa5bba/record.json"
+    },
+    {
+      "case": "library-brief",
+      "label": "借阅需求",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 5.7,
+      "endToEndSeconds": 28.2,
+      "parentPublications": 1,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "ls",
+        "bot_skill_dispatch"
+      ],
+      "userAcknowledgements": 1,
+      "openedAttachmentSha256": "4bea78100bfc3f90d28b213ee9e43b3bd5c7984e5ba54d4133e3f4182a0ef087",
+      "matchesWorkerReceipt": true,
+      "evidence": "runs/20261119T020920Z-2ab7e815/record.json"
+    },
+    {
+      "case": "library-brief/named-revision",
+      "label": "文字点名修改原 PRD",
+      "validation": "passed",
+      "route": "continue",
+      "preferred": "continue",
+      "mainSeconds": 2.7,
+      "endToEndSeconds": 16.6,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_skill_dispatch"
+      ],
+      "userAcknowledgements": 1,
+      "openedAttachmentSha256": "7790fa221facc0b22c93eee89ec662b4997542796dc797e96976381e61fd921d",
+      "matchesWorkerReceipt": true,
+      "evidence": "runs/20261119T020920Z-2ab7e815/record.json"
+    },
+    {
+      "case": "named-schedule",
+      "label": "定时需求文档",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 7.6,
+      "endToEndSeconds": 59.3,
+      "parentPublications": 1,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "execute",
+        "bot_skill_dispatch"
+      ],
+      "userAcknowledgements": 1,
+      "openedAttachmentSha256": "64d036245be8c859e15340cabfc33fc2514b450b07113e28294d9bb11b65d5e0",
+      "matchesWorkerReceipt": true,
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "lending-requirements",
+      "label": "借阅规则",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 5.6,
+      "endToEndSeconds": 59,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_work_create"
+      ],
+      "userAcknowledgements": 1,
+      "openedAttachmentSha256": "f8c6813f45df65ad9120907d03187dd78ecfc400d69ecd5dccc8dc31c39e14b9",
+      "matchesWorkerReceipt": true,
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "slash-skill-natural",
+      "label": "仅斜杠选技能，不要求独立任务，观察实际读取与交办顺序",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 3.1,
+      "endToEndSeconds": 30.2,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_skill_dispatch"
+      ],
+      "userAcknowledgements": 1,
+      "foregroundProbe": {
+        "overlapped": true,
+        "seconds": 2,
+        "exactFormat": false
+      },
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "slash-skill",
+      "label": "主 Bot 斜杠技能选择、独立任务激活及文件回传",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 2.4,
+      "endToEndSeconds": 36.5,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_skill_dispatch"
+      ],
+      "userAcknowledgements": 1,
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "slash-skill/slash-skill-revision",
+      "label": "不再选择技能，继续原任务修改并回传",
+      "validation": "passed",
+      "route": "continue",
+      "preferred": "continue",
+      "mainSeconds": 4.5,
+      "endToEndSeconds": 23.7,
+      "parentPublications": 1,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "bot_work_send"
+      ],
+      "userAcknowledgements": 1,
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "slash-skill/slash-skill-reselect",
+      "label": "再次选择技能，恢复已完成的原任务而非新建",
+      "validation": "passed",
+      "route": "continue",
+      "preferred": "continue",
+      "mainSeconds": 2.3,
+      "endToEndSeconds": 25.2,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_skill_dispatch"
+      ],
+      "userAcknowledgements": 1,
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "greeting",
+      "label": "日常问答",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 1.9,
+      "endToEndSeconds": 2.2,
+      "parentPublications": 0,
+      "mainModelRequests": 1,
+      "mainTools": [],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "rewrite",
+      "label": "短文改写",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 1.9,
+      "endToEndSeconds": 2.1,
+      "parentPublications": 0,
+      "mainModelRequests": 1,
+      "mainTools": [],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "lookup",
+      "label": "读取一个文件查事实",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 4.8,
+      "endToEndSeconds": 4.9,
+      "parentPublications": 0,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "read_file"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "short-shell",
+      "label": "短 Shell 查询",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 5.3,
+      "endToEndSeconds": 5.5,
+      "parentPublications": 0,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "execute"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "small-edit",
+      "label": "文件中修改一个时间",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 7.1,
+      "endToEndSeconds": 7.3,
+      "parentPublications": 0,
+      "mainModelRequests": 3,
+      "mainTools": [
+        "read_file",
+        "edit_file"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "event-plan",
+      "label": "多材料筹备方案及交付",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 18.7,
+      "endToEndSeconds": 76.2,
+      "parentPublications": 1,
+      "mainModelRequests": 5,
+      "mainTools": [
+        "ls",
+        "bot_work_create",
+        "bot_work_create",
+        "bot_work_stop"
+      ],
+      "foregroundProbe": {
+        "overlapped": true,
+        "seconds": 1.9,
+        "exactFormat": true
+      },
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "background-plan",
+      "label": "自然要求后台推进方案",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 4.6,
+      "endToEndSeconds": 44.4,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_work_create"
+      ],
+      "foregroundProbe": {
+        "overlapped": true,
+        "seconds": 2.1,
+        "exactFormat": true
+      },
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "background-plan/revision",
+      "label": "修改既有方案",
+      "validation": "passed",
+      "route": "continue",
+      "preferred": "continue",
+      "mainSeconds": 3.1,
+      "endToEndSeconds": 37,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_work_send"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "background-plan/status",
+      "label": "查进度不重启执行",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 1.7,
+      "endToEndSeconds": 1.9,
+      "parentPublications": 0,
+      "mainModelRequests": 1,
+      "mainTools": [],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "background-plan/reopen",
+      "label": "已完成任务再次修改",
+      "validation": "passed",
+      "route": "continue",
+      "preferred": "continue",
+      "mainSeconds": 3,
+      "endToEndSeconds": 19.5,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_work_send"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "reconcile",
+      "label": "跨文件核对数据并输出报告",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 6.3,
+      "endToEndSeconds": 37.5,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_work_create"
+      ],
+      "foregroundProbe": {
+        "overlapped": true,
+        "seconds": 1.7,
+        "exactFormat": true
+      },
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "code-fix",
+      "label": "修复代码并运行验证",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 6.7,
+      "endToEndSeconds": 33.4,
+      "parentPublications": 1,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "bot_work_create"
+      ],
+      "foregroundProbe": {
+        "overlapped": true,
+        "seconds": 1.6,
+        "exactFormat": true
+      },
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "reconciliation-cli",
+      "label": "从零实现可复用的对账工具",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 14.7,
+      "endToEndSeconds": 179.9,
+      "parentPublications": 1,
+      "mainModelRequests": 3,
+      "mainTools": [
+        "execute",
+        "execute",
+        "bot_work_create"
+      ],
+      "foregroundProbe": {
+        "overlapped": true,
+        "seconds": 2.6,
+        "exactFormat": true
+      },
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "explicit-inline",
+      "label": "多步分析但用户指定主对话",
+      "validation": "passed",
+      "route": "inline",
+      "preferred": "inline",
+      "mainSeconds": 10,
+      "endToEndSeconds": 10,
+      "parentPublications": 0,
+      "mainModelRequests": 3,
+      "mainTools": [
+        "ls",
+        "read_file",
+        "read_file",
+        "read_file"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "explicit-task",
+      "label": "简单工作但用户要求独立任务",
+      "validation": "passed",
+      "route": "independent",
+      "preferred": "independent",
+      "mainSeconds": 4.5,
+      "endToEndSeconds": 10.3,
+      "parentPublications": 1,
+      "mainModelRequests": 1,
+      "mainTools": [
+        "bot_work_create"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "background-command",
+      "label": "单条耗时命令",
+      "validation": "passed",
+      "route": "background",
+      "preferred": "background",
+      "mainSeconds": 3.9,
+      "endToEndSeconds": 16.9,
+      "parentPublications": 0,
+      "mainModelRequests": 2,
+      "mainTools": [
+        "execute"
+      ],
+      "evidence": "runs/20261119T021959Z-b0b56430/record.json"
+    },
+    {
+      "case": "event-plan/revision",
+      "validation": "failed",
+      "route": "continue",
+      "parentPublications": 1,
+      "intendedSameTask": true,
+      "acceptedSendCalls": 7,
+      "distinctRequestKeys": 7,
+      "workOperations": [
+        {
+          "tool": "bot_work_send",
+          "requestKey": "update-time-1600-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "noop-ack-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "clarify-noop-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "final-narrow-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "quiet-finish-1600"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "last-1600-ack"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "deliver-updated-plan-1600"
+        }
+      ],
+      "error": "Expected one send to the original task, observed repeated sends under new request keys. The revised 16:00 plan was delivered.",
+      "evidence": "runs/20261119T021959Z-b0b56430/event-plan-followups.json"
+    },
+    {
+      "case": "event-plan/status",
+      "route": "inline",
+      "mainSeconds": 4.9,
+      "endToEndSeconds": 4.9,
+      "mainTools": [],
+      "parentPublications": 0,
+      "rebuiltInitialCase": false,
+      "validation": "passed",
+      "evidence": "runs/20261119T021959Z-b0b56430/event-plan-followups.json"
+    },
+    {
+      "case": "event-plan/reopen",
+      "route": "continue",
+      "mainSeconds": 5.4,
+      "endToEndSeconds": 20.2,
+      "mainTools": [
+        "bot_work_send"
+      ],
+      "parentPublications": 1,
+      "rebuiltInitialCase": false,
+      "validation": "passed",
+      "evidence": "runs/20261119T021959Z-b0b56430/event-plan-followups.json"
+    }
+  ]
+}

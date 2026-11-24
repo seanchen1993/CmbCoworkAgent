@@ -14,6 +14,7 @@ import { WorkspaceValidationError } from "../services/workspace-validation"
 import {
   HARNESS_SOURCE,
   type HarnessProjectCreateInput,
+  type HarnessProjectMetadataUpdateInput,
   type HarnessDeployUnitMapping
 } from "../../shared/harness-board-types"
 import {
@@ -135,12 +136,13 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     "systemName"
   ])
   const existing = await requireProject(projectId)
-  const input: HarnessProjectCreateInput = {
+  const input: HarnessProjectMetadataUpdateInput = {
     adapterId: existing.harnessAdapter.id,
     adapterType: existing.harnessAdapter.type,
     name: existing.name,
     projectCode: existing.projectCode,
     projectFromLean: existing.projectFromLean,
+    isTestProject: existing.isTestProject,
     description: existing.description,
     systemId: existing.systemId,
     systemName: existing.systemName,

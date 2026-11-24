@@ -1,0 +1,121 @@
+{
+  "originalSha256": "b98438927c4a8e0f52f3a9774e8a7ae653111e4f48890c27e2fa86b09c7a9b65",
+  "transformation": "Vitest suite totals and per-file summaries; all failed assertions retained; paths redacted",
+  "startTime": 1794910750438,
+  "success": false,
+  "numTotalTests": 407,
+  "numPassedTests": 403,
+  "numFailedTests": 4,
+  "numPendingTests": 0,
+  "files": [
+    {
+      "name": "src/main/agent/bot-communication-prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794910755251,
+      "endTime": 1794910755255.7268,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/bot-turn-context.test.ts",
+      "status": "passed",
+      "startTime": 1794910751522,
+      "endTime": 1794910751568.1353,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/opening-reply-reminder.test.ts",
+      "status": "passed",
+      "startTime": 1794910751148,
+      "endTime": 1794910751199.9758,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794910751734,
+      "endTime": 1794910751752.165,
+      "total": 36,
+      "passed": 36,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/runtime-adapter.test.ts",
+      "status": "failed",
+      "startTime": 1794910751758,
+      "endTime": 1794910762118.944,
+      "total": 338,
+      "passed": 334,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration injects accurate environment and authority for 'introduction' turns",
+          "status": "failed",
+          "title": "injects accurate environment and authority for 'introduction' turns",
+          "duration": 15.412209000000075,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain 'first conversation after the user cre…'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:4076:20\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration injects accurate environment and authority for 'user' turns",
+          "status": "failed",
+          "title": "injects accurate environment and authority for 'user' turns",
+          "duration": 5.265333000001192,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain 'PRIVATE_STOPPED_CONTEXT'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:4067:22\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "keeps the group workflow final-delivery gate aligned with trusted private ownership (true)",
+          "status": "failed",
+          "title": "keeps the group workflow final-delivery gate aligned with trusted private ownership (true)",
+          "duration": 1.0754999999990105,
+          "failureMessages": [
+            "AssertionError: expected undefined to be true // Object.is equality\n    at <repo>/src/main/bots/runtime-adapter.test.ts:6227:82\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "keeps the group workflow final-delivery gate aligned with trusted private ownership (false)",
+          "status": "failed",
+          "title": "keeps the group workflow final-delivery gate aligned with trusted private ownership (false)",
+          "duration": 0.8185000000012224,
+          "failureMessages": [
+            "AssertionError: expected undefined to be false // Object.is equality\n    at <repo>/src/main/bots/runtime-adapter.test.ts:6227:82\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-result.test.ts",
+      "status": "passed",
+      "startTime": 1794910752010,
+      "endTime": 1794910752484.3057,
+      "total": 15,
+      "passed": 15,
+      "failed": [],
+      "message": ""
+    }
+  ]
+}

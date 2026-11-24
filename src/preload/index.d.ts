@@ -1,3 +1,34 @@
+import type { GitGraphPage } from "../shared/git-graph"
+import type {
+  GitBranchKind,
+  GitBranchListResult,
+  GitBranchMenuCursor,
+  GitBranchMenuPage,
+  GitBranchMenuResult,
+  GitBranchMutationResult,
+  GitCurrentBranchResult
+} from "../shared/git-branches"
+import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
+import type { ProjectAgentRunListener } from "../shared/project-agent-run"
+import type { ProjectReportApi } from "../shared/project-analysis-report"
+import type {
+  ProjectOperationsPeriodInput,
+  ProjectOperationsPeriodResponse
+} from "../shared/project-operations-period"
+import type {
+  ProjectAnalysisAgentInput,
+  ProjectAnalysisAgentResponse
+} from "../shared/project-analysis-agent"
+import type {
+  RunAnalysisData,
+  RunAnalysisOptions,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
+  RunAnalysisRange,
+  RunAnalysisSessionRequest,
+  RunAnalysisStages,
+  RunAnalysisSessions
+} from "../shared/project-run-analysis"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -5,14 +36,17 @@ import type {
   ManagedRunScheduleIdentity,
   ManagedRunScheduleChange
 } from "../shared/managed-run-schedule"
+import type { ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest, ThreadSearchSummary, ThreadSearchWindow } from "../shared/thread-search-types"
 import type {
   KnowledgeAccumulationData,
+  KnowledgeOrgItem,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
   KnowledgeProjectStats,
   KnowledgeReadDetails,
   KnowledgeReadFileRef,
-  KnowledgeRecentConstraintFiles
+  KnowledgeRecentConstraintFiles,
+  KnowledgeUserDetails
 } from "../shared/dashboard-knowledge-overview"
 import type { ProjectAttentionSortKey } from "../shared/project-attention"
 import type { ProjectCodeTraceRequest, ProjectCodeTracePage } from "../shared/project-code-trace"
@@ -95,6 +129,7 @@ import type {
   ThreadGroupIdsOptions,
   ThreadGroupIdsResult,
   ThreadDeleteOptions,
+  ThreadDeleteResult,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   ThreadLegacyCheckpointBootstrapResult,
@@ -102,6 +137,12 @@ import type {
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
 } from "../main/types"
+import type {
+  MarketSkillShortcutBinding,
+  MarketSkillShortcutResult,
+  MarketSkillShortcutSelection,
+  MarketSkillShortcutSkillState
+} from "../shared/market-skill-shortcut"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import type {
@@ -125,7 +166,6 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult,
@@ -166,6 +206,11 @@ import type {
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
 } from "../shared/harness-board-types"
+import type {
+  KnowledgeBaseListResult,
+  KnowledgeBaseSyncResult,
+  KnowledgeDepositionWorkspace
+} from "../shared/knowledge-base-types"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
@@ -236,6 +281,7 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { StartupView } from "../shared/startup-view"
 import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
@@ -254,6 +300,8 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
+  getStartupView: () => Promise<StartupView>
+  setStartupView: (view: StartupView) => Promise<StartupView>
   getGitChangeNoticeEnabled: () => Promise<boolean>
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
@@ -773,6 +821,8 @@ interface DashboardProjectModeAnalytics {
 }
 
 interface DashboardProjectModeProject {
+  /** 项目累计：最后主 Agent 执行结束时间减去创建时间；缺失或异常时为 null。 */
+  elapsedMs?: number | null
   lastExecutedAt?: string | null
   projectId: string
   name: string
@@ -832,6 +882,7 @@ type DashboardProjectModeProjectSortKey =
   | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
+  | "elapsedMs"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -1046,6 +1097,7 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  bots: import("../shared/bots/contracts").BotClient
   uiGuides: {
     getState(config: UiGuideConfig): Promise<UiGuideState>
     recordDisplay(config: UiGuideConfig): Promise<boolean>
@@ -1100,6 +1152,9 @@ interface CustomAPI {
       }
     }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    hasBackgroundShell: (threadId: string) => Promise<boolean>
+    onBackgroundShellChanged: (threadId: string, callback: (active: boolean) => void) => () => void
+    cancelBackgroundShell: (threadId: string) => Promise<void>
     queueCurrentRunMessage: (
       threadId: string,
       message: { id: string; content: string; displayContent?: string; rawUserInput?: string }
@@ -1186,6 +1241,15 @@ interface CustomAPI {
     onWorkflowAgentStream: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
+    searchEnabled: boolean
+    searchStart: (request: ThreadSearchStartRequest) => Promise<ThreadSearchPage>
+    searchContinue: (cursor: string) => Promise<ThreadSearchPage>
+    searchCancel: (id?: string) => Promise<void>
+    searchCancelNavigation: (navigationTicketId: string) => Promise<void>
+    searchSummary: (request: ThreadSearchOpenRequest) => Promise<ThreadSearchSummary | null>
+    searchConfirmRoute: (request: ThreadSearchOpenRequest) => Promise<boolean>
+    onSearchProjectCatalogChanged: (callback: (sessionId: string) => void) => () => void
+    searchTargetWindow: (request: ThreadSearchOpenRequest) => Promise<ThreadSearchWindow>
     list: () => Promise<Thread[]>
     listPage: (options?: ThreadSummaryPageOptions) => Promise<ThreadSummaryPage>
     listGroupIds: (options: ThreadGroupIdsOptions) => Promise<ThreadGroupIdsResult>
@@ -1222,7 +1286,7 @@ interface CustomAPI {
       threadId: string,
       transcripts: Record<string, unknown>
     ) => Promise<Record<string, unknown>>
-    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<void>
+    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<ThreadDeleteResult>
     getMessages: (threadId: string) => Promise<Message[]>
     getMessagesPage: (
       threadId: string,
@@ -1248,9 +1312,13 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
-    getLatestCheckpointRuntimeState: (threadId: string) => Promise<unknown | null>
+    getLatestCheckpointRuntimeState: (
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
+    ) => Promise<unknown | null>
     bootstrapLegacyCheckpointTranscript: (
-      threadId: string
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
     ) => Promise<ThreadLegacyCheckpointBootstrapResult | null>
     getGoalEvents: (
       threadId: string,
@@ -1589,6 +1657,7 @@ interface CustomAPI {
       options?: {
         worktreePath?: string
         includeSummary?: boolean
+        refreshHead?: boolean
         includePushability?: boolean
       }
     ) => Promise<{
@@ -1601,6 +1670,7 @@ interface CustomAPI {
       hasPushableCommit: boolean
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
+      repositoryRoots?: string[]
       worktreeBranch?: string | null
       error?: string
     }>
@@ -1807,7 +1877,18 @@ interface CustomAPI {
     }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
+  marketSkillShortcut: {
+    get: () => Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>>
+    resolve: (selection: MarketSkillShortcutSelection) => Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    >
+    install: (selection: MarketSkillShortcutSelection) => Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    >
+  }
   skills: {
+    marketCatalog: () => Promise<MarketSkillCatalogPage>
+    onMarketCatalogChanged: (callback: () => void) => () => void
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,
@@ -1865,7 +1946,7 @@ interface CustomAPI {
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local" }
+      options?: { allowNestedNameDuplicates?: boolean; origin?: "market" | "local"; marketplace?: { name: string; id?: string } }
     ) => Promise<{
       success: boolean
       skillName?: string
@@ -2236,6 +2317,7 @@ interface CustomAPI {
     onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }
   plugins: {
+    marketSourceAccess: (type: "skill" | "plugin", name: string, id?: string) => Promise<"owner" | "whitelist" | undefined>
     list: () => Promise<PluginMetadata[]>
     install: (
       buffer: ArrayBuffer,
@@ -2643,12 +2725,12 @@ interface CustomAPI {
       options?: FeatureGateCheckOptions
     ) => Promise<FeatureGateCheckResult>
   }
-  dashboard: {
+  dashboard: ProjectReportApi & {
     cancelRequests: (families?: string[]) => Promise<{ cancelled: number }>
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
+    isProjectAnalysisAllowed: () => Promise<boolean>
     orgFilterDefaults: () => Promise<string[]>
-    isAnalysisAgentAllowed: () => Promise<boolean>
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
     isAwardsAdmin: () => Promise<boolean>
@@ -2669,29 +2751,13 @@ interface CustomAPI {
       range: { from: string; to: string },
       groups: Array<{ shi: string; skillNames: string[] }>
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
-    esQuery: (input: {
-      indexAlias: "event" | "trace"
-      operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
-      body?: unknown
-      context?: {
-        scope?: "platform" | "project"
-        upperOrgLv1?: string | string[] | null
-        projectId?: string | null
-        featureSlug?: string | null
-      }
-    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
-    analysisAgent: (input: {
-      question: string
-      messages?: Array<{ role: "user" | "assistant"; content: string }>
-      context?: {
-        scope?: "platform" | "project"
-        range?: { from: string; to: string }
-        upperOrgLv1?: string | string[] | null
-        projectId?: string | null
-        featureSlug?: string | null
-        panelSnapshot?: Record<string, unknown> | null
-      }
-    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    projectModePeriodMetrics: (
+      input: ProjectOperationsPeriodInput
+    ) => Promise<ProjectOperationsPeriodResponse>
+    projectModeAnalysisAgent: (
+      input: ProjectAnalysisAgentInput,
+      onEvent?: ProjectAgentRunListener
+    ) => Promise<ProjectAnalysisAgentResponse>
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -2709,11 +2775,33 @@ interface CustomAPI {
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
-    knowledgeAccumulation: (opts?: {
-      upperOrgLv1?: string | string[] | null
-    }) => Promise<{
+    knowledgeAccumulation: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeOrgGroups: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeOrgItem[]
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeRoomPeople: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeUserDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
       error?: string
       cancelled?: boolean
     }>
@@ -2739,17 +2827,15 @@ interface CustomAPI {
       cancelled?: boolean
     }>
     knowledgeProjectStats: (
-      range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null; createdInRangeOnly?: boolean }
     ) => Promise<{
       success: boolean
       data?: KnowledgeProjectStats
       error?: string
       cancelled?: boolean
     }>
-    knowledgeRecentConstraintFiles: (opts?: {
-      upperOrgLv1?: string | string[] | null
-    }) => Promise<{
+    knowledgeRecentConstraintFiles: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeRecentConstraintFiles
       error?: string
@@ -2776,6 +2862,24 @@ interface CustomAPI {
       filters: ProjectMetricFilters,
       options?: ProjectMetricListOptions
     ) => Promise<{ success: boolean; data?: ProjectMetricProjectsData; error?: string }>
+    projectModeRunAnalysis: (
+      range: RunAnalysisRange,
+      options?: RunAnalysisOptions
+    ) => Promise<{ success: boolean; data?: RunAnalysisData; error?: string }>
+    projectModeRunAnalysisExportStages: (
+      range: RunAnalysisRange,
+      options: RunAnalysisOptions,
+      request: RunAnalysisStageExportRequest
+    ) => Promise<{ success: boolean; data?: RunAnalysisPluginStages[]; error?: string }>
+    projectModeRunAnalysisStages: (
+      request: RunAnalysisSessionRequest
+    ) => Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }>
+    projectModeRunAnalysisThread: (
+      request: RunAnalysisSessionRequest & { traceId: string }
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
+    projectModeRunAnalysisSessions: (
+      request: RunAnalysisSessionRequest
+    ) => Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }>
     projectModeProjects: (
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions
@@ -2849,6 +2953,21 @@ interface CustomAPI {
         pushedOnly: boolean
         items: DashboardCommitDetail[]
       }
+      error?: string
+    }>
+    botOverview: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: import("../shared/bots/telemetry").BotOverviewData; error?: string }>
+    botActiveUsers: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null },
+      cursor?: string
+    ) => Promise<{
+      success: boolean
+      data?: import("../shared/bots/telemetry").BotActiveUsersPage
       error?: string
     }>
     overview: (
@@ -3062,9 +3181,17 @@ interface CustomAPI {
       mappings: HarnessDeployUnitConfig[]
     ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
-    syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
-    getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
+    listKnowledgeBases: () => Promise<KnowledgeBaseListResult>
+    refreshKnowledgeBases: () => Promise<KnowledgeBaseListResult>
+    deleteKnowledgeBase: (idKey: string) => Promise<void>
+    prepareKnowledgeDeposition: (
+      projectId: string,
+      targetId?: string
+    ) => Promise<KnowledgeDepositionWorkspace>
+    syncKnowledgeBase: (idKey: string) => Promise<KnowledgeBaseSyncResult>
+    getKnowledgePreview: (idKey: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    getDefaultProjectDirectoryPreview: (projectId: string) => Promise<string>
     selectProjectDirectory: () => Promise<{
       workspacePath: string
       projectDir: string
@@ -3237,34 +3364,31 @@ interface CustomAPI {
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void
   }
   git: {
-    currentBranch: (cwd?: string) => Promise<{
-      isGitRepo: boolean
-      branch: string | null
-      isWorktree: boolean
-      isMultiRepo?: boolean
-      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
-      error?: string
-    }>
+    currentBranch: (cwd?: string, forSwitcher?: true) => Promise<GitCurrentBranchResult>
+    cancelBranchProbe: () => Promise<void>
+    readBranchHead: (gitDir: string) => Promise<string | null | undefined>
+    cancelBranchHead: () => Promise<void>
+    cancelCommitGraph: () => Promise<void>
+    getCommitGraph: (cwd?: string, skip?: number, snapshot?: string, forDialog?: true) => Promise<GitGraphPage>
+    cancelBranchList: () => Promise<void>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }
-    ) => Promise<{ success: boolean; branches: string[]; error?: string }>
-    switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
-    createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
+    ) => Promise<GitBranchListResult>
+    listBranchMenu: (
+      cwd?: string,
+      options?: { refreshRemote?: boolean; paged?: true }
+    ) => Promise<GitBranchMenuResult>
+    readBranchMenuPage: (cursor: GitBranchMenuCursor) => Promise<GitBranchMenuPage>
+    getChangedFileCount: (cwd?: string, branch?: string | null) => Promise<number>
+    switchBranch: (branch: string, cwd?: string, kind?: GitBranchKind) => Promise<GitBranchMutationResult>
+    createBranch: (branch: string, cwd?: string) => Promise<GitBranchMutationResult>
   }
   gitPanel: {
     getCommitHistory: (threadId: string) => Promise<{
       success: boolean
       projectPath: string | null
       records: GitCommitHistoryRecord[]
-      error?: string
-    }>
-    recordCommitHistory: (
-      threadId: string,
-      fullMessage: string
-    ) => Promise<{
-      success: boolean
-      record: GitCommitHistoryRecord | null
       error?: string
     }>
   }

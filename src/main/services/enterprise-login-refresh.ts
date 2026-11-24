@@ -1,6 +1,7 @@
 import { BrowserWindow } from "electron"
 import { userIdentityKey } from "../../shared/user-identity"
 import { getUserInfo, upsertUserInfoConfig, type UserInfoConfig } from "../storage"
+import { refreshKnowledgeBasesInBackground } from "./knowledge-base-manager"
 
 const ENTERPRISE_LOGIN_REFRESH_TIMEOUT_MS = 15_000
 
@@ -114,6 +115,7 @@ async function requestEnterpriseLoginRefresh(
         if (!win.isDestroyed()) win.webContents.send("models:userInfoChanged")
       }
     }
+    refreshKnowledgeBasesInBackground()
     return nextUserInfo
   } catch (error) {
     console.warn("[EnterpriseLogin] token-refresh:error", {

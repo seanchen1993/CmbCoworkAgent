@@ -1,3 +1,5 @@
+import { registerThreadSearchHandlers, closeThreadSearchWorker } from "./ipc/thread-search"
+import { closeDurableMessageSearchWorker } from "./thread-search/durable-message-search-client"
 import { cleanupMarketRuntimeContent } from "./services/market-content"
 import { harnessStageWatches } from "./services/harness-stage-attribution"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
@@ -80,6 +82,7 @@ import {
 } from "./app-tray"
 import { setAppAttentionHandler } from "./app-attention-events"
 import { APP_ATTENTION_CHANNEL, isRendererAppAttentionPayload } from "../shared/app-attention"
+import { STARTUP_VIEW_GET_CHANNEL, STARTUP_VIEW_SET_CHANNEL } from "../shared/startup-view"
 import {
   closePromptActionToBehavior,
   isCloseToTrayPromptResponse,
@@ -339,7 +342,7 @@ import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { startApiGateway, stopApiGateway } from "./api/http-gateway"
 import { disposeApiCarrierWindow } from "./api/agent-bridge"
-import { registerModelHandlers } from "./ipc/models"
+import { invalidateGitPanelHeadCaches, registerModelHandlers } from "./ipc/models"
 import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
 import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
 import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
@@ -352,6 +355,8 @@ import { registerSkillsHandlers } from "./ipc/skills"
 import { closeSkillPluginCatalogWorker } from "./skill-plugin-catalog/client"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
+import { registerBotHandlers } from "./ipc/bots"
+import { hasActiveBotRuns, stopLocalBotHost } from "./bots/local-service"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
 import { closeMemoryCatalogWorker } from "./memory-catalog/client"
@@ -415,6 +420,10 @@ import {
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
+import {
+  startKnowledgeBaseManager,
+  stopKnowledgeBaseManager
+} from "./services/knowledge-base-manager"
 import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
 import {
   startRegisteredGitHookEventSync,
@@ -451,6 +460,7 @@ import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollb
 import {
   getGitChangeNoticeEnabled,
   getOpenworkDir,
+  getStartupView,
   getStoredAgentGraphRecursionLimit,
   getStoredAgentToolStrategy,
   getStoredWorkflowWorktreeRemoveTimeoutMinutes,
@@ -458,6 +468,7 @@ import {
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
   setGitChangeNoticeEnabled,
+  setStartupView,
   setStoredAgentGraphRecursionLimit,
   setStoredAgentToolStrategy,
   setStoredWorkflowWorktreeRemoveTimeoutMinutes,
@@ -637,6 +648,7 @@ function clearCloseToTrayPromptState(): void {
 function hasActiveForegroundRuns(): boolean {
   return (
     hasAnyActiveAgentTasks() ||
+    hasActiveBotRuns() ||
     hasActiveScheduledTaskRuns() ||
     isHeartbeatRunning() ||
     builtinRobotManager.hasActiveRuns()
@@ -937,9 +949,7 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
-  // A second launch may arrive while initialization is pending or after it failed.
-  // The normal startup path must create the first window after registering IPC.
-  if (!mainWindowStartupReady) return null
+  if (isAppQuitting() || !mainWindowStartupReady) return null
   clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
@@ -1162,7 +1172,9 @@ if (browserNativeMessagingHostLaunch) {
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
     registerWorkflowHandlers(ipcMain)
-    registerThreadHandlers(ipcMain)
+    const deleteThread = registerThreadHandlers(ipcMain)
+    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow)
+    registerThreadSearchHandlers(ipcMain)
     registerModelHandlers(ipcMain)
     registerWorkspaceFilePreviewHandlers(ipcMain)
     registerWorkspaceFilePreviewProtocol()
@@ -1172,7 +1184,7 @@ if (browserNativeMessagingHostLaunch) {
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
     registerTaskMmdHandlers(ipcMain)
-    registerGitHandlers()
+    registerGitHandlers(invalidateGitPanelHeadCaches)
     registerPluginHandlers(ipcMain)
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
@@ -1197,6 +1209,7 @@ if (browserNativeMessagingHostLaunch) {
       acknowledgeUiGuide(getDb(), config)
     )
     registerHarnessBoardHandlers(ipcMain)
+    startKnowledgeBaseManager()
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     registerPathOpenersHandlers(ipcMain)
@@ -1246,6 +1259,20 @@ if (browserNativeMessagingHostLaunch) {
         throw new Error("Invalid window close behavior")
       }
       return saveWindowCloseBehavior(behavior)
+    })
+
+    ipcMain.handle(STARTUP_VIEW_GET_CHANNEL, (event) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+        throw new Error("Startup settings are only available to the main window")
+      }
+      return getStartupView()
+    })
+
+    ipcMain.handle(STARTUP_VIEW_SET_CHANNEL, (event, view: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+        throw new Error("Startup settings are only available to the main window")
+      }
+      return setStartupView(view)
     })
 
     ipcMain.handle(GIT_CHANGE_NOTICE_GET_CHANNEL, (event) => {
@@ -1651,7 +1678,7 @@ if (browserNativeMessagingHostLaunch) {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" || isAppQuitting()) {
       app.quit()
     }
   })
@@ -1693,6 +1720,7 @@ if (browserNativeMessagingHostLaunch) {
     void (async () => {
       try {
         const shutdownResults = await Promise.allSettled([
+          waitBestEffort(stopLocalBotHost(), 5_000),
           shutdownAllAgentTasks(5_000),
           stopSchedulerAndWait(5_000),
           stopHeartbeatAndWait(5_000),
@@ -1758,6 +1786,7 @@ if (browserNativeMessagingHostLaunch) {
     stopHookConfigWatcher()
     stopAllWatching()
     stopRegisteredGitHookEventSync()
+    stopKnowledgeBaseManager()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
     try {
@@ -1767,11 +1796,14 @@ if (browserNativeMessagingHostLaunch) {
     }
 
     const cleanup = Promise.all([
+      stopLocalBotHost().catch((error) => console.warn("[Bots] Shutdown failed", error)),
       builtinRobotManager
         .stop()
         .catch((err) => console.warn("[Main] stop built-in robot error:", err)),
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      closeThreadSearchWorker(),
+      closeDurableMessageSearchWorker(),
       closeThreadMessageHydrationWorker().catch((err) =>
         console.warn("[Main] closeThreadMessageHydrationWorker error:", err)
       ),

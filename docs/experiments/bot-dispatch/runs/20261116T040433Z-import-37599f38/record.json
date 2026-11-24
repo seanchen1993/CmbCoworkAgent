@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261116T040433Z-import-37599f38",
+  "kind": "historical-real-model-electron",
+  "startedAt": "2026-11-16T04:04:33.709Z",
+  "displayTimezone": "Asia/Shanghai",
+  "archivedOn": "2026-11-17",
+  "status": "no-failure-recorded",
+  "exitCode": null,
+  "selectedCases": null,
+  "provenance": {
+    "sourceArtifact": "bot-integration-build-d4PFit/artifacts/routing-1794801873709.json",
+    "originalReportSha256": "37599f386c7a93320f9a1d86f62fe6889747ac4114f6bd262e6ef191ff7264e2",
+    "originalExitCodeUnavailable": true,
+    "originalCaseSelectionUnavailable": true,
+    "note": "历史回收。保留缺失字段；未见 error 不等于证实进程成功。未使用当前源码回填历史版本。"
+  },
+  "build": {
+    "builtAt": "2026-11-16T03:59:29.668Z",
+    "mainSha256": "eb885d085129afaafdbb5ba260864ba0a5464e9c7c3117faaab273b7bc8d8896",
+    "sourceAtBuild": null
+  },
+  "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。",
+  "report": {
+    "model": "deepseek-v4-flash",
+    "fixtureApprovalMode": "yolo (disposable profile only)",
+    "wire": {
+      "main": 8,
+      "guided": 8,
+      "worker": 0,
+      "workerCreate": 0
+    },
+    "results": [
+      {
+        "id": "event-plan",
+        "label": "多材料筹备方案及交付",
+        "preferred": "independent",
+        "files": {
+          "活动约束.md": "虚构读书会：周日下午三点开始，共90分钟，20人，各带一本书。必须有签到、分组讨论和分享。预算1000元。\n",
+          "场地说明.md": "社区阅览室免费，可容纳24人，室内不受天气影响。小公园免费、容量40人，下雨不可用。活动中心收费300元、容量30人，有投影。\n",
+          "费用.csv": "项目,单价,数量\n饮用水,5,20\n材料,120,1\n备用金,100,1\n"
+        },
+        "message": "请帮我做好周日读书会筹备方案。工作目录 <test-workspace>/event-plan。读取活动约束.md、场地说明.md、费用.csv，核算费用，比较三个场地的容量、预算和天气风险，推荐一个；制定90分钟流程、分工清单和两条应急安排。写入 plan.md，检查总时长和预算后交给我。后面我会调整时间。资料均为虚构，不用浏览器，也不联系任何人。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 31.7,
+        "tools": [
+          "ls",
+          "read_file",
+          "write_file",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "read_file",
+          "write_file",
+          "execute",
+          "bot_deliver_files",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "reply": "我先查看工作目录里的三份资料，再核算与比较。\n\n资料已看完，我先核算费用：水 5×20=100，材料 120，备用金 100，小计 320；再加上活动中心 300，合计 620 元，预算 1000 元内余 380 元。现在写方案。\n\n\n\n\n方案已写入 [plan.md](<test-workspace>/event-plan/plan.md)，附件是同一份。\n\n**推荐活动中心**：30 人容量（20 人 + 4 组讨论不挤），室内无天气风险，有投影；阅览室 24 人偏紧但免费，留作备用场地；小公园虽免费且 40 人，但下雨即不可用，不推荐。\n\n**核算与检查**：水 100 + 材料 120 + 备用金 100 + 场地 300 = **620 元**，预算 1000 元内余 380 元；流程 10+10+30+25+13+2 = **90 分钟**（15:00–16:30），已用脚本核对。两条应急（降雨/场地不可用→转阅览室；设备故障或人员延误→纸质分享+扣减自由交换）均不追加预算、不推迟结束时间。\n\n后续调时间的话告诉我新的起止或可用分钟数，我按环节重排并复核时长。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      }
+    ]
+  },
+  "logs": [
+    {
+      "name": "bot-routing-audit.log",
+      "text": "{\"case\":\"event-plan\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":31.7,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"read_file\",\"write_file\",\"execute\",\"bot_deliver_files\",\"execute\",\"bot_deliver_files\"]}\nRouting evaluation report: <temp>/bot-integration-build-d4PFit/artifacts/routing-1794801873709.json\n",
+      "sha256": "bd2908e70a12e4991934f0df6fc5ced764054c7def98f47c643955f5268bc8ac"
+    }
+  ]
+}

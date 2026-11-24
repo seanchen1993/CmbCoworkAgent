@@ -1,3 +1,4 @@
+import { botInteractionRoutes } from "../src/main/services/im/bot-interaction-route"
 import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -112,7 +113,12 @@ async function createContext(
   const cardSends = {
     accept: true,
     sent: 0,
-    cards: [] as Array<{ tag: string; json: string }>,
+    cards: [] as Array<{
+      tag: string
+      json: string
+      botEventId?: string
+      conversationKey?: string
+    }>,
     /** When set, a send stays in flight until it resolves. */
     hold: null as Promise<void> | null
   }
@@ -123,9 +129,19 @@ async function createContext(
     usesTextReplies: (conversationKey) => conversations.getReplyMode(conversationKey) === "text",
     gateway: {
       isAuthenticated: () => true,
-      sendCard: async (card: { tag: string; content: unknown }) => {
+      sendCard: async (card: {
+        tag: string
+        content: unknown
+        botEventId?: string
+        conversationKey?: string
+      }) => {
         cardSends.sent += 1
-        cardSends.cards.push({ tag: card.tag, json: JSON.stringify(card.content) })
+        cardSends.cards.push({
+          tag: card.tag,
+          json: JSON.stringify(card.content),
+          botEventId: card.botEventId,
+          conversationKey: card.conversationKey
+        })
         if (cardSends.hold) await cardSends.hold
         return cardSends.accept
           ? ({ state: "accepted" } as const)
@@ -289,16 +305,24 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     await context.publish(request)
     // The card landed, so it is the only message: no notice follows it at all.
     assert.equal(context.deliveryText(request.requestId), "", "a delivered card sends no notice")
-    // Everything a reader needs is therefore in the card, the short code
-    // included — it is the only way to answer when the buttons do not work.
     assert.equal(context.cardInteractions.list().length, 1)
     assert.equal(context.sendPendingCount(), 0, "nothing was queued to drain")
-    // Everything a reader needs is therefore in the card: the question, the
-    // options, and the submit button. The short code is deliberately not among
-    // them — a delivered card is answered by pressing it.
     const card = context.cardJson()
-    assert(card.includes("导出格式用哪种？"), card)
-    assert(card.includes("CSV"), card)
+    const components: Array<{ type: string; list?: Array<{ content: string }> }> = JSON.parse(card)
+    const formIndex = components.findIndex((component) => component.type === "interactive")
+    assert.ok(formIndex > 0, "the standard robot sends an answer form below the question")
+    const bodyIndex = components.slice(0, formIndex).findIndex(
+      (component) => component.type === "content" && component.list?.[0]?.content === "导出格式用哪种？"
+    )
+    assert.ok(bodyIndex > 0, "the question title precedes the body")
+    assert.deepEqual(components[bodyIndex - 1].list, [{ type: [1], content: "问题一：格式" }])
+    // The client renders the list as adjacent rich-text spans, with no implicit line break.
+    assert.deepEqual(components[bodyIndex].list?.map((span) => span.content).join("").split("\n"), [
+      "导出格式用哪种？",
+      "1. CSV (Recommended)（兼容性最好。）",
+      "2. Excel（保留表格格式。）",
+      "3. JSON（便于程序读取。）"
+    ])
     assert(!card.includes("A1B2C3"), card)
 
     assert.equal(
@@ -552,6 +576,7 @@ async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promis
     assert.equal(context.cardUpdates.length, 1, "the card must be closed exactly once")
     const rendered = JSON.stringify(context.cardUpdates[0]!.content)
     assert(rendered.includes("已回答"), rendered)
+    assert(rendered.includes("问题一：格式："), "the answered card uses the same question title")
     assert(
       !rendered.includes("已在桌面处理"),
       "a Zhaohu answer must not be credited to the desktop"
@@ -725,7 +750,147 @@ async function testASwitchDuringTheCardSendStillHandsTheQuestionOver(): Promise<
   }
 }
 
+async function testBotGroupCardRoundtripAndRouteRevocation(): Promise<void> {
+  const context = await createContext()
+  let active = true
+  const disconnect = botInteractionRoutes.setTransport(() => true)
+  const detach = botInteractionRoutes.register({
+    realm: "gateway-a",
+    principalId: ROUTE.principalId,
+    conversationKey: "bot-group",
+    kind: "group",
+    threadId: "thread-1",
+    prefix: "【群任务】",
+    botEventId: "source-event",
+    senderId: "requester",
+    isCurrent: () => active
+  })
+  try {
+    const request = userInputRequest({ requestId: "bot-question" })
+    await context.publish(request)
+    assert.equal(context.cardSends.cards[0].botEventId, "source-event")
+    assert.equal(context.cardSends.cards[0].conversationKey, "bot-group")
+    assert.match(await context.service.resolveAnswer({ ...ROUTE, argument: "A1B2C3 1" }), /不属于/)
+    assert.match(
+      await context.service.resolveAnswer({
+        ...ROUTE,
+        principalId: "another-account",
+        conversationKey: "bot-group",
+        botSenderId: "other",
+        argument: "A1B2C3 1"
+      }),
+      /不属于/
+    )
+    assert.equal(context.responses.length, 0)
+    assert.match(
+      await context.service.resolveCardAnswers({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        requestId: request.requestId,
+        feedback: [{ key: "q0", value: "1" }]
+      }),
+      /已从招乎提交/
+    )
+    assert.equal(context.responses.length, 1)
+    assert.match(
+      await context.service.resolveAnswer({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        botSenderId: "another-member",
+        argument: "A1B2C3 2"
+      }),
+      /不存在|不再/
+    )
+    assert.match(
+      await context.service.resolveCardAnswers({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        requestId: request.requestId,
+        feedback: []
+      }),
+      /不存在|不再/
+    )
+    assert.equal(context.responses.length, 1)
+    context.cardSends.accept = false
+    await context.publish(userInputRequest({ requestId: "bot-question-revoked" }))
+    assert.match(context.deliveryText("bot-question-revoked"), /群内 @当前机器人/)
+    assert.match(context.deliveryText("bot-question-revoked"), /\/回答 D4E5F6/)
+    active = false
+    assert.match(
+      await context.service.resolveAnswer({
+        ...ROUTE,
+        conversationKey: "bot-group",
+        botSenderId: "requester",
+        argument: "D4E5F6 1"
+      }),
+      /连接已变化/
+    )
+    assert.equal(context.responses.length, 1)
+  } finally {
+    detach()
+    disconnect()
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testBotGroupTextAnswerFromAnotherMemberWinsOnce(): Promise<void> {
+  const context = await createContext()
+  const disconnect = botInteractionRoutes.setTransport(() => true)
+  const detach = botInteractionRoutes.register({
+    realm: "gateway-a",
+    ...ROUTE,
+    conversationKey: "bot-group-text",
+    kind: "group",
+    threadId: "thread-1",
+    prefix: "【群任务】",
+    botEventId: "source-event",
+    senderId: "requester",
+    isCurrent: () => true
+  })
+  try {
+    const request = userInputRequest({ requestId: "group-text-question" })
+    await context.publish(request)
+    const results = await Promise.all([
+      context.service.resolveAnswer({
+        ...ROUTE,
+        conversationKey: "bot-group-text",
+        botSenderId: "other-member",
+        argument: "A1B2C3 2"
+      }),
+      context.service.resolveCardAnswers({
+        ...ROUTE,
+        conversationKey: "bot-group-text",
+        requestId: request.requestId,
+        feedback: [{ key: "q0", value: "0" }]
+      })
+    ])
+    assert.match(results[0], /已从招乎提交/)
+    assert.match(results[1], /不存在|不再/)
+    assert.equal(context.responses.length, 1)
+    const answer = context.responses[0].answers.export_format
+    assert.equal(answer.type, "option")
+    assert.equal(answer.type === "option" && answer.optionIndex, 1)
+    assert.match(await context.service.resolveAnswer({
+      ...ROUTE,
+      conversationKey: "bot-group-text",
+      botSenderId: "requester",
+      argument: "A1B2C3 1"
+    }), /不存在|不再/)
+    assert.equal(context.responses.length, 1)
+  } finally {
+    detach()
+    disconnect()
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
+  await testBotGroupCardRoundtripAndRouteRevocation()
+  await testBotGroupTextAnswerFromAnotherMemberWinsOnce()
   await testAHeldBackQuestionIsResentOnceAsText()
   await testAnAnsweredQuestionIsNotResent()
   await testAQuestionBeingAnsweredIsNotResent()

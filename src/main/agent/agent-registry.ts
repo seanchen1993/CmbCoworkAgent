@@ -87,7 +87,8 @@ const CC_TOOL_ALIASES: Record<string, string> = {
   glob: "glob",
   grep: "grep",
   ls: "ls",
-  taskoutput: "task_output"
+  taskoutput: "task_output",
+  monitor: "task_output"
 }
 
 /** The write tools a read-only/verify agent must never get. */
@@ -223,12 +224,8 @@ function deriveToolPolicy(fm: Record<string, string>): ToolPolicy {
       return policyFromDisallowed(denyExplicit)
     }
     const allow = new Set(allowTokens.map(normalizeToolName).filter(Boolean) as string[])
-    // task_output is the read-side companion of execute's background mode: a
-    // background command is started via execute(run_in_background) and its result
-    // is fetched via task_output. Granting execute (Bash) but blocking task_output
-    // leaves background commands half-broken (startable, unreadable), so when the
-    // allowlist grants execute, grant task_output too. An EXPLICIT
-    // `disallowedTools: task_output` still wins (denyExplicit is applied below).
+    // Grant Bash's background result tools with execute. Both names normalize to
+    // task_output for policy matching, and the explicit denylist still wins.
     if (allow.has("execute")) allow.add("task_output")
     // Block every known fs tool AND every fixed non-fs side-effect tool
     // (code_exec / deferred bridge / orchestration) not in the allowlist, then

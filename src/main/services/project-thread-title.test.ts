@@ -6,11 +6,25 @@ describe("project thread title", () => {
   const binding = { projectId: "project", slug: "feature" }
   const message = "请继续完成当前阶段的任务"
 
-  it("places the selected skill description before its name", async () => {
+  it("places the selected skill name before its description", async () => {
     expect(await generateProjectThreadTitle(message, " 方案设计 ", binding, " 编写技术方案 ")).toBe(
-      "编写技术方案·方案设计"
+      "方案设计·编写技术方案"
     )
   })
+
+  it.each(["方案设计", undefined])(
+    "limits the description to 15 characters with skill name %j",
+    async (name) => {
+      const description = "一二三四五六七八九十一二三四五"
+      const expected = name ? `${name}·${description}` : description
+      expect(await generateProjectThreadTitle(message, name, binding, ` ${description} `)).toBe(
+        expected
+      )
+      expect(await generateProjectThreadTitle(message, name, binding, ` ${description}六七 `)).toBe(
+        expected
+      )
+    }
+  )
 
   it.each([undefined, "", " "])(
     "uses only the name when the description is absent: %j",

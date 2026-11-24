@@ -120,7 +120,16 @@ async function main(): Promise<void> {
     })
     await app.context().route(/^https?:/, (route) => route.abort())
     const page = await app.firstWindow()
+    page.on("console", (message) => {
+      requireLocal("node:fs").appendFileSync(
+        join(isolated, "renderer.log"), `${message.type()}: ${message.text()}\n`
+      )
+    })
+    page.on("pageerror", (error) => {
+      requireLocal("node:fs").appendFileSync(join(isolated, "renderer.log"), `${error.stack}\n`)
+    })
     await page.waitForFunction(() => Boolean(window.api?.threads))
+    await page.getByRole("button", { name: "自定义设置", exact: true }).waitFor()
     await app
       .evaluate(({ BrowserWindow, ipcMain }) => {
         ipcMain.removeHandler("open-login-page")
@@ -132,6 +141,7 @@ async function main(): Promise<void> {
       })
       .then((handlers) => assert.deepEqual(handlers, []))
     await page.evaluate("globalThis.__name = (value) => value")
+    await page.evaluate("window.logOn?.()")
     await page.evaluate(
       ({ baseUrl }) => {
         if ("mods" in window.api) throw new Error("Mods preload API is still exposed")
@@ -205,14 +215,32 @@ async function main(): Promise<void> {
     assert.ok(calls >= 102, "All 101 runtimes reached the local model")
     assert.deepEqual(serverErrors, [])
     assert.equal(existsSync(join(dataRoot, "mods-control.db")), false)
-    await page.getByRole("button", { name: "自定义", exact: true }).click()
+    await page.getByRole("button", { name: "自定义设置", exact: true }).dispatchEvent("click")
     await page.getByText("基础功能", { exact: true }).waitFor()
     assert.equal(await page.getByText("Function Mods", { exact: true }).count(), 0)
-    await page.screenshot({ path: join(isolated, "settings-without-mods.png") })
+    const screenshot = await app.evaluate(async ({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows().find((window) =>
+        window.webContents.getURL().startsWith("file:")
+      )
+      if (!window) throw new Error("Application window is unavailable")
+      const image = await window.webContents.capturePage(undefined, {
+        stayHidden: true,
+        stayAwake: true
+      })
+      return image.toPNG().toString("base64")
+    })
+    writeFileSync(join(isolated, "settings-without-mods.png"), Buffer.from(screenshot, "base64"))
     console.log(
       `PASS HTTP/SSE: 101 threads, native tool, bearer auth, invalid workspace, legacy switch (${calls} model calls)`
     )
     console.log(`Artifacts: ${isolated}`)
+  } catch (error) {
+    const page = app?.windows()[0]
+    if (page) {
+      await page.screenshot({ path: join(isolated, "failure.png") }).catch(() => {})
+      console.error(await page.locator("body").innerText().catch(() => "Renderer unavailable"))
+    }
+    throw error
   } finally {
     await app?.close()
     server.closeAllConnections()

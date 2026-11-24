@@ -1,0 +1,2 @@
+src/main/bots/performance-regression.test.ts(231,7): error TS2322: Type 'NativeSqliteBindings' is not assignable to type 'readonly unknown[]'.
+  Type 'Record<string, unknown>' is missing the following properties from type 'readonly unknown[]': length, concat, join, slice, and 26 more.

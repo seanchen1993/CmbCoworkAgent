@@ -22,6 +22,44 @@ const row = (id: string, role: Message["role"], content: string): Message => ({
 })
 
 describe("managed scheduler assistant snapshots", () => {
+  it("keeps late completed snapshots on the same provider occurrence after a steer", () => {
+    const state = tracker()
+    const completed = {
+      ...row("stable-first", "assistant", "finished"),
+      provider_source_id: "reused",
+      provider_occurrence: 1,
+      reasoning: "retained",
+      tool_calls: [{ id: "call", name: "echo", args: {} }]
+    }
+    const messages = [completed, row("steer", "user", "continue")]
+    const events: SchedulerRendererEvent[] = []
+    const delivery = createManagedTransportAgentRunDelivery({
+      mirror: (_, event) => events.push(event), broadcast: () => {}
+    })
+    const serialize = createStreamDataSerializer()
+    for (const [kind, id, occurrence] of [
+      ["AIMessage", "stable-first", 1],
+      ["AIMessageChunk", "reused", 2]
+    ] as const) {
+      const packet = serialize("messages", [{ id: [kind], kwargs: {
+        id, content: "finished", additional_kwargs: {
+          cmb_internal_provider_source_id: "reused", cmb_internal_provider_occurrence: occurrence
+        }
+      } }, {}])
+      delivery.send("agent:stream:thread", { type: "stream", mode: "messages", data: packet.data })
+    }
+    const snapshot = events.find(e => e.type === "custom" && e.data.type === "coordinator_ai_snapshot_message")!
+    assertCustom(snapshot)
+    const next = applySchedulerAssistantSnapshot(state, messages, snapshot.data.assistantMessage)!
+    expect(next).toMatchObject(completed)
+    const delta = events.find(e => e.type === "message-delta")
+    expect(delta).toMatchObject({ provider_source_id: "reused", provider_occurrence: 2 })
+    const second = applySchedulerAssistantSnapshot(state, messages, {
+      id: "reused", type: "ai", content: "finished", provider_source_id: "reused", provider_occurrence: 2
+    })!
+    expect(second.id).not.toBe(completed.id)
+    expect(second.provider_occurrence).toBe(2)
+  })
   it("preserves repeated explicit reasoning deltas through real managed delivery", () => {
     const state = tracker()
     let messages: Message[] = []
@@ -158,3 +196,7 @@ describe("managed scheduler assistant snapshots", () => {
     expect(tool.content).toBe("result")
   })
 })
+
+function assertCustom(event: SchedulerRendererEvent): asserts event is Extract<SchedulerRendererEvent, { type: "custom" }> {
+  expect(event.type).toBe("custom")
+}

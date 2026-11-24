@@ -4,6 +4,7 @@ import {
   Gauge,
   Loader2,
   PanelTopClose,
+  PanelTopOpen,
   Settings2,
   TimerReset,
   Trash2
@@ -20,6 +21,7 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import { isWindowCloseBehavior, type WindowCloseBehavior } from "../../../../shared/close-to-tray"
+import { isStartupView, type StartupView } from "../../../../shared/startup-view"
 import {
   AGENT_GRAPH_RECURSION_LIMIT_DEFAULT,
   AGENT_GRAPH_RECURSION_LIMIT_MAX,
@@ -48,6 +50,9 @@ export function GeneralPanel({
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [startupView, setStartupView] = useState<StartupView | null>(null)
+  const [startupViewBusy, setStartupViewBusy] = useState(true)
+  const [startupViewError, setStartupViewError] = useState<string | null>(null)
   const [recursionLimit, setRecursionLimit] = useState<number | null>(null)
   const [toolStrategy, setToolStrategy] = useState<AgentToolStrategy>(AGENT_TOOL_STRATEGY_DEFAULT)
   const [toolStrategySaving, setToolStrategySaving] = useState(false)
@@ -98,6 +103,36 @@ export function GeneralPanel({
   useEffect(() => {
     void loadCloseBehavior()
   }, [loadCloseBehavior])
+
+  const loadStartupView = useCallback(async (): Promise<void> => {
+    setStartupViewBusy(true)
+    setStartupViewError(null)
+    try {
+      setStartupView(await window.electron.getStartupView())
+    } catch {
+      setStartupViewError("无法读取启动设置，请重试。")
+    } finally {
+      setStartupViewBusy(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadStartupView()
+  }, [loadStartupView])
+
+  const handleStartupViewChange = async (value: string): Promise<void> => {
+    if (!isStartupView(value) || startupViewBusy || value === startupView) return
+    setStartupViewBusy(true)
+    setStartupViewError(null)
+    try {
+      setStartupView(await window.electron.setStartupView(value))
+      toast.success("已保存，下次启动时生效")
+    } catch {
+      setStartupViewError("启动设置保存失败，请重试。")
+    } finally {
+      setStartupViewBusy(false)
+    }
+  }
 
   const loadRuntimeSettings = useCallback(async (): Promise<void> => {
     setRuntimeSettingsLoading(true)
@@ -293,6 +328,37 @@ export function GeneralPanel({
         <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">
           <div className="border-b border-border/60 bg-muted/35 px-5 py-4">
             <h2 className="text-sm font-semibold text-foreground">窗口</h2>
+          </div>
+          <div className="flex flex-col gap-4 border-b border-border/60 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3 sm:pr-8">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60">
+                <PanelTopOpen className="size-4" />
+              </div>
+              <div>
+                <div className="text-sm font-medium text-foreground">启动时打开</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">下次启动应用时生效。</p>
+              </div>
+            </div>
+            <div className="w-full shrink-0 space-y-2 sm:w-[250px]">
+              <Select value={startupView ?? ""} onValueChange={(value) => void handleStartupViewChange(value)}
+                disabled={startupViewBusy || startupView === null}>
+                <SelectTrigger aria-label="启动时打开" className="w-full">
+                  <SelectValue placeholder={startupViewBusy ? "正在加载…" : "无法读取设置"} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="thread">工作台（默认）</SelectItem>
+                  <SelectItem value="bots">Bots</SelectItem>
+                </SelectContent>
+              </Select>
+              {startupViewError && (
+                <div role="alert" className="flex items-center justify-between gap-2 text-xs text-status-critical">
+                  <span>{startupViewError}</span>
+                  {startupView === null && (
+                    <Button variant="outline" size="sm" className="h-7" onClick={loadStartupView}>重试</Button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
           <div className="flex flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-start gap-3 sm:pr-8">

@@ -1,29 +1,27 @@
+import { isHarnessProjectModeThread, isLocalWorkConversation, isRegularChatThread } from "../../../shared/thread-search-scope"
 import type { Thread } from "@/types"
 
-export function isHarnessFeatureThread(thread: Thread | null | undefined): boolean {
-  const harnessFeature = thread?.metadata?.harnessFeature
-  if (!harnessFeature || typeof harnessFeature !== "object") {
-    return false
-  }
+export {
+  isBotThread,
+  isLocalWorkConversation,
+  isRegularChatThread,
+  isHarnessFeatureThread,
+  isHarnessProjectSessionThread,
+  isHarnessProjectModeThread
+} from "../../../shared/thread-search-scope"
 
-  const metadata = harnessFeature as Record<string, unknown>
-  return typeof metadata.projectId === "string" && typeof metadata.slug === "string"
-}
-
-export function isHarnessProjectSessionThread(thread: Thread | null | undefined): boolean {
-  const harnessProjectSession = thread?.metadata?.harnessProjectSession
-  if (!harnessProjectSession || typeof harnessProjectSession !== "object") {
-    return false
-  }
-
-  const metadata = harnessProjectSession as Record<string, unknown>
-  return typeof metadata.projectId === "string" && typeof metadata.kind === "string"
-}
-
-export function isHarnessProjectModeThread(thread: Thread | null | undefined): boolean {
-  return isHarnessFeatureThread(thread) || isHarnessProjectSessionThread(thread)
+export function isManagedLocalWorkConversation(thread: Thread | null | undefined): boolean {
+  const metadata = thread?.metadata
+  return (
+    isLocalWorkConversation(thread) &&
+    !isHarnessProjectModeThread(thread) &&
+    !metadata?.remoteState &&
+    !metadata?.remoteReadOnly &&
+    metadata?.targetKind !== "inbox" &&
+    !metadata?.imDeliveryContext
+  )
 }
 
 export function findFirstChatThread(threads: Thread[]): Thread | null {
-  return threads.find((thread) => !isHarnessProjectModeThread(thread)) ?? null
+  return threads.find(isRegularChatThread) ?? null
 }

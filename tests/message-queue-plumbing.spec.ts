@@ -55,8 +55,11 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
   assert(b < a, `${label}: expected ${JSON.stringify(before)} before ${JSON.stringify(after)}`)
 }
 
+const queueMiddlewareCall = "createCurrentRunMessageQueueMiddleware(\n        currentRunMessageQueueOwnerToken,\n        onPrimaryModelRequestState,"
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
+assertIncludes(runtime, "messages.filter((message) => !message.peerFeedback)", "peer feedback cannot enter the ordinary user transcript")
+
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const physicalStreamRunSetup = read("src/main/agent/physical-stream-run-setup.ts")
 const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
@@ -82,7 +85,7 @@ function testMiddlewareOnlyOnMainStack(): void {
   // can't leak into a background subagent's loop.
   assertOccurrences(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(",
+    queueMiddlewareCall,
     1,
     "middleware invoked once (main stack only)"
   )
@@ -92,22 +95,27 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // Slice from the (single) main-stack invocation — summarization also appears in
   // the subagent stack earlier in the file, so a whole-file order check is wrong.
   const idx = runtime.indexOf(
-    "createCurrentRunMessageQueueMiddleware("
+    queueMiddlewareCall
   )
   assert(idx >= 0, "queue middleware present on the main stack")
   const after = runtime.slice(idx)
-  // beforeModel must run before summarization (injected turns participate in
-  // context management): the queue middleware immediately precedes it in the array.
-  assertMatches(
+  // Queued user messages enter the context before the summarization policy.
+  assertSourceOrder(
     after,
-    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*onCurrentRunInputInjected\s*\),\s*\n\s*createCmbSummarizationMiddleware\(/,
-    "queue middleware immediately precedes summarization on the main stack"
+    queueMiddlewareCall,
+    "createCmbSummarizationMiddleware(mainSummarizationOptions)",
+    "queue middleware before summarization on the main stack"
+  )
+  assertIncludes(
+    runtime,
+    "createCmbSummarizationMiddleware(mainSummarizationOptions)",
+    "the shared context controller owns the main-agent summarization policy"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
   // injection.
   assertSourceOrder(
     after,
-    "createCurrentRunMessageQueueMiddleware(",
+    queueMiddlewareCall,
     "humanInTheLoopMiddleware",
     "queue middleware before HITL on the main stack"
   )
@@ -142,9 +150,9 @@ function testAfterModelSkipsOnToolCalls(): void {
 function testQueueIpcRequiresActiveRun(): void {
   assertIncludes(agentIpc, '"agent:queueCurrentRunMessage"', "queue IPC handler registered")
   assertIncludes(agentIpc, '"agent:deleteCurrentRunQueuedMessage"', "delete IPC handler registered")
-  // Background workflow/worker/scheduler runs don't populate activeRuns, so the
-  // controller lookup is what prevents steering into them and also fences an
-  // async hook preparation against run replacement.
+  // A physical top-level run (desktop or managed Bot) must exist. Derived
+  // worker graphs have separate thread IDs. The shared entrypoint also checks
+  // the caller's exact lease, and fences async preparation against replacement.
   assertMatches(
     agentIpc,
     /const activeController = activeRuns\.get\(threadId\)[\s\S]{0,500}if \(!activeController \|\| activeController\.signal\.aborted\)[\s\S]{0,500}no_active_run/,
@@ -153,7 +161,7 @@ function testQueueIpcRequiresActiveRun(): void {
 }
 
 function testGuideRespectsActiveGoal(): void {
-  const ipcStart = agentIpc.indexOf('"agent:queueCurrentRunMessage"')
+  const ipcStart = agentIpc.indexOf("const queueIntoOwnedRun = async")
   const ipcBody = agentIpc.slice(ipcStart, ipcStart + 6500)
   assertIncludes(
     ipcBody,
@@ -232,7 +240,7 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
   )
   assertIncludes(
     standardTurn,
-    "isPreparationCurrent && !isPreparationCurrent()",
+    "if (!isCurrent())",
     "stale async hook results stop before committing skill and prompt side effects"
   )
   assertOccurrences(
@@ -261,9 +269,9 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "!signal.aborted && currentRunMessagePreparers.get(threadId)?.runToken === runToken",
     "aborted runs invalidate async prompt preparation before side effects commit"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "activeController.signal.aborted ||\n            currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken",
+    /activeController\.signal\.aborted \|\|\s*currentRunMessagePreparers\.get\(threadId\)\?\.runToken !== preparer\.runToken/,
     "queue commit rechecks abort state after asynchronous hooks"
   )
   assertIncludes(
@@ -517,7 +525,7 @@ function testClearOnEveryRunExit(): void {
     agentIpc,
     "resolveAgentStreamRequestChannel(",
     4,
-    "invoke, resume, interrupt, and preflight rejection isolate terminal events on request-scoped channels"
+    "invoke, resume, interrupt and early human-decision rejection isolate terminal events on request-scoped channels"
   )
   assert(
     !agentIpc.includes("abort: () => {\n      LocalSandbox.cancelBackgroundTasks(threadId)"),
@@ -564,12 +572,27 @@ function testClearOnEveryRunExit(): void {
     "export async function cancelAndWaitForAgentThreadRun("
   )
   assert(foregroundDeleteStart >= 0, "foreground thread deletion helper exists")
-  const foregroundDeleteBody = agentIpc.slice(foregroundDeleteStart, foregroundDeleteStart + 900)
+  const foregroundDeleteBody = agentIpc.slice(
+    foregroundDeleteStart,
+    agentIpc.indexOf("async function waitForReplacedRunToSettle", foregroundDeleteStart)
+  )
   assertSourceOrder(
     foregroundDeleteBody,
     "controller.abort()",
-    "return waitForReplacedRunToSettle(threadId)",
+    "waitForReplacedRunToSettle(threadId)",
     "thread deletion aborts and bounded-waits for its foreground run"
+  )
+  assertSourceOrder(
+    foregroundDeleteBody,
+    "LocalSandbox.cancelBackgroundTasksWithin(",
+    "if (!controller) return (await shellSettlement)",
+    "thread deletion waits for detached Bash even when no foreground run is active"
+  )
+  assertSourceOrder(
+    threadsIpc,
+    'if (runOutcome === "shell_timed_out")',
+    "clearToolConcurrencyLocksForThread(threadId)",
+    "thread deletion stops on a shell settlement timeout before tearing down its runtime"
   )
   const deletedRuntimeStart = agentIpc.indexOf("export function disposeDeletedAgentThreadRuntime(")
   assert(deletedRuntimeStart >= 0, "deleted-thread runtime cleanup exists")
@@ -653,7 +676,7 @@ function testClearOnEveryRunExit(): void {
   )
   assertIncludes(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(",
+    queueMiddlewareCall,
     "each middleware closure is bound to its physical run token"
   )
   assertOccurrences(
@@ -1074,7 +1097,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   assertSourceOrder(
     transcriptFlushBody,
     "try {",
-    "const resolved = resolveStreamTranscriptFlush({",
+    "resolveStreamTranscriptFlush({",
     "stream batches enter the run-scoped identity resolver inside the restoration boundary"
   )
   assertSourceOrder(
@@ -1090,13 +1113,13 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "appendThreadMessageTextDelta(threadId, messages[0])",
-    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
+    "appendThreadMessageTextDelta(threadId, messages[0], streamAttempt)",
+    "upsertThreadMessages(threadId, messages, {\n        preserveExistingOrder,\n        streamAttempt\n      })",
     "content-only batches append fragments before the structural fallback"
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
+    "upsertThreadMessages(threadId, messages, {\n        preserveExistingOrder,\n        streamAttempt\n      })",
     "} catch (error) {",
     "both incremental persistence paths run inside the buffer-restoration boundary"
   )
@@ -1134,7 +1157,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "non-strict shutdown flush reports remaining evidence without discarding it"
   )
   const resetStart = agentIpc.indexOf("function resetFailedStreamAttempt(")
-  const resetBody = agentIpc.slice(resetStart, resetStart + 1200)
+  const resetBody = agentIpc.slice(resetStart, agentIpc.indexOf("export async function retryStreamAfterDisconnect", resetStart))
   assertSourceOrder(
     resetBody,
     "if (options.preservePendingTranscript)",
@@ -1155,7 +1178,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertIncludes(
     runtime,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(\n    threadId,\n    context.runToken",
     "the strict steering flush targets the current physical run"
   )
   assertIncludes(
@@ -1466,9 +1489,12 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     `invoke, resume, and interrupt each have one completion hook: got ${completionHookIndexes.length}`
   )
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
+    const failedOutcomeMarker = 'if (completionOutcome === "failed")'
+    const failedOutcomeIndex = agentIpc.indexOf(failedOutcomeMarker, completionHookIndexes[index])
+    assert(failedOutcomeIndex >= 0, `${label} handles the completion hook failure outcome`)
     const body = agentIpc.slice(
       completionHookIndexes[index],
-      agentIpc.indexOf('if (completionOutcome === "failed")', completionHookIndexes[index]) + 40
+      failedOutcomeIndex + failedOutcomeMarker.length
     )
     const fence =
       label === "invoke"
@@ -1506,7 +1532,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   const forkBoundaryHelperStart = agentIpc.indexOf("async function markLatestForkBoundary(")
   const forkBoundaryHelperBody = agentIpc.slice(
     forkBoundaryHelperStart,
-    forkBoundaryHelperStart + 2800
+    agentIpc.indexOf("async function markLatestForkBoundaryBestEffort(", forkBoundaryHelperStart)
   )
   assertIncludes(
     forkBoundaryHelperBody,
@@ -1557,8 +1583,8 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     )
   }
   assert(
-    forkBoundaryCallIndexes.length === 7,
-    `all terminal boundary calls are physical-run scoped: got ${forkBoundaryCallIndexes.length}`
+    forkBoundaryCallIndexes.length === 3,
+    `all completion boundary calls are physical-run scoped: got ${forkBoundaryCallIndexes.length}`
   )
   for (const index of forkBoundaryCallIndexes) {
     const callBody = agentIpc.slice(index, index + 380)
@@ -1569,6 +1595,20 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
       "fork boundary call carries its controller"
     )
   }
+  const settlementStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  const settlement = agentIpc.slice(settlementStart, settlementStart + 8_000)
+  assertSourceOrder(
+    settlement,
+    'name: "flush-stream-transcript"',
+    'name: "persist-interrupted-fork-boundary"',
+    "interrupted forks see all transcript rows committed by settlement"
+  )
+  assertSourceOrder(
+    settlement,
+    'name: "persist-interrupted-fork-boundary"',
+    'name: "release-active-controller"',
+    "interrupted forks are marked under the originating controller"
+  )
 
   const completionBoundaryMarker = 'source: "agent_run_complete"'
   const completionBoundaryIndexes: number[] = []
@@ -1650,8 +1690,8 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
 }
 
 function testPreparingGuidesParticipateInReconciliation(): void {
-  const queueStart = agentIpc.indexOf('"agent:queueCurrentRunMessage"')
-  const queueBody = agentIpc.slice(queueStart, queueStart + 7500)
+  const queueStart = agentIpc.indexOf("const queueIntoOwnedRun = async")
+  const queueBody = agentIpc.slice(queueStart, agentIpc.indexOf("registerAgentRunSteerer(queueIntoOwnedRun)", queueStart))
   assertSourceOrder(
     queueBody,
     "trackCurrentRunMessagePreparation(preparationLockKey, messageId, 1)",
@@ -1681,7 +1721,7 @@ function testPreparingGuidesParticipateInReconciliation(): void {
   const rendererReconcileBody = chat.slice(rendererReconcileStart, rendererReconcileStart + 4200)
   assertIncludes(
     rendererReconcileBody,
-    "if (!cancelled) setQueuePumpTick((tick) => tick + 1)",
+    "if (canReconcile()) setQueuePumpTick((tick) => tick + 1)",
     "reload reconciliation retries while main still owns a preparing or pending handoff"
   )
   const reconcileCatchStart = rendererReconcileBody.indexOf(".catch((error) => {")
@@ -1788,13 +1828,13 @@ function testInjectedMessagesUseNormalUserTurnEffects(): void {
   const listenerBody = threadContext.slice(listenerStart, listenerStart + 2200)
   assertIncludes(
     listenerBody,
-    "threadActions.appendMessage({",
-    "injected user messages use appendMessage rather than mutating messages directly"
+    "pendingHookLogBucketOpensRef",
+    "injected user messages retain hook-log effects without racing the stream"
   )
   assertNotIncludes(
     listenerBody,
-    "messages: [...state.messages, ...injectedUserMessages]",
-    "injection listener does not bypass user-turn side effects with a direct append"
+    "threadActions.appendMessage({",
+    "queue acknowledgement cannot append user turns ahead of ordered stream events"
   )
 }
 
@@ -1805,8 +1845,8 @@ function testEnqueueExcludesGoalInputs(): void {
   // completely untouched by the queue.
   assertMatches(
     chat,
-    /willEnqueueWhileBusy\s*=\s*\n?\s*!isGoalSlashInput\s*&&\s*\(isLoading/,
-    "enqueue-while-busy excludes /goal inputs"
+    /willEnqueueWhileBusy\s*=\s*!managedTurn\s*&&\s*!isGoalSlashInput\s*&&\s*\(isLoading/,
+    "the workbench enqueue-while-busy excludes managed Bot turns and /goal inputs"
   )
 }
 
@@ -1844,8 +1884,13 @@ function testDrainGatedOnGoalNotActive(): void {
 function testEnqueueBranchParksDraft(): void {
   assertMatches(
     chat,
-    /if \(willEnqueueWhileBusy\) \{[\s\S]{0,160}addQueuedMessage\(composedDraft\)/,
+    /if \(willEnqueueWhileBusy \|\| queueRestoredDraft\) \{[\s\S]{0,1000}addQueuedMessage\(composedDraft\)/,
     "busy branch parks the composed draft"
+  )
+  assertMatches(
+    chat,
+    /if \(queueRestoredDraft\) \{[\s\S]{0,500}if \(storageError\)[\s\S]{0,500}clearClaimedDraft\(\)/,
+    "a recovered Bot draft stays in the composer until the ordinary queue is durable"
   )
 }
 
@@ -1898,8 +1943,8 @@ function testCancelSuppressesAutoDrain(): void {
   assertOccurrences(
     chat,
     "setQueueAutoDrainSuppressed(false)",
-    4,
-    "suppression clears for live enqueue/send and both guide fallback paths"
+    5,
+    "suppression clears for live enqueue/send, both guide fallbacks and explicit parked-draft resume"
   )
 }
 
@@ -1930,7 +1975,7 @@ function testPumpGatedOnHistoryLoadingReadOnlyContextReminder(): void {
   assertIncludes(
     chat,
     "if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return",
-    "auto-drain gated on historyLoading/readOnly/contextReminderPending/bizRetryPending"
+    "auto-drain waits for authoritative history, write access, context and human-decision readiness"
   )
 }
 
@@ -2131,7 +2176,7 @@ function testBusyDraftPreparationIsAtomic(): void {
 function testSteerAcknowledgementIsDurableAndReconciled(): void {
   assertSourceOrder(
     runtime,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(\n    threadId,\n    context.runToken",
     "const persistedCount = upsertThreadMessages(",
     "deferred assistant/tool transcript is flushed before the steered user turn"
   )
@@ -2276,7 +2321,7 @@ function testSteerAcknowledgementIsDurableAndReconciled(): void {
   )
   assertSourceOrder(
     durableDraftReconcileBody,
-    "await syncDurableTranscript(missingDurableIds)",
+    "await syncDurableTranscript(missingDurableIds, canReconcile)",
     "deleteQueuedMessage(queued.id)",
     "a missing durable bubble is merged by DB ordinal before its handed-off draft is removed"
   )
@@ -2313,7 +2358,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   assertSourceOrder(
     notifierBody,
     "const completedAssistantMessage = context?.completedAssistantMessage",
-    "...messages.map((message) => ({",
+    "...messages.filter((message) => !message.peerFeedback).map((message) => ({",
     "the final assistant reply is persisted before the steered user turn"
   )
   assertIncludes(
@@ -2323,7 +2368,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   )
   assertSourceOrder(
     notifierBody,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(\n    threadId,\n    context.runToken",
     "resolveCurrentRunCompletedAssistantIdentity(",
     "provider occurrence resolution uses the durable baseline after pending chunks flush"
   )
@@ -2403,7 +2448,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
     "renderer-only aliases are retained for cumulative SDK replays"
   )
   assertSourceOrder(
-    threadContext,
+    threadContext.slice(threadContext.indexOf("if (rendererOnlyAlias) {")),
     "aliases.set(resolvedFromId",
     "commitLocalAlias()",
     "renderer-only aliases are applied before the following stable event"
@@ -2435,7 +2480,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
     "the renderer alias carries the exact provider occurrence"
   )
   const streamPersistStart = agentIpc.indexOf("function persistStreamTranscriptChunk(")
-  const streamPersistBody = agentIpc.slice(streamPersistStart, streamPersistStart + 1200)
+  const streamPersistBody = agentIpc.slice(streamPersistStart, agentIpc.indexOf("\n}\n", streamPersistStart))
   assertSourceOrder(
     streamPersistBody,
     "routeCurrentRunCompletedAssistantMessage(threadId, message, runToken)",
@@ -2812,8 +2857,8 @@ function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   const pumpBody = chat.slice(pumpStart, pumpStart + 3000)
   assertIncludes(
     pumpBody,
-    "if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return",
-    "auto-drain waits until every handed-off draft is reconciled"
+    "const next = nextOrdinaryQueuedMessage(queuedMessages)",
+    "auto-drain uses the eligible FIFO and fences unresolved handoffs"
   )
 }
 

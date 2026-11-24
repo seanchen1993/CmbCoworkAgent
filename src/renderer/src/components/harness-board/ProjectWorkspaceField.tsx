@@ -1,12 +1,61 @@
-import { useId } from "react"
-import { FolderOpen, Info } from "lucide-react"
+import { useId, useState } from "react"
+import { ChevronRight, FolderOpen, Info } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
+export function ProjectWorkspaceAdvancedSettings({
+  onUseDefault,
+  onPreviewDefaultPath,
+  ...workspace
+}: Omit<React.ComponentProps<typeof ProjectWorkspaceField>, "readOnly" | "defaultPath"> & {
+  onUseDefault: () => void
+  onPreviewDefaultPath: () => Promise<string>
+}): React.JSX.Element {
+  const [defaultPath, setDefaultPath] = useState<string | null>(null)
+
+  return (
+    <details
+      className="group mt-3"
+      onToggle={(event) => {
+        if (event.currentTarget.open && defaultPath === null) {
+          void onPreviewDefaultPath().then(
+            (path) => setDefaultPath(path),
+            () => setDefaultPath("")
+          )
+        }
+      }}
+    >
+      <summary
+        className={cn(
+          "flex w-fit cursor-pointer list-none items-center gap-1 rounded-sm text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden",
+          workspace.error && "text-status-critical"
+        )}
+      >
+        <ChevronRight aria-hidden="true" className="size-3.5 group-open:rotate-90" />
+        高级设置
+      </summary>
+      <ProjectWorkspaceField {...workspace} defaultPath={defaultPath} />
+      {(workspace.workspacePath || workspace.error) && (
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="mt-1 h-auto px-0 py-1 text-xs"
+          onClick={onUseDefault}
+          disabled={workspace.disabled}
+        >
+          恢复默认路径
+        </Button>
+      )}
+    </details>
+  )
+}
+
 export function ProjectWorkspaceField({
   workspacePath,
   projectDir,
+  defaultPath = null,
   readOnly = false,
   disabled = false,
   error,
@@ -14,6 +63,7 @@ export function ProjectWorkspaceField({
 }: {
   workspacePath: string
   projectDir: string
+  defaultPath?: string | null
   readOnly?: boolean
   disabled?: boolean
   error: string | null
@@ -25,11 +75,17 @@ export function ProjectWorkspaceField({
     workspacePath && projectDir
       ? `${workspacePath.replace(/[\\/]+$/, "")}${separator}${projectDir}`
       : ""
+  const displayedPath = projectPath || defaultPath
+  const fallbackText = readOnly
+    ? "选择空文件夹作为插件工作区"
+    : defaultPath === null
+      ? "正在读取默认路径…"
+      : "无法读取默认路径"
 
   return (
     <div className="mt-3 grid min-w-0 gap-1.5 text-xs font-medium text-muted-foreground">
       <div className="flex items-center gap-1">
-        <span id={`${id}-label`}>插件工作区 *</span>
+        <span id={`${id}-label`}>{readOnly ? "插件工作区 *" : "插件工作区"}</span>
         <TooltipProvider delayDuration={150}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -51,14 +107,14 @@ export function ProjectWorkspaceField({
         <div
           className={cn(
             "min-w-0 flex-1 rounded-md border border-input px-3 py-2 text-sm font-normal",
-            projectPath ? "break-all text-foreground" : "text-muted-foreground",
+            displayedPath ? "break-all text-foreground" : "text-muted-foreground",
             readOnly && "bg-muted",
             error && "border-status-critical"
           )}
           aria-labelledby={`${id}-label`}
-          title={projectPath || undefined}
+          title={displayedPath || undefined}
         >
-          {projectPath || "选择空文件夹作为插件工作区"}
+          {displayedPath || fallbackText}
         </div>
         {!readOnly && (
           <Button
@@ -73,7 +129,7 @@ export function ProjectWorkspaceField({
             className="h-auto shrink-0 gap-1.5"
           >
             <FolderOpen className="size-3.5" />
-            <span id={`${id}-pick`}>{projectPath ? "更换文件夹" : "选择文件夹"}</span>
+            <span id={`${id}-pick`}>{projectPath ? "更换文件夹" : "自行指定工作区路径"}</span>
           </Button>
         )}
       </div>

@@ -8,6 +8,7 @@ import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 
 const root = resolve(__dirname, "..")
+const appOut = resolve(process.env.BOT_TEST_APP_OUT ?? join(root, "out"))
 const requireLocal = createRequire(join(root, "package.json"))
 const binary = requireLocal("electron") as string
 const isolated = mkdtempSync(join(tmpdir(), "cmb-without-mods-"))
@@ -97,7 +98,7 @@ async function main(): Promise<void> {
     app = await _electron.launch({
       executablePath:
         process.platform === "win32" ? join(root, "tests/support/electron-launcher.cmd") : binary,
-      args: [join(root, "out/main/index.js"), `--user-data-dir=${join(isolated, "electron")}`],
+      args: [join(appOut, "main/index.js"), `--user-data-dir=${join(isolated, "electron")}`],
       cwd: root,
       env,
       timeout: 60_000

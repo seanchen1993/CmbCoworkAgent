@@ -10,8 +10,17 @@
  * touches the real ~/.cmbcoworkagent/adoption-index.sqlite.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs"
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "fs"
 import { join } from "path"
+import initSqlJs from "sql.js"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 const h = vi.hoisted(() => {
@@ -25,6 +34,10 @@ const h = vi.hoisted(() => {
 })
 
 vi.mock("../storage", () => ({ getOpenworkDir: () => h.tempDir }))
+vi.mock("fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("fs")>()
+  return { ...fs, renameSync: vi.fn(fs.renameSync) }
+})
 
 import {
   closeAdoptionIndex,
@@ -132,6 +145,31 @@ describe("adoption-index harness_node_name column", () => {
     expect(fetched?.harness_node_status).toBe("进行中")
     // Existing sibling column must remain intact alongside the new one.
     expect(fetched?.harness_feature_slug).toBe("feature-x")
+  })
+
+  it("persists deploy-unit snapshots for commit measurement and leaves legacy rows unknown", () => {
+    const row = makeRow({
+      event_id: "g_deploy_unit",
+      file_path: "/repo/src/unit.ts",
+      harness_deploy_unit_id: "unit-a",
+      harness_deploy_unit_ids: '["unit-a","unit-b"]'
+    })
+    expect(insertGenEvent(row)).toBe(true)
+    for (const result of [
+      getGenRowByEventId(row.event_id),
+      ...findPendingGensForFile(row.file_path, 0)
+    ]) {
+      expect(result).toMatchObject({
+        harness_deploy_unit_id: "unit-a",
+        harness_deploy_unit_ids: '["unit-a","unit-b"]'
+      })
+    }
+    expect(findPendingGensForFile(row.file_path, 0)).toHaveLength(1)
+    expect(insertGenEvent(makeRow({ event_id: "g_legacy_unit" }))).toBe(true)
+    expect(getGenRowByEventId("g_legacy_unit")).toMatchObject({
+      harness_deploy_unit_id: null,
+      harness_deploy_unit_ids: null
+    })
   })
 
   it("round-trips new_ratio / change_kind via getGenRowByEventId", () => {
@@ -434,6 +472,12 @@ describe.sequential("adoption-index atomic snapshot persistence", () => {
   const primaryPath = join(h.tempDir, "adoption-index.sqlite")
   const primaryTempPath = `${primaryPath}.tmp`
 
+  function corruptBackups(): string[] {
+    return readdirSync(h.tempDir).filter((name) =>
+      name.startsWith("adoption-index.sqlite.corrupt.")
+    )
+  }
+
   beforeEach(() => {
     setAdoptionIndexSnapshotFsyncForTest(null)
     setAdoptionIndexSnapshotReplaceForTest(null)
@@ -660,19 +704,101 @@ describe.sequential("adoption-index atomic snapshot persistence", () => {
     expect(getGenRowByEventId("g_missing_repair")).not.toBeNull()
   })
 
-  it("fails closed when the existing primary is corrupt", async () => {
+  it.each([
+    ["invalid header", Buffer.from("corrupted-primary")],
+    ["empty file", Buffer.alloc(0)],
+    ["truncated database", Buffer.from("SQLite format 3\0")]
+  ] as const)("archives and rebuilds a primary with a %s", async (_description, damaged) => {
+    writeFileSync(primaryPath, damaged)
+    expect(await initializeAdoptionIndex()).toBe(true)
+    const backups = corruptBackups()
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(h.tempDir, backups[0]))).toEqual(damaged)
+    expect(readFileSync(primaryPath).subarray(0, 16).toString()).toBe("SQLite format 3\0")
+    expect(insertGenEvent(makeRow({ event_id: "g_after_recovery" }))).toBe(true)
+    expect(closeAdoptionIndex()).toBe(true)
+
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_after_recovery")).not.toBeNull()
+    expect(corruptBackups()).toEqual(backups)
+  })
+
+  it.each(["damaged table page", "missing final byte"])(
+    "detects a %s behind a valid legacy header",
+    async (damage) => {
+      const SQL = await initSqlJs()
+      const legacy = new SQL.Database()
+      legacy.run("CREATE TABLE legacy_rows (value TEXT); INSERT INTO legacy_rows VALUES ('abc')")
+      const page = Number(
+        legacy.exec("SELECT rootpage FROM sqlite_master WHERE name='legacy_rows'")[0].values[0][0]
+      )
+      const pageSize = Number(legacy.exec("PRAGMA page_size")[0].values[0][0])
+      const original = Buffer.from(legacy.export())
+      legacy.close()
+      const damaged = damage === "missing final byte" ? original.subarray(0, -1) : original
+      if (damage === "damaged table page") damaged[(page - 1) * pageSize] = 0
+      writeFileSync(primaryPath, damaged)
+
+      expect(await initializeAdoptionIndex()).toBe(true)
+      const backups = corruptBackups()
+      expect(backups).toHaveLength(1)
+      expect(readFileSync(join(h.tempDir, backups[0]))).toEqual(damaged)
+    }
+  )
+
+  it("preserves pending generations when upgrading a healthy unversioned index", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(insertGenEvent(makeRow({ event_id: "g_before_upgrade" }))).toBe(true)
+    expect(closeAdoptionIndex()).toBe(true)
+    const SQL = await initSqlJs()
+    const legacy = new SQL.Database(readFileSync(primaryPath))
+    legacy.run("PRAGMA user_version = 0")
+    writeFileSync(primaryPath, legacy.export())
+    legacy.close()
+
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_before_upgrade")?.measured).toBe(0)
+    expect(corruptBackups()).toHaveLength(0)
+  })
+
+  it("keeps the original when a valid database fails schema migration", async () => {
+    const SQL = await initSqlJs()
+    const incompatible = new SQL.Database()
+    incompatible.run("CREATE TABLE gen_events (event_id TEXT PRIMARY KEY)")
+    const original = Buffer.from(incompatible.export())
+    incompatible.close()
+    writeFileSync(primaryPath, original)
+
+    expect(await initializeAdoptionIndex()).toBe(false)
+    expect(readFileSync(primaryPath)).toEqual(original)
+    expect(corruptBackups()).toHaveLength(0)
+  })
+
+  it("leaves the corrupt primary in place if its backup cannot be created", async () => {
+    writeFileSync(primaryPath, "original bytes")
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw new Error("simulated backup permission failure")
+    })
+    expect(await initializeAdoptionIndex()).toBe(false)
+    expect(readFileSync(primaryPath, "utf8")).toBe("original bytes")
+    expect(corruptBackups()).toHaveLength(0)
+    expect(await initializeAdoptionIndex()).toBe(true)
+  })
+
+  it("preserves the backup if persisting the rebuilt primary fails", async () => {
+    writeFileSync(primaryPath, "broken")
+    setAdoptionIndexSnapshotReplaceForTest(() => {
+      throw new Error("simulated replace failure")
+    })
+    expect(await initializeAdoptionIndex()).toBe(false)
+    const backups = corruptBackups()
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(h.tempDir, backups[0]), "utf8")).toBe("broken")
+
+    setAdoptionIndexSnapshotReplaceForTest(null)
     expect(await initializeAdoptionIndex()).toBe(true)
     expect(flushAdoptionIndex()).toBe(true)
-    closeAdoptionIndex()
-    writeFileSync(primaryPath, "corrupted-primary", "utf8")
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
-    try {
-      expect(await initializeAdoptionIndex()).toBe(false)
-    } finally {
-      warn.mockRestore()
-    }
-    expect(insertGenEvent(makeRow({ event_id: "g_must_not_overwrite" }))).toBe(false)
-    expect(readFileSync(primaryPath, "utf8")).toBe("corrupted-primary")
+    expect(corruptBackups()).toEqual(backups)
   })
 
   it("keeps the old primary and dirty state retryable when atomic replace fails", async () => {

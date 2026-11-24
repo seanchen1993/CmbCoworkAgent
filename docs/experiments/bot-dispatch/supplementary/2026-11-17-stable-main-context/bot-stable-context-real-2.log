@@ -1,0 +1,4 @@
+Persistent experiment record: <repo>/docs/experiments/bot-dispatch/runs/20261117T103530Z-c618a26c/record.json
+{"case":"slash-skill-natural","actual":"independent","preferred":"independent","seconds":33.2,"mainSeconds":12.9,"dispatchSeconds":12.7,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":true,"tools":["read_file","ls","ls","read_file","read_file","read_file","read_file","bot_work_create"]}
+{"case":"short-shell","actual":"inline","preferred":"inline","seconds":3.6,"mainSeconds":3.5,"mainModelRequests":2,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":["execute"]}
+Routing evaluation report: <temp>/bot-integration-build-OSjiAe/artifacts/routing-1794911731000.json

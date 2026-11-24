@@ -18,6 +18,11 @@ async function main(): Promise<void> {
     resolve(__dirname, "../src/main/db/index.ts"),
     "utf8"
   )
+  const compactionSource = await readFile(
+    resolve(__dirname, "../src/main/agent/context-summarization-middleware.ts"),
+    "utf8"
+  )
+  const invokeSource = await readFile(resolve(__dirname, "../src/main/ipc/agent.ts"), "utf8")
 
   const messageCopy = section(
     threadsSource,
@@ -56,7 +61,7 @@ async function main(): Promise<void> {
   const durableTail = section(
     threadsSource,
     "function findDurableForkTailMessages",
-    "function appendDurableTailToCheckpoint"
+    "function normalizeForkBoundaryMetadataForCheckpoint"
   )
   assert.match(durableTail, /visibleMessages\.slice\(-32\)/)
   assert.match(durableTail, /getThreadMessagesByIds\(/)
@@ -65,6 +70,20 @@ async function main(): Promise<void> {
     /getThreadMessagesAfterAnyId\([\s\S]*MAX_FORK_DURABLE_TAIL_MESSAGES \+ 1/
   )
   assert.doesNotMatch(durableTail, /\bgetThreadMessages\s*\(/)
+  const historicalTail = section(
+    await readFile(resolve(__dirname, "../src/main/ipc/thread-runtime-tail.ts"), "utf8"),
+    "function materializeSavedForkTails",
+    "function getForkableReplyId"
+  )
+  assert.match(historicalTail, /getThreadMessagesForForkReplay\(threadId, references,/)
+  assert.doesNotMatch(historicalTail, /getThreadMessagesAfterAnyId\(/)
+  const replayLookup = section(
+    databaseSource,
+    "function getThreadMessagesForForkReplay",
+    "interface ThreadMessageIdentityContextSelector"
+  )
+  assert.match(replayLookup, /alias\.thread_id = \? AND alias\.source_id = requested\.id/)
+  assert.match(replayLookup, /getThreadMessageRows\(database, threadId, directKeys, "fork_replay_key"\)/)
 
   const gcScan = section(
     threadsSource,
@@ -82,6 +101,15 @@ async function main(): Promise<void> {
   )
   assert.match(boundedAfter, /LIMIT \?/)
   assert.match(boundedAfter, /boundedLimit/)
+
+  const compactTail = section(
+    compactionSource,
+    "function compactOversizedNonToolContent",
+    "function truncateArgs"
+  )
+  assert.match(compactTail, /candidateContent\.has\(index\)/)
+  assert.doesNotMatch(compactTail, /candidateIndexes\.includes\(/)
+  assert.match(invokeSource, /\{ durableTail: durableRuntimeTail \}\s*\)\s*throwIfInvokeAborted\(\)/)
 
   console.log("thread-fork-cold-path-performance.spec.ts passed")
 }

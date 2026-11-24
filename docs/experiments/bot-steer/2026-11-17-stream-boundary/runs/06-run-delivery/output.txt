@@ -1,0 +1,9 @@
+PASS bot-main { samples: 66, maxBefore: 1, maxAfter: 1, duplicates: [] }
+Steer UI evidence: <temp>/bot-integration-build-ANxBHw/artifacts/steer-stream-KDFMbM
+locator.evaluate: ReferenceError: __name is not defined
+    at eval (eval at evaluate (:370:30), <anonymous>:1:93)
+    at UtilityScript.evaluate (<anonymous>:372:16)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+    at main (<repository>/tests/bots-steer-stream-app.spec.ts:107:18) {
+  log: []
+}

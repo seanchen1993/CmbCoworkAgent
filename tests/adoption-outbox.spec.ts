@@ -381,6 +381,40 @@ async function testCodeGenRequiresAnIndexedBaseline(): Promise<void> {
   console.log("PASS code_gen is suppressed when its measurement baseline cannot be indexed")
 }
 
+async function testCodeGenResumesAfterIndexRecovery(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    await writeFile(join(testDataRoot, "adoption-index.sqlite"), "invalid legacy SQLite header")
+    const reporter = new AdoptionReporter()
+    setEventReporter(reporter)
+    assert(await initializeAdoptionTracker(), "tracker should recover during startup")
+
+    await withTempRepo("code-gen-upgrade", async (repo) => {
+      const filePath = join(repo, "recovered.ts")
+      const generatedContent = "export const recovered = true\n"
+      await writeFile(filePath, generatedContent)
+      recordGen({
+        threadId: "upgrade",
+        workspacePath: repo,
+        filePath,
+        tool: "write_file",
+        generatedContent
+      })
+
+      const genEventId = await waitForPendingGen(filePath)
+      const event = await waitForGenerationCall(reporter)
+      assert(
+        event.properties?.eventId === genEventId,
+        "reported code_gen should match the new baseline"
+      )
+      await waitUntil(
+        () => getOutboxEvent(event.eventId)?.status === "delivered",
+        "recovered tracker should deliver code_gen in the same session"
+      )
+    })
+  })
+  console.log("PASS startup recovers a corrupt index and automatically delivers a new code_gen")
+}
+
 async function testCodeGenUsesDurableBatchedOutbox(): Promise<void> {
   await withIsolatedAdoptionStore(async () => {
     const reporter = new AdoptionReporter()
@@ -496,6 +530,10 @@ async function testCodeGenUsesMutationTimeHarnessStage(): Promise<void> {
       setAdoptionContext(threadId, {
         harnessProjectId: "project-1",
         harnessFeatureSlug: "feature-1",
+        harnessDeployUnitSnapshot: Promise.resolve({
+          mappings: [{ deployUnitId: "unit-original", localRepoPath: repo }],
+          ids: ["unit-original"]
+        }),
         harnessNodeName: "Dev-旧节点",
         harnessNodeStatus: "进行中"
       })
@@ -529,6 +567,25 @@ async function testCodeGenUsesMutationTimeHarnessStage(): Promise<void> {
         row?.harness_node_name === "Test-新节点" && row.harness_node_status === "已完成",
         "the persisted baseline should carry the same stage into code_adopt"
       )
+      assert(
+        event.properties?.harnessDeployUnitId === "unit-original" &&
+          row?.harness_deploy_unit_id === "unit-original",
+        "generation should match the file to its configured unit and persist that attribution"
+      )
+      assert(!JSON.stringify(event).includes(repo), "cloud attribution must omit local repository paths")
+      setAdoptionContext(threadId, {
+        harnessDeployUnitSnapshot: Promise.resolve({ mappings: [], ids: ["unit-changed"] })
+      })
+      await git(repo, ["add", "."])
+      const snapshots = await captureStagedSnapshotsForCommit(repo)
+      await git(repo, ["commit", "-q", "-m", "generated"])
+      const sha = await git(repo, ["rev-parse", "HEAD"])
+      assert(await measureForCommit(snapshots, sha, Date.now(), repo), "commit measurement should persist")
+      await flushAdoptionEventOutbox()
+      assert(reporter.adoptionCalls.some(adopt =>
+        adopt.properties?.harnessDeployUnitId === "unit-original" &&
+        JSON.stringify(adopt.properties?.harnessDeployUnitIds) === '["unit-original"]'
+      ), "commit should keep generation-time attribution even after feature binding changes")
     })
   })
   console.log("PASS code_gen uses the mutation-time Harness stage snapshot")
@@ -1090,6 +1147,7 @@ async function testOutboxAttemptAndRetentionLimits(): Promise<void> {
 async function main(): Promise<void> {
   await testTestGenerationUsesSeparateDurableOutbox()
   await testCodeGenRequiresAnIndexedBaseline()
+  await testCodeGenResumesAfterIndexRecovery()
   await testCodeGenUsesDurableBatchedOutbox()
   await testCodeGenUsesMutationTimeHarnessStage()
   await testOversizeEditReportsNetGeneratedLines()

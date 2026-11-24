@@ -2,9 +2,17 @@ import type { Message } from "@/types"
 import {
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
+  getMessageProviderTupleFromMetadata,
   normalizeAppendedMessageIds,
   normalizeCompleteMessageIds
 } from "../../../shared/message-role-collision"
+import { coalesceSnapshotMessageAliases } from "./snapshot-message-aliases"
+import {
+  compatibleWorkerProviderIdentity,
+  parseWorkerTurnScopedId,
+  readWorkerToolResultError,
+  workerToolCallSnapshot
+} from "./worker-message-content"
 
 export const MAX_WORKER_HISTORY_MESSAGES = 500
 
@@ -71,11 +79,30 @@ export function mergeWorkerCheckpointSparseContent(
   return liveMessage.content
 }
 
+export function canMatchWorkerCheckpointIdentity(left: Message, right: Message): boolean {
+  if (!compatibleWorkerProviderIdentity(left, right)) return false
+  if (Boolean(left.worker_provider_identity) === Boolean(right.worker_provider_identity))
+    return true
+  if (left.id === right.id) return true
+
+  // A declared source can equal an unrelated wire ID. Use recorded aliases within the same turn.
+  const leftRawId = parseWorkerTurnScopedId(left.id)?.rawId ?? left.id
+  const rightRawId = parseWorkerTurnScopedId(right.id)?.rawId ?? right.id
+  const leftScope = left.id.slice(0, left.id.length - leftRawId.length)
+  const rightScope = right.id.slice(0, right.id.length - rightRawId.length)
+  return (
+    leftScope === rightScope &&
+    (left.worker_provider_wire_ids?.includes(rightRawId) === true ||
+      right.worker_provider_wire_ids?.includes(leftRawId) === true)
+  )
+}
+
 export function checkpointHistoryMessageMatchesSparseLive(
   historyMessage: Message,
   liveMessage: Message
 ): boolean {
   if (historyMessage.role !== liveMessage.role) return false
+  if (!canMatchWorkerCheckpointIdentity(historyMessage, liveMessage)) return false
   if (getMessageProviderSourceId(historyMessage) !== getMessageProviderSourceId(liveMessage)) {
     return false
   }
@@ -258,28 +285,45 @@ function messageFromCheckpoint(
   const toolCallId = message.tool_call_id ?? message.kwargs?.tool_call_id
   const toolName = message.name ?? message.kwargs?.name
   const toolStatus = message.status ?? message.kwargs?.status
-  const isToolError =
-    message.is_error === true ||
-    message.kwargs?.is_error === true ||
-    additionalKwargs?.is_error === true ||
-    toolStatus === "error"
-  const rawMessageId =
-    message.kwargs?.id ??
-    (typeof message.id === "string" ? message.id : createWorkerSnapshotFallbackMessageId(index))
+  const isToolError = readWorkerToolResultError(
+    toolStatus,
+    message.is_error,
+    message.kwargs?.is_error,
+    typeof additionalKwargs?.is_error === "boolean" ? additionalKwargs.is_error : undefined
+  )
+  const wireId = message.kwargs?.id ?? (typeof message.id === "string" ? message.id : undefined)
+  const rawMessageId = wireId ?? createWorkerSnapshotFallbackMessageId(index)
   const messageId =
     workerThreadId && workerTurn
       ? createWorkerTurnScopedMessageId(workerThreadId, rawMessageId, workerTurn)
       : rawMessageId
+  const providerTuple = getMessageProviderTupleFromMetadata(additionalKwargs)
 
   return {
     id: messageId,
     role,
     content,
-    tool_calls: toolCalls,
+    ...(providerTuple && {
+      ...providerTuple,
+      worker_provider_identity: true,
+      ...(wireId &&
+        !wireId.startsWith("worker-snapshot-") && {
+          worker_provider_wire_ids: [parseWorkerTurnScopedId(wireId)?.rawId ?? wireId]
+        }),
+      provider_source_id:
+        workerThreadId && workerTurn
+          ? createWorkerTurnScopedMessageId(
+              workerThreadId,
+              providerTuple.provider_source_id,
+              workerTurn
+            )
+          : providerTuple.provider_source_id
+    }),
+    ...(role === "assistant" && Array.isArray(toolCalls) && workerToolCallSnapshot(toolCalls)),
     ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
     ...(role === "tool" && toolName && { name: toolName }),
     ...(role === "tool" && toolStatus && { status: toolStatus }),
-    ...(role === "tool" && isToolError && { is_error: true }),
+    ...(role === "tool" && isToolError !== undefined && { is_error: isToolError }),
     created_at: new Date()
   }
 }
@@ -317,11 +361,12 @@ export function buildWorkerCheckpointHistory(
       return message ? { absoluteIndex, message } : null
     })
     .filter((entry): entry is { absoluteIndex: number; message: Message } => entry !== null)
-  const normalizedMessages = normalizeCompleteMessageIds(
-    indexedMessages.map((entry) => entry.message)
+  const prefixLength = indexedMessages.findIndex((entry) => entry.absoluteIndex >= startIndex)
+  if (prefixLength === -1) return { messages: [], truncatedCount: startIndex }
+  const prefix = indexedMessages.slice(0, prefixLength).map((entry) => entry.message)
+  const tail = coalesceSnapshotMessageAliases(
+    indexedMessages.slice(prefixLength).map((entry) => entry.message)
   )
-  const messages = normalizedMessages.filter(
-    (_, index) => indexedMessages[index].absoluteIndex >= startIndex
-  )
+  const messages = normalizeCompleteMessageIds([...prefix, ...tail]).slice(prefixLength)
   return { messages, truncatedCount: startIndex }
 }

@@ -45,7 +45,7 @@ ${exampleBlock}
 - After calling structured_output successfully, end your turn. No acknowledgment needed.`
 }
 
-export const WORKFLOW_TOOL_DESCRIPTION = `Execute a workflow script that orchestrates multiple subagents deterministically. Workflows run in the background — this tool returns immediately with {status:"launched", runId}, and a <task-notification> arrives when the workflow completes. Live progress shows in the workflow panel on the right.
+const WORKFLOW_EXPLICIT_USE = `Execute a workflow script that orchestrates multiple subagents deterministically. Workflows run in the background — this tool returns immediately with {status:"launched", runId}, and a <task-notification> arrives when the workflow completes. Live progress shows in the workflow panel on the right.
 
 A workflow structures work across many agents — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before committing), or to take on scale one context can't hold (migrations, audits, broad sweeps). The script is where you encode that structure: what fans out, what verifies, what synthesizes.
 
@@ -53,9 +53,9 @@ This tool is available because the user selected Dynamic Workflows as this threa
 
 For a small or conversational request — even one that would clearly benefit from some parallelism — do NOT force a workflow. Answer directly, or use the \`task\` tool for a single focused subagent (its result comes back inline this turn).
 
-When you do call it, the right move is often **hybrid**: scout inline first (list the files, find the channels, scope the diff) to discover the work-list, then call Workflow to pipeline over it. You don't need to know the shape before the *task* — only before the *orchestration step*.
+When you do call it, the right move is often **hybrid**: scout inline first (list the files, find the channels, scope the diff) to discover the work-list, then call Workflow to pipeline over it. You don't need to know the shape before the *task* — only before the *orchestration step*.`
 
-Common single-phase workflows you can chain across turns:
+const WORKFLOW_SCRIPT_CONTRACT = `Common single-phase workflows you can chain across turns:
 - **Understand** — parallel readers over relevant subsystems → structured map
 - **Design** — judge panel of N independent approaches → scored synthesis
 - **Review** — dimensions → find → adversarially verify (example below)
@@ -211,12 +211,43 @@ Use this tool for multi-step orchestration where control flow should be determin
 
 The tool result includes a runId. To resume after a pause, kill, or script edit, relaunch the workflow tool with {scriptPath, resumeFromRunId} — completed agent() results replay from the run's <runId>.journal, matched by content (prompt/opts) not position, so the unchanged prefix returns instantly and the first edited/new call onward runs live. Same script + same args → 100% cache hit; a changed script or args discards the journal and re-runs from scratch. Isolated (worktree) agents are never journaled — their deliverable is a checkout the journal can't reconstruct, so a resume re-runs them in a fresh worktree. Date.now()/Date()/Math.random()/argless new Date() are unavailable in scripts (they would break this) — stamp results after the workflow returns, or pass timestamps via args.`
 
+export const WORKFLOW_TOOL_DESCRIPTION = `${WORKFLOW_EXPLICIT_USE}\n\n${WORKFLOW_SCRIPT_CONTRACT}`
+
+/** Host-enabled background work shares the same engine and approval protocol. */
+export const AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION = `Execute a resumable background workflow for authorized work. The tool returns immediately with {status:"launched", runId}; the actual outcome arrives in a later <task-notification>. Live progress and cancellation use the existing workflow panel.
+
+Use a workflow for genuine fan-out or an independent multi-step assignment. A single focused agent() is sufficient for an independent assignment; use execute with run_in_background for an ordinary long-running command instead. Do not manufacture extra agents or verification waves for a simple task. For a small or conversational request, answer directly. An inline task tool waits for its result and does not release the conversation.
+
+Keep the user's original task, workspace, permissions and acceptance criteria. Launch approval and command approvals still apply. Claim background execution only after a successful launch; do not detach a shell process yourself or repeatedly poll its status. Do not ask the user to change execution modes.
+
+For one background task, use this complete script shape with the actual assignment in tool input args.task:
+  export const meta = { name: "Background task", description: "Complete and verify the authorized assignment" };
+  return await agent(args.task, { label: "Complete task" });
+The agent receives a self-contained assignment including paths, commands and verification requirements. The workflow script has no exec(), execute(), shell or process API; commands run through the agent's existing tools and approvals. Fix a script error using this protocol rather than moving a blocking task into the inline task tool.
+
+${WORKFLOW_SCRIPT_CONTRACT}`
+
+const WORKFLOW_HANDOFF_CONTRACT = `After launching, briefly tell the user what was launched and END your turn; the outcome arrives as a <task-notification> later — don't poll or relaunch. When it arrives, summarize it for the user in their language; on a transient failure resume with resumeFromRunId alone, on a bug re-send the edited script.`
+
+const WORKFLOW_ORCHESTRATION_CONTRACT = `\`task\` is ONE inline subagent; \`workflow\` is FAN-OUT — many agents across phases with a resumable background run. Don't hand-roll a fan-out with repeated \`task\` calls (it skips the launch approval, the workflow panel, and journal/resume). ${WORKFLOW_HANDOFF_CONTRACT}`
+
 export const WORKFLOW_MODE_SYSTEM_PROMPT = `
 
 ## Dynamic Workflows mode
 
 The user selected Dynamic Workflows as this thread's execution mode, so the \`workflow\` tool is available — see its description for how to author scripts (phases, pipeline/parallel, schema, verify waves, resume). Reserve it for genuine fan-out; for small or conversational requests answer directly or use the \`task\` tool.
 
-\`task\` is ONE inline subagent; \`workflow\` is FAN-OUT — many agents across phases with a resumable background run. Don't hand-roll a fan-out with repeated \`task\` calls (it skips the launch approval, the workflow panel, and journal/resume). After launching, briefly tell the user what was launched and END your turn; the outcome arrives as a <task-notification> later — don't poll or relaunch. When it arrives, summarize it for the user in their language; on a transient failure resume with resumeFromRunId alone, on a bug re-send the edited script.
+${WORKFLOW_ORCHESTRATION_CONTRACT}
 
 In this mode several global directives don't apply — "answer in fewer than 4 lines", "answer first before acting", and "use write_todos for multi-step tasks" are for quick single-agent edits, not orchestration: here a multi-step task IS the workflow (don't track it with write_todos), and you write the full script directly rather than outlining a plan in prose first. The Task Completion and Repetition contract still applies to the workflow design and every subagent: cover the assigned work, verify it appropriately, and avoid no-value repeated text or identical no-progress tool loops. The required END immediately after a successful background launch is an asynchronous handoff, not a claim that the user's task is already complete; continue when the task notification arrives. For a substantive task, default to thoroughness: decompose into phases, fan out, and add a verification wave (adversarial or multi-perspective) rather than a one-shot "good enough" script — scale the depth to the request (a quick check stays light; "audit / thorough / comprehensive" earns a larger fan-out + multi-vote verify).`
+
+/** Same orchestration contract, without explicit-mode-only output overrides. */
+export const AUTOMATIC_WORKFLOW_SYSTEM_PROMPT = `
+
+## Background orchestration
+
+The \`workflow\` tool is available for genuine fan-out or an independent multi-step subtask. For an ordinary long-running command, use the provided execute background capability; do not create an extra agent just to wait for a process. Do not manufacture extra agents for a simple task; for small or conversational requests answer directly.
+
+\`task\` waits inline; \`workflow\` releases the conversation while the existing manager owns execution, approvals and cancellation. ${WORKFLOW_HANDOFF_CONTRACT}
+
+A successful launch is an asynchronous handoff, not completion of the user's task. Continue when the task notification arrives. Verify the requested deliverables before claiming completion. Choose tools yourself; do not ask the user to switch execution modes.`

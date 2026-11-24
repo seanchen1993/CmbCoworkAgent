@@ -1,0 +1,378 @@
+/** Synthetic transport; render the production workspace and group conversation components. */
+import React from "react"
+import { createRoot } from "react-dom/client"
+import { Toaster } from "sonner"
+import { useAppStore } from "@/lib/store"
+import { ConversationTaskControls } from "../../src/renderer/src/components/bots/ConversationTaskControls"
+import { BotsWorkspace } from "../../src/renderer/src/components/bots/BotsWorkspace"
+import { useBotViewStore } from "../../src/renderer/src/components/bots/view-store"
+
+const bot = {
+  id: "bot",
+  hostId: "local",
+  threadId: "private",
+  name: "招乎T",
+  color: "#ed2040",
+  shape: "drop",
+  instructions: "协助团队梳理工作、整理信息。",
+  archived: false,
+  deleting: false,
+  version: 1,
+  createdAt: 1,
+  updatedAt: 1,
+  modelRef: null
+}
+const activity = (id: string, preview: string) => ({
+  kind: "im",
+  id,
+  version: 2,
+  unread: true,
+  updatedAt: 100,
+  preview
+})
+const groups = [
+  {
+    id: "group-a",
+    botId: bot.id,
+    bindingId: "binding-a",
+    threadId: "im-a",
+    title: "产品协作群",
+    state: "active",
+    connected: true,
+    activity: activity("group-a", "已整理好本周的项目进展。")
+  },
+  {
+    id: "group-b",
+    botId: bot.id,
+    bindingId: "binding-b",
+    threadId: "im-b",
+    title: "体验优化小组",
+    state: "active",
+    connected: false,
+    activity: activity("group-b", "三个界面问题，已整理为改进清单。")
+  }
+]
+const removedBindings = new Set<string>()
+const t = new Date("2026-10-27T14:30:00+08:00").getTime()
+const entry = (id: string, text: string, kind = "bot", extra = {}) => ({
+  id,
+  text,
+  kind,
+  senderId: kind === "bot" ? "Bot" : "opaque-member",
+  state: kind === "bot" ? "accepted" : "completed",
+  createdAt: t + Number(id.replace(/\D/g, "")) * 60000,
+  replyToMessageId: null,
+  ...extra
+})
+const latest = [
+  entry("a1", "整理一下本周的项目进展，列出当前进度和需要大家确认的事项。", "user"),
+  entry(
+    "a2",
+    "已整理好本周的项目进展。\n\n- **IM 接入**：群内绑定和消息收发已打通。\n- **会话体验**：群记录与私人对话分开显示。\n- **待确认**：演示时间，以及每项工作的负责人。"
+  ),
+  entry("a3", "把演示准备单独建个任务，后续在任务里继续细化。", "user"),
+  entry("a4", "已创建「演示准备清单」，整理完成后会同步结果到群里。", "bot", { workId: "work-a" })
+]
+const work = {
+  id: "work-a",
+  botId: bot.id,
+  threadId: "task-a",
+  parentThreadId: "im-a",
+  audienceKey: "im:group-a",
+  title: "演示准备清单",
+  goal: "准备演示",
+  state: "active",
+  version: 1,
+  source: { transport: "im", bindingId: "group-a" },
+  executionState: "completed",
+  activity: { kind: "work", id: "work-a", version: 1, unread: true },
+  createdAt: t,
+  updatedAt: t,
+  conversation: { kind: "local", state: "linked" }
+}
+const f = ((window as any).fixture = {
+  calls: [] as any[],
+  reads: [] as any[],
+  opened: [] as any[],
+  exported: [] as any[],
+  manage: 0,
+  tasks: [] as any[],
+  schedules: [] as import("../../src/shared/bots/contracts").BotSchedule[],
+  backgroundThreads: [] as string[],
+  stoppedBackgroundThreads: [] as string[],
+  cancelled: [] as string[],
+  hold: false,
+  holdWork: false,
+  releaseWork: null as any,
+  release: null as any,
+  fail: false,
+  groups,
+  nativeGroups: [
+    { id: "local-group", hostId: "local", name: "本地方案讨论组", memberIds: [bot.id], version: 1 }
+  ],
+  memoryReads: [] as any[],
+  memoryWrites: [] as any[],
+  bots: [bot],
+  workActivity: [] as Array<{ botId: string; version: number; unread: boolean; updatedAt: number; preview: string }>,
+  personalIm: [] as Array<{ botId: string; connected: boolean }>,
+  activities: [
+    {
+      kind: "bot",
+      id: "bot",
+      version: 1,
+      unread: true,
+      updatedAt: Date.now() - 3600000,
+      preview: "私人主对话"
+    }
+  ],
+  latest,
+  work,
+  bump: () => {},
+  setView: (patch: any) => useBotViewStore.getState().update("local", patch)
+})
+const listeners = new Set<Function>()
+let revision = 1
+f.bump = () => {
+  revision++
+  for (const listener of listeners) listener({ revision })
+}
+const memories: any[] = [
+  {
+    id: "private",
+    name: "私人偏好",
+    content: "仅本人使用",
+    scope: { kind: "private" },
+    version: "1"
+  },
+  {
+    id: "shared",
+    name: "团队写作格式",
+    content: "结论在前，保持简洁。",
+    scope: { kind: "shared" },
+    version: "1"
+  },
+  {
+    id: "group-a",
+    name: "演示约定",
+    content: "每周五下午演示。",
+    scope: { kind: "group", groupId: "group-a" },
+    version: "1"
+  },
+  {
+    id: "group-b",
+    name: "体验组约定",
+    content: "每周三评审。",
+    scope: { kind: "group", groupId: "group-b" },
+    version: "1"
+  },
+  {
+    id: "local-memory",
+    name: "本地讨论约定",
+    content: "先讨论再实施。",
+    scope: { kind: "group", groupId: "local-group" },
+    version: "1"
+  },
+  {
+    id: "retained-memory",
+    name: "原群保留经验",
+    content: "已移除群聊的记录仍可管理。",
+    scope: { kind: "group", groupId: "removed-group" },
+    version: "1"
+  }
+]
+const client = {
+  browserPreview: async (scope: string) => {
+    f.calls.push(["browser", scope])
+    return { pages: [], pageId: null, image: null, generation: 1, control: "bot" }
+  },
+  hostId: "local",
+  cancel: async (id: string) => {
+    f.cancelled.push(id)
+    const task = f.tasks.find((item) => item.id === id)
+    if (task) task.state = "cancelled"
+    f.bump()
+  },
+  snapshot: async () => ({
+    host: { id: "local", kind: "local", name: "本机", capabilities: {} },
+    bots: f.bots.map((bot) => ({ ...bot })),
+    groups: f.nativeGroups.map((group) => ({ ...group })),
+    imConversations: groups.map((g) => ({ ...g, activity: { ...g.activity } })),
+    tasks: f.tasks.map((task) => ({ ...task })),
+    backgroundThreads: [...f.backgroundThreads],
+    activities: f.activities.map((activity) => ({ ...activity })),
+    workActivity: f.workActivity.map(activity => ({ ...activity })),
+    personalIm: f.personalIm.map(entry => ({ ...entry })),
+    schedules: f.schedules.map(schedule => ({ ...schedule })),
+    revision
+  }),
+  subscribe: (fn: Function) => {
+    listeners.add(fn)
+    return () => listeners.delete(fn)
+  },
+  markRead: async (...args: any[]) => {
+    f.reads.push(args)
+    const [kind, id, version] = args
+    const group = kind === "im" ? groups.find((item) => item.id === id) : undefined
+    if (group?.activity.unread && version >= group.activity.version) {
+      group.activity.unread = false
+      f.bump()
+    }
+    const activity = kind === "work-bot" ? f.workActivity.find(item => item.botId === id)
+      : kind === "bot" ? f.activities.find(item => item.id === id) : undefined
+    if (activity?.unread && version >= activity.version) {
+      activity.unread = false
+      f.bump()
+    }
+  },
+  open: async () => {},
+  requestReceipts: async () => [],
+  listMemory: async (_bot: string, groupId?: string) => {
+    f.memoryReads.push([_bot, groupId])
+    return memories.filter(
+      (entry) => !groupId || entry.scope.kind === "shared" || entry.scope.groupId === groupId
+    )
+  },
+  writeMemory: async (_bot: string, input: any) => {
+    f.memoryWrites.push(input)
+    const entry = {
+      ...memories.find((entry) => entry.id === input.id),
+      ...input,
+      id: input.id ?? String(memories.length),
+      version: "2"
+    }
+    const prior = memories.findIndex((entry) => entry.id === input.id)
+    if (prior < 0) memories.push(entry)
+    else memories[prior] = entry
+    return entry
+  },
+  conversations: {
+    expose: async (botId: string, workId: string) => {
+      if (botId !== bot.id || workId !== work.id) throw Error("wrong task")
+      f.opened.push(["expose", botId, workId])
+      return work
+    }
+  },
+  works: {
+    list: async () => ({ items: [], priority: [], nextCursor: null }),
+    get: async () => {
+      if (f.holdWork) {
+        f.holdWork = false
+        await new Promise((resolve) => (f.releaseWork = resolve))
+      }
+      return work
+    },
+    summaries: async () => [work],
+    lifecycle: async ({ action }: { action: string }) => {
+      work.state = action === "complete" ? "completed" : "active"
+      work.version++
+      f.bump()
+      return { ...work }
+    }
+  },
+  im: {
+    exportFile: async (...args: any[]) => {
+      f.exported.push(args)
+      return true
+    },
+    retryFile: async (botId: string, id: string) => {
+      if (botId !== bot.id) throw Error("wrong owner")
+      const row = f.latest.find((item: any) => item.delivery?.id === id) as any
+      if (!row || row.delivery.state !== "failed") throw Error("not retryable")
+      row.delivery.state = "pending"
+      f.bump()
+    },
+    stopConversation: async (_bot: string, id: string) => {
+      for (const task of f.tasks.filter(
+        (task) =>
+          task.mockSource?.bindingId === id &&
+          !task.workId &&
+          ["running", "queued", "waiting_user"].includes(task.state)
+      )) {
+        f.cancelled.push(task.id)
+        task.state = "cancelled"
+      }
+      const thread = groups.find((group) => group.id === id)?.threadId
+      if (thread && f.backgroundThreads.includes(thread)) {
+        f.stoppedBackgroundThreads.push(thread)
+        f.backgroundThreads = f.backgroundThreads.filter((id) => id !== thread)
+      }
+      f.bump()
+    },
+    conversationHistory: async (botId: string, id: string, before?: string) => {
+      f.calls.push({ botId, id, before })
+      if (f.hold) {
+        f.hold = false
+        await new Promise((resolve) => (f.release = resolve))
+      }
+      if (f.fail) throw Error("本地记录读取失败")
+      if (id !== "group-a" && id !== "group-b")
+        return {
+          items: [
+            entry("c1", groups.find((group) => group.id === id)?.activity.preview ?? "历史群消息")
+          ],
+          before: null
+        }
+      return id === "group-b"
+        ? { items: [entry("b1", "三个界面问题，已整理为改进清单。")], before: null }
+        : before
+          ? { items: [entry("a0", "早些时候：我们先明确本周的演示范围。", "user")], before: null }
+          : { items: latest, before: "older-a" }
+    },
+    conversationWorks: async (_bot: string, id: string) => ({
+      items: id === "group-a" ? [work] : [],
+      priority: [],
+      nextCursor: null
+    }),
+    status: async () => ({ connected: true, available: true }),
+    list: async () => ({
+      items: [
+        {
+          id: "binding-a",
+          botId: "bot",
+          kind: "group",
+          state: "active",
+          version: 1,
+          conversationKey: "a",
+          createdAt: new Date(t).toISOString()
+        },
+        ...["revoked", "expired"].map((state) => ({
+          id: `binding-${state}`,
+          botId: "bot",
+          kind: "group",
+          state,
+          version: 2,
+          peerLabel: state === "revoked" ? "已撤销测试群" : "已过期测试群",
+          createdAt: new Date(t).toISOString(),
+          expiresAt: new Date(t).toISOString()
+        }))
+      ].filter((binding) => !removedBindings.has(binding.id)),
+      before: null
+    }),
+    remove: async (_botId: string, id: string) => {
+      removedBindings.add(id)
+    },
+    history: async () => ({ items: [], before: null })
+  }
+}
+;(window as any).api = {
+  models: { getUserInfo: async () => null },
+  bots: client,
+  threads: { get: async () => ({ metadata: { workspacePath: "/fixture/bots/workspaces/mock-group-a" } }) },
+  system: { getPlatform: async () => "darwin" }
+}
+;(window as any).electron = { onNotifyMsg: () => () => {} }
+if (!useBotViewStore.getState().hosts.local)
+  useBotViewStore
+    .getState()
+    .update("local", { selectedId: "bot", imConversationId: "group-a", detailOpen: true })
+function FixtureRoot() {
+  const mainView = useAppStore((state) => state.mainView)
+  return <>{mainView === "thread"
+    ? <section data-testid="ordinary-workbench" className="w-full p-8">
+        <ConversationTaskControls threadId={work.threadId} refresh={() => {}} link={{ bot, work,
+          workspacePath: "/fixture/bots/workspaces/mock-group-a", imConversation: groups[0] } as any} />
+        <div className="mt-8 text-sm text-muted-foreground">任务对话：演示准备清单</div>
+      </section>
+    : <BotsWorkspace client={client as any} />}<Toaster /></>
+}
+createRoot(document.getElementById("root")!).render(<FixtureRoot />)

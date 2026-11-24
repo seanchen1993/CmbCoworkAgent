@@ -26,6 +26,7 @@ let currentAppVersion = "1.3.10"
 let getUserInfoImpl: () => UserInfoConfig | null = () => null
 let currentManifest: LatestJson | null = null
 let expectedManifestFile = "cmbdevclaw-latest.json"
+let splitManifestUtf8 = false
 let chainTestRoot = ""
 
 vi.mock("electron", () => ({
@@ -37,7 +38,7 @@ vi.mock("../storage", () => ({
 }))
 
 // SUT imports must come AFTER vi.mock calls
-import { checkForUpdate } from "./checker"
+import { checkForUpdate, fetchLatestJson } from "./checker"
 import { isSameStagingPayload } from "./gray-release"
 import { clearPendingUpdateChain, writePendingUpdateChain } from "./update-chain"
 
@@ -52,7 +53,14 @@ beforeAll(async () => {
       const file = url.searchParams.get("file")
       if (file === expectedManifestFile) {
         res.writeHead(200, { "content-type": "application/json" })
-        res.end(JSON.stringify(currentManifest))
+        const bytes = Buffer.from(JSON.stringify(currentManifest))
+        if (splitManifestUtf8) {
+          const split = bytes.indexOf("项目") + 1
+          res.write(bytes.subarray(0, split))
+          setImmediate(() => res.end(bytes.subarray(split)))
+        } else {
+          res.end(bytes)
+        }
         return
       }
       // Any other file = fake update package payload.
@@ -83,6 +91,7 @@ beforeEach(() => {
   getUserInfoImpl = () => null
   currentManifest = null
   expectedManifestFile = "cmbdevclaw-latest.json"
+  splitManifestUtf8 = false
   clearPendingUpdateChain()
 })
 
@@ -124,6 +133,20 @@ const sales: UserInfoConfig = {
 // ---------------------------------------------------------------------------
 
 describe("E2E gray release — real HTTP server, real checkForUpdate", () => {
+  it("preserves a navigation skill name split across UTF-8 response chunks", async () => {
+    splitManifestUtf8 = true
+    currentManifest = {
+      ...baseManifest,
+      conversationShortcuts: {
+        projectPluginCreation: { itemId: "market-id", marketName: "项目插件开发" }
+      }
+    }
+
+    await expect(fetchLatestJson(baseUrl)).resolves.toMatchObject({
+      conversationShortcuts: currentManifest.conversationShortcuts
+    })
+  })
+
   it("C0 自测入口：可按指定 manifest 文件检查更新", async () => {
     expectedManifestFile = "cmbdevclaw-latest.selftest.json"
     currentAppVersion = "1.4.5"

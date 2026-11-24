@@ -11,7 +11,7 @@ import {
   writeFileSync
 } from "fs"
 import { dirname, join, resolve, sep } from "path"
-import { homedir } from "os"
+import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { realpath as realpathAsync } from "node:fs/promises"
 import {
   clearAsyncGitRootCache,
@@ -38,7 +38,7 @@ interface ProjectMemoryMetadata {
   updatedAt: number
 }
 
-export const MEMORY_ROOT_DIR = join(homedir(), ".cmbcoworkagent", "memory")
+export const MEMORY_ROOT_DIR = join(getCmbCoworkAgentDataRoot(), "memory")
 export const GLOBAL_MEMORY_DIR = join(MEMORY_ROOT_DIR, "global")
 export const PROJECTS_MEMORY_DIR = join(MEMORY_ROOT_DIR, "projects")
 

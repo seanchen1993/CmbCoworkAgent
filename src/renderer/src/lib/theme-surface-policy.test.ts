@@ -128,7 +128,8 @@ describe("theme surface policy", () => {
       const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
       const rule = css.match(new RegExp(`${escapedSelector}\\s*\\{([\\s\\S]*?)\\}`))?.[1]
       expect(rule, `${selector} must exist`).toBeDefined()
-      expect(rule, `${selector} must use theme variables`).toContain("var(--")
+      // currentColor inherits the already themed message color (including Bot bubbles).
+      expect(rule, `${selector} must use theme variables or inherited color`).toMatch(/var\(--|currentColor/)
     }
   })
 
@@ -357,7 +358,7 @@ describe("theme surface policy", () => {
     )
 
     expect(rightPanel).toContain("const workspacePanelRef = useRef<HTMLDivElement>(null)")
-    expect(rightPanel).toContain("workspacePanelRef.current.clientHeight")
+    expect(rightPanel).toContain("observer.observe(panel)")
     expect(rightPanel).toMatch(/ref=\{workspacePanelRef\}[\s\S]{0,120}workspace-info-panel/)
     expect(chatContainer).toContain(
       "border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground"

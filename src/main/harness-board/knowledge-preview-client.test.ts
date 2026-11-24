@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events"
 import { mkdtempSync, rmSync } from "node:fs"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -57,34 +57,16 @@ class FakeKnowledgePreviewWorker extends EventEmitter {
   }
 }
 
-const source = {
-  openworkDir: "C:/openwork",
-  pluginStorePath: "C:/openwork/plugins.json",
-  leanTokenStorePath: "C:/openwork/leanstar-config.json"
-}
+const target = (idKey: string) => ({
+  idKey,
+  name: `Knowledge ${idKey}`,
+  path: join(tmpdir(), idKey)
+})
 
 describe("Harness knowledge preview worker client", () => {
   it("keeps the main event loop responsive while a real worker scans a bounded tree", async () => {
-    const openworkDir = await mkdtemp(join(tmpdir(), "harness-knowledge-worker-"))
-    tempRoots.push(openworkDir)
-    const pluginPath = join(openworkDir, "plugin")
-    const knowledgePath = join(pluginPath, "knowledge")
-    await mkdir(join(pluginPath, "board_core"), { recursive: true })
-    await mkdir(knowledgePath, { recursive: true })
-    await writeFile(
-      join(openworkDir, "plugins.json"),
-      JSON.stringify([{ id: "adapter", name: "Adapter", path: pluginPath }]),
-      "utf8"
-    )
-    await writeFile(
-      join(pluginPath, "board_core", "board_config.json"),
-      JSON.stringify({
-        apiVersion: 1,
-        inspectCommands: { [process.platform]: { knowledge_path: "${pluginPath}/knowledge" } }
-      }),
-      "utf8"
-    )
-    await writeFile(join(openworkDir, "leanstar-config.json"), "{}", "utf8")
+    const knowledgePath = await mkdtemp(join(tmpdir(), "framework-knowledge-worker-"))
+    tempRoots.push(knowledgePath)
     await Promise.all(
       Array.from({ length: 200 }, (_, index) =>
         writeFile(join(knowledgePath, `entry-${index}.md`), "body", "utf8")
@@ -98,11 +80,10 @@ describe("Harness knowledge preview worker client", () => {
     const client = new HarnessKnowledgePreviewClient(
       async () => new Worker(workerBundlePath, { name: "harness-knowledge-preview-test" })
     )
-    const result = await client.read("adapter", "harness-knowledge:1:adapter", {
-      openworkDir,
-      pluginStorePath: join(openworkDir, "plugins.json"),
-      leanTokenStorePath: join(openworkDir, "leanstar-config.json")
-    })
+    const result = await client.read(
+      { idKey: "kb-main", name: "Main knowledge", path: knowledgePath },
+      "harness-knowledge:1:kb-main"
+    )
     clearInterval(ticker)
 
     expect(result.files).toHaveLength(200)
@@ -113,7 +94,7 @@ describe("Harness knowledge preview worker client", () => {
     await client.close()
   })
 
-  it("terminates a superseded same-adapter scan and only accepts the latest result", async () => {
+  it("terminates a superseded same-knowledge-base scan and only accepts the latest result", async () => {
     const firstWorker = new FakeKnowledgePreviewWorker()
     const secondWorker = new FakeKnowledgePreviewWorker()
     const workers = [firstWorker, secondWorker]
@@ -121,9 +102,9 @@ describe("Harness knowledge preview worker client", () => {
       async () => workers.shift()! as unknown as Worker
     )
 
-    const first = client.read("adapter-a", "harness-knowledge:7:adapter-a", source)
+    const first = client.read(target("kb-a"), "harness-knowledge:7:kb-a")
     await new Promise((resolve) => setTimeout(resolve, 0))
-    const second = client.read("adapter-a", "harness-knowledge:7:adapter-a", source)
+    const second = client.read(target("kb-a"), "harness-knowledge:7:kb-a")
     await expect(first).rejects.toBeInstanceOf(HarnessKnowledgePreviewCancelledError)
     expect(firstWorker.terminateCalls).toBeGreaterThan(0)
 
@@ -134,24 +115,21 @@ describe("Harness knowledge preview worker client", () => {
       requestId,
       ok: true,
       result: {
-        adapterId: "adapter-a",
-        adapterName: "Adapter A",
-        configured: true,
         exists: false,
         files: []
       }
     })
-    await expect(second).resolves.toMatchObject({ adapterId: "adapter-a" })
+    await expect(second).resolves.toMatchObject({ exists: false })
     await client.close()
   })
 
-  it("cancels all adapter scans owned by an unmounted renderer", async () => {
+  it("cancels all knowledge-base scans owned by an unmounted renderer", async () => {
     const workers = [new FakeKnowledgePreviewWorker(), new FakeKnowledgePreviewWorker()]
     const client = new HarnessKnowledgePreviewClient(
       async () => workers.shift()! as unknown as Worker
     )
-    const first = client.read("adapter-a", "harness-knowledge:9:adapter-a", source)
-    const second = client.read("adapter-b", "harness-knowledge:9:adapter-b", source)
+    const first = client.read(target("kb-a"), "harness-knowledge:9:kb-a")
+    const second = client.read(target("kb-b"), "harness-knowledge:9:kb-b")
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     client.cancelScopesWithPrefix("harness-knowledge:9:")
@@ -169,26 +147,23 @@ describe("Harness knowledge preview worker client", () => {
       async () => workers.shift()! as unknown as Worker
     )
 
-    const exited = client.read("adapter-a", "harness-knowledge:10:adapter-a", source)
+    const exited = client.read(target("kb-a"), "harness-knowledge:10:kb-a")
     await new Promise((resolve) => setTimeout(resolve, 0))
     firstWorker.emit("exit", 0)
     await expect(exited).rejects.toThrow("exited: 0")
 
-    const retried = client.read("adapter-a", "harness-knowledge:10:adapter-a", source)
+    const retried = client.read(target("kb-a"), "harness-knowledge:10:kb-a")
     await new Promise((resolve) => setTimeout(resolve, 0))
     replacement.emit("message", {
       type: "read-result",
       requestId: replacement.request?.requestId,
       ok: true,
       result: {
-        adapterId: "adapter-a",
-        adapterName: "Adapter A",
-        configured: false,
         exists: false,
         files: []
       }
     })
-    await expect(retried).resolves.toMatchObject({ adapterId: "adapter-a" })
+    await expect(retried).resolves.toMatchObject({ exists: false })
     await client.close()
   })
 })

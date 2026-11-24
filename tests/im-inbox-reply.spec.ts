@@ -369,7 +369,8 @@ async function testMarkdownGoesOutOnlyWhereAgreed(): Promise<void> {
         : { supportsMarkdownReplies: () => options.supportsMarkdown === true })
     } as unknown as ImGatewayClientPort
     const eventStore = {
-      listOutbox: () => records.filter((record) => record.state === "pending"),
+      pendingReplyConversations: () => ["conversation-1"],
+      conversationOutbox: () => records.filter((record) => record.state === "pending"),
       markOutboxSending: async (outboxId: string) => {
         find(outboxId).state = "sending"
         return find(outboxId)
@@ -449,8 +450,8 @@ async function testConcurrentOutboxDrainUsesSingleSender(): Promise<void> {
     }
   } as ImGatewayClientPort
   const eventStore = {
-    listOutbox: (state?: string) =>
-      (!state || state === "pending") && record.state === "pending" ? [record] : [],
+    pendingReplyConversations: () => ["conversation-1"],
+      conversationOutbox: () => [record],
     markOutboxSending: async () => {
       record.state = "sending"
       record.attemptCount += 1
@@ -505,7 +506,8 @@ async function testSegmentDeliveryStopsBehindUnconfirmedPredecessor(): Promise<v
     }
   } as ImGatewayClientPort
   const eventStore = {
-    listOutbox: () => records,
+    pendingReplyConversations: () => ["conversation-1"],
+      conversationOutbox: () => records,
     markOutboxSending: async (outboxId: string) => {
       const record = records.find((candidate) => candidate.outboxId === outboxId)!
       record.state = "sending"
@@ -587,7 +589,8 @@ async function testOutboundDeliveryIsCountedOncePerMessage(): Promise<void> {
       }
     } as ImGatewayClientPort
     const eventStore = {
-      listOutbox: () => (record.state === "pending" ? [record] : []),
+      pendingReplyConversations: () => ["conversation-1"],
+      conversationOutbox: () => (record.state === "pending" ? [record] : []),
       markOutboxSending: async () => {
         record.state = "sending"
         record.attemptCount += 1

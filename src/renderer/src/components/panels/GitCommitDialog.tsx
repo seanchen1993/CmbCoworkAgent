@@ -37,6 +37,7 @@ export interface GitCommitRepositoryOption {
 interface GitCommitDialogProps {
   open: boolean
   running: boolean
+  submitDisabled?: boolean
   branch: string
   fileCount: number
   additions: number
@@ -62,6 +63,7 @@ interface GitCommitDialogProps {
 export function GitCommitDialog({
   open,
   running,
+  submitDisabled = false,
   branch,
   fileCount,
   additions,
@@ -83,6 +85,7 @@ export function GitCommitDialog({
   onHistorySelect,
   onSubmit
 }: GitCommitDialogProps): React.JSX.Element {
+  const [dialogContent, setDialogContent] = useState<HTMLDivElement | null>(null)
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | undefined>(undefined)
   const [submitAttempted, setSubmitAttempted] = useState(false)
   const cardValue = cardNumber.trim()
@@ -120,7 +123,10 @@ export function GitCommitDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg rounded-2xl border border-border bg-background p-0 shadow-xl">
+      <DialogContent
+        ref={setDialogContent}
+        className="sm:max-w-lg rounded-2xl border border-border bg-background p-0 shadow-xl overflow-visible"
+      >
         <div className="px-5 py-4 border-b border-border/70">
           <div className="text-[16px] font-semibold">Git Commit</div>
         </div>
@@ -248,6 +254,7 @@ export function GitCommitDialog({
               </span>
             </div>
             <TaskCardPicker
+              portalContainer={dialogContent}
               value={cardNumber}
               onValueChange={(nextValue, card) => onCardNumberChange(nextValue, card)}
               preferredText={preferredTaskText}
@@ -338,7 +345,7 @@ export function GitCommitDialog({
             id="git-commit-button"
             type="button"
             className="w-full h-9"
-            disabled={running || noSelectedFiles}
+            disabled={running || submitDisabled || noSelectedFiles}
             onClick={() => {
               setSubmitAttempted(true)
               if (commitBlocked) return

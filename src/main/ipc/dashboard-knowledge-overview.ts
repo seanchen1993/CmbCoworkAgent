@@ -1,21 +1,28 @@
-import {
-  normalizeRoomName,
-  resolveKnowledgeCommitRateScope
-} from "./dashboard-knowledge-commit-rate"
+import { resolveKnowledgeCommitRateScope } from "./dashboard-knowledge-commit-rate"
 import type { DashboardKnowledgeCommitRateUnavailableReason } from "../../shared/dashboard-knowledge-commit-rate"
 import type {
   KnowledgeAccumulationData,
   KnowledgeAccumulationTotals,
-  KnowledgeDistributionItem,
+  KnowledgeOrgItem,
+  KnowledgeRoom,
   KnowledgeProjectStats,
   KnowledgeSection
 } from "../../shared/dashboard-knowledge-overview"
+import {
+  normalizeKnowledgeOrgId,
+  normalizeRoomName
+} from "../../shared/dashboard-knowledge-overview"
+import { assertProjectModeResultComplete } from "./project-mode-query-scope"
 import { DashboardRequestCancelledError } from "../services/dashboard-request-coordinator"
 
 export function resolveKnowledgeOverviewScope(
   input: Parameters<typeof resolveKnowledgeCommitRateScope>[0],
   getRoomIds: () => Map<string, string>
-): { orgIds: string[] | null; unavailableReason?: DashboardKnowledgeCommitRateUnavailableReason } {
+): {
+  orgIds: string[] | null
+  orgRoom?: KnowledgeRoom
+  unavailableReason?: DashboardKnowledgeCommitRateUnavailableReason
+} {
   const scope = resolveKnowledgeCommitRateScope(input)
   if (scope.kind === "allRooms") return { orgIds: null }
   if (scope.kind === "unavailable" && scope.reason !== "multipleRooms") {
@@ -28,7 +35,8 @@ export function resolveKnowledgeOverviewScope(
   const mapping = getRoomIds()
   const ids = rooms.map((room) => mapping.get(normalizeRoomName(room)))
   if (ids.some((id) => !id)) return { orgIds: [], unavailableReason: "roomNotMapped" }
-  return { orgIds: [...new Set(ids as string[])] }
+  const orgIds = [...new Set(ids as string[])]
+  return orgIds.length === 1 ? { orgIds, orgRoom: { id: orgIds[0], name: rooms[0] } } : { orgIds }
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -53,20 +61,81 @@ export function parseKnowledgeTotals(value: unknown): KnowledgeAccumulationTotal
   }
 }
 
-export function parseKnowledgeDistribution(value: unknown): KnowledgeDistributionItem[] {
+export function parseKnowledgeDistribution(
+  value: unknown,
+  level?: "room" | "group"
+): KnowledgeOrgItem[] {
   if (!Array.isArray(value)) throw new Error("知识沉淀分布接口未返回数组")
-  const items = new Map<string, number>()
+  const items = new Map<string, KnowledgeOrgItem>()
   for (const item of value) {
     const row = record(item)
     if (row.name != null && typeof row.name !== "string") {
       throw new Error("知识沉淀分布接口返回了无效的名称")
     }
-    const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : "未归属"
-    items.set(name, (items.get(name) ?? 0) + count(row.value))
+    const id = level && "id" in row ? normalizeKnowledgeOrgId(row.id) : undefined
+    const name =
+      (typeof row.name === "string" && row.name.trim()) ||
+      (id
+        ? `机构 ${id}`
+        : level === "room"
+          ? "未归属室"
+          : level === "group"
+            ? "未归属组"
+            : "未归属")
+    const key = id != null ? `id:${id}` : JSON.stringify([id === undefined, name])
+    const existing = items.get(key)
+    const n = count(row.value)
+    if (existing) existing.value += n
+    else items.set(key, { name, value: n, ...(id !== undefined && { id }) })
   }
-  return [...items]
-    .map(([name, value]) => ({ name, value }))
-    .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name))
+  return [...items.values()].sort((a, b) => b.value - a.value || a.name.localeCompare(b.name))
+}
+
+async function requestKnowledgeSection(
+  baseUrl: string,
+  path: string,
+  orgIds: (string | number)[] | null,
+  signal: AbortSignal | undefined,
+  request: typeof fetch
+): Promise<unknown> {
+  if (signal?.aborted) throw new DashboardRequestCancelledError()
+  if (!baseUrl) throw new Error("未配置知识沉淀接口地址（VITE_KNOWLEDGE_OVERVIEW_BASE_URL）")
+  const timeout = AbortSignal.timeout(10_000)
+  try {
+    const response = await request(`${baseUrl.replace(/\/+$/, "")}/knowledge/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orgIds }),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+    })
+    if (!response.ok) throw new Error(`知识沉淀接口返回 HTTP ${response.status}`)
+    return await response.json()
+  } catch (error) {
+    if (signal?.aborted) throw new DashboardRequestCancelledError()
+    if (timeout.aborted) throw new Error("知识沉淀接口响应超时")
+    throw error
+  }
+}
+
+export async function fetchKnowledgeOrgDistribution(
+  baseUrl: string,
+  orgIds: string[] | null,
+  signal?: AbortSignal,
+  request: typeof fetch = fetch
+): Promise<KnowledgeOrgItem[]> {
+  if (orgIds?.length === 0) return []
+  const roomId = orgIds?.length === 1 ? orgIds[0] : undefined
+  const numericId = Number(roomId)
+  const endpoint = roomId ? "group-distribution" : "org-distribution"
+  const parent = roomId
+    ? [Number.isSafeInteger(numericId) && String(numericId) === roomId ? numericId : roomId]
+    : null
+  const raw = await requestKnowledgeSection(baseUrl, endpoint, parent, signal, request)
+  const items = parseKnowledgeDistribution(raw, roomId ? "group" : "room")
+  if (roomId && items.some((item) => item.id === roomId)) {
+    throw new Error("组分布接口返回了室汇总，未返回有效的组分布")
+  }
+  return orgIds && !roomId ? items.filter((item) => item.id && orgIds.includes(item.id)) : items
 }
 
 export function emptyKnowledgeAccumulation(): KnowledgeAccumulationData {
@@ -95,25 +164,17 @@ export async function fetchKnowledgeAccumulation(
       while (next < endpoints.length) {
         if (signal?.aborted) throw new DashboardRequestCancelledError()
         const [section, path] = endpoints[next++]
-        const timeout = AbortSignal.timeout(10_000)
         try {
-          const response = await request(`${baseUrl.replace(/\/+$/, "")}/knowledge/${path}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ orgIds }),
-            signal: signal ? AbortSignal.any([signal, timeout]) : timeout
-          })
-          if (!response.ok) throw new Error(`知识沉淀接口返回 HTTP ${response.status}`)
-          const raw: unknown = await response.json()
-          if (section === "totals") result.totals = parseKnowledgeTotals(raw)
-          else result[section] = parseKnowledgeDistribution(raw)
+          if (section === "orgs") {
+            result.orgs = await fetchKnowledgeOrgDistribution(baseUrl, orgIds, signal, request)
+          } else {
+            const raw = await requestKnowledgeSection(baseUrl, path, orgIds, signal, request)
+            if (section === "totals") result.totals = parseKnowledgeTotals(raw)
+            else result[section] = parseKnowledgeDistribution(raw)
+          }
         } catch (error) {
           if (signal?.aborted) throw new DashboardRequestCancelledError()
-          result.errors[section] = timeout.aborted
-            ? "知识沉淀接口响应超时"
-            : error instanceof Error
-              ? error.message
-              : String(error)
+          result.errors[section] = error instanceof Error ? error.message : String(error)
         }
       }
     })
@@ -167,4 +228,79 @@ export function parseKnowledgeProjectStats(
     readProjectCount: count(record(r.projects).value),
     successfulReadCount: count(record(r.reads).value)
   }
+}
+
+/** Stream disjoint project ID pages; never load snapshots or trace bodies. */
+export async function fetchKnowledgeProjectAggregates(
+  query: (body: Record<string, unknown>) => Promise<unknown>,
+  snapshotFilters: Record<string, unknown>[],
+  readFilters: Record<string, unknown>[],
+  scopeReadsToProjects: boolean
+): Promise<KnowledgeProjectStats> {
+  const [snapshotQuery, readsQuery] = buildKnowledgeProjectQueries(snapshotFilters, readFilters)
+  const checkedQuery = async (body: Record<string, unknown>) => {
+    const raw = await query(body)
+    assertProjectModeResultComplete(raw)
+    return raw
+  }
+  if (!scopeReadsToProjects) {
+    const [snapshot, reads] = await Promise.all([
+      checkedQuery(snapshotQuery),
+      checkedQuery(readsQuery)
+    ])
+    return parseKnowledgeProjectStats(snapshot, reads)
+  }
+  const snapshot = await checkedQuery(snapshotQuery)
+  let reads = 0,
+    projects = 0
+  let after: Record<string, unknown> | undefined
+  const seen = new Set<string>()
+  while (true) {
+    const raw = await checkedQuery({
+      size: 0,
+      track_total_hits: false,
+      query: { bool: { filter: snapshotFilters } },
+      aggs: {
+        ids: {
+          composite: {
+            size: 500,
+            sources: [{ project: { terms: { field: "properties.projectId" } } }],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })
+    const agg = record(record(record(raw).aggregations).ids)
+    if (!Array.isArray(agg.buckets)) throw new Error("项目范围未完整返回")
+    if (!agg.buckets.length) break
+    const ids = agg.buckets.map((b) => record(record(b).key).project)
+    if (ids.some((id) => typeof id !== "string" || !id)) throw new Error("项目范围包含无效标识")
+    const next = record(agg.after_key)
+    if (!Object.keys(next).length && ids.length >= 500)
+      throw new Error("项目范围缺少后续分页游标，无法保证完整统计")
+    if (
+      Object.keys(next).length &&
+      (Object.keys(next).length !== 1 || typeof next.project !== "string" || !next.project)
+    )
+      throw new Error("项目范围分页游标无效")
+    const cursor = JSON.stringify(Object.keys(next).length ? next : { project: ids.at(-1) })
+    if (seen.has(cursor)) throw new Error("项目范围分页游标重复，无法保证完整统计")
+    seen.add(cursor)
+    const stats = parseKnowledgeProjectStats(
+      snapshot,
+      await checkedQuery({
+        ...readsQuery,
+        query: {
+          bool: { filter: [...readFilters, { terms: { "properties.harnessProjectId": ids } }] }
+        }
+      })
+    )
+    reads += stats.successfulReadCount
+    projects += stats.readProjectCount
+    if (!Object.keys(next).length) break
+    after = next
+  }
+  return parseKnowledgeProjectStats(snapshot, {
+    aggregations: { projects: { value: projects }, reads: { value: reads } }
+  })
 }

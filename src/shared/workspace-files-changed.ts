@@ -1,4 +1,6 @@
-import { normalizeWorkspacePathKey } from "./workspace-path"
+import { isSameGitWorkspacePath, normalizeWorkspacePathKey } from "./workspace-path"
+
+export const WORKSPACE_WATCH_DEBOUNCE_MS = 500
 
 export type WorkspaceFilesChangeType = "file" | "meta"
 
@@ -21,6 +23,8 @@ export type WorkspaceFilesUpdate =
 export interface WorkspaceFilesChangedPayload {
   threadIds: string[]
   workspacePath: string
+  /** Preserve spelling when a normalized path would identify a different Git workspace. */
+  literalWorkspacePath?: string
   changeType: WorkspaceFilesChangeType
   /**
    * Known file paths are resolved in the main process and sent as a bounded
@@ -108,10 +112,9 @@ export function normalizeWorkspaceFilesChangedPayload(
 ): WorkspaceFilesChangedPayload | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
   const payload = value as LegacyWorkspaceFilesChangedPayload
-  const workspacePath =
-    typeof payload.workspacePath === "string"
-      ? normalizeWorkspacePathKey(payload.workspacePath)
-      : ""
+  if (typeof payload.workspacePath !== "string") return undefined
+  const literalWorkspacePath = payload.workspacePath
+  const workspacePath = normalizeWorkspacePathKey(literalWorkspacePath)
   if (!workspacePath) return undefined
 
   const rawThreadIds = Array.isArray(payload.threadIds)
@@ -129,6 +132,7 @@ export function normalizeWorkspaceFilesChangedPayload(
   return {
     threadIds,
     workspacePath,
+    ...(!isSameGitWorkspacePath(workspacePath, literalWorkspacePath) && { literalWorkspacePath }),
     changeType: payload.changeType === "meta" ? "meta" : "file",
     update: normalizeWorkspaceFilesUpdate(payload.update)
   }

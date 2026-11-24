@@ -3,9 +3,13 @@ import { describe, expect, it } from "vitest"
 import {
   createStreamDataSerializer,
   createSerializedValuesMessageAccumulator,
+  isStreamUserTurnBoundary,
+  sanitizeCoordinatorWorkerStreamDataForRenderer,
   sanitizeStreamDataForRenderer,
   serializeStreamData
 } from "./stream-data-serialization"
+import { createHash } from "node:crypto"
+import { projectDisplayMessageId } from "../display-message-identity"
 import {
   STREAM_MESSAGE_CONTENT_MODE_KEY,
   STREAM_MESSAGE_REASONING_MODE_KEY,
@@ -13,6 +17,105 @@ import {
 } from "../../shared/stream-message-wire-mode"
 
 describe("stream data serialization", () => {
+  it("only treats marked Bot feedback as internal across live and serialized messages", () => {
+    for (const marker of [undefined, false, true]) {
+      const message = new HumanMessage({
+        id: "input", content: "[Internal Bot feedback] quoted user text",
+        additional_kwargs: marker === undefined ? {} : { cmb_internal_bot_feedback: marker }
+      })
+      expect(isStreamUserTurnBoundary(message)).toBe(marker !== true)
+      expect(isStreamUserTurnBoundary(message.toJSON())).toBe(marker !== true)
+      expect(isStreamUserTurnBoundary({
+        type: "human", id: message.id, content: message.content,
+        additional_kwargs: message.additional_kwargs
+      })).toBe(marker !== true)
+    }
+  })
+
+  it("projects long Team identities without changing wire IDs, chunk tags or source payloads", () => {
+    const longId = "x".repeat(4095) + '😀"\\\ud840\u0000'
+    const digest = createHash("sha256").update(JSON.stringify(longId)).digest("hex")
+    const id = projectDisplayMessageId(longId, "tool-call")
+    expect(id).toBe("cmb-checkpoint-tool-id:sha256:" + digest)
+    const providerId = "cmb-checkpoint-provider-id:sha256:" + digest
+    const provider = {
+      cmb_internal_provider_source_id: longId,
+      cmb_internal_provider_occurrence: 2
+    }
+    const projectedProvider = { ...provider, cmb_internal_provider_source_id: providerId }
+    const serialize = createStreamDataSerializer()
+    const chunk = new AIMessageChunk({
+      id: "request",
+      content: "",
+      additional_kwargs: provider,
+      tool_call_chunks: [{ id: longId, index: 0, name: "read_file", args: '{"path":' }]
+    })
+    const rawChunk = serialize("messages", [chunk, { marker: "preserve" }]).data
+    expect(sanitizeCoordinatorWorkerStreamDataForRenderer("messages", rawChunk, 0)).toEqual([
+      expect.objectContaining({
+        kwargs: expect.objectContaining({
+          id: "request",
+          additional_kwargs: projectedProvider,
+          tool_call_chunks: [
+            expect.objectContaining({
+              id,
+              args: '{"path":',
+              [STREAM_TOOL_CALL_ARGS_MODE_KEY]: "delta"
+            })
+          ]
+        })
+      }),
+      expect.objectContaining({ marker: "preserve" })
+    ])
+    expect(JSON.stringify(rawChunk)).toContain(JSON.stringify(longId))
+    expect(chunk.tool_call_chunks?.[0].id).toBe(longId)
+    expect(chunk.additional_kwargs).toEqual(provider)
+
+    const values = serialize("values", {
+      messages: [
+        new HumanMessage("prompt"),
+        new AIMessage({
+          id: "request",
+          content: "",
+          tool_calls: [
+            { id: longId, name: "read_file", args: { path: "probe.txt" } },
+            { id: "short", name: "read_file", args: {} }
+          ],
+          additional_kwargs: {
+            ...provider,
+            tool_calls: [
+              { id: longId, type: "function", function: { name: "read_file", arguments: "{}" } }
+            ]
+          }
+        }),
+        new ToolMessage({ id: "result", tool_call_id: longId, content: "done" })
+      ]
+    })
+    expect(
+      sanitizeCoordinatorWorkerStreamDataForRenderer(
+        "values",
+        values.data,
+        values.valuesMessageIndexOffset
+      )
+    ).toMatchObject({
+      messages: [
+        {
+          kwargs: {
+            id: "request",
+            tool_calls: [{ id, args: { path: "probe.txt" } }, { id: "short" }],
+            additional_kwargs: {
+              ...projectedProvider,
+              tool_calls: [{ id }],
+              cmb_worker_snapshot_index: 1
+            }
+          }
+        },
+        { kwargs: { id: "result", tool_call_id: id } }
+      ]
+    })
+    expect(JSON.stringify(values.data)).toContain(JSON.stringify(longId))
+  })
+
   it.each([
     ["哈", "哈", "，你好"],
     ["a", "ab", "abc"],

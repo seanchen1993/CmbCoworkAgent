@@ -1,0 +1,40 @@
+
+ RUN  v3.2.4 <repository>
+
+(node:57056) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/main/bots/work-tools.test.ts (12 tests | 1 failed) 748ms
+   ✓ work Runtime tools > keeps durable work tools on the parent turn and rejects direct temporary-agent calls 52ms
+   ✓ work Runtime tools > dispatches a selected skill once, preserving original input for activation only in its worker 47ms
+   × work Runtime tools > reuses and reopens the same work atomically, and keeps replay and audience protection 49ms
+     → {"ok":false,"error":"标识格式无效","recovery":"The work operation did not succeed. Report the actual error; never claim a work was created, completed or continued without a successful receipt. Do not bypass these controls using files, SQL or shell."}: expected 'error' not to be 'error' // Object.is equality
+   ✓ work Runtime tools > rejects an invalid skill or missing selection before creating work 78ms
+   ✓ work Runtime tools > offers original inputs only to their independent assignment under its live lease 64ms
+   ✓ work Runtime tools > reads only owned tasks under the live source lease, without enqueueing work 43ms
+   ✓ work Runtime tools > forwards a live main user's instruction once, including a lost tool reply replay 45ms
+   ✓ work Runtime tools > rejects forwarding from autonomous 'notification' turns before durable acceptance 77ms
+   ✓ work Runtime tools > rejects forwarding from autonomous 'schedule' turns before durable acceptance 82ms
+   ✓ work Runtime tools > rejects forwarding from autonomous 'bot' turns before durable acceptance 81ms
+   ✓ work Runtime tools > uses a live lease plus actual call ID, deduplicates both call and request key, and keeps normal replies unconstrained 49ms
+   ✓ work Runtime tools > does not permit recursive visible work creation inside a work, or completing its own running source 80ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/work-tools.test.ts > work Runtime tools > reuses and reopens the same work atomically, and keeps replay and audience protection
+AssertionError: {"ok":false,"error":"标识格式无效","recovery":"The work operation did not succeed. Report the actual error; never claim a work was created, completed or continued without a successful receipt. Do not bypass these controls using files, SQL or shell."}: expected 'error' not to be 'error' // Object.is equality
+ ❯ src/main/bots/work-tools.test.ts:113:65
+    111|     const call = (id: string, workId = existing.work.id) => dispatch.i…
+    112|     const firstResult = await call("follow") as any
+    113|     expect(firstResult.status, String(firstResult.content)).not.toBe("…
+       |                                                                 ^
+    114|     const first = JSON.parse(String(firstResult.content)).receipt
+    115|     const replayResult = await call("replay") as any
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 11 passed (12)
+   Start at  19:27:59
+   Duration  1.63s (transform 316ms, setup 0ms, collect 616ms, tests 748ms, environment 0ms, prepare 46ms)
+

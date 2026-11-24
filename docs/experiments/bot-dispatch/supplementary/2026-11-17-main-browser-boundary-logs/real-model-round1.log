@@ -1,0 +1,5 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T073245Z-c20ecf7b/record.json
+{"case":"browser-lookup","actual":"independent","preferred":"independent","seconds":11.8,"mainSeconds":5,"dispatchSeconds":3.1,"budgetHandoff":false,"tools":["bot_work_create"]}
+{"case":"greeting","actual":"inline","preferred":"inline","seconds":1.6,"mainSeconds":1.4,"budgetHandoff":false,"tools":[]}
+{"case":"short-shell","actual":"inline","preferred":"inline","seconds":3.1,"mainSeconds":3,"budgetHandoff":false,"tools":["execute"]}
+Routing evaluation report: <isolated-build>/artifacts/routing-1794900765116.json

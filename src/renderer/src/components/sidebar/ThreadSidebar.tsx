@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, memo, lazy, Suspense } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
   Plus,
@@ -23,7 +23,8 @@ import {
   HeartPulse,
   Clock,
   ShoppingBag,
-  Settings
+  Settings,
+  Bot as BotIcon
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -34,14 +35,8 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
+import botWorkspaceMarkUrl from "@/assets/bot-workspace-mark.svg"
+import { ThreadDeleteDialog } from "./ThreadDeleteDialog"
 import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
 import { ThreadGroupDeleteDialog } from "./ThreadGroupDeleteDialog"
 import { useAppStore } from "@/lib/store"
@@ -50,7 +45,8 @@ import {
   useThreadStateSummaries,
   useThreadContext
 } from "@/lib/thread-context"
-import { cn, truncate } from "@/lib/utils"
+import { cn } from "@/lib/utils"
+import { getDisplayThreadTitle } from "../../../../shared/thread-search-scope"
 import { useFeatureGate } from "@/lib/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
@@ -63,7 +59,12 @@ import {
   listCompleteThreadGroupSelection,
   type ThreadGroupSelectionEntry
 } from "@/lib/thread-group-selection"
-import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
+import {
+  isHarnessFeatureThread,
+  isHarnessProjectModeThread,
+  isRegularChatThread,
+  isLocalWorkConversation
+} from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
@@ -75,8 +76,16 @@ import {
 } from "@/components/ui/context-menu"
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
 import type { Thread } from "@/types"
+import type { BotThreadOwner } from "../../../../shared/bots/conversation"
+import { useThreadBotOwners } from "../bots/use-thread-bot-owners"
+import { useLocalBotsUnread } from "../bots/use-bots"
 import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
+import { revealSidebarThread } from "./sidebar-thread-anchor"
+import { useThreadSearch } from "../../lib/thread-search-navigation"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
+import { collectChangedStreamingThreadIds } from "@/lib/thread-stream-activity"
+import { botDefaultWorkspaceOwner, botWorkspaceDisplay, botWorkOwnerLabel } from "@/lib/bot-workspace-display"
+import { useBotWorkspaceProfiles } from "../bots/use-bot-workspace-profiles"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
@@ -87,6 +96,48 @@ const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
 const DEFAULT_VISIBLE_PROJECTS = 60
 const VISIBLE_PROJECTS_STEP = 60
+const BotWorkspaceAvatar = lazy(() =>
+  import("../bots/BotAvatar").then(({ BotAvatar }) => ({ default: BotAvatar }))
+)
+
+const BotWorkspaceEntry = memo(function BotWorkspaceEntry({
+  setMainView
+}: {
+  setMainView(view: "bots"): void
+}) {
+  const hasUnread = useLocalBotsUnread()
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="w-full justify-start gap-2.5 rounded-lg text-sm font-medium text-foreground/80 transition-colors hover:text-foreground"
+      aria-label="Bots 工作区"
+      aria-description={hasUnread ? "有未读消息" : undefined}
+      onClick={() => setMainView("bots")}
+    >
+      <Suspense
+        fallback={
+          <img
+            src={botWorkspaceMarkUrl}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+            className="size-5 shrink-0"
+          />
+        }
+      >
+        <BotWorkspaceAvatar
+          color="#ff263c"
+          size={20}
+          className="size-5 shrink-0 overflow-visible"
+        />
+      </Suspense>
+      <span>Bots</span>
+      {hasUnread && <span aria-hidden="true" className="ml-auto size-2 shrink-0 rounded-full bg-status-info" />}
+    </Button>
+  )
+})
+
 type SidebarTab = "chat" | "project"
 
 interface ThreadProject {
@@ -96,6 +147,7 @@ interface ThreadProject {
   path: string | null
   threads: Thread[]
   isManagedInbox: boolean
+  botWorkspace?: ReturnType<typeof botWorkspaceDisplay>
   isPinned: boolean
   hasCustomName: boolean
   sortIndex: number
@@ -153,22 +205,6 @@ function formatCompactTime(date: Date | string): string {
   const day = d.getDate()
   if (d.getFullYear() === now.getFullYear()) return `${month}/${day}`
   return `${String(d.getFullYear()).slice(2)}/${month}/${day}`
-}
-
-function getDisplayThreadTitle(thread: Thread): string {
-  if (isRemoteInboxThread(thread)) return REMOTE_INBOX_WORKSPACE_NAME
-  const title = thread.title?.trim()
-
-  if (!title || title === "..." || title === "…") {
-    return truncate(thread.thread_id, 20)
-  }
-
-  if (title.startsWith("[Heartbeat]")) return title.slice(12).trim()
-  if (title.startsWith("[定时]")) return title.slice(5).trim()
-  if (title.startsWith("[远端机器人] ")) return `(远端) ${title.slice(8).trim()}`
-  if (title.startsWith("[机器人] ")) return title.slice(6).trim()
-
-  return title
 }
 
 function getRemoteThreadKind(thread: Thread): "inbox" | "feature" | null {
@@ -236,6 +272,7 @@ function ThreadListItemImpl({
   isSelected,
   isEditing,
   isUnread,
+  readOnly = false,
   isManagedRunning = false,
   editingTitle,
   onSelect,
@@ -250,7 +287,9 @@ function ThreadListItemImpl({
   onEditingTitleChange,
   isExporting,
   isForking = false,
-  hoverTitle
+  hoverTitle,
+  botOwnerLabel,
+  botOwner
 }: {
   thread: Thread
   isLoading: boolean
@@ -263,6 +302,7 @@ function ThreadListItemImpl({
   isSelected: boolean
   isEditing: boolean
   isUnread: boolean
+  readOnly?: boolean
   isManagedRunning?: boolean
   editingTitle: string
   onSelect: () => void
@@ -276,8 +316,14 @@ function ThreadListItemImpl({
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
   hoverTitle?: string
+  botOwnerLabel?: string
+  botOwner?: BotThreadOwner
 }): React.JSX.Element {
   const isRunning = isLoading || scheduledTaskLoading
+  // Unopened threads have no live interaction subscription. Use the existing
+  // owner batch's exact Bot state, without adding per-row listeners or timers.
+  const botWorking = Boolean(botOwner && !botOwner.userControlled && !botOwner.bot.archived &&
+    botOwner.working && !hasPendingApproval && !hasPendingUserInput)
   const forkDisabled = isRunning || hasPendingApproval || hasPendingUserInput || isForking
   const wasRunningRef = useRef(false)
   const onRunFinishedRef = useRef(onRunFinished)
@@ -294,6 +340,7 @@ function ThreadListItemImpl({
   }, [isRunning])
 
   const displayTitle = getDisplayThreadTitle(thread)
+  const managedWork = isLocalWorkConversation(thread)
   const remoteThreadKind = getRemoteThreadKind(thread)
   const remoteThreadHistorical = remoteThreadKind && thread.metadata?.remoteState === "historical"
   const pendingUserInputBadge = hasPendingUserInput ? (
@@ -306,6 +353,8 @@ function ThreadListItemImpl({
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
+          data-sidebar-thread-id={thread.thread_id}
+          aria-current={isSelected ? "true" : undefined}
           className={cn(
             "group relative flex cursor-pointer items-center gap-2 overflow-hidden rounded-md px-3 py-2 transition-colors",
             isSelected
@@ -318,11 +367,17 @@ function ThreadListItemImpl({
             }
           }}
         >
-          <ThreadStatusIcon
-            isLoading={isLoading}
-            pendingApproval={hasPendingApproval}
-            scheduledTaskLoading={scheduledTaskLoading}
-          />
+          {botWorking ? (
+            <span className="grid size-4 shrink-0 place-items-center" role="img" aria-label="正在工作">
+              <span className="size-1.5 rounded-full bg-status-info" />
+            </span>
+          ) : (
+            <ThreadStatusIcon
+              isLoading={isLoading}
+              pendingApproval={hasPendingApproval}
+              scheduledTaskLoading={scheduledTaskLoading}
+            />
+          )}
           <div className="flex-1 min-w-0 overflow-hidden">
             {isEditing ? (
               <input
@@ -378,6 +433,15 @@ function ThreadListItemImpl({
                 )}
               </div>
             )}
+            {!isEditing && isLocalWorkConversation(thread) && (
+              <div
+                className="mt-0.5 flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground"
+                title={botOwnerLabel}
+              >
+                <BotIcon className="size-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">{botOwnerLabel || "Bot · 独立任务"}</span>
+              </div>
+            )}
           </div>
           {isManagedRunning && (
             <span
@@ -388,6 +452,20 @@ function ThreadListItemImpl({
               <ManagedRunIcon />
             </span>
           )}
+          {botOwner && !isEditing ? (
+            <span
+              className="flex size-5 shrink-0 items-center justify-center rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              role="img"
+              tabIndex={0}
+              aria-label={`${botOwner.userControlled ? "用户接管，关联 Bot：" : "由 "}${botOwner.bot.name}${botOwner.userControlled ? "" : " 管理"}${botOwner.bot.archived ? "（已归档）" : ""}`}
+              title={`${botOwner.userControlled ? "用户接管，关联 Bot：" : "由 "}${botOwner.bot.name}${botOwner.userControlled ? "" : " 管理"}${botOwner.bot.archived ? "（已归档）" : ""}`}
+            >
+              <Suspense fallback={null}>
+                <BotWorkspaceAvatar color={botOwner.bot.color} shape={botOwner.bot.shape} size={20}
+                  busy={botWorking} animated={botWorking} />
+              </Suspense>
+            </span>
+          ) : null}
           {hasContextReminder && !isRunning ? (
             <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
           ) : (
@@ -395,10 +473,11 @@ function ThreadListItemImpl({
             !isRunning && <span className="size-2 rounded-full bg-status-info shrink-0" />
           )}
           <span className="relative ml-auto flex h-6 shrink-0 items-center justify-end overflow-hidden">
-            <span className="text-[10px] text-muted-foreground group-hover:hidden group-focus-within:hidden">
+            <span className={cn("text-[10px] text-muted-foreground",
+              !readOnly && "group-hover:hidden group-focus-within:hidden")}>
               {formatCompactTime(thread.updated_at)}
             </span>
-            <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:static group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:static group-focus-within:opacity-100">
+            {!readOnly && <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:static group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:static group-focus-within:opacity-100">
               <IconPopoverButton
                 icon={<Pencil className="size-3" />}
                 popoverContent="重命名会话"
@@ -408,24 +487,24 @@ function ThreadListItemImpl({
               />
               <IconPopoverButton
                 icon={<Trash2 className="size-3" />}
-                popoverContent={isRunning ? "任务运行中，无法删除" : "删除会话"}
-                disabled={isRunning}
+                popoverContent={managedWork ? "请在所属 Bot 或群中管理任务" : isRunning ? "任务运行中，无法删除" : "删除会话"}
+                disabled={isRunning || managedWork}
                 stopPropagation
                 className={cn(
                   "size-6 rounded-sm p-0 hover:bg-accent/20",
-                  isRunning && "cursor-not-allowed !opacity-30"
+                  (isRunning || managedWork) && "cursor-not-allowed !opacity-30"
                 )}
                 onClick={onDelete}
               />
-            </span>
+            </span>}
           </span>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onClick={onStartEditing}>
+        {!readOnly && <ContextMenuItem onClick={onStartEditing}>
           <Pencil className="size-4 mr-2" />
           重命名
-        </ContextMenuItem>
+        </ContextMenuItem>}
         <ContextMenuItem onClick={onExport} disabled={isRunning || isExporting}>
           {isExporting ? (
             <Loader2 className="size-4 mr-2 animate-spin" />
@@ -434,7 +513,7 @@ function ThreadListItemImpl({
           )}
           {isRunning ? "运行中，无法导出" : isExporting ? "正在导出" : "导出会话"}
         </ContextMenuItem>
-        {onFork ? (
+        {!readOnly && onFork ? (
           <ContextMenuItem onClick={onFork} disabled={forkDisabled}>
             {isForking ? (
               <Loader2 className="size-4 mr-2 animate-spin" />
@@ -444,7 +523,7 @@ function ThreadListItemImpl({
             {isForking ? "正在 fork" : forkDisabled ? "当前状态无法 fork" : "Fork 当前会话"}
           </ContextMenuItem>
         ) : null}
-        {onForkFromCheckpoint ? (
+        {!readOnly && onForkFromCheckpoint ? (
           <ContextMenuItem onClick={onForkFromCheckpoint} disabled={forkDisabled}>
             {isForking ? (
               <Loader2 className="size-4 mr-2 animate-spin" />
@@ -454,11 +533,13 @@ function ThreadListItemImpl({
             从 checkpoint fork
           </ContextMenuItem>
         ) : null}
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning}>
-          <Trash2 className="size-4 mr-2" />
-          {isRunning ? "运行中，无法删除" : "删除"}
-        </ContextMenuItem>
+        {!readOnly && <>
+          <ContextMenuSeparator />
+          <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning || managedWork}>
+            <Trash2 className="size-4 mr-2" />
+            {isRunning ? "运行中，无法删除" : "删除"}
+          </ContextMenuItem>
+        </>}
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -487,9 +568,12 @@ function areThreadListItemPropsEqual(
     prev.isSelected !== next.isSelected ||
     prev.isEditing !== next.isEditing ||
     prev.isUnread !== next.isUnread ||
+    prev.readOnly !== next.readOnly ||
     prev.isManagedRunning !== next.isManagedRunning ||
     Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
-    prev.hoverTitle !== next.hoverTitle
+    prev.hoverTitle !== next.hoverTitle ||
+    prev.botOwnerLabel !== next.botOwnerLabel ||
+    prev.botOwner !== next.botOwner
   ) {
     return false
   }
@@ -527,7 +611,9 @@ function SidebarSettingsButton(): React.JSX.Element {
 }
 
 // Settings visibility only changes the footer button, not the task list.
-export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
+export const ThreadSidebar = memo(function ThreadSidebar({
+  allowSearchAnchor = false
+}: { allowSearchAnchor?: boolean }): React.JSX.Element {
   const {
     threads,
     currentThreadId,
@@ -583,29 +669,17 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   const threadStateSummaries = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
 
-  // FIX: 发送消息后侧边栏线程时间不更新。
-  // 当线程开始或结束流式加载时，更新本地 updated_at，确保侧边栏时间立即刷新
-  const streamChangeRef = useRef<Record<string, boolean>>({})
+  // Refresh the list time when a reply starts or ends.
+  const previousStreamLoadingStates = useRef(allStreamLoadingStates)
   useEffect(() => {
-    const prev = streamChangeRef.current
-    const now = new Date()
-    const affectedIds = new Set<string>()
-    // 检查当前所有线程的加载状态变化
-    for (const threadId of Object.keys(allStreamLoadingStates)) {
-      const wasLoading = prev[threadId] === true
-      const isLoading = allStreamLoadingStates[threadId] === true
-      if (isLoading !== wasLoading) {
-        affectedIds.add(threadId)
-      }
+    const affectedIds = collectChangedStreamingThreadIds(
+      previousStreamLoadingStates.current,
+      allStreamLoadingStates
+    )
+    previousStreamLoadingStates.current = allStreamLoadingStates
+    if (affectedIds.length > 0) {
+      touchThreadSummaries(affectedIds, new Date())
     }
-    // 检查是否有线程从加载状态中移除（流式结束）
-    for (const threadId of Object.keys(prev)) {
-      if (!(threadId in allStreamLoadingStates)) {
-        affectedIds.add(threadId)
-      }
-    }
-    touchThreadSummaries(affectedIds, now)
-    streamChangeRef.current = { ...allStreamLoadingStates }
   }, [allStreamLoadingStates, touchThreadSummaries])
 
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
@@ -656,12 +730,12 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       const previousThread = previousThreadId
         ? threads.find((thread) => thread.thread_id === previousThreadId)
         : null
-      if (previousThread && !isHarnessProjectModeThread(previousThread)) {
+      if (previousThread && isRegularChatThread(previousThread)) {
         setShowHarnessBoardView(false)
         return
       }
 
-      const firstThread = threads.find((thread) => !isHarnessProjectModeThread(thread))
+      const firstThread = threads.find(isRegularChatThread)
       if (firstThread) {
         await selectThread(firstThread.thread_id)
         return
@@ -761,12 +835,30 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     [persistUnread]
   )
 
+  const needsBotProfiles = useMemo(
+    () =>
+      threads.some(
+        (thread) =>
+          isLocalWorkConversation(thread) ||
+          botDefaultWorkspaceOwner(getThreadWorkspacePath(thread))
+      ),
+    [threads]
+  )
+  const botProfiles = useBotWorkspaceProfiles(needsBotProfiles)
+  const botProfilesById = useMemo(
+    () => new Map(botProfiles.map((bot) => [bot.id, bot])),
+    [botProfiles]
+  )
   const threadProjects = useMemo<ThreadProject[]>(() => {
     const projectMap = new Map<string, ThreadProject>()
     let sortIndex = 0
 
     for (const thread of threads) {
-      if (isHarnessProjectModeThread(thread)) continue
+      if (
+        isHarnessProjectModeThread(thread) ||
+        (thread.metadata?.botId && !isLocalWorkConversation(thread))
+      )
+        continue
       const path = getThreadWorkspacePath(
         thread,
         threadStateSummaries[thread.thread_id]?.workspacePath
@@ -774,7 +866,6 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
       const isManagedInbox = isRemoteInboxThread(thread)
-
       if (existing) {
         existing.threads.push(thread)
         if (isManagedInbox && !existing.isManagedInbox) {
@@ -782,13 +873,22 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
           existing.defaultName = REMOTE_INBOX_WORKSPACE_NAME
           existing.name = REMOTE_INBOX_WORKSPACE_NAME
           existing.hasCustomName = false
+          existing.botWorkspace = undefined
         }
       } else {
-        const { defaultName, name, hasCustomName } = getProjectDisplayName(
+        const defaultOwner = !isManagedInbox && path ? botDefaultWorkspaceOwner(path) : null
+        const botWorkspace =
+          path && defaultOwner
+            ? botWorkspaceDisplay(path, botProfiles, undefined, botProfilesById.get(defaultOwner))
+            : undefined
+        const display = getProjectDisplayName(
           path,
           projectNameOverrides,
           isManagedInbox ? REMOTE_INBOX_WORKSPACE_NAME : undefined
         )
+        const defaultName = botWorkspace?.name ?? display.defaultName
+        const name = botWorkspace && !display.hasCustomName ? defaultName : display.name
+        const { hasCustomName } = display
         projectMap.set(key, {
           key,
           name,
@@ -796,6 +896,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
           path,
           threads: [thread],
           isManagedInbox,
+          botWorkspace,
           isPinned: pinnedProjectKeys.has(key),
           hasCustomName,
           sortIndex: sortIndex++
@@ -804,7 +905,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     }
 
     return sortPinnedFirst(projectMap.values(), (project) => project.isPinned)
-  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads])
+  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads, botProfilesById, botProfiles])
 
   const currentThread = useMemo(() => {
     if (!currentThreadId) return null
@@ -834,6 +935,15 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     () => selectBoundedSidebarWindow(threadProjects, visibleProjectCount, selectedProjectIndex),
     [selectedProjectIndex, threadProjects, visibleProjectCount]
   )
+  const visibleBotThreadIds = useMemo(() => visibleProjectWindow.items.flatMap(project => {
+    if (collapsedProjectKeys.has(project.key)) return []
+    const selected = project.key === currentProjectKey && currentThreadId
+      ? project.threads.findIndex(thread => thread.thread_id === currentThreadId) : -1
+    return selectBoundedSidebarWindow(project.threads,
+      visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS, selected).items
+      .filter(isLocalWorkConversation).map(thread => thread.thread_id)
+  }), [visibleProjectWindow, collapsedProjectKeys, currentProjectKey, currentThreadId, visibleThreadCounts])
+  const botThreadOwners = useThreadBotOwners(visibleBotThreadIds)
 
   const projectStatusByKey = useMemo(() => {
     const status = new Map<
@@ -902,12 +1012,47 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     [persistCollapsedProjects]
   )
 
+  const threadScrollAreaRef = useRef<HTMLDivElement>(null)
+  const searchAnchor = useThreadSearch((state) => state.ordinarySidebarAnchor)
+  useLayoutEffect(() => {
+    if (!allowSearchAnchor || activeSidebarTab !== "chat" || !searchAnchor) return undefined
+    const consume = () => {
+      if (useThreadSearch.getState().ordinarySidebarAnchor === searchAnchor) {
+        useThreadSearch.setState({ ordinarySidebarAnchor: null })
+      }
+    }
+    if (currentThreadId !== searchAnchor.threadId) {
+      consume()
+      return undefined
+    }
+    if (currentProjectKey && collapsedProjectKeys.has(currentProjectKey)) {
+      const frame = requestAnimationFrame(() => {
+        if (useThreadSearch.getState().ordinarySidebarAnchor === searchAnchor &&
+            useAppStore.getState().currentThreadId === searchAnchor.threadId) {
+          expandProject(currentProjectKey)
+        }
+      })
+      return () => cancelAnimationFrame(frame)
+    }
+    const viewport = threadScrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    )
+    if (viewport && revealSidebarThread(viewport, searchAnchor.threadId)) consume()
+    return undefined
+  }, [
+    activeSidebarTab, allowSearchAnchor, collapsedProjectKeys, currentProjectKey, currentThreadId,
+    expandProject, searchAnchor, visibleProjectWindow
+  ])
+
   const allProjectsCollapsed = useMemo(
     () =>
       threadProjects.length > 0 &&
       threadProjects.every((project) => collapsedProjectKeys.has(project.key)),
     [collapsedProjectKeys, threadProjects]
   )
+  const toggleAllProjectsLabel = threadProjects.length === 0
+    ? "暂无工作区"
+    : allProjectsCollapsed ? "全部展开工作区" : "全部收起工作区"
 
   const toggleAllProjects = useCallback(() => {
     setCollapsedProjectKeys((prev) => {
@@ -963,7 +1108,8 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   )
 
   const saveTitle = async (): Promise<void> => {
-    if (editingThreadId && editingTitle.trim()) {
+    if (editingThreadId && editingTitle.trim() &&
+        editingTitle.trim() !== (threads.find(thread => thread.thread_id === editingThreadId)?.title || "")) {
       await updateThread(editingThreadId, { title: editingTitle.trim() })
     }
     setEditingThreadId(null)
@@ -1292,8 +1438,9 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       {activeSidebarTab === "project" ? (
         <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
       ) : activeSidebarTab === "chat" ? (
-        <ScrollArea className="flex-1 min-h-0">
+        <ScrollArea ref={threadScrollAreaRef} className="flex-1 min-h-0">
           <div className="space-y-0.5 px-1 pb-1">
+            <BotWorkspaceEntry setMainView={setMainView} />
             <Button
               variant="ghost"
               size="sm"
@@ -1375,13 +1522,8 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                   <Minimize2 className="size-3.5" />
                 )
               }
-              popoverContent={
-                threadProjects.length === 0
-                  ? "暂无工作区"
-                  : allProjectsCollapsed
-                    ? "全部展开工作区"
-                    : "全部收起工作区"
-              }
+              aria-label={toggleAllProjectsLabel}
+              popoverContent={toggleAllProjectsLabel}
               disabled={threadProjects.length === 0}
               className="size-6 shrink-0 rounded-sm p-0"
               onClick={toggleAllProjects}
@@ -1461,6 +1603,11 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                                 {project.isPinned ? (
                                   <Pin
                                     className="size-4 shrink-0 text-primary"
+                                    aria-hidden="true"
+                                  />
+                                ) : project.botWorkspace ? (
+                                  <BotIcon
+                                    className="size-4 shrink-0 text-muted-foreground"
                                     aria-hidden="true"
                                   />
                                 ) : (
@@ -1559,13 +1706,20 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                           onMouseLeave={() => setHoveredProjectKey(null)}
                         >
                           <div className="mb-1 font-medium text-muted-foreground">
-                            {project.isManagedInbox ? "工作区说明" : "工作区路径"}
+                            {project.isManagedInbox
+                              ? "工作区说明"
+                              : (project.botWorkspace?.name ?? "工作区路径")}
                           </div>
                           <div className="break-all text-foreground">
                             {project.isManagedInbox
                               ? "应用托管目录，路径已隐藏"
                               : project.path || "未关联工作区"}
                           </div>
+                          {project.botWorkspace && (
+                            <p className="mt-2 text-muted-foreground">
+                              Bot 自动管理的默认目录，用于保存任务文件。
+                            </p>
+                          )}
                         </PopoverContent>
                       </Popover>
                       <ContextMenuContent>
@@ -1623,8 +1777,14 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
 
                           return (
                             <ThreadListItem
+                              botOwner={botThreadOwners.get(thread.thread_id)?.threadCreatedAt === new Date(thread.created_at).getTime()
+                                ? botThreadOwners.get(thread.thread_id) : undefined}
                               key={thread.thread_id}
                               thread={thread}
+                              botOwnerLabel={botWorkOwnerLabel(
+                                thread.metadata,
+                                botProfilesById.get(String(thread.metadata?.botId ?? ""))
+                              )}
                               isLoading={isLoading}
                               hasPendingApproval={hasPendingApproval}
                               hasPendingUserInput={hasPendingUserInput}
@@ -1749,24 +1909,13 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
           onForkingChange={handleForkCheckpointBusyChange}
         />
       ) : null}
-      <Dialog open={!!threadToDelete} onOpenChange={(open) => !open && setThreadToDelete(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>确认删除会话</DialogTitle>
-            <DialogDescription>
-              {`确定要删除「${threadToDelete ? getDisplayThreadTitle(threadToDelete) : ""}」吗？删除后不可恢复。`}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setThreadToDelete(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={confirmDeleteThread}>
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ThreadDeleteDialog
+        open={!!threadToDelete}
+        title="确认删除会话"
+        description={`确定要删除「${threadToDelete ? getDisplayThreadTitle(threadToDelete) : ""}」吗？删除后不可恢复。`}
+        onCancel={() => setThreadToDelete(null)}
+        onConfirm={confirmDeleteThread}
+      />
       <ThreadGroupDeleteDialog
         open={!!projectToDelete}
         title="确认删除工作区会话"

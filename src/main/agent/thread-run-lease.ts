@@ -1,4 +1,4 @@
-export type LocalThreadRunOwner = "desktop" | "im" | "scheduler"
+export type LocalThreadRunOwner = "desktop" | "im" | "scheduler" | "bot"
 
 export interface LocalThreadRunLease {
   threadId: string
@@ -67,6 +67,10 @@ export function onLocalThreadRunLeaseReleased(
 export function getLocalThreadRunLease(threadId: string): LocalThreadRunLease | undefined {
   const lease = activeLeases.get(threadId)
   return lease ? copyLease(lease) : undefined
+}
+
+export function getLocalThreadRunLeases(): LocalThreadRunLease[] {
+  return [...activeLeases.values()].map(copyLease)
 }
 
 export function claimLocalThreadRunLease(

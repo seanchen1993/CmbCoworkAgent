@@ -9,6 +9,7 @@ interface HtmlPreviewProps {
   fillHeight?: boolean
   showHeader?: boolean
   showModeToggle?: boolean
+  headerActions?: React.ReactNode
   viewMode?: "preview" | "source"
   readDependencyFile?: (resolvedPath: string) => Promise<string | null>
 }
@@ -180,34 +181,37 @@ export function HtmlPreview(props: HtmlPreviewProps): React.JSX.Element {
           <div className="min-w-0 truncate text-[11px] text-muted-foreground">
             HTML 预览{path ? ` · ${getFileName(path)}` : ""}
           </div>
-          {showModeToggle && (
-            <div className="inline-flex items-center rounded-md border border-border bg-background text-[11px]">
-              <button
-                type="button"
-                onClick={() => setInternalViewMode("preview")}
-                aria-pressed={currentViewMode === "preview"}
-                className={`px-2 py-0.5 transition-colors ${
-                  currentViewMode === "preview"
-                    ? "bg-muted text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                预览
-              </button>
-              <button
-                type="button"
-                onClick={() => setInternalViewMode("source")}
-                aria-pressed={currentViewMode === "source"}
-                className={`border-l border-border px-2 py-0.5 transition-colors ${
-                  currentViewMode === "source"
-                    ? "bg-muted text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                原文
-              </button>
-            </div>
-          )}
+          <div className="flex shrink-0 items-center gap-1">
+            {showModeToggle && (
+              <div className="inline-flex items-center rounded-md border border-border bg-background text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setInternalViewMode("preview")}
+                  aria-pressed={currentViewMode === "preview"}
+                  className={`px-2 py-0.5 transition-colors ${
+                    currentViewMode === "preview"
+                      ? "bg-muted text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  预览
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInternalViewMode("source")}
+                  aria-pressed={currentViewMode === "source"}
+                  className={`border-l border-border px-2 py-0.5 transition-colors ${
+                    currentViewMode === "source"
+                      ? "bg-muted text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  原文
+                </button>
+              </div>
+            )}
+            {props.headerActions}
+          </div>
         </div>
       )}
       {/* Source mode unmounts the runtime, listeners and timers; preview restarts a fresh sandbox. */}

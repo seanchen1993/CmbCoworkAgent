@@ -36,14 +36,23 @@ export function isGitRepositoryOverrideEnvironmentVariable(name: string): boolea
  * LFS-smudge suppression from the process that launched Electron. Preserve
  * ordinary variables while stripping the fixed names and indexed config family. */
 export function withoutGitRepositoryOverrides(
-  environment: NodeJS.ProcessEnv | Record<string, string | undefined>
+  environment: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  context: "isolated" | "workspace" = "isolated"
 ): Record<string, string> {
   const clean: Record<string, string> = {}
   for (const [name, value] of Object.entries(environment)) {
     if (value === undefined) continue
+    // Interactive Git uses the user's selected system/global config (e.g. URL
+    // rewrites and credentials) and checkout preferences in their own workspace.
+    const upper = name.toUpperCase()
+    const keepUserSetting =
+      context === "workspace" &&
+      (upper === "GIT_CONFIG_SYSTEM" ||
+        upper === "GIT_CONFIG_GLOBAL" ||
+        GIT_INHERITED_CHECKOUT_ENV_NAMES.has(upper))
     if (
-      isGitRepositoryOverrideEnvironmentVariable(name) ||
-      GIT_INHERITED_CHECKOUT_ENV_NAMES.has(name.toUpperCase())
+      !keepUserSetting &&
+      (isGitRepositoryOverrideEnvironmentVariable(name) || GIT_INHERITED_CHECKOUT_ENV_NAMES.has(upper))
     ) {
       continue
     }

@@ -124,7 +124,7 @@ export async function executeImInboxScheduledTask(
     .listOutbox()
     .filter((record) => record.deliveryId === deliveryId)
   if (existingOutbox.length > 0) {
-    await replyClient.sendPending()
+    await replyClient.sendPending(delivery.conversationKey)
     return {
       status: "completed",
       text: existingOutbox.map((record) => record.content).join("\n"),
@@ -219,7 +219,7 @@ export async function executeImInboxScheduledTask(
         format: "markdown"
       })
     )
-    await replyClient.sendPending()
+    await replyClient.sendPending(delivery.conversationKey)
     return { status: "completed", text, deliveryId }
   } finally {
     releaseLocalThreadRunLease(delivery.inboxThreadId, "scheduler", runId)

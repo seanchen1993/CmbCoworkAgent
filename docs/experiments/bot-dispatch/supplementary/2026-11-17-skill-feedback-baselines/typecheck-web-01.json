@@ -1,0 +1,14 @@
+{
+  "label": "typecheck-web-01",
+  "args": [
+    "node_modules/typescript/bin/tsc",
+    "--noEmit",
+    "-p",
+    "tsconfig.web.json",
+    "--composite",
+    "false"
+  ],
+  "exitCode": 2,
+  "seconds": 32.0,
+  "log": "typecheck-web-01.log.txt"
+}

@@ -1,0 +1,5 @@
+(node:48567) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS: silent tools → ephemeral opening reminder → visible update while running → continued tools and final result
+PASS: global off → Bot on, exact model tool inventory, profile rollback, create/update/delete in the same conversation
+Memory App evidence: <temp>/bot-memory-app-Pzkb3B

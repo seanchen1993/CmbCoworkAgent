@@ -1,0 +1,79 @@
+
+ RUN  v3.2.4 <repo>
+
+(node:81394) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:81395) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/main/bots/performance-regression.test.ts (10 tests | 1 failed) 1577ms
+   ✓ invalidates only the owning work, coalesces updates and rolls back with failed writes 33ms
+   ✓ invalidates peer commands/workflows and bounds large transaction notifications  311ms
+   × selects the next queued task using the priority index without sorting the backlog 308ms
+     → incomplete input
+   ✓ admits all independent tasks while yielding to a main message during startup, even with queued wakes 172ms
+   ✓ does not poll unavailable threads between admission slices and retries on availability 293ms
+   ✓ drains result turns when a main turn and all background leases finish between scheduling slices 221ms
+   ✓ pages every Feature with scoped cursors, searches beyond page one and keeps old waiting work visible 32ms
+   ✓ preserves Feature operation ordering while eliminating history sorts 201ms
+   ✓ reuses validated memory content while external edits, permissions and deletions stay fresh 4ms
+   ✓ omits oversized facts without losing later small memories or changing escaping/budget 0ms
+(node:81413) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+ ✓ src/main/bots/work-projection.test.ts (5 tests) 5144ms
+   ✓ work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history  4552ms
+(node:81426) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] Custom model: o07-test-model baseUrl: https://o07.invalid/v1
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 1/5 after 1000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 2/5 after 2000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 3/5 after 4000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 4/5 after 8000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 5/5 after 16000ms
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch headers in 0ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+ ✓ src/main/bots/feature-follow.test.ts (31 tests) 1256ms
+ ✓ src/main/bots/memory.test.ts (15 tests) 88ms
+ ✓ src/main/bots/prompt.test.ts (36 tests) 18ms
+ ✓ src/main/bots/host.test.ts (175 tests) 17339ms
+   ✓ stops the whole group including completed peer owners (worker first: false)  306ms
+   ✓ Bot control state > keeps delivered routine files visible in activity even with a terminal silence marker  1869ms
+   ✓ Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host  2732ms
+   ✓ Bot host scheduling > runs independent bots concurrently, serializes each conversation, and releases after cancellation cleanup  1759ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/performance-regression.test.ts > selects the next queued task using the priority index without sorting the backlog
+Error: incomplete input
+ ❯ NativeSqliteAdapter.exec src/main/db/native-sqlite-adapter.ts:202:31
+    200|     let statement: StatementSync
+    201|     try {
+    202|       statement = this.native.prepare(sql)
+       |                               ^
+    203|     } catch (error) {
+    204|       if (bindings !== undefined) throw error
+ ❯ src/main/bots/performance-regression.test.ts:108:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 5 passed (6)
+      Tests  1 failed | 271 passed (272)
+   Start at  22:30:47
+   Duration  18.23s (transform 2.21s, setup 0ms, collect 2.72s, tests 25.42s, environment 0ms, prepare 191ms)
+

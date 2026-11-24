@@ -1,0 +1,776 @@
+{
+  "originalSha256": "3095ec29973f23ef5d8b0682fe936b83aaf62eb3083cc36d6f921dfe0f90fa63",
+  "transformation": "Vitest suite totals and per-file summaries; all failed assertions retained; paths redacted",
+  "startTime": 1794911191897,
+  "success": false,
+  "numTotalTests": 1939,
+  "numPassedTests": 1938,
+  "numFailedTests": 1,
+  "numPendingTests": 0,
+  "files": [
+    {
+      "name": "src/main/agent/bot-communication-prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794911216501,
+      "endTime": 1794911216506.796,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/bot-communication-tools.test.ts",
+      "status": "passed",
+      "startTime": 1794911216798,
+      "endTime": 1794911216800.4856,
+      "total": 1,
+      "passed": 1,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/bot-dispatch-feedback.test.ts",
+      "status": "passed",
+      "startTime": 1794911214256,
+      "endTime": 1794911214347.987,
+      "total": 8,
+      "passed": 8,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/bot-turn-context.test.ts",
+      "status": "passed",
+      "startTime": 1794911213551,
+      "endTime": 1794911213655.5386,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/foreground-work-budget.test.ts",
+      "status": "passed",
+      "startTime": 1794911215525,
+      "endTime": 1794911215539.0627,
+      "total": 7,
+      "passed": 7,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/opening-reply-reminder.test.ts",
+      "status": "passed",
+      "startTime": 1794911213617,
+      "endTime": 1794911213721.0483,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/standard-thread-turn.test.ts",
+      "status": "passed",
+      "startTime": 1794911216389,
+      "endTime": 1794911216425.2925,
+      "total": 21,
+      "passed": 21,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/background-commands.test.ts",
+      "status": "passed",
+      "startTime": 1794911209572,
+      "endTime": 1794911210883.4148,
+      "total": 41,
+      "passed": 41,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/browser-host-entry.test.ts",
+      "status": "passed",
+      "startTime": 1794911203983,
+      "endTime": 1794911206910.0715,
+      "total": 11,
+      "passed": 11,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/browser-profile.test.ts",
+      "status": "passed",
+      "startTime": 1794911214141,
+      "endTime": 1794911214198.861,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/browser-window-focus.test.ts",
+      "status": "passed",
+      "startTime": 1794911215962,
+      "endTime": 1794911215964.2864,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/browser.test.ts",
+      "status": "passed",
+      "startTime": 1794911206279,
+      "endTime": 1794911207529.4749,
+      "total": 118,
+      "passed": 118,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/command-capacity.test.ts",
+      "status": "passed",
+      "startTime": 1794911193544,
+      "endTime": 1794911201888.9878,
+      "total": 31,
+      "passed": 31,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/conversation-link-service.test.ts",
+      "status": "passed",
+      "startTime": 1794911209909,
+      "endTime": 1794911210869.2942,
+      "total": 26,
+      "passed": 26,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/conversation-link.test.ts",
+      "status": "passed",
+      "startTime": 1794911213864,
+      "endTime": 1794911213947.198,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/electron-browser-engine.test.ts",
+      "status": "passed",
+      "startTime": 1794911211954,
+      "endTime": 1794911212193.112,
+      "total": 7,
+      "passed": 7,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/exchange-scope.test.ts",
+      "status": "passed",
+      "startTime": 1794911211803,
+      "endTime": 1794911212199.0117,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/feature-follow.test.ts",
+      "status": "passed",
+      "startTime": 1794911208806,
+      "endTime": 1794911210348.6064,
+      "total": 31,
+      "passed": 31,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/feature-steering.test.ts",
+      "status": "passed",
+      "startTime": 1794911214818,
+      "endTime": 1794911214827.3193,
+      "total": 9,
+      "passed": 9,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/files.test.ts",
+      "status": "passed",
+      "startTime": 1794911211091,
+      "endTime": 1794911212126.8752,
+      "total": 11,
+      "passed": 11,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/foreground-continuation.test.ts",
+      "status": "passed",
+      "startTime": 1794911205928,
+      "endTime": 1794911207343.682,
+      "total": 31,
+      "passed": 31,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/group-consumed-input.test.ts",
+      "status": "passed",
+      "startTime": 1794911210728,
+      "endTime": 1794911211394.1123,
+      "total": 7,
+      "passed": 7,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/group-delivery.test.ts",
+      "status": "passed",
+      "startTime": 1794911213920,
+      "endTime": 1794911214075.7966,
+      "total": 41,
+      "passed": 41,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/group-discussion.test.ts",
+      "status": "passed",
+      "startTime": 1794911197273,
+      "endTime": 1794911203841.154,
+      "total": 146,
+      "passed": 146,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/group-history.test.ts",
+      "status": "passed",
+      "startTime": 1794911211820,
+      "endTime": 1794911212268.4465,
+      "total": 9,
+      "passed": 9,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/group-mentions.test.ts",
+      "status": "passed",
+      "startTime": 1794911214537,
+      "endTime": 1794911214590.9844,
+      "total": 5,
+      "passed": 5,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/history-retention.test.ts",
+      "status": "passed",
+      "startTime": 1794911207266,
+      "endTime": 1794911209475.929,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/host-work-status.test.ts",
+      "status": "passed",
+      "startTime": 1794911208521,
+      "endTime": 1794911209477.6282,
+      "total": 5,
+      "passed": 5,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/host.test.ts",
+      "status": "passed",
+      "startTime": 1794911193574,
+      "endTime": 1794911205675.3582,
+      "total": 175,
+      "passed": 175,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/im-channel.test.ts",
+      "status": "passed",
+      "startTime": 1794911193870,
+      "endTime": 1794911253475.2883,
+      "total": 125,
+      "passed": 125,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/im-wire.test.ts",
+      "status": "passed",
+      "startTime": 1794911193995,
+      "endTime": 1794911202191.2732,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/introduction-delivery.test.ts",
+      "status": "passed",
+      "startTime": 1794911214279,
+      "endTime": 1794911214398.2324,
+      "total": 27,
+      "passed": 27,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/introduction.test.ts",
+      "status": "passed",
+      "startTime": 1794911212663,
+      "endTime": 1794911212858.1304,
+      "total": 7,
+      "passed": 7,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/local-service.test.ts",
+      "status": "passed",
+      "startTime": 1794911212090,
+      "endTime": 1794911212682.7693,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/mcp-scope.test.ts",
+      "status": "passed",
+      "startTime": 1794911214971,
+      "endTime": 1794911214977.3677,
+      "total": 7,
+      "passed": 7,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/memory-maintainer.test.ts",
+      "status": "passed",
+      "startTime": 1794911215243,
+      "endTime": 1794911215249.3835,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/memory-summary-adapter.test.ts",
+      "status": "passed",
+      "startTime": 1794911212769,
+      "endTime": 1794911212957.0964,
+      "total": 53,
+      "passed": 53,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/memory-tools.test.ts",
+      "status": "passed",
+      "startTime": 1794911213873,
+      "endTime": 1794911214067.8604,
+      "total": 14,
+      "passed": 14,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/memory.test.ts",
+      "status": "passed",
+      "startTime": 1794911213159,
+      "endTime": 1794911213345.4893,
+      "total": 15,
+      "passed": 15,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/message-mentions.test.ts",
+      "status": "passed",
+      "startTime": 1794911211279,
+      "endTime": 1794911211766.4229,
+      "total": 14,
+      "passed": 14,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/message-reactions.test.ts",
+      "status": "passed",
+      "startTime": 1794911210902,
+      "endTime": 1794911211565.4834,
+      "total": 17,
+      "passed": 17,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/message-reply.test.ts",
+      "status": "passed",
+      "startTime": 1794911213162,
+      "endTime": 1794911213437.8105,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/mock-channel.test.ts",
+      "status": "passed",
+      "startTime": 1794911209858,
+      "endTime": 1794911210789.9048,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/mock-runtime-policy.test.ts",
+      "status": "passed",
+      "startTime": 1794911216179,
+      "endTime": 1794911216181.7236,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/nested-replies.test.ts",
+      "status": "passed",
+      "startTime": 1794911202671,
+      "endTime": 1794911206702.0266,
+      "total": 85,
+      "passed": 85,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/notification-dispatch.test.ts",
+      "status": "passed",
+      "startTime": 1794911212808,
+      "endTime": 1794911213024.9268,
+      "total": 7,
+      "passed": 7,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/peer-background.test.ts",
+      "status": "passed",
+      "startTime": 1794911197376,
+      "endTime": 1794911206930.1318,
+      "total": 19,
+      "passed": 19,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/peer-feedback.test.ts",
+      "status": "passed",
+      "startTime": 1794911206214,
+      "endTime": 1794911207953.8975,
+      "total": 40,
+      "passed": 40,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794911214466,
+      "endTime": 1794911214522.2222,
+      "total": 36,
+      "passed": 36,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/request-receipts.test.ts",
+      "status": "passed",
+      "startTime": 1794911212644,
+      "endTime": 1794911212889.9712,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/runtime-adapter.test.ts",
+      "status": "passed",
+      "startTime": 1794911194525,
+      "endTime": 1794911205672.1897,
+      "total": 338,
+      "passed": 338,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/skill-policy.test.ts",
+      "status": "passed",
+      "startTime": 1794911216306,
+      "endTime": 1794911216308.199,
+      "total": 5,
+      "passed": 5,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/steering.test.ts",
+      "status": "passed",
+      "startTime": 1794911202532,
+      "endTime": 1794911205599.437,
+      "total": 27,
+      "passed": 27,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/stopped-task-context.test.ts",
+      "status": "passed",
+      "startTime": 1794911212709,
+      "endTime": 1794911212913.401,
+      "total": 6,
+      "passed": 6,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/telemetry.test.ts",
+      "status": "passed",
+      "startTime": 1794911211214,
+      "endTime": 1794911211897.7825,
+      "total": 21,
+      "passed": 21,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/thread-message-replies.test.ts",
+      "status": "passed",
+      "startTime": 1794911213457,
+      "endTime": 1794911213576.2087,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/tools.test.ts",
+      "status": "passed",
+      "startTime": 1794911208419,
+      "endTime": 1794911210473.411,
+      "total": 36,
+      "passed": 36,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-history.test.ts",
+      "status": "passed",
+      "startTime": 1794911214488,
+      "endTime": 1794911214569.3225,
+      "total": 6,
+      "passed": 6,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-input.test.ts",
+      "status": "passed",
+      "startTime": 1794911215917,
+      "endTime": 1794911215922.3489,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-projection.test.ts",
+      "status": "failed",
+      "startTime": 1794911193449,
+      "endTime": 1794911196716.6672,
+      "total": 4,
+      "passed": 3,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "work activity projection query boundaries"
+          ],
+          "fullName": "work activity projection query boundaries seeks the existing family index for list, detail and summaries despite unrelated private history",
+          "status": "failed",
+          "title": "seeks the existing family index for list, detail and summaries despite unrelated private history",
+          "duration": 2870.180042,
+          "failureMessages": [
+            "AssertionError: expected true to be false // Object.is equality\n    at <repo>/src/main/bots/work-projection.test.ts:110:64\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at runSuite (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-result.test.ts",
+      "status": "passed",
+      "startTime": 1794911210788,
+      "endTime": 1794911211405.4707,
+      "total": 15,
+      "passed": 15,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-status.test.ts",
+      "status": "passed",
+      "startTime": 1794911214893,
+      "endTime": 1794911214903.1067,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-tools.test.ts",
+      "status": "passed",
+      "startTime": 1794911209574,
+      "endTime": 1794911210260.487,
+      "total": 9,
+      "passed": 9,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work.test.ts",
+      "status": "passed",
+      "startTime": 1794911207289,
+      "endTime": 1794911208993.066,
+      "total": 28,
+      "passed": 28,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/workflow-ownership.test.ts",
+      "status": "passed",
+      "startTime": 1794911207031,
+      "endTime": 1794911209152.5676,
+      "total": 42,
+      "passed": 42,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/workflow-tool-surface.test.ts",
+      "status": "passed",
+      "startTime": 1794911215950,
+      "endTime": 1794911216117.1106,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/workspace-host.test.ts",
+      "status": "passed",
+      "startTime": 1794911211982,
+      "endTime": 1794911212272.0422,
+      "total": 6,
+      "passed": 6,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/workspace.test.ts",
+      "status": "passed",
+      "startTime": 1794911214624,
+      "endTime": 1794911214639.8083,
+      "total": 6,
+      "passed": 6,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/shared/bots/browser-scope-validation.test.ts",
+      "status": "passed",
+      "startTime": 1794911215442,
+      "endTime": 1794911215448.0674,
+      "total": 17,
+      "passed": 17,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/shared/bots/client-registry.test.ts",
+      "status": "passed",
+      "startTime": 1794911216141,
+      "endTime": 1794911216143.9048,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/shared/bots/context-budget.test.ts",
+      "status": "passed",
+      "startTime": 1794911215763,
+      "endTime": 1794911215766.3306,
+      "total": 22,
+      "passed": 22,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/shared/bots/file-delivery.test.ts",
+      "status": "passed",
+      "startTime": 1794911215039,
+      "endTime": 1794911215046.5894,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/shared/bots/message-mentions.test.ts",
+      "status": "passed",
+      "startTime": 1794911215717,
+      "endTime": 1794911215721.2014,
+      "total": 16,
+      "passed": 16,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/shared/bots/message-reactions.test.ts",
+      "status": "passed",
+      "startTime": 1794911214771,
+      "endTime": 1794911214774.4758,
+      "total": 3,
+      "passed": 3,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/shared/bots/message-reply.test.ts",
+      "status": "passed",
+      "startTime": 1794911215320,
+      "endTime": 1794911215323.2588,
+      "total": 16,
+      "passed": 16,
+      "failed": [],
+      "message": ""
+    }
+  ]
+}

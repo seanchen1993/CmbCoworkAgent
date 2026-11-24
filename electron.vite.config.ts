@@ -1,12 +1,15 @@
 import { resolve } from "path"
-import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "fs"
+import { createRequire } from "node:module"
+import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "fs"
 import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
+import { virtuosoResizeAnchor } from "./scripts/vite-virtuoso-resize-anchor"
 // import {app} from "electron"
 
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"))
+const requireDependency = createRequire(import.meta.url)
 
 // Plugin to copy resources to output
 function copyResources(): { name: string; closeBundle: () => void } {
@@ -28,6 +31,16 @@ function copyResources(): { name: string; closeBundle: () => void } {
       const srcSkills = resolve("skills")
       const destSkills = resolve("out/skills")
       mirrorRequiredDirectorySync(srcSkills, destSkills)
+
+      // Preserve the original notices for adapted Bot code in packaged builds.
+      const botNotices = resolve("out/resources/notices")
+      mkdirSync(botNotices, { recursive: true })
+      for (const [source, name] of [
+        ["src/renderer/src/components/bots/animation/LICENSE.hermes", "hermes-bots-animation.txt"],
+        ["src/renderer/src/components/bots/animation/vendor/README.md", "grok-avatar-source.md"],
+        ["src/renderer/src/components/bots/EDITOR-SOURCES.md", "grok-group-editor-source.md"]
+      ])
+        copyFileSync(resolve(source), resolve(botNotices, name))
 
       // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
       // require("./generated/*.js") 加载，因此这里把源码副本同步到
@@ -87,12 +100,24 @@ export default defineConfig({
   main: {
     // Bundle all dependencies into the main process
     build: {
+      externalizeDeps: {
+        exclude: [
+          "decode-named-character-reference", "micromark-util-decode-numeric-character-reference",
+          "micromark", "micromark-extension-gfm",
+          "remark-gfm", "remark-parse", "remark-rehype", "unified"
+        ]
+      },
       lib: {
         entry: {
-          index: "src/main/index.ts",
+          index: "src/main/bootstrap.ts",
+          application: "src/main/index.ts",
+          "bot-browser-host": "src/main/bots/browser-host-entry.ts",
+          "bot-browser-toolbar-preload": "src/main/bots/browser-toolbar-preload.ts",
           "browser-native-host": "src/main/browser/chrome/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
-          "code-exec-helper": "src/main/code-exec/helper-entry.ts"
+          "code-exec-helper": "src/main/code-exec/helper-entry.ts",
+          ...(process.env.CMB_BOTS_E2E === "1" ? { "bots-browser-e2e": "tests/support/bots-browser-e2e-entry.ts" } : {}),
+          ...(process.env.CMB_BOT_APP_E2E === "1" ? { "bots-app-e2e": "tests/support/bots-app-e2e-entry.ts" } : {})
         },
         formats: ["cjs"]
       },
@@ -105,18 +130,26 @@ export default defineConfig({
   preload: {},
   renderer: {
     cacheDir: resolve("node_modules/.vite/renderer"),
+    // Run the same Virtuoso transform in dev instead of pre-bundling past it.
+    optimizeDeps: { exclude: ["react-virtuoso"] },
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
       // __APP_VERSION__: app.getVersion(),
     },
     resolve: {
       alias: {
+        // Both dev and built Web Workers need the decoder without DOM dependencies.
+        "decode-named-character-reference": requireDependency.resolve("decode-named-character-reference"),
         "@": resolve("src/renderer/src"),
         "@renderer": resolve("src/renderer/src")
       }
     },
-    plugins: [optionalMmjModule(), react(), tailwindcss()],
+    plugins: [optionalMmjModule(), virtuosoResizeAnchor(), react(), tailwindcss()],
     server: {
+      fs: {
+        // Worktrees may share node_modules through a symlink; allow its static assets too.
+        allow: [resolve("."), realpathSync(resolve("node_modules"))]
+      },
       watch: {
         ignored: [
           "**/dist/**",

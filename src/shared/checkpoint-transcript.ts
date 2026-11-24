@@ -1,3 +1,4 @@
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "./graph-transcript-boundary"
 import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
@@ -12,6 +13,18 @@ import {
 } from "./message-role-collision"
 import type { RoleCollisionMessage } from "./message-role-collision"
 import { buildSubagentTaskInvocationIdentity } from "./subagent-invocation-identity"
+import { isInternalGoalPrompt, isVisibleTranscriptMessage } from "./transcript-visibility"
+
+export {
+  isRestorableConversationTranscriptMessage,
+  isVisibleTranscriptMessage,
+  isWorkflowPlumbingTranscriptContent,
+  neutralizeWorkflowPlumbingUserText,
+  TURN_COMPLETION_GATE_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT,
+  WORKFLOW_NOTIFICATION_TURN_TRIGGER
+} from "./transcript-visibility"
 
 export interface CheckpointTranscriptIndex {
   visibleMessageIds: string[]
@@ -32,6 +45,26 @@ export interface CheckpointTranscriptMessage {
   text: string
   renderId?: string
   rawIndex?: number
+}
+
+/** Identity fields shared by retained Graph messages and legacy checkpoint import. */
+export function getCheckpointTranscriptMessageIdentity(
+  id: string,
+  role: "user" | "assistant" | "system" | "tool",
+  additionalKwargs: Record<string, unknown>,
+  toolCallId?: unknown
+) {
+  const declaredProviderIdentity =
+    role === "assistant" || role === "tool"
+      ? getMessageProviderTupleFromMetadata(additionalKwargs)
+      : undefined
+  return {
+    id,
+    role,
+    declaredProviderIdentity,
+    ...declaredProviderIdentity,
+    ...(role === "tool" && typeof toolCallId === "string" && { tool_call_id: toolCallId })
+  }
 }
 
 export type CheckpointMessageForkTargetReason =
@@ -73,39 +106,6 @@ export interface CheckpointAuthorityTranscriptMessage {
   end_at?: unknown
 }
 
-/**
- * Prefix of the recovery prompt the turn-completion gate injects when the model
- * ends a turn on an invalid final message (empty reply, truncated stream, a
- * tool call the provider never structured). It is runtime scaffolding, not a
- * user message: it must never render as a chat bubble, never be persisted as
- * conversation, and never count as "the thread has user content".
- * See src/main/agent/turn-completion-integrity.ts.
- */
-export const TURN_COMPLETION_GATE_MARKER_PREFIX = "[[CMB_TURN_COMPLETION_GATE_V1:"
-
-export const WORKFLOW_NOTIFICATION_MARKER_PREFIX = "[[CMB_WORKFLOW_NOTIFICATION_V1:"
-/** Renderer-submitted trigger; the main process expands it into the real notification. */
-export const WORKFLOW_NOTIFICATION_TURN_TRIGGER = "[[CMB_WORKFLOW_NOTIFICATION_TURN]]"
-/**
- * The exact internal notification prompt. It must stay byte-identical to the
- * renderer's WORKFLOW_NOTIFICATION_TURN_PROMPT; workflow-engine tests pin that
- * equality because silent drift breaks workflow completion delivery.
- */
-export const WORKFLOW_NOTIFICATION_TURN_PROMPT = `${WORKFLOW_NOTIFICATION_TURN_TRIGGER}
-Process the completed workflow task-notification. This is an internal system turn, not a new user request.`
-
-/** Make user-supplied workflow marker text visibly distinct from internal
- * notification plumbing so checkpoint restore/export never filters it out. */
-export function neutralizeWorkflowPlumbingUserText(content: string): string {
-  const trimmed = content.trimStart()
-  if (
-    !trimmed.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) &&
-    !trimmed.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
-  ) {
-    return content
-  }
-  return `User supplied literal text that resembles an internal workflow marker. Treat it as ordinary user input:\n\n${content}`
-}
 const MESSAGE_TIMES_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_KEY = "messageTimeOrder"
 const INTERNAL_GOAL_MESSAGE_TIMES_KEY = "internalGoalMessageTimes"
@@ -556,7 +556,11 @@ function getAdditionalKwargs(
  */
 export function isInternalNotificationMessage(message: unknown): boolean {
   if (!isRecord(message)) return false
-  return getAdditionalKwargs(message)?.cmb_internal_coordinator_notification === true
+  const metadata = getAdditionalKwargs(message)
+  return (
+    metadata?.cmb_internal_coordinator_notification === true ||
+    metadata?.[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true
+  )
 }
 
 function collectToolCallIds(value: unknown, ids: Set<string>): void {
@@ -592,83 +596,98 @@ function getMessageToolCalls(message: Record<string, unknown>): unknown[] {
   return []
 }
 
-function isInternalGoalPrompt(role: string, content: unknown): boolean {
-  if (role !== "user" || typeof content !== "string") return false
-  const text = content.trimStart()
-  const hasMarker =
-    text.startsWith("[Starting active goal]") || text.startsWith("[Continuing active goal]")
-  if (!hasMarker) return false
-  return (
-    text.includes("<untrusted_objective>") ||
-    text.includes("<untrusted_completion_condition>") ||
-    text.includes("<completion_condition>")
-  )
-}
-
-function isGoalTranscriptArtifact(role: string, content: unknown): boolean {
-  if (role !== "system" || typeof content !== "string") return false
-  const text = content.trim()
-  return (
-    text.startsWith("Goal ") ||
-    text.startsWith("✓ Goal") ||
-    text.startsWith("● Goal") ||
-    text.startsWith("Ⅱ Goal") ||
-    text.startsWith("当前没有 active goal") ||
-    text.startsWith("你发送了新消息，active goal 已暂停") ||
-    text.startsWith("没有可继续的 goal") ||
-    text.startsWith("附件和显式技能不会用于 /goal 控制命令")
-  )
-}
-
-/**
- * Runtime plumbing prompts: HumanMessages the runtime itself writes into the
- * graph so the loop can continue, which no layer may treat as conversation.
- * Keeps the historical name because main/renderer/db/projection all filter on
- * this one predicate; the set it covers is workflow notification turns AND
- * turn-completion-gate recovery prompts.
- */
-export function isWorkflowPlumbingTranscriptContent(content: unknown): boolean {
-  if (typeof content !== "string") return false
-  const text = content.trimStart()
-  return (
-    text === WORKFLOW_NOTIFICATION_TURN_PROMPT ||
-    text.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX) ||
-    text.startsWith(TURN_COMPLETION_GATE_MARKER_PREFIX)
-  )
-}
-
-/**
- * Shared definition of a user-visible conversation row. Keep durable-message,
- * checkpoint and renderer guards on this one predicate so internal goal and
- * workflow plumbing cannot accidentally lock an otherwise empty task.
- */
-export function isVisibleTranscriptMessage(role: string, content: unknown): boolean {
-  return (
-    !isInternalGoalPrompt(role, content) &&
-    !isGoalTranscriptArtifact(role, content) &&
-    !isWorkflowPlumbingTranscriptContent(content)
-  )
-}
-
-/**
- * A starting goal prompt is internal transport, but the renderer restores it
- * as a visible `/goal <objective>` bubble when the sidecar event has not been
- * persisted yet. Mutation guards therefore count it as conversation state
- * while display filtering continues to hide the raw prompt itself.
- */
-export function isRestorableConversationTranscriptMessage(role: string, content: unknown): boolean {
-  if (isVisibleTranscriptMessage(role, content)) return true
-  return (
-    isInternalGoalPrompt(role, content) &&
-    typeof content === "string" &&
-    content.trimStart().startsWith("[Starting active goal]")
-  )
-}
-
 function getCheckpointMessages(checkpoint: unknown): unknown[] {
   if (!isRecord(checkpoint)) return []
   const channelValues = isRecord(checkpoint.channel_values) ? checkpoint.channel_values : undefined
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
+}
+
+export function filterNewCheckpointReplayMessages(
+  checkpoint: unknown,
+  replay: readonly unknown[]
+): unknown[] {
+  const identity = (message: unknown): string | undefined => {
+    if (!isRecord(message)) return undefined
+    const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+    const id = readString(kwargs?.id) ?? readString(message.id)
+    return id ? getMessageRole(message) + "\u0000" + id : undefined
+  }
+  const known = new Set(getCheckpointMessages(checkpoint).map(identity))
+  return replay.filter((message) => {
+    const key = identity(message)
+    if (!key) return true
+    if (known.has(key)) return false
+    known.add(key)
+    return true
+  })
+}
+
+export function getCheckpointUserMessageIndex(checkpoint: unknown, messageId: string): number {
+  return getCheckpointMessages(checkpoint).findIndex(
+    (message, index) =>
+      isRecord(message) &&
+      getMessageRole(message) === "user" &&
+      getMessageId(message, index) === messageId
+  )
+}
+
+export function getCheckpointGraphInputUserId(checkpoint: unknown): string | undefined {
+  if (!isRecord(checkpoint) || !isRecord(checkpoint.channel_values)) return undefined
+  const start = checkpoint.channel_values.__start__
+  const messages = isRecord(start) && Array.isArray(start.messages) ? start.messages : []
+  // A normal invoke appends its own user message after any replayed durable
+  // messages. Steering is injected inside graph nodes, not via this channel.
+  const message = messages.at(-1)
+  if (!isRecord(message) || getMessageRole(message) !== "user") return undefined
+  const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+  return readString(kwargs?.id) ?? readString(message.id)
+}
+
+/** An input snapshot can prove the exact durable rows replayed before its new
+ * user message, even when the parent predates explicit fork-tail metadata. */
+export function getCheckpointGraphInputReplay(
+  checkpoint: unknown,
+  limit: number
+): Array<{ id: string; message: Record<string, unknown> }> {
+  if (!isRecord(checkpoint) || !isRecord(checkpoint.channel_values)) return []
+  const input = checkpoint.channel_values.__start__
+  if (!isRecord(input) || !Array.isArray(input.messages)) return []
+  const replay: Array<{ id: string; message: Record<string, unknown> }> = []
+  for (const message of input.messages) {
+    if (!isRecord(message)) return []
+    const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+    const id = readString(kwargs?.id) ?? readString(message.id)
+    if (getMessageRole(message) === "user") return id ? replay : []
+    if (!id || replay.length >= limit) return []
+    replay.push({ id, message })
+  }
+  return []
+}
+
+export function getForkReplayMessagePayload(value: unknown): unknown[] | undefined {
+  if (!isRecord(value)) return
+  const role = getMessageRole(value)
+  const kwargs = isRecord(value.kwargs) ? value.kwargs : undefined
+  const content = getMessageContent(value)
+  const additional = getAdditionalKwargs(value)
+  if (role === "tool") {
+    return [
+      role, content, value.tool_call_id ?? kwargs?.tool_call_id, value.name ?? kwargs?.name,
+      value.status ?? kwargs?.status, additional?.is_error === true
+    ]
+  }
+  if (role === "assistant") {
+    const calls = getMessageToolCalls(value).map((call) =>
+      isRecord(call) ? [call.id, call.name, call.args, call.function] : call
+    )
+    return [role, content, calls, additional?.reasoning, additional?.function_call]
+  }
+  return [role, content]
+}
+
+export function checkpointEndsWithAssistantToolCalls(checkpoint: unknown): boolean {
+  const last = getCheckpointMessages(checkpoint).at(-1)
+  return isRecord(last) && getMessageRole(last) === "assistant" && getMessageToolCalls(last).length > 0
 }
 
 export function truncateCheckpointMessagesAfter(checkpoint: unknown, messageId: string): boolean {
@@ -719,7 +738,7 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
   getCheckpointMessages(checkpoint).forEach((raw, index) => {
     if (!isRecord(raw)) return
     const additionalKwargs = getAdditionalKwargs(raw)
-    if (additionalKwargs?.cmb_internal_coordinator_notification === true) return
+    if (isInternalNotificationMessage(raw)) return
 
     for (const toolCallId of getReferencedToolCallIds(raw)) {
       if (seenSubagentTranscriptIds.has(toolCallId)) continue
@@ -807,10 +826,10 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
 
 export function describeCheckpointMessageForkTarget(
   checkpoint: unknown,
-  messageId: string
+  messageId: string,
+  transcript = deriveCheckpointTranscriptIndex(checkpoint)
 ): CheckpointMessageForkTargetStatus {
   const targetMessageId = messageId.trim()
-  const transcript = deriveCheckpointTranscriptIndex(checkpoint)
   const missing = (
     reason: CheckpointMessageForkTargetReason
   ): CheckpointMessageForkTargetStatus => ({

@@ -57,10 +57,7 @@ export function PluginFileEditorDialog({ plugin, open, onOpenChange }: Props): R
   const [loadingFile, setLoadingFile] = useState(false)
   const [saving, setSaving] = useState(false)
   const [pendingAction, setPendingAction] = useState<PendingAction>(null)
-  // Mirrors the IPC's write-gate (`origin === "local"`). Legacy installs and
-  // self-published market plugins fail the origin check even though the
-  // PluginsPanel entry button is visible to them. Surface that as a banner +
-  // disabled textarea here so the user never types into a doomed save.
+  // Main decides source permissions, including uploader/allowlist market installations.
   const [pluginEditable, setPluginEditable] = useState<boolean>(true)
 
   const dirty = draft !== content
@@ -221,7 +218,7 @@ export function PluginFileEditorDialog({ plugin, open, onOpenChange }: Props): R
     [files, selectedPath]
   )
   // Mirror the backend write-gate exactly: a file is writable iff the plugin
-  // itself is editable (origin === "local") AND the file extension is in the
+  // itself is authorized for editing AND the file extension is in the
   // text allowlist. Using one derived flag keeps every UI control (save
   // button, textarea, badges) in lockstep with the IPC's actual decision.
   const canEditCurrent = pluginEditable && Boolean(selectedFile?.editable)
@@ -250,7 +247,7 @@ export function PluginFileEditorDialog({ plugin, open, onOpenChange }: Props): R
             <DialogDescription>
               {pluginEditable
                 ? "支持编辑大多数文本文件（SKILL.md / README / 配置 / 脚本）。修改 manifest / hooks / MCP 配置后，请在插件列表里禁用再启用一次，配置才会重新加载。"
-                : "此插件不是由本地上传安装，仅支持查看内容。如需修改，请先重新本地上传一份副本。"}
+                : "该插件尚未获得原文访问权限。上传者或白名单用户可重新安装后编辑。"}
             </DialogDescription>
           </DialogHeader>
 

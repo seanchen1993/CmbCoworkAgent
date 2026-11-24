@@ -1,0 +1,176 @@
+import { ModelSwitcher } from "@/components/chat/ModelSwitcher"
+import { botWorkStatus } from "@/lib/bot-work-status"
+import { useRef, useState, type ReactNode } from "react"
+import { ArrowUpRight, Check, MoreHorizontal, RotateCcw } from "lucide-react"
+import { useThreadContext } from "@/lib/thread-context"
+import { openBotWorkThreadChat, resolveBotWorkThreadForNavigation } from "@/lib/bot/work-thread-summary"
+import { useAppStore } from "@/lib/store"
+import { botErrorMessage } from "@/lib/bot-error-message"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import type { BotClient } from "../../../../shared/bots/contracts"
+import type { BotWorkItem } from "../../../../shared/bots/work"
+import type { useBotWorks } from "./use-bot-works"
+
+/** One place for task navigation and lifecycle; the side panel remains a directory. */
+export function BotWorkHeader({
+  client,
+  work,
+  controller,
+  captureWorkNavigation,
+  disabled
+}: {
+  client: BotClient
+  work: BotWorkItem
+  controller: ReturnType<typeof useBotWorks>
+  captureWorkNavigation?(): () => boolean
+  disabled: boolean
+}) {
+  const threadContext = useThreadContext()
+  const [saving, setSaving] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [error, setError] = useState<string>()
+  const operation = useRef<{ fingerprint: string; id: string } | undefined>(undefined)
+  const busy =
+    ["running", "queued", "waiting_user"].includes(work.executionState ?? "") ||
+    work.backgroundBusy ||
+    work.pendingPeers > 0 ||
+    work.execution?.runActive === true ||
+    Boolean(work.execution && Object.values(work.execution.background).some(Boolean))
+  const current = () =>
+    controller.current.current.botId === work.botId &&
+    controller.current.current.selectedId === work.id &&
+    controller.current.current.audience ===
+      (work.source && !work.source.personal ? work.source.bindingId : "desktop")
+  const openConversation = async () => {
+    if (saving || !client.conversations) return
+    const isNavigationCurrent = captureWorkNavigation?.()
+    const isCurrent = () => current() && isNavigationCurrent?.() !== false
+    setMenuOpen(false)
+    setSaving(true)
+    setError(undefined)
+    try {
+      if (work.source) {
+        const result = await client.conversations.expose(work.botId, work.id)
+        if (!isCurrent()) return
+        await useAppStore.getState().loadThreads()
+        if (isCurrent()) await useAppStore.getState().selectThread(result.threadId)
+      } else {
+        const threadId = await resolveBotWorkThreadForNavigation(client, work, isCurrent)
+        if (threadId && isCurrent()) await openBotWorkThreadChat(threadContext, threadId)
+      }
+    } catch (cause) {
+      if (isCurrent()) setError(botErrorMessage(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+  const apply = async () => {
+    if (saving) return
+    setMenuOpen(false)
+    setSaving(true)
+    setError(undefined)
+    try {
+      const action = work.state === "completed" ? "continue" : "complete"
+      const fingerprint = JSON.stringify([work.id, work.version, action])
+      if (operation.current?.fingerprint !== fingerprint)
+        operation.current = { fingerprint, id: crypto.randomUUID() }
+      await client.works!.lifecycle({
+        botId: work.botId,
+        workId: work.id,
+        expectedVersion: work.version,
+        action,
+        operationId: operation.current.id
+      })
+      operation.current = undefined
+      if (current()) await controller.refresh()
+    } catch (cause) {
+      if (current()) setError(botErrorMessage(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+  const canChange = !disabled && !saving && !busy && work.conversation?.state !== "detached"
+  const renderMoreMenu = (modelPicker?: ReactNode) => (
+    <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      <PopoverTrigger asChild>
+        <button className="bot-icon-button" aria-label="任务更多操作">
+          <MoreHorizontal size={17} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" data-bot-popup className="bot-workspace-menu rounded-xl">
+        {modelPicker}
+        {client.conversations && (!work.source || work.source.transport === "im") && (
+          <button
+            className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
+            disabled={saving}
+            onClick={() => void openConversation()}
+          >
+            <ArrowUpRight size={14} />
+            在对话模式打开
+          </button>
+        )}
+        {work.state !== "completed" && work.executionState !== "completed" && (
+          <button
+            className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
+            disabled={!canChange}
+            onClick={() => void apply()}
+          >
+            <Check size={14} />
+            完成任务
+          </button>
+        )}
+        <hr className="my-2 border-border" />
+        <p className="max-w-72 whitespace-normal text-xs font-normal text-muted-foreground">
+          {work.source && !work.source.personal
+            ? "回复和结果回到原群，沿用该群的记忆范围。"
+            : "补充要求会继续此任务，沿用原来的工作目录。"}
+        </p>
+      </PopoverContent>
+    </Popover>
+  )
+  return (
+    <div className="bot-task-toolbar">
+      <div className="bot-task-toolbar-row">
+        <span className="bot-task-status" role="status">
+          {botWorkStatus(work)}
+        </span>
+        {!busy && work.executionState === "completed" && work.state !== "completed" && (
+          <button
+            className="bot-task-finish"
+            disabled={!canChange}
+            onClick={() => void apply()}
+          >
+            <Check size={14} />
+            完成任务
+          </button>
+        )}
+        {work.state === "completed" && (
+          <button
+            className="bot-task-finish"
+            disabled={!canChange}
+            onClick={() => void apply()}
+          >
+            <RotateCcw size={14} />
+            继续处理
+          </button>
+        )}
+        {work.conversation?.state === "bound" ? (
+          <ModelSwitcher
+            threadId={work.threadId}
+            variant="menu"
+            onSelect={() => setMenuOpen(false)}
+          >
+            {renderMoreMenu}
+          </ModelSwitcher>
+        ) : (
+          renderMoreMenu()
+        )}
+      </div>
+      {error && (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}

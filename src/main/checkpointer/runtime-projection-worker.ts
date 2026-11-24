@@ -5,6 +5,8 @@ import type {
 } from "./runtime-projection-protocol"
 import {
   CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+  CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED,
+  CHECKPOINT_RUNTIME_PROJECTION_RESUME_REQUIRED,
   CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
 } from "./runtime-projection-protocol"
 import {
@@ -38,11 +40,9 @@ function failureResponse(
     ok: false,
     error: {
       code:
-        normalized.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
-          ? CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
-          : normalized.name === CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
-            ? CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
-            : "CHECKPOINT_RUNTIME_PROJECTION_FAILED",
+        [CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED, CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+          CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY, CHECKPOINT_RUNTIME_PROJECTION_RESUME_REQUIRED]
+          .find((code) => code === normalized.name) ?? "CHECKPOINT_RUNTIME_PROJECTION_FAILED",
       message: normalized.message,
       ...(normalized.stack ? { stack: normalized.stack } : {})
     }
@@ -77,7 +77,8 @@ workerPort.on("message", (request: CheckpointRuntimeProjectionWorkerRequest) => 
         request.messageDatabasePath,
         request.threadId,
         request.checkpointNs,
-        request.cancellationBuffer
+        request.cancellationBuffer,
+        request.searchGuard
       )
       workerPort.postMessage({
         type: "bootstrap-legacy-transcript-result",

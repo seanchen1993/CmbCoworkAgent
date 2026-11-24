@@ -264,6 +264,17 @@ describe("thread conversation presence hydration", () => {
     ).toBe(false)
   })
 
+  it("shows healthy durable rows while a changed checkpoint is reverified", () => {
+    const page = { total: 2, hasVisibleMessages: true,
+      legacyCheckpointMigrationStatus: "complete" as const, legacyCheckpointSourceNeedsVerification: true }
+    expect(shouldBootstrapLegacyCheckpointTranscript(page)).toBe(true)
+    expect(shouldAwaitCheckpointConversationPresence(page)).toBe(false)
+    expect(shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, page })).toBe(false)
+    const empty = { ...page, total: 0, hasVisibleMessages: false }
+    expect(shouldAwaitCheckpointConversationPresence(empty)).toBe(true)
+    expect(shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, page: empty })).toBe(true)
+  })
+
   it("keeps an unmarked internal-only legacy page unknown until checkpoint restore", () => {
     const ambiguousLegacyPage = {
       total: 3,

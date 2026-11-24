@@ -1,3 +1,5 @@
+import type { KnowledgeBaseListItem } from "../../../../shared/knowledge-base-types"
+import { KnowledgeDepositionTarget } from "./KnowledgeDepositionTarget"
 import React, { useState, useCallback, useEffect, useRef } from "react"
 import { Plus, Trash2, Loader2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -5,7 +7,6 @@ import { Input } from "@/components/ui/input"
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter
@@ -39,15 +40,25 @@ interface LabelRow {
 interface KnowledgeDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSubmit: (content: string) => void
+  onSubmit: (content: string, targetId?: string) => void
   projectNumber: string
   leanToken: string
+  knowledgeBases: KnowledgeBaseListItem[]
+  knowledgeBaseIds: string[]
 }
 
 const MAX_ROWS = 10
 const DEPLOY_UNIT_SEARCH_MIN_CHARS = 2
 
-export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, leanToken }: KnowledgeDialogProps): React.JSX.Element {
+export function KnowledgeDialog({
+  open,
+  onOpenChange,
+  onSubmit,
+  projectNumber,
+  leanToken,
+  knowledgeBases,
+  knowledgeBaseIds
+}: KnowledgeDialogProps): React.JSX.Element {
   const [labelRows, setLabelRows] = useState<LabelRow[]>([{
     deployUnit: "",
     deployUnitName: "",
@@ -69,6 +80,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
   const [labels, setLabels] = useState<HarnessPipelineLabelItem[][]>([[]])
   const [loadingLabels, setLoadingLabels] = useState<boolean[]>([false])
 
+  const [targetId, setTargetId] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -95,6 +107,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       setLoadingLabels([false])
       setError(null)
       setSubmitting(false)
+      setTargetId("")
     }
   }, [open])
 
@@ -460,6 +473,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
   }
 
   const validateForm = (): string | null => {
+    if (knowledgeBaseIds.length > 1 && !targetId) return "公共系统约束"
     for (let i = 0; i < labelRows.length; i++) {
       const row = labelRows[i]
       if (!row.deployUnit) {
@@ -508,7 +522,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
 
     try {
       const content = generateContent()
-      onSubmit(content)
+      onSubmit(content, knowledgeBaseIds.length === 1 ? knowledgeBaseIds[0] : targetId)
       onOpenChange(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : "提交失败")
@@ -527,10 +541,19 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
     <Dialog open={open} onOpenChange={handleDialogClose}>
       <DialogContent className="z-[60] sm:max-w-4xl max-h-[90vh] overflow-hidden">
         <DialogHeader>
-          <DialogTitle>知识库沉淀</DialogTitle>
-          <DialogDescription>填写相关信息，生成知识库同步请求</DialogDescription>
+          <DialogTitle>系统约束沉淀</DialogTitle>
         </DialogHeader>
 
+        {knowledgeBaseIds.length > 1 && (
+          <KnowledgeDepositionTarget
+            items={knowledgeBaseIds.flatMap((id) =>
+              knowledgeBases.filter((item) => item.idKey === id)
+            )}
+            value={targetId}
+            disabled={submitting}
+            onChange={setTargetId}
+          />
+        )}
         <ScrollArea ref={scrollAreaRef} className="max-h-[60vh] pr-3">
           <div className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

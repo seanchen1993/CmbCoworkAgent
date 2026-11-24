@@ -23,6 +23,7 @@ export interface HookScopeSnapshot {
 export interface HookScopeController {
   /** Human input for this invocation; never inferred from model-facing text. */
   rawUserInput?: string
+  readonly disabled?: boolean
   readonly activePluginIds: ReadonlySet<string>
   readonly activeSkillNames: ReadonlySet<string>
   readonly activeSkillPaths: ReadonlySet<string>
@@ -53,6 +54,7 @@ export interface HookScopeController {
 }
 
 export interface HookScopeOptions {
+  disabled?: boolean
   initialPersistentHookKeys?: readonly string[]
   onPersistentHookKeysChanged?: (keys: readonly string[]) => void
 }
@@ -142,6 +144,7 @@ export function createHookScope(options: HookScopeOptions = {}): HookScopeContro
   }
 
   return {
+    ...(options.disabled ? { disabled: true } : {}),
     activePluginIds,
     activeSkillNames,
     activeSkillPaths,
@@ -235,7 +238,7 @@ export function mergeHookScopeSnapshot(
  * parent or visible to sibling children.
  */
 export function createInheritedHookScope(parent: HookScopeController): HookScopeController {
-  const child = createHookScope()
+  const child = createHookScope({ disabled: parent.disabled })
   child.rawUserInput = parent.rawUserInput
   mergeHookScopeSnapshot(child, parent.snapshot())
   return child
@@ -329,6 +332,7 @@ export function filterScopedHooks(
   onSkipped?: ScopeSkipCallback,
   event?: HookEvent
 ): HookConfig[] {
+  if (scope?.disabled) return []
   const { baseHooks, pluginHooks, skillHooks } = candidates
   if (!scope) return baseHooks
   const visibilityScope: ProjectModeSkillScope = {
@@ -445,6 +449,7 @@ export function resolveEnabledHooksForRun(
   if (event !== "SessionEnd" && context.rawUserInput === undefined) {
     context.rawUserInput = scope?.rawUserInput
   }
+  if (scope?.disabled) return []
   return filterScopedHooks(
     {
       baseHooks: getEnabledHooks(workspacePath),

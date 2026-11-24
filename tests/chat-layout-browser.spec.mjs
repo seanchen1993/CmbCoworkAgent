@@ -102,6 +102,8 @@ try {
   )
   await page.addStyleTag({ content: css.build(scanner.scan()) })
   await page.evaluate(() => {
+    // Tool rows subscribe to the desktop Mod bridge; this browser fixture has no preload.
+    window.api = { mods: { cards: async () => [], onCardsChanged: () => () => {} } }
     window.chatLayoutRenders = 0
     window.chatLayoutRendersById = {}
   })

@@ -312,3 +312,79 @@ it("reuses completed scoped rankings for paging and reversals, expires and clear
   cache.clear()
   expect(cache.get("scope-a")).toBeUndefined()
 })
+
+it("joins creation snapshots with main-Agent end times across all ID pages for elapsed ranking", async () => {
+  const ids = Array.from({ length: 1001 }, (_, i) => `p${i}`)
+  const start = Date.parse("2026-10-01T00:00:00Z")
+  let pages = 0
+  const query = vi.fn(async (index: string, body: Record<string, unknown>) => {
+    const aggs = body.aggs as { projects: { composite?: { after?: unknown }; aggs: unknown } }
+    if (aggs.projects.composite) {
+      expect(index).toBe(scope.eventIndex)
+      expect(aggs.projects.aggs).toMatchObject({
+        creation: {
+          top_hits: {
+            size: 1,
+            _source: { includes: ["properties.lifecycleCreatedAt"] }
+          }
+        }
+      })
+      const offset = pages++ * 1000
+      return {
+        aggregations: {
+          projects: {
+            buckets: ids.slice(offset, offset + 1000).map((id) => ({
+              key: { project: id },
+              creation: {
+                hits: {
+                  hits: [
+                    {
+                      _source: {
+                        properties: {
+                          lifecycleCreatedAt:
+                            id === "p0" ? undefined : new Date(start).toISOString()
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            })),
+            ...(offset === 0 ? { after_key: { project: "p999" } } : {})
+          }
+        }
+      }
+    }
+    expect(index).toBe(scope.traceIndex)
+    const filters = (body.query as { bool: { filter: Array<Record<string, unknown>> } }).bool.filter
+    expect(filters).toContainEqual(projectModeMainAgentConversationFilter())
+    expect(aggs.projects.aggs).toMatchObject({
+      main_agent_conversations: {
+        aggs: { last_execution_end: { max: { field: "endedAt" } } }
+      }
+    })
+    const batch = (filters.find((f) => f.terms)!.terms as { harnessProjectId: string[] })
+      .harnessProjectId
+    expect(batch.length).toBeLessThanOrEqual(200)
+    return result(
+      batch.map((id) =>
+        conversationBucket(id, {
+          last_execution_end: {
+            value:
+              id === "p1" ? null : id === "p2" ? start - 1 : start + Number(id.slice(1)) * 60000
+          }
+        })
+      )
+    )
+  })
+  const metrics = await fetchProjectAttentionRanking(scope, "elapsedMs", query)
+  expect(pages).toBe(2)
+  expect(metrics.size).toBe(1001)
+  expect(metrics.get("p1000")).toBe(60_000_000)
+  for (const id of ["p0", "p1", "p2"]) expect(metrics.get(id)).toBeNull()
+  for (const order of ["asc", "desc"] as const) {
+    const sorted = [...metrics].sort((a, b) => compareProjectAttentionValues(a[1], b[1], order))
+    expect(sorted[0][0]).toBe(order === "asc" ? "p3" : "p1000")
+    expect(sorted.slice(-3).map(([id]) => id)).toEqual(["p0", "p1", "p2"])
+  }
+})

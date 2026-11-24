@@ -11,10 +11,11 @@ export function useKnowledgeDetails<T>(
   open: boolean,
   rooms: string[],
   family: string,
-  request: (rooms: string[]) => Promise<DetailResult<T>>
+  request: (rooms: string[]) => Promise<DetailResult<T>>,
+  refreshKey = 0
 ) {
   const [retryKey, setRetryKey] = useState(0)
-  const key = JSON.stringify([rooms, retryKey])
+  const key = JSON.stringify([rooms, retryKey, refreshKey])
   const [state, setState] = useState<{ key: string; data: T | null; error: string | null } | null>(
     null
   )
@@ -50,3 +51,12 @@ export function useKnowledgeDetails<T>(
     retry: () => setRetryKey((n) => n + 1)
   }
 }
+
+const loadPeople = (rooms: string[]) =>
+  window.api.dashboard.knowledgeUserDetails({ upperOrgLv1: rooms })
+
+export function useKnowledgePeople(rooms: string[], refreshKey: number) {
+  return useKnowledgeDetails(true, rooms, "dashboard:knowledgeUserDetails", loadPeople, refreshKey)
+}
+
+export type KnowledgePeopleState = ReturnType<typeof useKnowledgePeople>

@@ -1,13 +1,31 @@
-import type { CheckpointTuple } from "@langchain/langgraph-checkpoint"
+import type { CheckpointMetadata, CheckpointTuple } from "@langchain/langgraph-checkpoint"
 import {
+  checkpointEndsWithAssistantToolCalls,
   checkpointHasInterrupt,
   describeCheckpointMessageForkTarget,
   deriveCheckpointTranscriptIndex,
+  filterNewCheckpointReplayMessages,
+  getCheckpointGraphInputUserId,
+  getCheckpointUserMessageIndex,
   type CheckpointTranscriptIndex
 } from "./checkpoint-transcript"
 
 export const FORK_BOUNDARY_MARKER_VERSION = 1
 export const FORK_BOUNDARY_THREAD_METADATA_KEY = "cmbForkBoundaryVersion"
+export const FORK_DURABLE_TAIL_KEY = "cmb_fork_durable_tail"
+export const MAX_FORK_DURABLE_TAIL_MESSAGES = 1_000
+
+export type ForkDurableTailReference = { id: string } & ({ key: string } | { digest: string })
+
+export function readForkDurableTail(metadata: unknown): ForkDurableTailReference[] | undefined {
+  const tail = isRecord(metadata) ? metadata[FORK_DURABLE_TAIL_KEY] : undefined
+  if (!Array.isArray(tail) || tail.length === 0 || tail.length > MAX_FORK_DURABLE_TAIL_MESSAGES) return
+  return tail.every((ref): ref is ForkDurableTailReference =>
+    isRecord(ref) && typeof ref.id === "string" && ref.id.length > 0 &&
+      ((typeof ref.key === "string" && ref.key.length > 0) ||
+        (ref.key === undefined && typeof ref.digest === "string" && /^[\da-f]{64}$/.test(ref.digest)))
+  ) ? tail : undefined
+}
 
 export type ForkBoundarySource =
   | "metadata_marker"
@@ -95,6 +113,17 @@ export interface ForkableCheckpointSummary {
 
 export type ForkableCheckpoint = ForkableCheckpointSummary
 
+export interface ForkCheckpointListOptions {
+  activeRun: boolean
+  pendingApproval: boolean
+  legacyFallbackMode?: LegacyForkFallbackMode
+  /** Checkpoints that existed before a markerless thread started writing explicit boundaries. */
+  legacyCheckpointIds?: ReadonlySet<string>
+  interruptedTurnUserId?: string
+  /** Keep its position and marker for legacy classification, but never offer it as a fork. */
+  unsafeLatestCheckpointId?: string
+}
+
 export function getCheckpointNamespace(tuple: CheckpointTuple): string {
   const ns = tuple.config?.configurable?.checkpoint_ns
   return typeof ns === "string" ? ns : ""
@@ -117,8 +146,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
 }
 
-export function getForkBoundaryMarker(tuple: CheckpointTuple): ForkBoundaryMarker | null {
-  const metadata: unknown = tuple.metadata
+export function readForkBoundaryMarker(metadata: unknown): ForkBoundaryMarker | null {
   if (!isRecord(metadata)) return null
   const boundary = metadata.cmb_fork_boundary
   if (!boundary || typeof boundary !== "object" || Array.isArray(boundary)) return null
@@ -126,8 +154,99 @@ export function getForkBoundaryMarker(tuple: CheckpointTuple): ForkBoundaryMarke
   return boundary as ForkBoundaryMarker
 }
 
-function isUserInterruptedForkBoundary(marker: ForkBoundaryMarker | null): boolean {
+export function getForkBoundaryMarker(tuple: CheckpointTuple): ForkBoundaryMarker | null {
+  return readForkBoundaryMarker(tuple.metadata)
+}
+
+export function applyForkReplayMessages(
+  tuple: CheckpointTuple,
+  messages: readonly unknown[]
+): CheckpointTuple | undefined {
+  const raw = tuple.checkpoint.channel_values.messages
+  const appended = filterNewCheckpointReplayMessages(tuple.checkpoint, messages)
+  if (appended.length === 0) return tuple
+  const checkpoint = {
+    ...tuple.checkpoint,
+    channel_values: {
+      ...tuple.checkpoint.channel_values,
+      messages: [...(Array.isArray(raw) ? raw : []), ...appended]
+    }
+  }
+  const lastVisibleMessageId = deriveCheckpointTranscriptIndex(checkpoint).visibleMessageIds.at(-1)
+  if (!lastVisibleMessageId) return undefined
+  const marker = getForkBoundaryMarker(tuple)
+  const metadata = marker
+    ? ({
+        ...tuple.metadata,
+        cmb_fork_boundary: {
+          ...marker,
+          lastVisibleMessageId,
+          durableTailReplayed: true,
+          durableTailMessageCount: appended.length
+        }
+      } as CheckpointMetadata)
+    : tuple.metadata
+  return { ...tuple, checkpoint, metadata }
+}
+
+export function getOldestForkBoundaryMarkerIndex(tuples: readonly CheckpointTuple[]): number {
+  return tuples.reduce((oldestIndex, tuple, index) => {
+    return getForkBoundaryMarker(tuple) ? index : oldestIndex
+  }, -1)
+}
+
+export function isUserInterruptedForkBoundary(marker: ForkBoundaryMarker | null): boolean {
   return marker?.source === "agent_run_interrupted" || marker?.outcome === "interrupted"
+}
+
+export function isSyntheticContinuationTurnId(turnId: string): boolean {
+  return /^(?:resume|interrupt):.+:\d+$/.test(turnId)
+}
+
+export function readInterruptedTurnUserId(
+  checkpoint: unknown,
+  marker: ForkBoundaryMarker | null,
+  graphInputUserId?: string
+): string | undefined {
+  if (!marker || !isUserInterruptedForkBoundary(marker)) return undefined
+  const canRecoverFromInput =
+    typeof marker.turnId !== "string" || isSyntheticContinuationTurnId(marker.turnId)
+  const candidates = [marker.turnUserMessageId, marker.turnId]
+  if (canRecoverFromInput) candidates.push(graphInputUserId)
+  return candidates.find(
+    (id): id is string =>
+      typeof id === "string" && getCheckpointUserMessageIndex(checkpoint, id) >= 0
+  )
+}
+
+export function isLegacyCheckpointBeforeTurn(checkpoint: unknown, turnUserId: string): boolean {
+  return (
+    getCheckpointUserMessageIndex(checkpoint, turnUserId) < 0 &&
+    getCheckpointGraphInputUserId(checkpoint) !== turnUserId &&
+    !checkpointEndsWithAssistantToolCalls(checkpoint)
+  )
+}
+
+/** An older checkpoint can prove its own completion even when the input
+ * ancestor of a later interrupted run is no longer available. */
+export function isCompletedLegacyGraphCheckpoint(
+  checkpoint: unknown,
+  source: unknown,
+  hasPendingWrites: boolean
+): boolean {
+  if (source !== "loop" || hasPendingWrites || !isRecord(checkpoint)) return false
+  const channels = checkpoint.channel_values
+  if (!isRecord(channels) || checkpointHasInterrupt(checkpoint)) return false
+  const tasks = channels.__pregel_tasks
+  return (
+    Array.isArray(tasks) && tasks.length === 2 &&
+    tasks.every((queue) => Array.isArray(queue) && queue.length === 0) &&
+    (!Array.isArray(checkpoint.pending_sends) || checkpoint.pending_sends.length === 0) &&
+    !Object.keys(channels).some((key) =>
+      key === "__start__" || key.startsWith("branch:") || key.startsWith("join:")
+    ) &&
+    !checkpointEndsWithAssistantToolCalls(checkpoint)
+  )
 }
 
 export function isForkableCheckpointForMessage(tuple: CheckpointTuple, messageId: string): boolean {
@@ -187,7 +306,7 @@ export function describeCheckpointForkability(
       hasPendingWrites
     }
   }
-  if (options.activeRun) {
+  if (options.activeRun || tuple.metadata?.source === "input") {
     return {
       isStableTurnBoundary: false,
       unstableReason: "in_progress_turn",
@@ -297,31 +416,50 @@ export function buildForkableCheckpointSummary(
 
 export function buildVisibleForkableCheckpointList(
   tuples: Iterable<CheckpointTuple>,
-  options: {
-    activeRun: boolean
-    pendingApproval: boolean
-    legacyFallbackMode?: LegacyForkFallbackMode
-  }
+  options: ForkCheckpointListOptions
 ): ForkableCheckpointSummary[] {
   const checkpoints: ForkableCheckpointSummary[] = []
   const seenLastVisibleMessageIds = new Set<string>()
   const legacyFallbackMode = options.legacyFallbackMode ?? "none"
   const orderedTuples = Array.from(tuples)
-  const oldestForkBoundaryMarkerIndex = orderedTuples.reduce((oldestIndex, tuple, index) => {
-    return getForkBoundaryMarker(tuple) ? index : oldestIndex
-  }, -1)
+  const oldestForkBoundaryMarkerIndex = getOldestForkBoundaryMarkerIndex(orderedTuples)
+  const oldestMarkerTuple = orderedTuples[oldestForkBoundaryMarkerIndex]
+  const oldestMarker = oldestMarkerTuple ? getForkBoundaryMarker(oldestMarkerTuple) : null
+  const needsLegacyTurnProof =
+    options.legacyCheckpointIds === undefined && isUserInterruptedForkBoundary(oldestMarker)
+  const interruptedTurnUserId =
+    needsLegacyTurnProof && oldestMarkerTuple
+      ? readInterruptedTurnUserId(
+          oldestMarkerTuple.checkpoint, oldestMarker, options.interruptedTurnUserId
+        )
+      : undefined
 
   for (const [index, tuple] of orderedTuples.entries()) {
+    const checkpointId = getCheckpointId(tuple)
+    if (checkpointId === options.unsafeLatestCheckpointId) continue
     const marker = getForkBoundaryMarker(tuple)
-    const isLatestCheckpoint = index === 0
+    const isLegacyCandidate =
+      !marker &&
+      (options.legacyCheckpointIds?.has(checkpointId) ??
+        (legacyFallbackMode === "all" ||
+          (legacyFallbackMode === "older_than_marker" &&
+            oldestForkBoundaryMarkerIndex >= 0 &&
+            index > oldestForkBoundaryMarkerIndex)))
     const allowLegacyLatestFallback =
-      !marker && isLatestCheckpoint && legacyFallbackMode === "all"
-    const allowLegacyHistoricalFallback =
-      !marker && !allowLegacyLatestFallback &&
-      (legacyFallbackMode === "all" ||
-        (legacyFallbackMode === "older_than_marker" &&
-          oldestForkBoundaryMarkerIndex >= 0 &&
-          index > oldestForkBoundaryMarkerIndex))
+      isLegacyCandidate && index === 0 && legacyFallbackMode === "all"
+    const allowLegacyHistoricalFallback = isLegacyCandidate && !allowLegacyLatestFallback
+    if (!marker && !isLegacyCandidate) continue
+    if (
+      !marker &&
+      needsLegacyTurnProof &&
+      !(interruptedTurnUserId
+        ? isLegacyCheckpointBeforeTurn(tuple.checkpoint, interruptedTurnUserId)
+        : isCompletedLegacyGraphCheckpoint(
+            tuple.checkpoint, tuple.metadata?.source, (tuple.pendingWrites?.length ?? 0) > 0
+          ))
+    ) {
+      continue
+    }
     const initialTranscript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
     const lastVisibleMessage = initialTranscript.visibleMessages.at(-1)
     const lastVisibleMessageId = lastVisibleMessage?.renderId ?? lastVisibleMessage?.id
@@ -330,7 +468,11 @@ export function buildVisibleForkableCheckpointList(
       continue
     }
 
-    const messageTarget = describeCheckpointMessageForkTarget(tuple.checkpoint, lastVisibleMessageId)
+    const messageTarget = describeCheckpointMessageForkTarget(
+      tuple.checkpoint,
+      lastVisibleMessageId,
+      initialTranscript
+    )
     if (!messageTarget.isForkableMessageBoundary) {
       const markerLastVisibleMessageId = marker?.lastVisibleMessageId
       const canForkInterruptedCheckpointTail =

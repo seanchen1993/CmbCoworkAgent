@@ -299,6 +299,7 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(prompt, "## Current Turn Internal Context", "coordinator prompt")
   assertIncludes(prompt, "TURN_CONTEXT_RULE", "coordinator prompt")
   assertIncludes(prompt, 'subagent_type="worker"', "coordinator prompt")
+  assertIncludes(prompt, "read_only workers keep execute and monitor", "coordinator prompt")
   assertIncludes(
     prompt,
     "If the user selected a skill",

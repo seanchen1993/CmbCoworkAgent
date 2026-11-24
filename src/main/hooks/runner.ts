@@ -4,8 +4,7 @@ import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/mark
 import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import * as chardet from "jschardet"
-import * as iconv from "iconv-lite"
+import { decodeHookOutput } from "./output-encoding"
 import type { HookConfig, HookEvent, HookResult, HookUserContextField } from "./types"
 import { getHookModelRef, getTimeoutBounds } from "./types"
 import { executeHttpHook } from "./http-runner"
@@ -20,6 +19,7 @@ import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { withWorkspaceExecution } from "../agent/file-operation-lock"
 import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
+import { canonicalShellTaskMonitorToolName } from "../agent/shell-task-monitor"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -32,8 +32,6 @@ function getEffectiveTimeout(hook: HookConfig): number {
   return hook.timeout ?? bounds.default
 }
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
-const CHARDET_CONFIDENCE_THRESHOLD = 0.8
-const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
 const INVOCATION_CONTEXT_ENV_KEYS = new Set([
@@ -74,6 +72,8 @@ export interface HookContext {
   workspacePath?: string
   /** Internal cancellation for queued synchronous command hooks; never sent to the hook process. */
   abortSignal?: AbortSignal
+  /** Monotonic deadline for synchronous command hooks queued behind workspace activity. */
+  workspaceLockDeadline?: number
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
   /** Optional system identifier exposed to hook commands as SYSTEM_ID. */
@@ -607,71 +607,6 @@ function applyForcedOutcome(result: HookResult, hook: HookConfig): HookResult {
     // explicitly opts back into revision — clear the halt signal.
     continue: undefined,
     stopReason: undefined
-  }
-}
-
-function isValidUtf8(buf: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buf)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function detectHookOutputEncoding(buf: Buffer): string {
-  if (buf.length === 0) return "utf-8"
-  const detected = chardet.detect(buf)
-  if (!detected) return "utf-8"
-
-  const encoding = typeof detected === "string" ? detected : detected.encoding
-  const confidence = typeof detected === "object" ? detected.confidence : 1
-
-  if (!encoding || encoding.toLowerCase() === "ascii" || !iconv.encodingExists(encoding)) {
-    return "utf-8"
-  }
-
-  if (confidence >= CHARDET_CONFIDENCE_THRESHOLD) {
-    return encoding
-  }
-
-  // On Chinese Windows, short GBK/GB18030 output often comes back with low confidence
-  // even though the bytes are definitely not UTF-8. In that case, trust the detector.
-  if (!isValidUtf8(buf)) {
-    return encoding
-  }
-
-  return "utf-8"
-}
-
-function decodeHookOutput(
-  stdoutBuf: Buffer,
-  stderrBuf: Buffer
-): { stdout: string; stderr: string } {
-  if (process.platform !== "win32") {
-    return {
-      stdout: stdoutBuf.length > 0 ? stdoutBuf.toString("utf-8") : "",
-      stderr: stderrBuf.length > 0 ? stderrBuf.toString("utf-8") : ""
-    }
-  }
-  // Sample both streams in bounded chunks so stderr-only Chinese diagnostics still
-  // influence detection when stdout contains ASCII / JSON.
-  const perStreamSampleBytes = Math.floor(CHARDET_SAMPLE_BYTES / 2)
-  const sample = Buffer.concat([
-    stdoutBuf.subarray(0, perStreamSampleBytes),
-    stderrBuf.subarray(0, CHARDET_SAMPLE_BYTES - perStreamSampleBytes)
-  ])
-  const encoding = detectHookOutputEncoding(sample)
-  try {
-    return {
-      stdout: stdoutBuf.length > 0 ? iconv.decode(stdoutBuf, encoding) : "",
-      stderr: stderrBuf.length > 0 ? iconv.decode(stderrBuf, encoding) : ""
-    }
-  } catch {
-    return {
-      stdout: stdoutBuf.toString("utf-8"),
-      stderr: stderrBuf.toString("utf-8")
-    }
   }
 }
 
@@ -1269,11 +1204,7 @@ async function executeHook(
   // Setup owns workspace initialisation state, so its caller must observe the
   // real exit code before writing setup-state or starting SessionStart. Even
   // if a workspace/CC-imported config says async:true, run Setup synchronously.
-  if (
-    hook.async === true &&
-    event !== "Setup" &&
-    !(context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
-  ) {
+  if (hookRunsAsynchronously(hook, event, context)) {
     void executeSyncHook(hook, context, event)
       .then((late) => {
         const finalLate: HookResult = {
@@ -1304,6 +1235,20 @@ async function executeHook(
     }
   }
   return executeSyncHook(hook, context, event)
+}
+
+function hookRunsAsynchronously(hook: HookConfig, event: HookEvent, context: HookContext): boolean {
+  const source = context.hookSourceType ?? hook.hookSourceType
+  return (
+    hook.async === true &&
+    event !== "Setup" &&
+    !(source === "workspace" && context.forceSyncWorkspaceHooks)
+  )
+}
+
+export function postToolUseHookAffectsResult(hook: HookConfig, context: HookContext): boolean {
+  // Static overrides are applied even to an async hook's pending result.
+  return Boolean(hook.forcedOutcome) || !hookRunsAsynchronously(hook, "PostToolUse", context)
 }
 
 async function executeSyncHook(
@@ -1370,7 +1315,8 @@ async function executeSyncHook(
             context.workspacePath,
             "write",
             runCommand,
-            context.abortSignal
+            context.abortSignal,
+            context.workspaceLockDeadline
           )
         : await runCommand()
   }
@@ -1493,18 +1439,44 @@ function enrichContextFromHook(hook: HookConfig, context: HookContext): HookCont
   }
 }
 
+function matchingHookContext(
+  hook: HookConfig,
+  event: HookEvent,
+  context: HookContext
+): HookContext | undefined {
+  if (!hook.enabled || hook.event !== event || shouldSkipOnceHook(hook, event, context)) {
+    return undefined
+  }
+  const legacyToolName = canonicalShellTaskMonitorToolName(context.toolName)
+  if (
+    legacyToolName !== context.toolName &&
+    (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure")
+  ) {
+    // Preserve the name broad legacy hooks inspect in their payload, and
+    // allow monitor-specific matchers when the hook rejects the legacy name.
+    const legacyContext = { ...context, toolName: legacyToolName }
+    if (
+      matchesEventMatcher(hook.matcher, event, legacyContext) &&
+      matchesIfCondition(hook.if, event, legacyContext)
+    ) {
+      return legacyContext
+    }
+  }
+  if (
+    matchesEventMatcher(hook.matcher, event, context) &&
+    matchesIfCondition(hook.if, event, context)
+  ) {
+    return context
+  }
+  return undefined
+}
+
 export function hookMatchesRunCriteria(
   hook: HookConfig,
   event: HookEvent,
   context: HookContext
 ): boolean {
-  return (
-    hook.enabled &&
-    hook.event === event &&
-    matchesEventMatcher(hook.matcher, event, context) &&
-    matchesIfCondition(hook.if, event, context) &&
-    !shouldSkipOnceHook(hook, event, context)
-  )
+  return matchingHookContext(hook, event, context) !== undefined
 }
 
 /**
@@ -1598,7 +1570,11 @@ export async function runHooks(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
-  const matched = hooks.filter((h) => hookMatchesRunCriteria(h, event, context))
+  const matched: { hook: HookConfig; matchedContext: HookContext }[] = []
+  for (const hook of hooks) {
+    const matchedContext = matchingHookContext(hook, event, context)
+    if (matchedContext) matched.push({ hook, matchedContext })
+  }
 
   if (matched.length === 0) return null
 
@@ -1610,8 +1586,8 @@ export async function runHooks(
     let humanGateDecision:
       | { systemMessage: string; decisionSource: NonNullable<HookResult["decisionSource"]> }
       | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(hook, hookContext, event, onHookResult),
         hook
@@ -1723,8 +1699,8 @@ export async function runHooks(
     const blockReasons: string[] = []
     let shouldHalt = false
     let haltReason: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(hook, hookContext, event, onHookResult),
         hook
@@ -1765,8 +1741,8 @@ export async function runHooks(
     const messages: string[] = []
     const revisionReasons: string[] = []
     const stopReasons: string[] = []
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(hook, hookContext, event, onHookResult),
         hook
@@ -1831,8 +1807,8 @@ export async function runHooks(
     const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(hook, hookContext, event, onHookResult),
         hook
@@ -1898,8 +1874,8 @@ export async function runHooks(
     const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(hook, hookContext, event, onHookResult),
         hook
@@ -1962,8 +1938,8 @@ export async function runHooks(
   // never be retried).
   if (event === "SessionEnd" || event === "Setup") {
     const TOTAL_TIMEOUT_MS = event === "Setup" ? 30_000 : 5_000
-    const tasks = matched.map(async (hook): Promise<HookResult> => {
-      const hookContext = enrichContextFromHook(hook, context)
+    const tasks = matched.map(async ({ hook, matchedContext }): Promise<HookResult> => {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       try {
         const rawResult = await executeHook(hook, hookContext, event, onHookResult)
         const result = applyForcedOutcome(rawResult, hook)
@@ -2043,8 +2019,8 @@ export async function runHooks(
   }
 
   // Notification / SessionStart: fire-and-forget
-  for (const hook of matched) {
-    const hookContext = enrichContextFromHook(hook, context)
+  for (const { hook, matchedContext } of matched) {
+    const hookContext = enrichContextFromHook(hook, matchedContext)
     executeHook(hook, hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)

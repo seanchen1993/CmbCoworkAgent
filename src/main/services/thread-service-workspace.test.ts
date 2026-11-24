@@ -46,12 +46,14 @@ describe("new thread workspace policy", () => {
     await createThreadService({ ...metadata, agentMode: "normal", subagentsEnabled: true })
     expect(mocks.create).toHaveBeenLastCalledWith(
       expect.any(String),
-      expect.objectContaining({ agentMode: "normal", subagentsEnabled: true })
+      expect.objectContaining({ agentMode: "normal", subagentsEnabled: true }),
+      { newDurableTranscript: true }
     )
     await createThreadService(metadata)
     expect(mocks.create).toHaveBeenLastCalledWith(
       expect.any(String),
-      expect.objectContaining({ agentMode: "workflow" })
+      expect.objectContaining({ agentMode: "workflow" }),
+      { newDurableTranscript: true }
     )
   })
 
@@ -66,7 +68,8 @@ describe("new thread workspace policy", () => {
       expect.objectContaining({
         workspacePath: "/feature",
         harnessFeature: expect.objectContaining({ launchStageName: "Dev-代码实现" })
-      })
+      }),
+      { newDurableTranscript: true }
     )
   })
   it("rejects missing feature configuration before inserting any thread", async () => {
@@ -94,7 +97,8 @@ describe("new thread workspace policy", () => {
     expect(mocks.resolve).not.toHaveBeenCalled()
     expect(mocks.create).toHaveBeenCalledWith(
       expect.any(String),
-      expect.objectContaining({ workspacePath: "/confirmed" })
+      expect.objectContaining({ workspacePath: "/confirmed" }),
+      { newDurableTranscript: true }
     )
   })
   it("leaves ordinary non-feature session defaults intact", async () => {
@@ -102,7 +106,8 @@ describe("new thread workspace policy", () => {
     expect(mocks.resolve).not.toHaveBeenCalled()
     expect(mocks.create).toHaveBeenCalledWith(
       expect.any(String),
-      expect.objectContaining({ workspacePath: "/recent" })
+      expect.objectContaining({ workspacePath: "/recent" }),
+      { newDurableTranscript: true }
     )
   })
 })

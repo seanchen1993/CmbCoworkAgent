@@ -19,6 +19,7 @@
  */
 
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
+import { randomUUID } from "crypto"
 import {
   closeSync,
   existsSync,
@@ -354,6 +355,10 @@ export interface GenIndexRow {
   /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
   harness_adapter_name: string | null
   harness_adapter_version: string | null
+  /** Generation-time unit attribution; preserved through later commit/push measurement. */
+  harness_deploy_unit_id?: string | null
+  /** JSON array of feature-bound units, not a per-unit allocation. */
+  harness_deploy_unit_ids?: string | null
   observability_schema_version: number | null
   trace_kind: string | null
   execution_mode: string | null
@@ -508,55 +513,43 @@ export interface AdoptionMeasurementCommitResult {
 // Lifecycle
 // ─────────────────────────────────────────────────────────
 
-function openValidatedAdoptionSnapshot(
-  SQL: Awaited<ReturnType<typeof initSqlJs>>,
-  path: string
-): SqlJsDatabase {
-  const snapshot = readFileSync(path)
-  if (
-    snapshot.length < SQLITE_FILE_HEADER.length ||
-    !snapshot.subarray(0, SQLITE_FILE_HEADER.length).equals(SQLITE_FILE_HEADER)
-  ) {
-    throw new Error(`invalid SQLite header: ${path}`)
-  }
+class CorruptAdoptionSnapshotError extends Error {}
 
-  const candidate = new SQL.Database(snapshot)
-  // Atomic replacement prevents partial snapshots in normal operation. Avoid a
-  // startup PRAGMA quick_check here: it scans the whole database on the Electron
-  // main thread, while schema reads below already fail closed for malformed files.
-  return candidate
+function isAdoptionSnapshotCorrupt(error: unknown): boolean {
+  // sql.js reports SQLite errors by message, without a numeric result code.
+  return (
+    error instanceof CorruptAdoptionSnapshotError ||
+    (error instanceof Error &&
+      /^(?:file is not a database$|database disk image is malformed$|malformed database schema\b)/.test(
+        error.message
+      ))
+  )
 }
 
-export async function initializeAdoptionIndex(): Promise<boolean> {
-  if (db) return true
-
-  const paths = getAdoptionSnapshotPaths()
-  const dbPath = paths.primary
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
+function openAdoptionDatabase(
+  SQL: Awaited<ReturnType<typeof initSqlJs>>,
+  snapshot?: Buffer
+): SqlJsDatabase {
+  if (snapshot && !snapshot.subarray(0, SQLITE_FILE_HEADER.length).equals(SQLITE_FILE_HEADER)) {
+    throw new CorruptAdoptionSnapshotError("invalid SQLite header")
   }
-  dirty = false
-  primarySnapshotIdentity = null
-  primaryNeedsFsync = false
-  durabilityRepairPending = false
-  saveRetryAttempt = 0
-  lastSaveFailureLogAt = 0
-  const directory = dirname(dbPath)
-  if (!existsSync(directory)) mkdirSync(directory, { recursive: true })
-  cleanupAdoptionSnapshotTemps(paths)
-
+  const db = new SQL.Database(snapshot)
   try {
-    const SQL = await initSqlJs()
-    const primaryExists = existsSync(paths.primary)
-
-    if (primaryExists) {
-      db = openValidatedAdoptionSnapshot(SQL, paths.primary)
-      primarySnapshotIdentity = snapshotIdentity(paths.primary)
+    if (snapshot) {
+      // SQLite can zero-fill a short final page and still report quick_check = ok.
+      const [pageSize, pageCount] = db.exec("PRAGMA page_size; PRAGMA page_count")
+      const expectedBytes = Number(pageSize.values[0][0]) * Number(pageCount.values[0][0])
+      if (snapshot.length < expectedBytes) {
+        throw new CorruptAdoptionSnapshotError("truncated SQLite snapshot")
+      }
     }
 
-    if (!db) {
-      db = new SQL.Database()
+    // Legacy snapshots can have a valid header but damaged data pages. Check
+    // them once on upgrade, without scanning a healthy index on every launch.
+    if (db.exec("PRAGMA user_version")[0]?.values[0]?.[0] === 0) {
+      const result = db.exec("PRAGMA quick_check(1)")[0]?.values[0]?.[0]
+      if (result !== "ok") throw new CorruptAdoptionSnapshotError(`SQLite quick_check: ${result}`)
+      db.run("PRAGMA user_version = 1")
     }
 
     db.run(`
@@ -584,6 +577,8 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
         harness_node_status TEXT,
         harness_adapter_name TEXT,
         harness_adapter_version TEXT,
+        harness_deploy_unit_id TEXT,
+        harness_deploy_unit_ids TEXT,
         observability_schema_version INTEGER,
         trace_kind TEXT,
         execution_mode TEXT,
@@ -643,6 +638,8 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
       "harness_node_status TEXT",
       "harness_adapter_name TEXT",
       "harness_adapter_version TEXT",
+      "harness_deploy_unit_id TEXT",
+      "harness_deploy_unit_ids TEXT",
       "observability_schema_version INTEGER",
       "trace_kind TEXT",
       "execution_mode TEXT",
@@ -671,8 +668,10 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
-      } catch {
-        // column already exists — safe to ignore
+      } catch (error) {
+        if (!(error instanceof Error && error.message.startsWith("duplicate column name:"))) {
+          throw error
+        }
       }
     }
 
@@ -694,7 +693,6 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
             OR root_thread_id IS NULL)`,
       [TRACE_OBSERVABILITY_SCHEMA_VERSION]
     )
-    if (db.getRowsModified() > 0) scheduleSave()
 
     db.run(
       `CREATE INDEX IF NOT EXISTS idx_gen_file_pending
@@ -771,7 +769,44 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
          ON thread_active_skills(updated_at)`
     )
 
-    scheduleSave()
+    return db
+  } catch (error) {
+    db.close()
+    throw error
+  }
+}
+
+export async function initializeAdoptionIndex(): Promise<boolean> {
+  if (db) return true
+  const paths = getAdoptionSnapshotPaths()
+  const dbPath = paths.primary
+  try {
+    const SQL = await initSqlJs()
+    if (db) return true
+    mkdirSync(dirname(dbPath), { recursive: true })
+    cleanupAdoptionSnapshotTemps(paths)
+
+    let backupPath: string | undefined
+    if (statSync(dbPath, { throwIfNoEntry: false })) {
+      const snapshot = readFileSync(dbPath)
+      try {
+        db = openAdoptionDatabase(SQL, snapshot)
+        primarySnapshotIdentity = snapshotIdentity(dbPath)
+      } catch (error) {
+        if (!isAdoptionSnapshotCorrupt(error)) throw error
+        backupPath = `${dbPath}.corrupt.${Date.now()}-${randomUUID()}`
+        renameSync(dbPath, backupPath)
+        console.warn(`[AdoptionIndex] archived corrupt index at ${backupPath}`, error)
+      }
+    }
+
+    db ??= openAdoptionDatabase(SQL)
+    if (backupPath) {
+      persistAdoptionSnapshot(db.export(), true)
+      console.log("[AdoptionIndex] rebuilt index at", dbPath)
+    } else {
+      scheduleSave()
+    }
     console.log("[AdoptionIndex] initialized at", dbPath)
     return true
   } catch (e) {
@@ -867,13 +902,14 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         generated_lines_blob, created_at, measured,
         used_skills, skill_source, thread_id, trace_id, model_id, model_name,
         harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+        harness_deploy_unit_id, harness_deploy_unit_ids,
         observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
         parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
         subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
         coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
         workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
         new_ratio, change_kind)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -898,6 +934,8 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         row.harness_node_status,
         row.harness_adapter_name,
         row.harness_adapter_version,
+        row.harness_deploy_unit_id ?? null,
+        row.harness_deploy_unit_ids ?? null,
         row.observability_schema_version,
         row.trace_kind,
         row.execution_mode,
@@ -958,6 +996,7 @@ export function findPendingGensForFile(
             line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            harness_deploy_unit_id, harness_deploy_unit_ids,
             observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
             parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
@@ -995,6 +1034,7 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
             line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            harness_deploy_unit_id, harness_deploy_unit_ids,
             observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
             parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,

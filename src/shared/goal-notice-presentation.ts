@@ -1,3 +1,29 @@
+export function systemNoticeBlockText(block: unknown): string {
+  if (!block || typeof block !== "object") return ""
+  const { type, text, content } = block as Record<string, unknown>
+  if (type === "text" && typeof text === "string") return text
+  return typeof content === "string" ? content : ""
+}
+
+export function getSystemNoticePresentation(source: string): {
+  text: string
+  tone: "success" | "warning" | "info"
+  goal: boolean
+} {
+  const text = source.trim().replace(/^●\s*/, "")
+  if (text.startsWith("✓ Goal 已完成")) {
+    return { text: text.replace(/^✓\s*/, ""), tone: "success", goal: true }
+  }
+  if (text.startsWith("Goal 已暂停") || text.startsWith("Ⅱ Goal 已暂停") ||
+      text.startsWith("Goal 等待补充信息") || text.startsWith("你发送了新消息，active goal 已暂停")) {
+    return { text: text.replace(/^Ⅱ\s*/, ""), tone: "warning", goal: true }
+  }
+  const goal = ["Goal ", "继续 Goal", "当前没有 active goal", "没有可继续的 goal",
+    "请写明 goal 目标", "附件和显式技能不会用于 /goal 控制命令", "该 /goal 命令",
+    "当前线程正在运行"].some((prefix) => text.startsWith(prefix))
+  return { text, tone: "info", goal }
+}
+
 export function parseGoalNoticeText(text: string): {
   title: string
   meta?: string

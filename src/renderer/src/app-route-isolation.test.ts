@@ -59,12 +59,16 @@ describe("App route isolation", () => {
   })
 
   it("reserves automatic thread selection for startup bootstrap", () => {
-    expect(appSource.match(/loadThreads\(\{ selectInitialThread: true \}\)/g)).toHaveLength(1)
+    const startup = appSource.indexOf("async function init():")
+    const end = appSource.indexOf("\n  useEffect(", startup)
+    expect(startup).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(startup)
+    expect(appSource.slice(startup, end)).toMatch(/\binitializeStartupWorkspace\s*\(/)
 
     const refreshSurface = backgroundThreadRefreshSurface()
     expect(refreshSurface).toContain("onThreadsChanged")
     expect(refreshSurface).toContain('window.addEventListener("focus", onFocus)')
     expect(refreshSurface.match(/loadThreads\(\)/g)).toHaveLength(2)
-    expect(refreshSurface).not.toContain("selectInitialThread")
+    expect(refreshSurface).not.toMatch(/\b(?:initializeStartupWorkspace|selectInitialThread|selectThread)\b/)
   })
 })

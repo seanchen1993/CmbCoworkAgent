@@ -54,6 +54,7 @@ export type TurnCompletionDefect =
   | "unparsed_tool_call"
   | "textual_tool_call"
   | "missing_finish_signal"
+  | "missing_delivery"
 
 export interface TurnCompletionInspection {
   defect: TurnCompletionDefect | null
@@ -437,7 +438,9 @@ const RECOVERY_INSTRUCTIONS: Record<TurnCompletionDefect, string> = {
   textual_tool_call:
     "你把工具调用当成普通文本写在了回复里，它不会被执行。请改用真正的工具调用接口重新发起，或者在不需要工具时直接给出最终回答。",
   missing_finish_signal:
-    "你上一条回复在没有正常结束的情况下中断了，很可能内容并不完整。请确认剩余工作后继续完成任务，并给出完整的最终回答。"
+    "你上一条回复在没有正常结束的情况下中断了，很可能内容并不完整。请确认剩余工作后继续完成任务，并给出完整的最终回答。",
+  missing_delivery:
+    "当前对话还没有已确认的正式交付。使用已有执行结果完成下面要求的交付，不要重跑已经完成的外部操作。"
 }
 
 /** The HumanMessage injected back into the graph. Prefixed with the plumbing
@@ -496,13 +499,23 @@ export function describeTurnCompletionFailure(report: TurnCompletionGateReport):
   return null
 }
 
-/** Fired once per injected recovery prompt, for the run's UI notice. */
-export type TurnCompletionRecoveryCallback = (input: {
+export interface TurnCompletionRecoveryNotice {
   kind: "defect" | "todo"
   detail: string
   attempt: number
   maxAttempts: number
-}) => void
+}
+
+/** Fired once per injected recovery prompt, for the run's UI notice. */
+export type TurnCompletionRecoveryCallback = (
+  input: TurnCompletionRecoveryNotice,
+  writeToStream?: (event: unknown) => void
+) => void
+
+/** Trusted main-turn transport check. Undefined means its delivery contract is satisfied.
+ * A satisfied explicit delivery may replace an empty private final reply, never a broken protocol.
+ */
+export type TurnFinalDeliveryCheck = (messages: readonly BaseMessage[]) => string | undefined
 
 export interface TurnCompletionGateOptions {
   /** Physical run token; without one the gate is inert (subagent/task graphs
@@ -512,6 +525,12 @@ export interface TurnCompletionGateOptions {
   maxTodoNudges?: number
   todoGateEnabled?: boolean
   onRecovery?: TurnCompletionRecoveryCallback
+  checkFinalDelivery?: TurnFinalDeliveryCheck
+  createRecoveryMessage?: (
+    threadId: string,
+    messages: readonly BaseMessage[],
+    prompt: string
+  ) => HumanMessage
 }
 
 interface GateGraphState {
@@ -535,7 +554,9 @@ export function createTurnCompletionGateMiddleware(
     maxRetries = DEFAULT_MAX_COMPLETION_RETRIES,
     maxTodoNudges = DEFAULT_MAX_TODO_NUDGES,
     todoGateEnabled = true,
-    onRecovery
+    onRecovery,
+    checkFinalDelivery,
+    createRecoveryMessage = (_threadId, _messages, prompt) => new HumanMessage(prompt)
   } = options
 
   return createMiddleware({
@@ -569,7 +590,19 @@ export function createTurnCompletionGateMiddleware(
         }
 
         const runState = ensureRunState(key)
-        const inspection = inspectFinalAssistantMessage(lastMessage)
+        let inspection = inspectFinalAssistantMessage(lastMessage)
+        let deliveryReminder: string | undefined
+        if (
+          checkFinalDelivery &&
+          (!inspection.defect ||
+            inspection.defect === "empty_response" ||
+            inspection.defect === "reasoning_only")
+        ) {
+          deliveryReminder = checkFinalDelivery(messages)
+          inspection = deliveryReminder
+            ? { defect: "missing_delivery", detail: "本轮未确认正式消息交付" }
+            : { defect: null, detail: "" }
+        }
 
         if (inspection.defect) {
           if (runState.retriesUsed >= maxRetries) {
@@ -586,21 +619,26 @@ export function createTurnCompletionGateMiddleware(
           }
           runState.retriesUsed += 1
           runState.unresolved = null
-          const prompt = buildCompletionRecoveryPrompt(
-            inspection.defect,
-            runState.retriesUsed,
-            maxRetries
-          )
+          const prompt = [
+            buildCompletionRecoveryPrompt(inspection.defect, runState.retriesUsed, maxRetries),
+            ...(deliveryReminder ? [deliveryReminder] : [])
+          ].join("\n\n")
           console.warn(
             `[TurnCompletionGate] ${threadId} retry ${runState.retriesUsed}/${maxRetries}: ${inspection.defect} — ${inspection.detail}`
           )
-          onRecovery?.({
-            kind: "defect",
-            detail: inspection.detail,
-            attempt: runState.retriesUsed,
-            maxAttempts: maxRetries
-          })
-          return { messages: [new HumanMessage(prompt)], jumpTo: "model" as const }
+          onRecovery?.(
+            {
+              kind: "defect",
+              detail: inspection.detail,
+              attempt: runState.retriesUsed,
+              maxAttempts: maxRetries
+            },
+            runtime.writer
+          )
+          return {
+            messages: [createRecoveryMessage(threadId, messages, prompt)],
+            jumpTo: "model" as const
+          }
         }
 
         // The protocol is satisfied. Now the task-state gate: a final answer
@@ -625,18 +663,18 @@ export function createTurnCompletionGateMiddleware(
         }
         runState.todoNudgesUsed += 1
         runState.unfinishedTodos = []
-        onRecovery?.({
-          kind: "todo",
-          detail: `仍有 ${unfinished.length} 项待办未完成`,
-          attempt: runState.todoNudgesUsed,
-          maxAttempts: maxTodoNudges
-        })
+        onRecovery?.(
+          {
+            kind: "todo",
+            detail: `仍有 ${unfinished.length} 项待办未完成`,
+            attempt: runState.todoNudgesUsed,
+            maxAttempts: maxTodoNudges
+          },
+          runtime.writer
+        )
+        const prompt = buildTodoRecoveryPrompt(unfinished, runState.todoNudgesUsed, maxTodoNudges)
         return {
-          messages: [
-            new HumanMessage(
-              buildTodoRecoveryPrompt(unfinished, runState.todoNudgesUsed, maxTodoNudges)
-            )
-          ],
+          messages: [createRecoveryMessage(threadId, messages, prompt)],
           jumpTo: "model" as const
         }
       }

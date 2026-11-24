@@ -20,13 +20,22 @@ export interface SystemConstraintReadRecord {
   pluginName?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  /** Feature-bound units at read time; does not assign each file to every unit. */
+  harnessDeployUnitIds?: string[]
+  harnessSessionDeployUnitId?: string
   constraintFile: string
+}
+
+interface FileReadSummary {
+  filePath: string
+  readCount: number
+  firstReadAt: string
+  lastReadAt: string
 }
 
 interface SummaryBucket {
   context: Omit<SystemConstraintReadRecord, "constraintFile">
-  constraintFiles: Set<string>
-  successfulReadCount: number
+  files: Map<string, FileReadSummary>
   firstReadAt: string
   lastReadAt: string
   updatedAtMs: number
@@ -44,12 +53,20 @@ function normalize(value: string | undefined): string | undefined {
 }
 
 function summaryBucketKey(record: SystemConstraintReadRecord): string {
-  return record.harnessNodeName?.trim() ?? ""
+  return JSON.stringify([
+    record.harnessProjectId,
+    record.harnessFeatureSlug,
+    record.harnessNodeName?.trim() ?? "",
+    record.harnessDeployUnitIds,
+    record.harnessSessionDeployUnitId
+  ])
 }
 
 /**
- * Run-scoped accumulator. One event is emitted per trace and workflow stage,
+ * Run-scoped accumulator. One event is emitted per trace, stage and binding snapshot,
  * regardless of how many pages or duplicate files `read_file` returned.
+ * `files` adds per-file counts and times; legacy summary fields remain available
+ * with their original meaning for existing dashboard queries and older clients.
  */
 export class SystemConstraintReadAccumulator {
   private readonly pending = new Map<string, Map<string, SummaryBucket>>()
@@ -76,14 +93,28 @@ export class SystemConstraintReadAccumulator {
       traceId,
       harnessProjectId,
       harnessFeatureSlug,
-      constraintFile
+      constraintFile,
+      harnessDeployUnitIds: input.harnessDeployUnitIds
+        ? [...new Set(input.harnessDeployUnitIds.map((id) => id.trim()).filter(Boolean))].sort()
+        : undefined,
+      harnessSessionDeployUnitId: normalize(input.harnessSessionDeployUnitId)
     }
     const key = summaryBucketKey(normalizedRecord)
     const now = nowIsoLocal()
     const existing = traceBuckets.get(key)
     if (existing) {
-      existing.constraintFiles.add(constraintFile)
-      existing.successfulReadCount += 1
+      const file = existing.files.get(constraintFile)
+      if (file) {
+        file.readCount += 1
+        file.lastReadAt = now
+      } else {
+        existing.files.set(constraintFile, {
+          filePath: constraintFile,
+          readCount: 1,
+          firstReadAt: now,
+          lastReadAt: now
+        })
+      }
       existing.lastReadAt = now
       existing.updatedAtMs = nowMs
       return
@@ -103,10 +134,20 @@ export class SystemConstraintReadAccumulator {
         pluginId: normalize(input.pluginId),
         pluginName: normalize(input.pluginName),
         harnessAdapterName: normalize(input.harnessAdapterName),
-        harnessAdapterVersion: normalize(input.harnessAdapterVersion)
+        harnessAdapterVersion: normalize(input.harnessAdapterVersion),
+        ...(normalizedRecord.harnessDeployUnitIds
+          ? { harnessDeployUnitIds: normalizedRecord.harnessDeployUnitIds }
+          : {}),
+        ...(normalizedRecord.harnessSessionDeployUnitId
+          ? { harnessSessionDeployUnitId: normalizedRecord.harnessSessionDeployUnitId }
+          : {})
       },
-      constraintFiles: new Set([constraintFile]),
-      successfulReadCount: 1,
+      files: new Map([
+        [
+          constraintFile,
+          { filePath: constraintFile, readCount: 1, firstReadAt: now, lastReadAt: now }
+        ]
+      ]),
       firstReadAt: now,
       lastReadAt: now,
       updatedAtMs: nowMs
@@ -126,12 +167,13 @@ export class SystemConstraintReadAccumulator {
 
     let emitted = 0
     for (const bucket of traceBuckets.values()) {
-      const constraintFiles = [...bucket.constraintFiles].sort((a, b) => a.localeCompare(b))
+      const files = [...bucket.files.values()].sort((a, b) => a.filePath.localeCompare(b.filePath))
       emit(SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT, "harness", {
         ...bucket.context,
-        constraintFiles,
-        successfulReadCount: bucket.successfulReadCount,
-        distinctFileCount: constraintFiles.length,
+        files,
+        constraintFiles: files.map((file) => file.filePath),
+        successfulReadCount: files.reduce((sum, file) => sum + file.readCount, 0),
+        distinctFileCount: files.length,
         filesTruncated: false,
         firstReadAt: bucket.firstReadAt,
         lastReadAt: bucket.lastReadAt,

@@ -11,14 +11,7 @@ import type { SubagentTranscriptBlobRef } from "../../shared/subagent-transcript
 
 export type { ForkBoundarySource, ForkUnstableReason } from "../../shared/checkpoint-forkability"
 
-export interface FileAttachment {
-  filename: string
-  filePath: string // full path for display
-  content: string // extracted text content
-  mimeType: string
-  size: number
-  truncated: boolean
-}
+export type { FileAttachment } from "../../shared/file-attachment"
 
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
@@ -143,7 +136,6 @@ import type {
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewFile,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
@@ -240,7 +232,6 @@ export type {
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewFile,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
@@ -289,16 +280,30 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Verified display/edit metadata from native history, not execution authority. */
+  botHistoryInputOrigin?: import("../../shared/bots/message-reply").BotHistoryInputOrigin
+  botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
+  /** A rendered Goal event occupies the position immediately before its durable anchor. */
+  transcript_anchor_message_id?: string
   provider_source_id?: string
   provider_occurrence?: number
   /** Renderer-only provenance for Team worker content; absent for partial fragments. */
   worker_content_source?: "values" | "snapshot"
+  /** Complete tool-call list for this worker message, including a deliberate empty list. */
+  worker_tool_calls_source?: "snapshot"
   /** This worker identity has appeared in a complete ordered values frame. */
   worker_snapshot_identity?: boolean
+  /** Absolute position in the producer's complete values frame. */
+  worker_snapshot_index?: number
+  /** The worker identity supplied by the producer, before occurrence inference. */
+  worker_provider_identity?: boolean
+  /** Recent wire IDs observed for this explicitly identified worker reply. */
+  worker_provider_wire_ids?: readonly string[]
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_preview_notice?: string
   content_priority?: number
   // A bounded in-flight projection keeps the stream responsive while retaining
   // enough identity to reconcile it with a later lossless snapshot.
@@ -374,13 +379,28 @@ export interface QueuedMessage {
   rawUserInput?: string
   id: string
   text: string
+  /** Bot-only durable reference; ordinary thread composition does not use it. */
+  botReplyTo?: import("../../shared/bots/contracts").BotMessageReply
+  /** Legacy queued Bot request identity; new composer drafts do not create this field. */
+  botMentions?: import("../../shared/bots/contracts").BotMessageMention[]
   attachmentModelBlocks?: string
+  /** Main-issued Bot attachment receipts; kept separately from user-editable text. */
+  botInputFileIds?: string[]
   attachmentDisplayPrefix?: string
   skillBlock?: string
   skillName?: string
   skillDescription?: string
+  botExplicitSkill?: import("../../shared/bots/skill-selection").BotSkillSelection
+  botSkillTarget?:
+    | { kind: "main" }
+    | { kind: "work"; workId: string }
+    | { kind: "create"; title: string; path: string }
+    | { kind: "create"; title: string; projectId: string }
   builtinBrowser?: boolean
   modelId?: string
+  /** Explicit link/unlink parks old drafts across remount/restart. */
+  parkedForConversationLink?: boolean
+  botHandoffTarget?: { botId: string; workId: string; runId?: string }
   handoffRequestedAt?: Date
   created_at: Date
   updated_at: Date
