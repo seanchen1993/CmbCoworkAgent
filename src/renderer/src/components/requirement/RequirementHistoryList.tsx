@@ -49,6 +49,7 @@ import {
 } from "@/lib/requirement-development"
 import { RequirementSpaceStatusTag } from "./RequirementSpaceStatusTag"
 import { systemTagToneClass } from "@/lib/requirement-system-tag-tone"
+import { useAllStreamLoadingStates, useThreadStateSummaries } from "@/lib/thread-context"
 
 const PAGE_SIZE_OPTIONS = [15, 30, 50, 100, 200] as const
 export type { RequirementSourceFilter } from "./requirement-history-filter"
@@ -126,6 +127,31 @@ export function RequirementHistoryList({
   onDelete: (requirement: RequirementRecord) => Promise<void>
 }): React.JSX.Element {
   const threads = useAppStore((state) => state.threads)
+  const allStreamLoadingStates = useAllStreamLoadingStates()
+  const threadStateSummaries = useThreadStateSummaries()
+  const loadingThreadIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const thread of threads) {
+      const threadId = thread.thread_id
+      const threadSummary = threadStateSummaries[threadId]
+      const isLoading =
+        Boolean(allStreamLoadingStates[threadId]) ||
+        Boolean(threadSummary?.hasRunningCoordinatorWorker) ||
+        Boolean(threadSummary?.workflowRunning) ||
+        Boolean(threadSummary?.scheduledTaskLoading)
+      if (isLoading) ids.add(threadId)
+    }
+    return ids
+  }, [allStreamLoadingStates, threadStateSummaries, threads])
+  const loadingRequirementIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const thread of threads) {
+      if (!loadingThreadIds.has(thread.thread_id)) continue
+      const requirementId = getRequirementDevelopmentMetadata(thread)?.requirementId
+      if (requirementId) ids.add(requirementId)
+    }
+    return ids
+  }, [loadingThreadIds, threads])
   const developingRequirementIds = useMemo(() => {
     const ids = new Set<string>()
     for (const thread of threads) {
@@ -199,6 +225,10 @@ export function RequirementHistoryList({
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
               {pageItems.map((item) => {
                 const owner = item.owner ?? (item.origin === "local" ? currentUser : null)
+                const hasLoadingSession =
+                  loadingRequirementIds.has(item.id) ||
+                  item.threadIds.some((threadId) => loadingThreadIds.has(threadId)) ||
+                  item.developmentThreadIds.some((threadId) => loadingThreadIds.has(threadId))
                 const spaceDesign =
                   item.origin === "space" ? findRequirementDesignEntry(item.id) : null
                 const developmentStatus =
@@ -364,11 +394,21 @@ export function RequirementHistoryList({
                           published={item.origin === "space" || isRequirementPublished(item)}
                           developmentStatus={developmentStatus}
                         />
-                        {item.origin === "space" && item.status ? (
-                          <RequirementSpaceStatusTag status={item.status} />
-                        ) : (
-                          <span />
-                        )}
+                        <div className="ml-auto flex shrink-0 items-center gap-2">
+                          {item.origin === "space" && item.status ? (
+                            <RequirementSpaceStatusTag status={item.status} />
+                          ) : null}
+                          {hasLoadingSession ? (
+                            <span
+                              className="inline-flex items-center text-primary"
+                              role="status"
+                              aria-label="需求会话正在运行"
+                              title="需求会话正在运行"
+                            >
+                              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   </article>
