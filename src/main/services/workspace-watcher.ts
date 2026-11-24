@@ -4,10 +4,11 @@ import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
 import { scheduleGitHookEventSync } from "./git-hook-service"
 import { isGitCommitSignalPath } from "./git-refs"
-import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
-import type {
-  WorkspaceFilesChangedPayload,
-  WorkspaceFilesUpdate
+import { normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../shared/workspace-path"
+import {
+  WORKSPACE_WATCH_DEBOUNCE_MS as DEBOUNCE_DELAY,
+  type WorkspaceFilesChangedPayload,
+  type WorkspaceFilesUpdate
 } from "../../shared/workspace-files-changed"
 import {
   WORKSPACE_GITIGNORE_MAX_BYTES,
@@ -98,7 +99,6 @@ const gitignoreRuleLoadsByWorkspace = new Map<
 >()
 const gitignoreGenerationsByWorkspace = new Map<string, number>()
 
-const DEBOUNCE_DELAY = 500 // ms
 const MAX_INCREMENTAL_PATHS = 128
 const FILE_STAT_CONCURRENCY = 24
 const MAX_GITIGNORE_RULE_CHARACTERS = 8 * 1024
@@ -117,7 +117,7 @@ function normalizeRelativePath(input: string): string {
 }
 
 function normalizeWorkspacePath(input: string): string {
-  return normalizeWorkspacePathKey(path.resolve(input))
+  return normalizeGitWorkspacePathKey(path.resolve(input))
 }
 
 function resolveWorkspaceChildPath(

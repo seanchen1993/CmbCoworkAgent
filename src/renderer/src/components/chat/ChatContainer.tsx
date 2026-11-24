@@ -168,6 +168,7 @@ import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import {
   ChatSearchOverlay,
+  useChatSearchShortcut,
   type DurableChatSearchOptions,
   type DurableChatSearchMatch,
   type DurableChatSearchPage
@@ -5520,23 +5521,11 @@ export function ChatContainer({
     visibleMessageIndexes.length
   ])
 
-  // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
-  // fires regardless of where focus is — a root-scoped listener missed the common
-  // case where focus sits on <body> after clicking the transcript. The visibility
-  // guard (offsetParent) means a backgrounded panel in a split view stays inert;
-  // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (useAppStore.getState().showCustomizeView || useThreadSearch.getState().open || event.shiftKey || event.altKey || event.isComposing) return
-      if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
-      const root = chatRootRef.current
-      if (!root || root.offsetParent === null) return
-      event.preventDefault()
-      setSearchOpen(true)
-    }
-    window.addEventListener("keydown", handleKeyDown, true)
-    return () => window.removeEventListener("keydown", handleKeyDown, true)
-  }, [])
+  const canOpenChatSearch = useCallback(
+    () => !useAppStore.getState().showCustomizeView && !useThreadSearch.getState().open,
+    []
+  )
+  useChatSearchShortcut(chatRootRef, canOpenChatSearch, setSearchOpen)
 
   useEffect(() => {
     const state = chatScrollStateRef.current
@@ -9722,6 +9711,7 @@ export function ChatContainer({
                         onGitStatusChange={setGitWorkspaceStatus}
                       />
                       <GitBranchSwitcher
+                        key={workspacePath}
                         workspacePath={workspacePath}
                         environmentRailCollapsed={composerEnvironmentRailCollapsed}
                       />

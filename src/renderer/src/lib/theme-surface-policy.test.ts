@@ -358,7 +358,7 @@ describe("theme surface policy", () => {
     )
 
     expect(rightPanel).toContain("const workspacePanelRef = useRef<HTMLDivElement>(null)")
-    expect(rightPanel).toContain("workspacePanelRef.current.clientHeight")
+    expect(rightPanel).toContain("observer.observe(panel)")
     expect(rightPanel).toMatch(/ref=\{workspacePanelRef\}[\s\S]{0,120}workspace-info-panel/)
     expect(chatContainer).toContain(
       "border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground"

@@ -686,6 +686,7 @@ export interface HookInterruptionState {
 }
 
 export interface ThreadGitContext {
+  workspacePath: string | null
   isGitRepo?: boolean
   isWorktree?: boolean
   branch?: string | null
@@ -1284,7 +1285,7 @@ function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGit
     const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
 
     if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
-    return { isGitRepo, isWorktree, branch }
+    return { workspacePath, isGitRepo, isWorktree, branch }
   }
 
   // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
@@ -1313,7 +1314,7 @@ function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGit
   const isWorktree = metadataMarkedWorktree || cachedIsWorktree
 
   if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
-  return { isGitRepo, isWorktree, branch }
+  return { workspacePath, isGitRepo, isWorktree, branch }
 }
 
 const defaultStreamData: StreamData = {

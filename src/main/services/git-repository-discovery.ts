@@ -2,6 +2,7 @@ import { execFile } from "child_process"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
+import { withoutGitRepositoryOverrides } from "./git-environment"
 import { currentGitReadSignal, throwIfGitReadCancelled } from "./git-read-context"
 
 const execFileAsync = promisify(execFile)
@@ -11,7 +12,7 @@ const GIT_DISCOVERY_MAX_DEPTH = 4
 const GIT_DISCOVERY_MAX_DIRECTORIES = 2_000
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
+  ...withoutGitRepositoryOverrides(process.env, "workspace"),
   GIT_OPTIONAL_LOCKS: "0",
   GIT_LFS_SKIP_SMUDGE: "1",
   GIT_TERMINAL_PROMPT: "0"
@@ -83,7 +84,8 @@ async function runGit(worktreePath: string, args: string[]): Promise<string> {
 
 export async function getGitRootForPath(folderPath: string): Promise<string | null> {
   try {
-    const root = (await runGit(folderPath, ["rev-parse", "--show-toplevel"])).trim()
+    const root = (await runGit(folderPath, ["rev-parse", "--show-toplevel"]))
+      .replace(process.platform === "win32" ? /\r?\n$/ : /\n$/, "")
     return root ? path.resolve(root) : null
   } catch {
     throwIfGitReadCancelled()

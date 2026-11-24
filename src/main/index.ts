@@ -340,7 +340,7 @@ import {
 } from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
-import { registerModelHandlers } from "./ipc/models"
+import { invalidateGitPanelHeadCaches, registerModelHandlers } from "./ipc/models"
 import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
 import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
 import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
@@ -1182,7 +1182,7 @@ if (browserNativeMessagingHostLaunch) {
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
     registerTaskMmdHandlers(ipcMain)
-    registerGitHandlers()
+    registerGitHandlers(invalidateGitPanelHeadCaches)
     registerPluginHandlers(ipcMain)
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)

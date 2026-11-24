@@ -12,7 +12,8 @@ const sourceFile = ts.createSourceFile(
 )
 
 function collectStringArguments(
-  matchesCall: (call: ts.CallExpression) => boolean
+  matchesCall: (call: ts.CallExpression) => boolean,
+  source: ts.SourceFile = sourceFile
 ): Array<string | null> {
   const values: Array<string | null> = []
 
@@ -24,7 +25,7 @@ function collectStringArguments(
     ts.forEachChild(node, visit)
   }
 
-  visit(sourceFile)
+  visit(source)
   return values
 }
 
@@ -47,5 +48,26 @@ describe("Git IPC command surface", () => {
     )
 
     expect(executables).toEqual(["git"])
+  })
+
+  it("limits graph process launches to Git and Windows process-tree cancellation", () => {
+    const runner = ts.createSourceFile(
+      "git-graph-process.ts",
+      readFileSync(new URL("../services/git-graph-process.ts", import.meta.url), "utf8"),
+      ts.ScriptTarget.Latest,
+      true
+    )
+    expect(
+      collectStringArguments(
+        (call) => ts.isIdentifier(call.expression) && call.expression.text === "spawn",
+        runner
+      )
+    ).toEqual(["git"])
+    expect(
+      collectStringArguments(
+        (call) => ts.isIdentifier(call.expression) && call.expression.text === "execFile",
+        runner
+      )
+    ).toEqual(["powershell.exe", "taskkill"])
   })
 })

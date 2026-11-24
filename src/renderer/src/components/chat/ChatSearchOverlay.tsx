@@ -1,11 +1,12 @@
 import { chatScrollInsets } from "@/lib/chat-scroll-insets"
+import { hasOpenModalDialog } from "@/lib/modal-dialog"
 import {
   finishThreadSearchNavigation,
   isCurrentThreadSearchNavigation,
   type DurableSearchNavigation
 } from "@/lib/thread-search-navigation"
 /* eslint-disable react-refresh/only-export-components -- colocated search contracts and bounded runtime primitives are tested directly */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
 import { ChevronUp, ChevronDown, X, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { findChatSearchLocationRange, mapChatSearchDom } from "@/lib/chat-search-dom"
@@ -93,6 +94,26 @@ interface ChatSearchOverlayProps {
   onCancelDurableReveal?: () => void
   /** Changes whenever the rendered transcript changes, to re-run the search. */
   recomputeKey: unknown
+}
+
+export function useChatSearchShortcut(
+  chatRoot: RefObject<HTMLElement | null>,
+  canOpen: () => boolean,
+  setOpen: (open: boolean) => void
+): void {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.shiftKey || event.altKey || event.isComposing) return
+      if (!((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f")) return
+      const root = chatRoot.current
+      if (!root || root.offsetParent === null || !canOpen()) return
+      event.preventDefault()
+      if (!hasOpenModalDialog()) setOpen(true)
+    }
+    // Capture the shortcut even when clicking the transcript moved focus to <body>.
+    window.addEventListener("keydown", handleKeyDown, true)
+    return () => window.removeEventListener("keydown", handleKeyDown, true)
+  }, [canOpen, chatRoot, setOpen])
 }
 
 const HIGHLIGHT_NAME = "chat-search"

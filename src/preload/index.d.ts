@@ -1,3 +1,13 @@
+import type { GitGraphPage } from "../shared/git-graph"
+import type {
+  GitBranchKind,
+  GitBranchListResult,
+  GitBranchMenuCursor,
+  GitBranchMenuPage,
+  GitBranchMenuResult,
+  GitBranchMutationResult,
+  GitCurrentBranchResult
+} from "../shared/git-branches"
 import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import type { ProjectAgentRunListener } from "../shared/project-agent-run"
 import type { ProjectReportApi } from "../shared/project-analysis-report"
@@ -1638,6 +1648,7 @@ interface CustomAPI {
       options?: {
         worktreePath?: string
         includeSummary?: boolean
+        refreshHead?: boolean
         includePushability?: boolean
       }
     ) => Promise<{
@@ -1650,6 +1661,7 @@ interface CustomAPI {
       hasPushableCommit: boolean
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
+      repositoryRoots?: string[]
       worktreeBranch?: string | null
       error?: string
     }>
@@ -3342,34 +3354,31 @@ interface CustomAPI {
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void
   }
   git: {
-    currentBranch: (cwd?: string) => Promise<{
-      isGitRepo: boolean
-      branch: string | null
-      isWorktree: boolean
-      isMultiRepo?: boolean
-      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
-      error?: string
-    }>
+    currentBranch: (cwd?: string, forSwitcher?: true) => Promise<GitCurrentBranchResult>
+    cancelBranchProbe: () => Promise<void>
+    readBranchHead: (gitDir: string) => Promise<string | null | undefined>
+    cancelBranchHead: () => Promise<void>
+    cancelCommitGraph: () => Promise<void>
+    getCommitGraph: (cwd?: string, skip?: number, snapshot?: string, forDialog?: true) => Promise<GitGraphPage>
+    cancelBranchList: () => Promise<void>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }
-    ) => Promise<{ success: boolean; branches: string[]; error?: string }>
-    switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
-    createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
+    ) => Promise<GitBranchListResult>
+    listBranchMenu: (
+      cwd?: string,
+      options?: { refreshRemote?: boolean; paged?: true }
+    ) => Promise<GitBranchMenuResult>
+    readBranchMenuPage: (cursor: GitBranchMenuCursor) => Promise<GitBranchMenuPage>
+    getChangedFileCount: (cwd?: string, branch?: string | null) => Promise<number>
+    switchBranch: (branch: string, cwd?: string, kind?: GitBranchKind) => Promise<GitBranchMutationResult>
+    createBranch: (branch: string, cwd?: string) => Promise<GitBranchMutationResult>
   }
   gitPanel: {
     getCommitHistory: (threadId: string) => Promise<{
       success: boolean
       projectPath: string | null
       records: GitCommitHistoryRecord[]
-      error?: string
-    }>
-    recordCommitHistory: (
-      threadId: string,
-      fullMessage: string
-    ) => Promise<{
-      success: boolean
-      record: GitCommitHistoryRecord | null
       error?: string
     }>
   }

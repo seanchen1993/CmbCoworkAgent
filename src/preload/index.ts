@@ -1,3 +1,13 @@
+import type { GitGraphPage } from "../shared/git-graph"
+import type {
+  GitBranchKind,
+  GitBranchListResult,
+  GitBranchMenuCursor,
+  GitBranchMenuPage,
+  GitBranchMenuResult,
+  GitBranchMutationResult,
+  GitCurrentBranchResult
+} from "../shared/git-branches"
 import { MARKET_SKILL_CATALOG_CHANGED, type MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import { localBotsApi } from "./bots"
 import { createBotWorkStreamPreview } from "./bot-work-stream-preview"
@@ -1985,6 +1995,7 @@ const api = {
       options?: {
         worktreePath?: string
         includeSummary?: boolean
+        refreshHead?: boolean
         includePushability?: boolean
       }
     ): Promise<{
@@ -1997,6 +2008,7 @@ const api = {
       hasPushableCommit: boolean
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
+      repositoryRoots?: string[]
       worktreeBranch?: string | null
       error?: string
     }> => {
@@ -2010,6 +2022,7 @@ const api = {
         hasPushableCommit: boolean
         pendingCommits?: Array<{ hash: string; message: string; date: string }>
         trackedFiles?: string[]
+        repositoryRoots?: string[]
         worktreeBranch?: string | null
         error?: string
       }>
@@ -5021,62 +5034,51 @@ const api = {
         projectPath: string | null
         records: GitCommitHistoryRecord[]
         error?: string
-      }>,
-    recordCommitHistory: (
-      threadId: string,
-      fullMessage: string
-    ): Promise<{
-      success: boolean
-      record: GitCommitHistoryRecord | null
-      error?: string
-    }> =>
-      ipcRenderer.invoke("git-panel:recordCommitHistory", { threadId, fullMessage }) as Promise<{
-        success: boolean
-        record: GitCommitHistoryRecord | null
-        error?: string
       }>
   },
   git: {
-    currentBranch: (
-      cwd?: string
-    ): Promise<{
-      isGitRepo: boolean
-      branch: string | null
-      isWorktree: boolean
-      isMultiRepo?: boolean
-      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
-      error?: string
-    }> =>
-      ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
-        isGitRepo: boolean
-        branch: string | null
-        isWorktree: boolean
-        isMultiRepo?: boolean
-        repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
-        error?: string
-      }>,
+    currentBranch: (cwd?: string, forSwitcher?: true): Promise<GitCurrentBranchResult> =>
+      ipcRenderer.invoke("git:currentBranch", cwd, forSwitcher),
+    cancelBranchProbe: (): Promise<void> => ipcRenderer.invoke("git:cancelBranchProbe"),
+    readBranchHead: (gitDir: string): Promise<string | null | undefined> =>
+      ipcRenderer.invoke("git:readBranchHead", gitDir),
+    cancelBranchHead: (): Promise<void> => ipcRenderer.invoke("git:cancelBranchHead"),
+    cancelCommitGraph: (): Promise<void> => ipcRenderer.invoke("git:cancelCommitGraph"),
+    getCommitGraph: (cwd?: string, skip = 0, snapshot?: string, forDialog?: true): Promise<GitGraphPage> =>
+      ipcRenderer.invoke("git:getCommitGraph", { cwd, skip, snapshot, forDialog }),
+    cancelBranchList: (): Promise<void> => ipcRenderer.invoke("git:cancelBranchList"),
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }
-    ): Promise<{ success: boolean; branches: string[]; error?: string }> =>
+    ): Promise<GitBranchListResult> =>
       ipcRenderer.invoke("git:listBranches", {
         cwd,
-        refreshRemote: Boolean(options?.refreshRemote)
-      }) as Promise<{
-        success: boolean
-        branches: string[]
-        error?: string
-      }>,
-    switchBranch: (branch: string, cwd?: string): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("git:switchBranch", { branch, cwd }) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    createBranch: (branch: string, cwd?: string): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("git:createBranch", { branch, cwd }) as Promise<{
-        success: boolean
-        error?: string
-      }>
+        refreshRemote: Boolean(options?.refreshRemote),
+        forBranchMenu: true
+      }),
+    listBranchMenu: (
+      cwd?: string,
+      options?: { refreshRemote?: boolean; paged?: true }
+    ): Promise<GitBranchMenuResult> =>
+      ipcRenderer.invoke("git:listBranches", {
+        cwd,
+        refreshRemote: Boolean(options?.refreshRemote),
+        forBranchMenu: true,
+        format: "menu",
+        paged: options?.paged
+      }),
+    readBranchMenuPage: (cursor: GitBranchMenuCursor): Promise<GitBranchMenuPage> =>
+      ipcRenderer.invoke("git:readBranchMenuPage", cursor),
+    getChangedFileCount: (cwd?: string, branch?: string | null): Promise<number> =>
+      ipcRenderer.invoke("git:getChangedFileCount", cwd, branch),
+    switchBranch: (
+      branch: string,
+      cwd?: string,
+      kind?: GitBranchKind
+    ): Promise<GitBranchMutationResult> =>
+      ipcRenderer.invoke("git:switchBranch", { branch, cwd, kind }),
+    createBranch: (branch: string, cwd?: string): Promise<GitBranchMutationResult> =>
+      ipcRenderer.invoke("git:createBranch", { branch, cwd })
   }
 }
 

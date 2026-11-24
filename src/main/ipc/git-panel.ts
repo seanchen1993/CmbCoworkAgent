@@ -8,7 +8,9 @@ import { getThreadCore } from "../db"
 import { mutateLatestThreadMetadata, parseThreadMetadata } from "../services/thread-metadata"
 import { getOpenworkDir } from "../storage"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
-import { resolveGitOperationPath } from "../services/git-repository-discovery"
+import { withoutGitRepositoryOverrides } from "../services/git-environment"
+import { getGitRootForPath, resolveGitOperationPath } from "../services/git-repository-discovery"
+import { prepareGitPanelWrite, type GitPanelWritePreparation } from "../services/git-worktree-write-gate"
 import type { GitCommitHistoryRecord } from "../../shared/git-commit-history"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 
@@ -24,7 +26,7 @@ const GIT_RESTORE_MIN_VERSION = { major: 2, minor: 23 }
 const SKIPPED_DIR_SCAN_TIMEOUT_MS = 5_000
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
+  ...withoutGitRepositoryOverrides(process.env, "workspace"),
   GIT_OPTIONAL_LOCKS: "0",
   GIT_LFS_SKIP_SMUDGE: "1",
   GIT_TERMINAL_PROMPT: "0",
@@ -598,6 +600,16 @@ async function runGit(
     console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
   }
+}
+
+function reserveGitPanelWrite(
+  worktreePath: string,
+  preparation: GitPanelWritePreparation
+): Promise<() => void> {
+  return preparation.reserve(
+    worktreePath,
+    runGit(worktreePath, ["rev-parse", "--git-dir"], { silent: true, timeoutMs: 10_000 })
+  )
 }
 
 function isRenameOrCopyStatus(status: string): boolean {
@@ -1259,168 +1271,176 @@ async function rejectWorktreePaths(params: {
   const { threadId, filePaths, options } = params
   const startedAt = Date.now()
   const hasExplicitSelection = Array.isArray(filePaths)
-  const entryThread = getThreadCore(threadId)
-  if (!entryThread) return { success: false, error: "任务不存在" }
-  const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
-  const context = await getThreadWorkspaceContext(threadId)
-  if (!matchesThreadIncarnation(getThreadCore(threadId), expectedThreadIncarnation)) {
-    return { success: false, error: "任务已被替换，忽略过期的回退请求" }
-  }
-  if (!context.workspacePath) {
-    return { success: false, error: "当前任务不在 Git 仓库中" }
-  }
-  const workspacePath = context.workspacePath
-  const capturedGitMetadataIdentity = getGitMetadataIdentity(context.metadata)
+  const preparation = prepareGitPanelWrite()
+  let releaseWrite: (() => void) | undefined
+  try {
+    const entryThread = getThreadCore(threadId)
+    if (!entryThread) return { success: false, error: "任务不存在" }
+    const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
+    const context = await getThreadWorkspaceContext(threadId)
+    if (!matchesThreadIncarnation(getThreadCore(threadId), expectedThreadIncarnation)) {
+      return { success: false, error: "任务已被替换，忽略过期的回退请求" }
+    }
+    if (!context.workspacePath) {
+      return { success: false, error: "当前任务不在 Git 仓库中" }
+    }
+    const workspacePath = context.workspacePath
+    const capturedGitMetadataIdentity = getGitMetadataIdentity(context.metadata)
 
-  const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
-  if ("error" in target) return { success: false, error: target.error }
+    const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
+    if ("error" in target) return { success: false, error: target.error }
 
-  const worktreePath = target.worktreePath
-  const gitRoot = target.gitRoot
-  const explicitSelections = hasExplicitSelection
-    ? (filePaths || [])
-        .map((rawPath) => {
-          const primaryPath = explicitPathToWorktreeRelativePath(
-            workspacePath,
-            worktreePath,
-            rawPath
+    const worktreePath = target.worktreePath
+    const gitRoot = target.gitRoot
+    releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
+    const explicitSelections = hasExplicitSelection
+      ? (filePaths || [])
+          .map((rawPath) => {
+            const primaryPath = explicitPathToWorktreeRelativePath(
+              workspacePath,
+              worktreePath,
+              rawPath
+            )
+            if (!primaryPath) return null
+            return {
+              rawPath,
+              primaryPath,
+              basenameFallbackPath: getBasenameFallbackPath(worktreePath, rawPath, primaryPath)
+            }
+          })
+          .filter(
+            (
+              entry
+            ): entry is {
+              rawPath: string
+              primaryPath: string
+              basenameFallbackPath: string | null
+            } => Boolean(entry)
           )
-          if (!primaryPath) return null
-          return {
-            rawPath,
-            primaryPath,
-            basenameFallbackPath: getBasenameFallbackPath(worktreePath, rawPath, primaryPath)
-          }
-        })
-        .filter(
-          (
-            entry
-          ): entry is {
-            rawPath: string
-            primaryPath: string
-            basenameFallbackPath: string | null
-          } => Boolean(entry)
-        )
-    : []
-  let targetPaths = hasExplicitSelection
-    ? Array.from(new Set(explicitSelections.map((entry) => entry.primaryPath)))
-    : ["."]
-  if (hasExplicitSelection && targetPaths.length === 0) {
-    return { success: false, error: "未选择可回退文件" }
-  }
-  logGitStep(
-    threadId,
-    "reject_all",
-    `路径解析完成：${targetPaths.length} 个 pathspec，仓库=${worktreePath}，Git根=${gitRoot}`
-  )
+      : []
+    let targetPaths = hasExplicitSelection
+      ? Array.from(new Set(explicitSelections.map((entry) => entry.primaryPath)))
+      : ["."]
+    if (hasExplicitSelection && targetPaths.length === 0) {
+      return { success: false, error: "未选择可回退文件" }
+    }
+    logGitStep(
+      threadId,
+      "reject_all",
+      `路径解析完成：${targetPaths.length} 个 pathspec，仓库=${worktreePath}，Git根=${gitRoot}`
+    )
 
-  for (const targetPath of targetPaths) {
-    await assertRejectPathSafe(worktreePath, targetPath)
-  }
-
-  const statusStartedAt = Date.now()
-  let changedEntries = await runStatusPorcelainForPathspecs(worktreePath, targetPaths)
-  if (hasExplicitSelection && explicitSelections.length > 0) {
-    const basenameFallbackPaths: string[] = []
-    for (const selection of explicitSelections) {
-      if (!selection.basenameFallbackPath) continue
-      if (
-        changedEntries.some((entry) => changedEntryMatchesPathspec(entry, selection.primaryPath))
-      ) {
-        continue
-      }
-      if (await isKnownWorktreePath(worktreePath, selection.primaryPath)) {
-        continue
-      }
-      basenameFallbackPaths.push(selection.basenameFallbackPath)
+    for (const targetPath of targetPaths) {
+      await assertRejectPathSafe(worktreePath, targetPath)
     }
 
-    const fallbackTargets = normalizeGitPathspecList(basenameFallbackPaths)
-    if (fallbackTargets.length > 0) {
-      for (const fallbackTarget of fallbackTargets) {
-        await assertRejectPathSafe(worktreePath, fallbackTarget)
+    const statusStartedAt = Date.now()
+    let changedEntries = await runStatusPorcelainForPathspecs(worktreePath, targetPaths)
+    if (hasExplicitSelection && explicitSelections.length > 0) {
+      const basenameFallbackPaths: string[] = []
+      for (const selection of explicitSelections) {
+        if (!selection.basenameFallbackPath) continue
+        if (
+          changedEntries.some((entry) => changedEntryMatchesPathspec(entry, selection.primaryPath))
+        ) {
+          continue
+        }
+        if (await isKnownWorktreePath(worktreePath, selection.primaryPath)) {
+          continue
+        }
+        basenameFallbackPaths.push(selection.basenameFallbackPath)
       }
-      const fallbackEntries = await runStatusPorcelainForPathspecs(worktreePath, fallbackTargets)
-      if (fallbackEntries.length > 0) {
-        changedEntries = mergeChangedEntries(changedEntries, fallbackEntries)
-        targetPaths = normalizeGitPathspecList([...targetPaths, ...fallbackTargets])
-        logGitStep(
-          threadId,
-          "reject_all",
-          `路径前缀兜底命中：${fallbackTargets.length} 个 pathspec`
-        )
+
+      const fallbackTargets = normalizeGitPathspecList(basenameFallbackPaths)
+      if (fallbackTargets.length > 0) {
+        for (const fallbackTarget of fallbackTargets) {
+          await assertRejectPathSafe(worktreePath, fallbackTarget)
+        }
+        const fallbackEntries = await runStatusPorcelainForPathspecs(worktreePath, fallbackTargets)
+        if (fallbackEntries.length > 0) {
+          changedEntries = mergeChangedEntries(changedEntries, fallbackEntries)
+          targetPaths = normalizeGitPathspecList([...targetPaths, ...fallbackTargets])
+          logGitStep(
+            threadId,
+            "reject_all",
+            `路径前缀兜底命中：${fallbackTargets.length} 个 pathspec`
+          )
+        }
       }
     }
-  }
-  logGitStep(
-    threadId,
-    "reject_all",
-    `状态扫描完成：${changedEntries.length} 个改动，耗时 ${formatDurationMs(statusStartedAt)}`
-  )
-  if (changedEntries.length === 0) {
-    logGitStep(threadId, "reject_all", `无可回退改动，总耗时 ${formatDurationMs(startedAt)}`)
-    return { success: true, revertedFileCount: 0 }
-  }
+    logGitStep(
+      threadId,
+      "reject_all",
+      `状态扫描完成：${changedEntries.length} 个改动，耗时 ${formatDurationMs(statusStartedAt)}`
+    )
+    if (changedEntries.length === 0) {
+      logGitStep(threadId, "reject_all", `无可回退改动，总耗时 ${formatDurationMs(startedAt)}`)
+      return { success: true, revertedFileCount: 0 }
+    }
 
-  const plan = buildRejectPlan(changedEntries)
-  logGitStep(
-    threadId,
-    "reject_all",
-    `回退计划：restore=${plan.restoreTargets.length}，clean=${plan.cleanTargets.length}`
-  )
-  logGitTimestamp(threadId, "安全检查开始")
-  for (const targetPath of [...plan.restoreTargets, ...plan.cleanTargets]) {
-    await assertRejectPathSafe(gitRoot, targetPath)
-  }
-  logGitTimestamp(threadId, "安全检查完成")
-  const restoreStartedAt = Date.now()
-  await restorePathsToHead(gitRoot, plan.restoreTargets, { threadId, skipNormalize: true })
-  logGitStep(
-    threadId,
-    "reject_all",
-    `restore 完成：${plan.restoreTargets.length} 个文件，耗时 ${formatDurationMs(restoreStartedAt)}`
-  )
-  const cleanStartedAt = Date.now()
-  await resetPathsFromIndex(gitRoot, plan.cleanTargets, { skipNormalize: true })
-  await cleanUntrackedPaths(gitRoot, plan.cleanTargets, { skipNormalize: true })
-  logGitStep(
-    threadId,
-    "reject_all",
-    `clean 完成：${plan.cleanTargets.length} 个文件，耗时 ${formatDurationMs(cleanStartedAt)}`
-  )
+    const plan = buildRejectPlan(changedEntries)
+    logGitStep(
+      threadId,
+      "reject_all",
+      `回退计划：restore=${plan.restoreTargets.length}，clean=${plan.cleanTargets.length}`
+    )
+    logGitTimestamp(threadId, "安全检查开始")
+    for (const targetPath of [...plan.restoreTargets, ...plan.cleanTargets]) {
+      await assertRejectPathSafe(gitRoot, targetPath)
+    }
+    logGitTimestamp(threadId, "安全检查完成")
+    const restoreStartedAt = Date.now()
+    await restorePathsToHead(gitRoot, plan.restoreTargets, { threadId, skipNormalize: true })
+    logGitStep(
+      threadId,
+      "reject_all",
+      `restore 完成：${plan.restoreTargets.length} 个文件，耗时 ${formatDurationMs(restoreStartedAt)}`
+    )
+    const cleanStartedAt = Date.now()
+    await resetPathsFromIndex(gitRoot, plan.cleanTargets, { skipNormalize: true })
+    await cleanUntrackedPaths(gitRoot, plan.cleanTargets, { skipNormalize: true })
+    logGitStep(
+      threadId,
+      "reject_all",
+      `clean 完成：${plan.cleanTargets.length} 个文件，耗时 ${formatDurationMs(cleanStartedAt)}`
+    )
 
-  const touchedTargets = plan.touchedTargets.length > 0 ? plan.touchedTargets : targetPaths
-  const convertedTouchedTargets =
-    path.resolve(gitRoot) === path.resolve(worktreePath)
-      ? touchedTargets
-      : touchedTargets
-          .map((targetPath) =>
-            gitRootRelativePathToWorktreeRelativePath(gitRoot, worktreePath, targetPath)
-          )
-          .filter((targetPath): targetPath is string => Boolean(targetPath))
-  const metadataTouchedTargets =
-    convertedTouchedTargets.length > 0 ? convertedTouchedTargets : touchedTargets
-  const latestThread = getThreadCore(threadId)
-  const latestMetadata = parseThreadMetadata(latestThread?.metadata)
-  const latestGitMetadataIdentity = getGitMetadataIdentity(latestMetadata)
-  if (
-    matchesThreadIncarnation(latestThread, expectedThreadIncarnation) &&
-    gitMetadataIdentityEquals(latestGitMetadataIdentity, capturedGitMetadataIdentity)
-  ) {
-    mutateLatestThreadMetadata(threadId, (current) => {
-      cleanupRejectedFileMetadata(current, workspacePath, worktreePath, metadataTouchedTargets)
-    })
-  } else {
-    logGitStep(threadId, "reject_all", "任务 Git 上下文已变化，跳过旧操作的元数据清理")
-  }
+    const touchedTargets = plan.touchedTargets.length > 0 ? plan.touchedTargets : targetPaths
+    const convertedTouchedTargets =
+      path.resolve(gitRoot) === path.resolve(worktreePath)
+        ? touchedTargets
+        : touchedTargets
+            .map((targetPath) =>
+              gitRootRelativePathToWorktreeRelativePath(gitRoot, worktreePath, targetPath)
+            )
+            .filter((targetPath): targetPath is string => Boolean(targetPath))
+    const metadataTouchedTargets =
+      convertedTouchedTargets.length > 0 ? convertedTouchedTargets : touchedTargets
+    const latestThread = getThreadCore(threadId)
+    const latestMetadata = parseThreadMetadata(latestThread?.metadata)
+    const latestGitMetadataIdentity = getGitMetadataIdentity(latestMetadata)
+    if (
+      matchesThreadIncarnation(latestThread, expectedThreadIncarnation) &&
+      gitMetadataIdentityEquals(latestGitMetadataIdentity, capturedGitMetadataIdentity)
+    ) {
+      mutateLatestThreadMetadata(threadId, (current) => {
+        cleanupRejectedFileMetadata(current, workspacePath, worktreePath, metadataTouchedTargets)
+      })
+    } else {
+      logGitStep(threadId, "reject_all", "任务 Git 上下文已变化，跳过旧操作的元数据清理")
+    }
 
-  notifyWorkspaceFilesChanged(threadId, worktreePath)
-  if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
-    notifyWorkspaceFilesChanged(threadId, workspacePath)
-  }
+    notifyWorkspaceFilesChanged(threadId, worktreePath)
+    if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
+      notifyWorkspaceFilesChanged(threadId, workspacePath)
+    }
 
-  logGitStep(threadId, "reject_all", `回退总耗时 ${formatDurationMs(startedAt)}`)
-  return { success: true, revertedFileCount: changedEntries.length }
+    logGitStep(threadId, "reject_all", `回退总耗时 ${formatDurationMs(startedAt)}`)
+    return { success: true, revertedFileCount: changedEntries.length }
+  } finally {
+    releaseWrite?.()
+    preparation.dispose()
+  }
 }
 
 function trimCommitHistoryText(value: unknown, maxChars = MAX_COMMIT_HISTORY_TEXT_CHARS): string {
@@ -1434,50 +1454,8 @@ function normalizeCommitHistoryProjectKey(projectPath: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved
 }
 
-async function getGitRoot(workspacePath: string): Promise<string | null> {
-  const command = formatGitCommand(workspacePath, ["rev-parse", "--show-toplevel"])
-  console.log(`[GitPanel][exec] ${command}`)
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["-C", workspacePath, "rev-parse", "--show-toplevel"],
-      {
-        encoding: "utf-8",
-        timeout: 10_000,
-        maxBuffer: 1024 * 1024,
-        windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
-      }
-    )
-    console.log(`[GitPanel][exec][ok] ${command}`)
-    return String(stdout || "").trim() || null
-  } catch (error) {
-    console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
-    return null
-  }
-}
-
-async function getOptionalGitOutput(workspacePath: string, args: string[]): Promise<string | null> {
-  const command = formatGitCommand(workspacePath, args)
-  console.log(`[GitPanel][exec] ${command}`)
-  try {
-    const { stdout } = await execFileAsync("git", ["-C", workspacePath, ...args], {
-      encoding: "utf-8",
-      timeout: 10_000,
-      maxBuffer: 1024 * 1024,
-      windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
-    })
-    console.log(`[GitPanel][exec][ok] ${command}`)
-    return String(stdout || "").trim() || null
-  } catch (error) {
-    console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
-    return null
-  }
-}
-
 async function getCommitHistoryProjectPath(workspacePath: string): Promise<string> {
-  const gitRoot = await getGitRoot(workspacePath)
+  const gitRoot = await getGitRootForPath(workspacePath)
   return path.resolve(gitRoot || workspacePath)
 }
 
@@ -1587,7 +1565,7 @@ function getThreadWorkspacePath(threadId: string): string | null {
   return typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
 }
 
-function recordGitCommitHistoryAsync(
+export function recordGitCommitHistoryAsync(
   params: GitCommitHistoryInput
 ): Promise<GitCommitHistoryRecord | null> {
   return enqueueHistoryMutation(async () => {
@@ -1649,6 +1627,8 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
         options?: { worktreePath?: string }
       }
     ) => {
+      const preparation = prepareGitPanelWrite()
+      let releaseWrite: (() => void) | undefined
       try {
         const { workspacePath } = await getThreadWorkspaceContext(threadId)
         if (!workspacePath) {
@@ -1660,6 +1640,7 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
         }
 
         const entry = normalizeGitignoreEntry(targetPath, kind)
+        releaseWrite = await reserveGitPanelWrite(target.worktreePath, preparation)
         const gitignorePath = path.join(target.worktreePath, ".gitignore")
         let existing = ""
         try {
@@ -1709,6 +1690,9 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
         const detail = e instanceof Error ? e.message : "写入 .gitignore 失败"
         logGitStep(threadId, "ignore", `失败：${detail}`)
         return { success: false, error: detail }
+      } finally {
+        releaseWrite?.()
+        preparation.dispose()
       }
     }
   )
@@ -1792,44 +1776,6 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
           projectPath: null,
           records: [],
           error: e instanceof Error ? e.message : "读取 commit 历史失败"
-        }
-      }
-    }
-  )
-
-  ipcMain.handle(
-    "git-panel:recordCommitHistory",
-    async (_event, { threadId, fullMessage }: { threadId: string; fullMessage: string }) => {
-      try {
-        const workspacePath = getThreadWorkspacePath(threadId)
-        if (!workspacePath) {
-          return {
-            success: false,
-            record: null,
-            error: "未关联工作区"
-          }
-        }
-
-        const [branch, commitSha] = await Promise.all([
-          getOptionalGitOutput(workspacePath, ["rev-parse", "--abbrev-ref", "HEAD"]),
-          getOptionalGitOutput(workspacePath, ["rev-parse", "HEAD"])
-        ])
-        const record = await recordGitCommitHistoryAsync({
-          workspacePath,
-          branch,
-          commitSha: commitSha || undefined,
-          fullMessage
-        })
-
-        return {
-          success: true,
-          record
-        }
-      } catch (e) {
-        return {
-          success: false,
-          record: null,
-          error: e instanceof Error ? e.message : "记录 commit 历史失败"
         }
       }
     }

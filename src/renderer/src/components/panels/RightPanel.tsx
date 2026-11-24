@@ -1525,11 +1525,20 @@ export function RightPanel({
     lsp: number
   } | null>(null)
 
+  const [workspacePanelHeight, setWorkspacePanelHeight] = useState(0)
+  useEffect(() => {
+    const panel = workspacePanelRef.current
+    if (!panel) return
+    const observer = new ResizeObserver(([entry]) => {
+      setWorkspacePanelHeight(Math.round(entry.contentRect.height))
+    })
+    observer.observe(panel)
+    return () => observer.disconnect()
+  }, [moduleMode])
+
   // Calculate available content height
   const getAvailableContentHeight = useCallback(() => {
     if (moduleMode !== "work") return 0
-    if (!workspacePanelRef.current) return 0
-    const totalHeight = workspacePanelRef.current.clientHeight
 
     const sectionCount = (showSystemConstraints ? 8 : 7) + (activePluginRunArtifacts ? 1 : 0)
     let used = HEADER_HEIGHT * sectionCount
@@ -1547,8 +1556,9 @@ export function RightPanel({
     ].filter(Boolean).length
     used += HANDLE_HEIGHT * handles
 
-    return Math.max(0, totalHeight - used)
+    return Math.max(0, workspacePanelHeight - used)
   }, [
+    workspacePanelHeight,
     moduleMode,
     tasksOpen,
     filesOpen,
@@ -1984,21 +1994,7 @@ export function RightPanel({
     lspOpen
   ])
 
-  // Calculate heights in an effect (refs can't be accessed during render)
-  const [heights, setHeights] = useState<PanelHeights>({
-    tasks: 0,
-    files: 0,
-    pluginRunArtifacts: 0,
-    systemConstraints: 0,
-    agents: 0,
-    skills: 0,
-    plugins: 0,
-    hooks: 0,
-    lsp: 0
-  })
-  useEffect(() => {
-    setHeights(getContentHeights())
-  }, [getContentHeights])
+  const heights = useMemo(getContentHeights, [getContentHeights])
 
   const allPanelsClosed =
     moduleMode === "work" &&
@@ -2193,7 +2189,6 @@ export function RightPanel({
           <div className="h-full min-h-0 bg-background-elevated p-2">
             <Suspense fallback={<LazySectionFallback label="加载 Git 面板..." />}>
               <GitPanelView
-                key={currentThreadId ?? "git-panel-empty-thread"}
                 threadId={currentThreadId ?? ""}
                 workspacePath={workspacePath ?? null}
                 initialGitContext={gitContext ?? null}

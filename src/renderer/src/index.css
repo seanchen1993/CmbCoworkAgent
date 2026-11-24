@@ -3,6 +3,7 @@
 @import "@fontsource/inter/500.css";
 @import "@fontsource/inter/600.css";
 @import "@fontsource/inter/700.css";
+@import "./components/chat/git-branch-menu.css";
 
 @custom-variant dark (&:is(.dark *));
 

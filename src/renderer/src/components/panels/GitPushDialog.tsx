@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 interface GitPushDialogProps {
   open: boolean
   running: boolean
+  submitDisabled?: boolean
   loading?: boolean
   branch: string
   pendingCommits?: Array<{ hash: string; message: string; date: string }>
@@ -15,6 +16,7 @@ interface GitPushDialogProps {
 export function GitPushDialog({
   open,
   running,
+  submitDisabled = false,
   loading = false,
   branch,
   pendingCommits,
@@ -109,7 +111,7 @@ export function GitPushDialog({
             id="git-push-button"
             type="button"
             className="w-full h-9"
-            disabled={running || loading || noPushableCommits}
+            disabled={running || submitDisabled || loading || noPushableCommits}
             onClick={onSubmit}
           >
             {running ? (

@@ -17,6 +17,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -25,12 +26,14 @@ import {
 import { tmpdir } from "os"
 import { basename, dirname, join } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { ipcMain } from "electron"
+import { registerGitHandlers } from "./git"
 
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "cmb-test", getVersion: () => "0.0.0" },
   BrowserWindow: { getAllWindows: () => [] },
   dialog: {},
-  ipcMain: { handle: () => undefined }
+  ipcMain: { handle: vi.fn() }
 }))
 
 import {
@@ -40,6 +43,7 @@ import {
   buildGitPanelMetaState,
   buildGitPanelState,
   collectChangedFileEntriesFromStatus,
+  invalidateGitPanelHeadCaches,
   pathExistsForGitAdd,
   resolveSelectedChangedFilesForGitOps,
   shouldUseDefaultGitPush
@@ -934,6 +938,35 @@ describe("shouldUseDefaultGitPush", () => {
 })
 
 describe("buildGitPanelMetaState — pushability", () => {
+  it("refreshes a cached subdirectory panel immediately after checkout at its root", async () => {
+    const root = createRepo("gitpanel-branch-")
+    try {
+      const nested = join(root, "nested")
+      mkdirSync(nested)
+      gitIn(root, ["symbolic-ref", "HEAD", "refs/heads/original"])
+      const context = { ...createGitPanelTestContext(nested), worktreeBranch: "stale-metadata" }
+      const read = () => buildGitPanelMetaState("subdir", context, {
+        includeSummary: false, includePushability: false
+      })
+      const repositoryRoots = [realpathSync(root)]
+      await expect(read()).resolves.toMatchObject({ worktreeBranch: "original", repositoryRoots })
+
+      registerGitHandlers(invalidateGitPanelHeadCaches)
+      const create = vi.mocked(ipcMain.handle).mock.calls.find(([name]) => name === "git:createBranch")?.[1]
+      if (!create) throw new Error("git:createBranch was not registered")
+      const branch = "feature/checkout\u00a0"
+      const result = await create({} as Electron.IpcMainInvokeEvent, { cwd: root, branch })
+      expect(result).toMatchObject({ success: true, headChanged: true, gitRoot: repositoryRoots[0] })
+      await expect(read()).resolves.toMatchObject({ worktreeBranch: branch, repositoryRoots })
+      gitIn(root, ["symbolic-ref", "HEAD", "refs/heads/external"])
+      await expect(buildGitPanelMetaState("subdir", context, {
+        refreshHead: true, includeSummary: false, includePushability: false
+      })).resolves.toMatchObject({ worktreeBranch: "external", repositoryRoots })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("lists all unpublished commits on a first-push branch, including external IDE commits", async () => {
     const localRepo = createRepo("gitpanel-pushability-local-")
     const remoteRepo = createBareRepo("gitpanel-pushability-remote-")

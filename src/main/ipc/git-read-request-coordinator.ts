@@ -1,6 +1,14 @@
 import { runWithGitReadSignal } from "../services/git-read-context"
 
-export type GitReadFamily = "panel" | "changed-summary" | "summary" | "workspace-probe"
+export type GitReadFamily =
+  | "panel"
+  | "changed-summary"
+  | "summary"
+  | "workspace-probe"
+  | "branch-menu"
+  | "branch-probe"
+  | "branch-head"
+  | "commit-graph"
 
 export interface GitReadSender {
   id: number
