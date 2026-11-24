@@ -22,6 +22,8 @@ export const REQUIREMENT_BOUND_SKILLS: RequirementSessionCapabilityItem[] = [
   }
 ]
 
+const REQUIREMENT_BUILTIN_SKILL_IDS = ["devclaw-in-app-browser"]
+
 export type RequirementSessionCapabilities = {
   allowedExperts: string[]
   allowedSkills: string[]
@@ -30,7 +32,10 @@ export type RequirementSessionCapabilities = {
 export function getRequirementSessionCapabilities(): RequirementSessionCapabilities {
   return {
     allowedExperts: REQUIREMENT_BOUND_EXPERTS.map((item) => item.id),
-    allowedSkills: REQUIREMENT_BOUND_SKILLS.map((item) => item.id)
+    allowedSkills: [
+      ...REQUIREMENT_BOUND_SKILLS.map((item) => item.id),
+      ...REQUIREMENT_BUILTIN_SKILL_IDS
+    ]
   }
 }
 

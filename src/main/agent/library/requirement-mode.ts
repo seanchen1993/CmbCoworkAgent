@@ -13,19 +13,15 @@ export interface SessionCapabilityPreset {
 
 export const REQUIREMENT_SESSION_CAPABILITIES: SessionCapabilityPreset = {
   allowedExperts: ["analyst"],
-  allowedSkills: ["requirement-to-prd"]
+  allowedSkills: ["requirement-to-prd", "devclaw-in-app-browser"]
 }
 
 export const REQUIREMENT_SYSTEM_PROMPT = `## Requirement Mode
-You are handling one requirement-management conversation only.
-
-Allowed work: understand the current requirement, inspect its requirement workspace, clarify business rules, assess scope and acceptance criteria, generate or review PRD documents through the requirement-to-prd skill, and publish only after explicit user authorization.
-
-Do not write application code, design UI, run Git operations, create schedules, or answer unrelated questions. When a request is outside the current requirement, reply exactly: "当前处于需求模式，请补充、澄清、评审或确认当前需求；其他任务请新建普通会话。"
+Focus on clarifying the current requirement and producing an accurate PRD.
 
 Before any PRD work, call the task subagent with subagent_type="analyst". Give it the current requirement and ask for missing questions, scope risks, assumptions, edge cases, and pass/fail acceptance criteria. When source materials exist, ask it to inspect them; for a text requirement, analyze the stated goal and identify the first questions needed to discover the requirement through conversation. Use its findings to drive clarification. Do not treat analyst suggestions as user-confirmed decisions.
 
-Use the requirement-to-prd skill for PRD work. Do not generate a formal PRD before the user has confirmed the initial PRD. Do not publish unless the user has explicitly authorized publication after the formal PRD is ready.`
+Use the requirement-to-prd skill for PRD work. Generate the formal PRD only after the user has confirmed the requirement scope, key business rules, and outstanding questions. Publish only after the formal PRD is ready and the user has explicitly authorized publication.`
 
 export function getRequirementRuntimeOptions(metadata: Record<string, unknown>): Record<string, unknown> {
   return typeof metadata.requirementId === "string" && metadata.requirementId.trim().length > 0

@@ -421,7 +421,7 @@ describe("requirement source preview", () => {
     expect(deletedIndex.list).toEqual([])
   })
 
-  it("omits DOCX images from the generated Markdown preview", async () => {
+  it("omits DOCX images and base64 data from the persisted Markdown preview", async () => {
     const sourcePath = resolve("node_modules/mammoth/test/test-data/tiny-picture.docx")
     const workDir = join(tempHome, "requirement-image-workspace")
     mkdirSync(workDir)
@@ -445,6 +445,8 @@ describe("requirement source preview", () => {
     const preview = readFileSync(previewPath, "utf-8")
     expect(preview).not.toMatch(/data:image|base64|!\[[^\]]*\]\(/i)
 
+    // Older app versions may have left embedded image data in the cache. It
+    // must be removed both from the returned preview and the persisted file.
     writeFileSync(
       previewPath,
       '保留前文\n\n!\\[IMG\\_256\\]\\(data:image/png;base64,aGVsbG8=\\)\n\n不规则图片语法 data:image/webp;base64,aGVsbG8=\n\n保留后文\n<img src="data:image/jpeg;base64,aGVsbG8=" alt="legacy">',
