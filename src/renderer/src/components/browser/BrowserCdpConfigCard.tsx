@@ -23,7 +23,7 @@ interface BrowserCdpConfigCardProps {
 }
 
 const BROWSER_CDP_CONFIG_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserCdpConfigCard]`
-const APP_DOWNLOAD_URL = import.meta.env.VITE_APP_DOWNLOAD_URL?.trim()
+const BROWSER_EXTENSION_DOWNLOAD_URL = import.meta.env.VITE_BROWSER_EXTENSION_DOWNLOAD_URL?.trim()
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -368,13 +368,13 @@ export function BrowserCdpConfigCard({
               ) : (
                 <>
                   1. Windows 系统需要先在 Chrome 浏览器中安装浏览器插件，才能导入已有登录数据。
-                  {APP_DOWNLOAD_URL ? (
+                  {BROWSER_EXTENSION_DOWNLOAD_URL ? (
                     <a
-                      href={APP_DOWNLOAD_URL}
+                      href={BROWSER_EXTENSION_DOWNLOAD_URL}
                       className="ml-2 text-primary underline underline-offset-2 hover:text-primary/80"
                       onClick={(event) => {
                         event.preventDefault()
-                        void window.electron.openExternal(APP_DOWNLOAD_URL)
+                        void window.electron.openExternal(BROWSER_EXTENSION_DOWNLOAD_URL)
                       }}
                     >
                       下载浏览器插件

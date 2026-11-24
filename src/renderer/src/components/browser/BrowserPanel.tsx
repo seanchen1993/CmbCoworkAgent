@@ -73,7 +73,8 @@ const BROWSER_CONSOLE_ICON_BUTTON_CLASSNAME = "size-7 rounded transition-colors 
 const BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME =
   "h-8 min-w-8 shrink-0 rounded-md px-1 transition-colors hover:bg-muted"
 const BROWSER_PANEL_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserPanel]`
-const APP_DOWNLOAD_URL = import.meta.env.VITE_APP_DOWNLOAD_URL?.trim()
+const BROWSER_GUIDE_URL = import.meta.env.VITE_BROWSER_GUIDE_URL?.trim()
+const BROWSER_EXTENSION_DOWNLOAD_URL = import.meta.env.VITE_BROWSER_EXTENSION_DOWNLOAD_URL?.trim()
 const AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS = [1500, 4000, 8000, 5000] as const
 const AUTO_COOKIE_IMPORT_RETRYABLE_ERROR_CODES = new Set([
   "extension_not_connected",
@@ -168,7 +169,21 @@ function BrowserWelcomePanel(): React.JSX.Element {
 
         <div className="overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.08)]">
           <div className="border-b border-border px-4 py-3">
-            <p className="text-xs font-semibold text-foreground">一个浏览器，贯通开发与验证</p>
+            <p className="text-xs font-semibold text-foreground">
+              一个浏览器，贯通开发与验证
+              {BROWSER_GUIDE_URL ? (
+                <a
+                  href={BROWSER_GUIDE_URL}
+                  className="ml-2 font-normal text-primary underline underline-offset-2 hover:text-primary/80"
+                  onClick={(event) => {
+                    event.preventDefault()
+                    void window.electron.openExternal(BROWSER_GUIDE_URL)
+                  }}
+                >
+                  操作指引（图文结合）
+                </a>
+              ) : null}
+            </p>
             <p className="mt-0.5 text-[11px] text-muted-foreground">
               预览页面、复用登录态、驱动自动化，让每次网页任务更快闭环。
             </p>
@@ -211,13 +226,13 @@ function BrowserWelcomePanel(): React.JSX.Element {
                 <p className="text-xs font-medium text-foreground">登录一次，连续工作</p>
                 <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                   导入已有 Chrome 登录数据，减少重复扫码与登录。首次使用需安装浏览器插件，
-                  {APP_DOWNLOAD_URL ? (
+                  {BROWSER_EXTENSION_DOWNLOAD_URL ? (
                     <a
-                      href={APP_DOWNLOAD_URL}
+                      href={BROWSER_EXTENSION_DOWNLOAD_URL}
                       className="text-primary underline underline-offset-2 hover:text-primary/80"
                       onClick={(event) => {
                         event.preventDefault()
-                        void window.electron.openExternal(APP_DOWNLOAD_URL)
+                        void window.electron.openExternal(BROWSER_EXTENSION_DOWNLOAD_URL)
                       }}
                     >
                       下载浏览器插件
