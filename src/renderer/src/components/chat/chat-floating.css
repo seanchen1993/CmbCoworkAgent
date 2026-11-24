@@ -8,6 +8,12 @@
   pointer-events: none;
 }
 [data-thread-floating-chat="true"] > [data-thread-floating-header] > * { pointer-events: auto; }
+[data-thread-floating-chat="true"] > [data-thread-floating-header] > [data-floating-task-controls] {
+  pointer-events: none;
+}
+[data-thread-floating-chat="true"] [data-floating-task-controls] :is(button, a) {
+  pointer-events: auto;
+}
 [data-thread-floating-chat="true"] [data-conversation-task-controls] {
   border: 0;
   width: fit-content;
