@@ -174,7 +174,9 @@ async function main() {
         process:{platform:'win32'}};
       window.api={featureGates:{isEnabled:async()=>({enabled:true,reason:'fixture'})},
         file:{selectDirectory:async()=>({canceled:false,filePaths:['C:/isolated/create']})},
-        plugins:{list:async()=>[]},dashboard:{cancelRequests:nothing,userProfiles:async()=>[]},
+        plugins:{list:async()=>adapters.map(({id,name,version,enabled})=>({id,name,version,enabled,origin:'local'}))},
+        models:{getUserInfo:async()=>null},
+        dashboard:{cancelRequests:nothing,userProfiles:async()=>[]},
         builtinRobot:{getStatus:async()=>({settings:{enabled:false},connectionState:'offline',identityState:'unknown'}),
           onStatus:unsubscribe,getRemoteAccess:async()=>({featureGrants:[],threadGrants:[]}),onRemoteAccessChanged:unsubscribe},
         appNotifications:{list:async()=>[],onChanged:unsubscribe},
@@ -552,7 +554,7 @@ async function main() {
     await page.getByRole("textbox", { name: /系统名称/ }).fill("通用系统")
     await page.getByRole("radiogroup", { name: /是否作为测试项目/ })
       .getByRole("radio", { name: "否", exact: true }).check()
-    await page.getByRole("button", { name: /插件工作区.*选择文件夹/ }).click()
+    await page.getByRole("button", { name: /插件工作区.*选择空文件夹/ }).click()
     await page.waitForFunction(() =>
       (window as unknown as FixtureWindow).hostSearch.reviewCalls.some(
         (request) => !request.released && request.input.workspacePath === "C:/isolated/create"
