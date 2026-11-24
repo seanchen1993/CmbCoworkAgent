@@ -27,6 +27,7 @@ export interface ResourcePanelOverlayOpenDetail {
 
 const RESOURCE_PANEL_OVERLAY_OPEN_EVENT = "resource-panel-overlay:open"
 const RESOURCE_PANEL_OVERLAY_CLOSE_EVENT = "resource-panel-overlay:close"
+const RESOURCE_PANEL_BROWSER_DESTROY_EVENT = "resource-panel-overlay:destroy-browser"
 
 export function closeResourcePanelOverlay(mode?: ResourcePanelOverlayMode): void {
   window.dispatchEvent(new CustomEvent(RESOURCE_PANEL_OVERLAY_CLOSE_EVENT, { detail: mode }))
@@ -39,6 +40,20 @@ export function onCloseResourcePanelOverlay(
     callback((event as CustomEvent<ResourcePanelOverlayMode | undefined>).detail)
   window.addEventListener(RESOURCE_PANEL_OVERLAY_CLOSE_EVENT, listener)
   return () => window.removeEventListener(RESOURCE_PANEL_OVERLAY_CLOSE_EVENT, listener)
+}
+
+/**
+ * Close the product-mode Browser panel and dispose its native browser session.
+ * The overlay owning the panel decides whether it is currently open, so callers
+ * cannot accidentally tear down a Browser panel hosted by another surface.
+ */
+export function destroyOpenBrowserResourcePanel(): void {
+  window.dispatchEvent(new Event(RESOURCE_PANEL_BROWSER_DESTROY_EVENT))
+}
+
+export function onDestroyOpenBrowserResourcePanel(callback: () => void): () => void {
+  window.addEventListener(RESOURCE_PANEL_BROWSER_DESTROY_EVENT, callback)
+  return () => window.removeEventListener(RESOURCE_PANEL_BROWSER_DESTROY_EVENT, callback)
 }
 
 export function openResourcePanelOverlay(

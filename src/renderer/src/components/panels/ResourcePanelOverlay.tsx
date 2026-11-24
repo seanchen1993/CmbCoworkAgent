@@ -8,6 +8,7 @@ import { getBrowserPageConfirmation } from "@/lib/browser-page-confirmation"
 import {
   onOpenResourcePanelOverlay,
   onCloseResourcePanelOverlay,
+  onDestroyOpenBrowserResourcePanel,
   type ResourcePanelInlinePreview,
   type ResourcePanelOverlayMode
 } from "@/lib/resource-panel-overlay-events"
@@ -78,6 +79,24 @@ export function ResourcePanelOverlay({
         if (!requestedMode || requestedMode === mode) close()
       }),
     [close, mode]
+  )
+
+  useEffect(
+    () =>
+      onDestroyOpenBrowserResourcePanel(() => {
+        if (!open || mode !== "browser") return
+        getBrowserPageConfirmation()?.onCancel()
+        setOpen(false)
+        setBrowserUrl(null)
+        setInlinePreview(null)
+        setFilePreview(null)
+        setFilePreviewThreadId(null)
+        clearPreviewRequest()
+        void window.api.browser.detach().catch((error) => {
+          console.error("[ResourcePanelOverlay] Failed to destroy Browser panel:", error)
+        })
+      }),
+    [clearPreviewRequest, mode, open]
   )
 
   useEffect(() => {

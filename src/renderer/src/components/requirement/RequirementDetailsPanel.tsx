@@ -31,6 +31,7 @@ import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-te
 import type { RequirementDesignEntry } from "@/lib/requirement-design-entry"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { destroyOpenBrowserResourcePanel } from "@/lib/resource-panel-overlay-events"
 import {
   findRequirementDevelopmentThreads,
   normalizeRequirementPrdFilePath
@@ -341,6 +342,10 @@ export function RequirementDetailsPanel({
     RequirementPrdManifest["functions"][number] | null
   >(null)
   const [fullPrdWorkspaceOpen, setFullPrdWorkspaceOpen] = useState(false)
+  const functionWorkspaceOpen = Boolean(selectedFunction) || fullPrdWorkspaceOpen
+  const functionWorkspaceOpenRef = useRef(functionWorkspaceOpen)
+  const previousFunctionWorkspaceOpenRef = useRef(functionWorkspaceOpen)
+  functionWorkspaceOpenRef.current = functionWorkspaceOpen
   const selectedPrototypeStatus = selectedFunction
     ? prototypeStatuses.find(
         (item) =>
@@ -401,16 +406,32 @@ export function RequirementDetailsPanel({
     }
   }
 
+  const closeFullPrdWorkspace = (): void => {
+    destroyOpenBrowserResourcePanel()
+    setFullPrdWorkspaceOpen(false)
+  }
+
+  const closeFunctionWorkspace = (): void => {
+    destroyOpenBrowserResourcePanel()
+    setSelectedFunction(null)
+  }
+
   useEffect(() => {
-    onFunctionWorkspaceChange(Boolean(selectedFunction) || fullPrdWorkspaceOpen)
-  }, [fullPrdWorkspaceOpen, onFunctionWorkspaceChange, selectedFunction])
+    const wasOpen = previousFunctionWorkspaceOpenRef.current
+    previousFunctionWorkspaceOpenRef.current = functionWorkspaceOpen
+    onFunctionWorkspaceChange(functionWorkspaceOpen)
+    if (wasOpen && !functionWorkspaceOpen) destroyOpenBrowserResourcePanel()
+  }, [functionWorkspaceOpen, onFunctionWorkspaceChange])
 
   useEffect(() => {
     if (hasFullPrdDesignSession) setSelectedFunction(null)
   }, [hasFullPrdDesignSession])
 
   useEffect(() => {
-    return () => onFunctionWorkspaceChange(false)
+    return () => {
+      if (functionWorkspaceOpenRef.current) destroyOpenBrowserResourcePanel()
+      onFunctionWorkspaceChange(false)
+    }
   }, [onFunctionWorkspaceChange])
 
   return (
@@ -561,7 +582,7 @@ export function RequirementDetailsPanel({
               ) : undefined
             }
             reloadToken={prdPreviewReloadToken}
-            onBack={() => setFullPrdWorkspaceOpen(false)}
+            onBack={closeFullPrdWorkspace}
             onOpenAttachment={openWorkspaceFilePreview}
             navigationValue="full-prd"
             navigationItems={[
@@ -635,7 +656,7 @@ export function RequirementDetailsPanel({
               ) : undefined
             }
             reloadToken={prdPreviewReloadToken}
-            onBack={() => setSelectedFunction(null)}
+            onBack={closeFunctionWorkspace}
             onOpenAttachment={openWorkspaceFilePreview}
             navigationValue={getRequirementPrototypeFunctionKey(selectedFunction)}
             navigationItems={

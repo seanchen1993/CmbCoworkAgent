@@ -6610,7 +6610,7 @@ export function ChatContainer({
       const composedDraft: QueuedMessage = {
         id: crypto.randomUUID(),
         text: userText,
-        ...(surface === "requirement-session"
+        ...(surface === "requirement-session" && isFirstMessage
           ? { contextLabel: "requirement-workbench" as const }
           : {}),
         ...(selectedBotMentions.length ? { botMentions: parseBotMessageMentions(userText, selectedBotMentions) } : {}),
@@ -6755,7 +6755,10 @@ export function ChatContainer({
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
         const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent, {
-          contextLabel: surface === "requirement-session" ? "requirement-workbench" : undefined
+          contextLabel:
+            surface === "requirement-session" && isFirstMessage
+              ? "requirement-workbench"
+              : undefined
         })
         visibleUserMessage = await visibleUserMessagePromise
       }
