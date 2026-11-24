@@ -99,7 +99,12 @@ export const NATIVE_INTEGRATION_TESTS = [
   "src/main/plugins/autobiz-lean-host.integration.test.ts",
   "src/main/plugins/autobiz-lean-code.integration.test.ts",
   "src/main/plugins/autobiz-native-performance.integration.test.ts",
-  "src/main/plugins/autobiz-native-multirepo.integration.test.ts"
+  "src/main/plugins/autobiz-native-multirepo.integration.test.ts",
+  // Real SQLite migrations, source tracing and pinned package scans share disk and worker budgets.
+  "src/main/checkpointer/sqljs-saver-schema-concurrency.test.ts",
+  "src/main/mods/v2/conversation-shared-restore.test.ts",
+  "src/main/plugins/autobiz-composition-admission.test.ts",
+  "tests/browser/mods-live-source-continuation.test.ts"
 ]
 
 export default defineConfig({
