@@ -365,6 +365,7 @@ VirtuosoMessageListWrapper.displayName = "VirtuosoMessageListWrapper"
 interface ChatVirtualListContext {
   header: React.ReactNode
   footer: React.ReactNode
+  anchorUpwardResize: true
 }
 
 function ChatVirtualListHeader({
@@ -734,7 +735,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         itemsRendered={handleItemsRendered}
         rangeChanged={handleVirtualRangeChanged}
         totalListHeightChanged={onContentHeightChanged}
-        context={{ header: historyHeader, footer: footerContent }}
+        context={{ header: historyHeader, footer: footerContent, anchorUpwardResize: true }}
         components={chatVirtualListComponents}
         itemContent={(visibleIndex, messageIndex) => renderMessage(visibleIndex, messageIndex)}
       />
