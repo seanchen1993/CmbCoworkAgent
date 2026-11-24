@@ -13,6 +13,8 @@ const changes = new EventTarget()
 const pending = new Map<number, { workspace: string; rejected: boolean; separatesDuplicates: boolean }>()
 const sessionStart = Math.floor(performance.timeOrigin * 1000)
 const offsets = new Map<string, number>()
+// Live cursors cannot be joined across a group already trimmed during this session.
+const trimmedThrough = new Map<string, number>()
 const previews = new Map<number, { workspace: string; entry: PromptHistoryEntry }>()
 let lastOrder = 0
 let opening: Promise<IDBDatabase> | undefined
@@ -57,15 +59,18 @@ function collapse(entries: PromptHistoryEntry[], separated?: (after: number, bef
   return result
 }
 
-export function watchPromptHistory(workspace: string, update: (entries: PromptHistoryEntry[]) => void) {
+export function watchPromptHistory(workspace: string, update: (entries: PromptHistoryEntry[], trimmed: number) => void) {
   let active = true
   let loaded = false
   let saved: PromptHistoryEntry[] = []
   const refresh = () => {
     const offset = offsets.get(workspace) ?? 0
-    const visible = [...previews.values()].filter(item => item.workspace === workspace)
+    const trimmed = trimmedThrough.get(workspace) ?? 0
+    const visible = [...previews.values()].filter(item => item.workspace === workspace && item.entry.order + offset > trimmed)
       .map(({ entry }) => ({ ...entry, order: entry.order + offset }))
-    update(collapse([...saved, ...visible].sort((a, b) => a.order - b.order)).slice(-limit))
+    const rows = collapse([...saved, ...visible].sort((a, b) => a.order - b.order))
+    const lastHidden = rows.at(-limit - 1)
+    update(rows.slice(-limit), lastHidden?.through ?? lastHidden?.order ?? trimmed)
   }
   const listener = (event: Event) => {
     const entries = (event as CustomEvent<PromptHistoryEntry[]>).detail
@@ -122,6 +127,10 @@ export function preparePromptHistory(workspace: string | null, text: string) {
         const saved: PromptHistoryEntry[] = read.result ?? []
         const offset = orderOffset(receipt.workspace, saved)
         const order = entry.order + offset
+        if (append && order <= (trimmedThrough.get(receipt.workspace) ?? 0)) {
+          tx.oncomplete = removePreview
+          return
+        }
         const separated = (after: number, before: number) => {
           const gap = outstanding.find(([key, slot]) => !slot.rejected && key + offset > after && key + offset < before)
           if (gap) gap[1].separatesDuplicates = true
@@ -143,9 +152,11 @@ export function preparePromptHistory(workspace: string | null, text: string) {
           if (compact[i].text !== compact[first]?.text && ++groups > limit) break
           first = i
         }
+        const lastTrimmed = compact[first - 1]
         compact.splice(0, first)
         store.put(compact, receipt.workspace)
         tx.oncomplete = () => {
+          if (lastTrimmed) trimmedThrough.set(receipt.workspace, lastTrimmed.through ?? lastTrimmed.order)
           previews.delete(entry.order)
           changes.dispatchEvent(new CustomEvent(receipt.workspace, { detail: compact }))
         }

@@ -42,6 +42,7 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     input: "",
     inputPlaceholder: "输入消息",
     inputRef: { current: null },
+    promptHistory: { cancelPending: () => undefined },
     handleKeyDown: () => undefined,
     handleAttachClick: () => undefined,
     attachmentLoading: false,

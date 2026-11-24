@@ -25,11 +25,11 @@ export function usePromptHistory(
   cursor: PromptHistoryCursor | undefined,
   setInput: (value: string, cursor?: PromptHistoryCursor) => void
 ) {
-  const [history, setHistory] = useState<{ workspace: string; entries: PromptHistoryEntry[] } | null>(null)
+  const [history, setHistory] = useState<{ workspace: string; entries: PromptHistoryEntry[]; trimmed: number } | null>(null)
   const pending = useRef<{ workspace: string; threadId: string; target: HTMLTextAreaElement; keys: Arrow[] } | null>(null)
   const cancelPending = () => { pending.current = null }
   useEffect(() => workspace
-    ? watchPromptHistory(workspace, entries => setHistory({ workspace, entries }))
+    ? watchPromptHistory(workspace, (entries, trimmed) => setHistory({ workspace, entries, trimmed }))
     : undefined, [workspace])
 
   const entries = history && history.workspace === workspace ? history.entries : null
@@ -41,12 +41,20 @@ export function usePromptHistory(
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i]
       if (entry.text !== input) continue
-      if (withdrawn && index < 0) index = i
       if (entry.order <= (cursor.through ?? cursor.order) &&
           cursor.order <= (entry.through ?? entry.order)) {
         index = i
         break
       }
+    }
+    if (index < 0 && cursor.previews?.length && (cursor.through ?? cursor.order) > (history?.trimmed ?? 0)) {
+      // Only adjacent equal submissions can merge. Never cross a different prompt to find a copy.
+      const next = entries.findIndex(entry => entry.order > (cursor.through ?? cursor.order))
+      const previous = (next < 0 ? entries.length : next) - 1
+      const before = entries[previous]
+      if (before?.text === input) index = previous
+      else if (withdrawn && entries[next]?.text === input &&
+          (before?.through ?? 0) <= (cursor.through ?? cursor.order)) index = next
     }
   }
   // A recalled row can age out while another chat in this workspace sends a message.
