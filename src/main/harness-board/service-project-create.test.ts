@@ -187,6 +187,39 @@ describe("create project in a managed directory", () => {
   )
 })
 
+describe("create project with an explicitly specified workspace", () => {
+  it("creates the specified workspace and its missing parent for HTTP creation", async () => {
+    const workspacePath = join(state.root, "http", "parent")
+    const projectDir = "项目_HTTP"
+    const created = await createHarnessProject(
+      { ...automaticInput(), workspacePath, projectDir },
+      { createSpecifiedWorkspace: true }
+    )
+
+    expect(created).toMatchObject({ workspacePath, projectDir })
+    const file = await readFile(join(workspacePath, projectDir, "initialized.json"), "utf8")
+    expect(JSON.parse(file)).toEqual({ workspacePath, projectDir })
+  })
+
+  it("rejects an existing workspace for HTTP creation even when it is empty", async () => {
+    await expect(createHarnessProject(input(), { createSpecifiedWorkspace: true })).rejects.toThrow(
+      "指定的项目工作区已存在"
+    )
+    expect(await readdir(projectPath())).toEqual([])
+    await expect(readFile(storePath())).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("requires a selected workspace to exist for UI creation", async () => {
+    const projectDir = "missing"
+    await expect(createHarnessProject({ ...input(), projectDir })).rejects.toThrow(
+      "项目工作区文件夹不存在或无法访问"
+    )
+    await expect(readdir(join(input().workspacePath, projectDir))).rejects.toMatchObject({
+      code: "ENOENT"
+    })
+  })
+})
+
 describe("inspect projects sharing a managed workspace", () => {
   it.each([
     ["${projectDir}", false],

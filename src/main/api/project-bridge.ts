@@ -91,41 +91,59 @@ function projectCreatorInput(input: unknown): NonNullable<HarnessProjectCreateIn
   return value as NonNullable<HarnessProjectCreateInput["creator"]>
 }
 
+function projectKnowledgeBaseIdsInput(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== "string"))
+    throw new ApiInputError(400, "invalid_request", "knowledgeBaseIds 必须是字符串数组")
+  return value
+}
+
 async function projectInput(body: Record<string, unknown>): Promise<HarnessProjectCreateInput> {
   allowedKeys(body, [
     "harness-adapter",
     "name",
     "projectCode",
     "projectFromLean",
+    "isTestProject",
     "projectDir",
     "description",
     "systemId",
     "systemName",
     "workspacePath",
+    "knowledgeBaseIds",
     "creator"
   ])
-  const fields = Object.fromEntries(
-    [
-      "name",
-      "projectCode",
-      "projectDir",
-      "description",
-      "systemId",
-      "systemName",
-      "workspacePath"
-    ].map((key) => [key, requiredText(body, key)])
-  ) as Pick<HarnessProjectCreateInput, "name" | "projectCode" | "projectDir" | "description" | "systemId" | "systemName" | "workspacePath">
+  const fields = {
+    name: requiredText(body, "name"),
+    projectCode: requiredText(body, "projectCode"),
+    description: requiredText(body, "description"),
+    systemId: requiredText(body, "systemId"),
+    systemName: requiredText(body, "systemName")
+  }
+  const workspace =
+    "workspacePath" in body || "projectDir" in body
+      ? {
+          workspacePath: requiredText(body, "workspacePath"),
+          projectDir: requiredText(body, "projectDir")
+        }
+      : {}
   if (typeof body.projectFromLean !== "boolean")
     throw new ApiInputError(400, "invalid_request", "projectFromLean 必须是 boolean")
+  if (typeof body.isTestProject !== "boolean")
+    throw new ApiInputError(400, "invalid_request", "isTestProject 必须是 boolean")
+  const knowledgeBaseIds =
+    "knowledgeBaseIds" in body ? projectKnowledgeBaseIdsInput(body.knowledgeBaseIds) : undefined
   const creator = body.creator === undefined ? undefined : projectCreatorInput(body.creator)
   const adapter = await projectAdapterInput(body["harness-adapter"])
   return {
     ...fields,
+    ...workspace,
     adapterId: adapter.id,
     adapterType: adapter.type,
     projectFromLean: body.projectFromLean,
+    isTestProject: body.isTestProject,
+    knowledgeBaseIds,
     creator
-  } as HarnessProjectCreateInput
+  }
 }
 
 function projectChanged(projectId: string): void {
@@ -133,7 +151,7 @@ function projectChanged(projectId: string): void {
 }
 
 export async function apiCreateProject(body: Record<string, unknown>) {
-  const project = await createProject(await projectInput(body))
+  const project = await createProject(await projectInput(body), { createSpecifiedWorkspace: true })
   projectChanged(project.projectId)
   return project
 }
@@ -144,19 +162,24 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     "name",
     "projectCode",
     "projectFromLean",
+    "isTestProject",
     "description",
     "systemId",
     "systemName",
+    "knowledgeBaseIds",
     "creator"
   ])
   const existing = await requireProject(projectId)
+  const isTestProject = "isTestProject" in body ? body.isTestProject : existing.isTestProject
+  if (typeof isTestProject !== "boolean")
+    throw new ApiInputError(400, "invalid_request", "isTestProject 必须是 boolean")
   const input: HarnessProjectMetadataUpdateInput = {
     adapterId: existing.harnessAdapter.id,
     adapterType: existing.harnessAdapter.type,
     name: existing.name,
     projectCode: existing.projectCode,
     projectFromLean: existing.projectFromLean,
-    isTestProject: existing.isTestProject,
+    isTestProject,
     description: existing.description,
     systemId: existing.systemId,
     systemName: existing.systemName,
@@ -176,6 +199,8 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     input.adapterId = adapter.id
     input.adapterType = adapter.type
   }
+  if ("knowledgeBaseIds" in body)
+    input.knowledgeBaseIds = projectKnowledgeBaseIdsInput(body.knowledgeBaseIds)
   if ("creator" in body) input.creator = projectCreatorInput(body.creator)
   const project = await updateProject(projectId, input)
   projectChanged(project.projectId)
@@ -306,6 +331,8 @@ export function apiProjectError(error: unknown): {
     return { status: 409, error: "resource_conflict", message }
   if (/Selected plugin|compatible/.test(message))
     return { status: 422, error: "adapter_unavailable", message }
+  if (message === "所选知识库当前不可用，请刷新知识库列表后重试")
+    return { status: 400, error: "invalid_request", message }
   if (
     /不允许修改|不能为空|必须|必填|仅支持|只允许|required|invalid characters|特性名称|项目编号|项目文件夹/.test(
       message

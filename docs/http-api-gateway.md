@@ -749,7 +749,7 @@ curl -s $BASE/v1/threads/$TID/messages
 
 ### 13.1 新建和编辑项目
 
-创建请求示例（所有路径均属于运行 App 的机器）：
+下面是 `POST /v1/projects` 的请求体示例。它使用默认工作区，同时指定创建人和系统约束。请替换示例中的插件名称和系统约束 ID。
 
 ```json
 {
@@ -757,11 +757,11 @@ curl -s $BASE/v1/threads/$TID/messages
   "name": "支付平台改造",
   "projectCode": "PAY202609",
   "projectFromLean": false,
-  "projectDir": "payment-upgrade",
+  "isTestProject": false,
   "description": "支付平台功能升级",
   "systemId": "PAY",
   "systemName": "支付平台",
-  "workspacePath": "/Users/me/projects",
+  "knowledgeBaseIds": ["payment-constraints-main"],
   "creator": {
     "sapId": "10010001",
     "ystId": "383331",
@@ -772,16 +772,36 @@ curl -s $BASE/v1/threads/$TID/messages
 }
 ```
 
-除 `creator` 外，上述字段必填。`creator` 为可选对象，支持示例中的五个字符串字段，至少需要一个非空字段；传入后使用该对象中的创建人信息，未传的子字段留空。服务端根据 `pathName` 按现有组织层级规则推导 `upperOrgLv0` 和 `upperOrgLv1`，无法推导时为空。不传 `creator` 时使用本机当前登录用户作为创建人。
+示例中的 `knowledgeBaseIds` 和 `creator` 可以省略，其余字段必填。`creator` 支持示例中的五个字符串字段，至少需要一个非空字段；传入后使用该对象中的创建人信息，未传的子字段留空。服务端根据 `pathName` 按现有组织层级规则推导 `upperOrgLv0` 和 `upperOrgLv1`，无法推导时为空。不传 `creator` 时使用本机当前登录用户作为创建人。
+
+`projectFromLean` 和 `isTestProject` 必须是 JSON 布尔值。测试项目的 `isTestProject` 传 `true`，正式项目传 `false`。
+
+同时省略 `workspacePath` 和 `projectDir` 时，App 会在应用数据目录中创建 `project-workspaces/<projectId>` 作为工作区。手动指定时，在创建请求中加入以下两个字段。
+
+```json
+{
+  "workspacePath": "/Users/me/projects",
+  "projectDir": "payment-upgrade"
+}
+```
+
+`workspacePath` 是运行 App 的机器上的父目录，`projectDir` 是其下的新文件夹名。这个例子会创建 `/Users/me/projects/payment-upgrade`。目标已经存在时返回 `409 resource_conflict`，只传一个字段时返回 `400 invalid_request`。创建成功后，可以从响应中的 `workspacePath` 和 `projectDir` 得到实际目录。
+
+`knowledgeBaseIds` 是公共系统约束的 ID 数组，使用配置中的 `idKey`。省略或传空数组时，创建的项目没有绑定。新增绑定必须在运行 App 的机器上可见、已同步且可读，否则返回 `400`。
 
 仅接受适配器 `name`，按去除首尾空格后的名称精确匹配已安装插件，校验 board 配置及兼容性，服务端生成完整 id/name/version/type 快照。未安装报错，同名多候选报错，不自动安装或选择版本。
 
-编辑使用 `PUT /v1/projects/:projectId`，按部分更新处理，只需提交要修改的字段：
+编辑使用 `PUT /v1/projects/:projectId`。下面的请求会更新项目名称和创建人，并清空系统约束绑定。
 
 ```json
 {
   "name": "支付平台改造-已编辑",
-  "description": "更新后的项目描述"
+  "creator": {
+    "sapId": "10010002",
+    "userName": "李四",
+    "pathName": "总行/信息技术部/某中心/某团队/某室/开发组"
+  },
+  "knowledgeBaseIds": []
 }
 ```
 
@@ -791,12 +811,14 @@ curl -s $BASE/v1/threads/$TID/messages
 | `description` | string | 保留原值 |
 | `projectCode` | string | 保留原值 |
 | `projectFromLean` | boolean | 保留原值；显式 false 正常更新 |
+| `isTestProject` | boolean | 保留原值。项目尚未设置时，必须显式传入 |
 | `systemId` | string | 保留原值 |
 | `systemName` | string | 保留原值 |
+| `knowledgeBaseIds` | string[] | 保留已有绑定。传入数组时整体替换，传 `[]` 清空 |
 | `harness-adapter` | `{ "name": "插件名称" }` | 使用原适配器绑定；传入时按名称解析 |
 | `creator` | 对象，字段与创建请求相同 | 保留原值；传入时整体替换，并根据 `pathName` 重新推导组织层级 |
 
-所有编辑字段均可选，显式 null 不表示保留或清除，而是参数错误。空对象不修改业务字段，仍遵循现有更新服务更新时间和快照上报的行为。项目存放目录由服务端从原 metadata 读取，不属于编辑入参；传入不可编辑字段返回 400。编辑仅更新现有元数据，不移动目录或重新初始化项目。
+显式传入 `null` 会返回参数错误。项目已设置 `isTestProject` 时，空对象保留业务字段，仍遵循现有更新服务更新时间和快照上报的行为。项目存放目录由服务端从原 metadata 读取，不属于编辑入参；传入不可编辑字段返回 400。编辑仅更新现有元数据，不移动目录或重新初始化项目。
 
 ### 13.2 新建特性
 
@@ -835,17 +857,17 @@ curl -s $BASE/v1/threads/$TID/messages
 
 ### 13.5 错误与部分成功
 
-项目模式错误响应为 `{ "error": "错误码", "message": "具体说明" }`。
+项目接口的参数和业务错误响应包含 `error` 和 `message`。`500` 响应为 `{"error":"internal_error"}`。
 
 | HTTP | error | 含义 |
 |---|---|---|
-| 400 | invalid_json / invalid_request | JSON 或字段类型、必填项错误 |
+| 400 | invalid_json / invalid_request | JSON、字段或必填项有误，或选中的系统约束不可用 |
 | 400 | invalid_thread_type / metadata_not_allowed | 会话类型无效或特性请求传入 metadata |
 | 400 | feature_requires_thread_type | 普通请求携带特性绑定，应使用 feature 类型 |
 | 400 | invalid_workspace_path | 显式会话工作目录不是有效绝对目录 |
 | 404 | project_not_found / feature_not_found | 目标项目或项目下特性不存在 |
 | 404 | adapter_not_installed | 本机未安装指定名称的适配器 |
-| 409 | adapter_name_ambiguous / resource_conflict | 同名适配器或项目/特性重复 |
+| 409 | adapter_name_ambiguous / resource_conflict | 适配器重名、项目或特性重复，或指定的项目工作区已存在 |
 | 422 | adapter_unavailable | 插件项目模式配置不可用或不兼容 |
 | 500 | internal_error | 插件命令、存储等核心操作失败 |
 

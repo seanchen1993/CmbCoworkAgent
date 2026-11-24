@@ -1,4 +1,9 @@
-import { createHarnessProject, createHarnessFeature, updateHarnessProjectMetadata } from "./service"
+import {
+  createHarnessProject,
+  createHarnessFeature,
+  updateHarnessProjectMetadata,
+  type ProjectCreationOptions
+} from "./service"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import type {
   HarnessProjectCreateInput,
@@ -10,8 +15,11 @@ function report(projectId: string): void {
   void reportProjectSnapshotNow(projectId)
 }
 
-export async function createProject(input: HarnessProjectCreateInput) {
-  const project = await createHarnessProject(input)
+export async function createProject(
+  input: HarnessProjectCreateInput,
+  options?: ProjectCreationOptions
+) {
+  const project = await createHarnessProject(input, options)
   report(project.projectId)
   return project
 }

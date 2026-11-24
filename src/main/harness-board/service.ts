@@ -3464,8 +3464,13 @@ export function getDefaultHarnessProjectDirectoryPreview(projectId: string): str
   return join(getDefaultHarnessWorkspacePath(), normalizeProjectCreateId(projectId))
 }
 
+export interface ProjectCreationOptions {
+  createSpecifiedWorkspace?: boolean
+}
+
 export async function createHarnessProject(
-  input: HarnessProjectCreateInput
+  input: HarnessProjectCreateInput,
+  options: ProjectCreationOptions = {}
 ): Promise<HarnessProjectMetadata> {
   const { workspacePath, projectDir } = validateCreateInput(input)
   const projectId =
@@ -3495,13 +3500,17 @@ export async function createHarnessProject(
   }
   normalizeProject(project)
 
-  const managedProjectPath = workspacePath ? null : projectDirectoryPath(project)
-  if (managedProjectPath) {
+  if (!workspacePath || options.createSpecifiedWorkspace) {
+    const projectPath = projectDirectoryPath(project)
     try {
       await mkdir(project.workspacePath, { recursive: true })
-      await mkdir(managedProjectPath)
+      await mkdir(projectPath)
     } catch (error) {
+      const directoryError = error as NodeJS.ErrnoException
+      if (workspacePath && directoryError.code === "EEXIST" && directoryError.path === projectPath)
+        throw new Error("指定的项目工作区已存在")
       console.error("[HarnessBoard] Failed to create managed project directory", error)
+      if (workspacePath) throw new Error("无法创建指定的项目工作区")
       throw new Error("无法自动创建插件工作区，请在高级设置中选择文件夹")
     }
   }
