@@ -944,6 +944,7 @@ jobs:
           artifact-ids: ${{ steps.upload-win-unpacked.outputs.artifact-id }}
           github-token: ${{ github.token }}
           path: output/downloaded-win-unpacked
+          merge-multiple: true
 
       - name: Verify published Windows artifact integrity
         if: matrix.platform == 'win'
