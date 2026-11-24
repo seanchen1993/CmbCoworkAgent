@@ -9696,7 +9696,7 @@ export function ChatContainer({
                     data-bot-user-control={showBotTaskComposerControls || undefined}
                     aria-hidden={composerEnvironmentRailCollapsed}
                     className={cn(
-                      "relative z-0 mx-3 -mb-4 flex min-w-0 items-center gap-1 rounded-t-[28px] bg-background-interactive/70 pb-[13px] pl-3 pr-2 pt-[5px]",
+                      "relative z-0 mx-3 -mb-4 flex min-w-0 items-center gap-1 rounded-t-[28px] bg-background-interactive pb-[13px] pl-3 pr-2 pt-[5px]",
                       composerEnvironmentRailCollapsed && "hidden"
                     )}
                   >
