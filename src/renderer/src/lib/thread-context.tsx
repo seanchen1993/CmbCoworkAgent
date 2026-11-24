@@ -1,3 +1,5 @@
+import type { PromptHistoryCursor } from "./prompt-history"
+import { normalizeGitWorkspacePathKey } from "../../../shared/workspace-path"
 import {
   cancelThreadSearchOnTabChange, isReadOnlyProjectSearchThread, useThreadSearch
 } from "./thread-search-navigation"
@@ -779,6 +781,7 @@ export interface ThreadState {
   contextReminder: ContextReminderState
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
+  draftPromptHistoryCursor?: PromptHistoryCursor
   draftBotReplyTo?: BotMessageReply | null
   draftBotMentions?: BotMessageMention[]
   /** Managed Bot composer attachments survive navigation; no binary data is retained here. */
@@ -1035,7 +1038,7 @@ export interface ThreadActions {
   setContextReminder: (
     update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
-  setDraftInput: (input: string) => void
+  setDraftInput: (input: string, cursor?: PromptHistoryCursor) => void
   setDraftBotInput: (input: string, mentions: BotMessageMention[]) => void
   setDraftBotReplyTo: (reply: BotMessageReply | null) => void
   setDraftAttachments: (update: DraftFilesUpdate<FileAttachment>) => void
@@ -2232,6 +2235,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         return
       }
       let nextState = { ...current, ...updates }
+      if (nextState.draftPromptHistoryCursor && updates.workspacePath !== undefined &&
+          nextState.draftPromptHistoryCursor.workspace !==
+            (updates.workspacePath && (normalizeGitWorkspacePathKey(updates.workspacePath) || "/"))) {
+        if (nextState.draftInput === nextState.draftPromptHistoryCursor.text) nextState.draftInput = ""
+        nextState.draftPromptHistoryCursor = undefined
+      }
       if (nextState.messages.length > THREAD_MESSAGE_RESIDENT_LIMIT) {
         const pageBoundaryIds = new Set(
           nextState.historyPageWindows.map((window) => window.lastMessageId)
@@ -6125,9 +6134,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 : update
           }))
         },
-        setDraftInput: (input: string) => {
+        setDraftInput: (input: string, cursor?: PromptHistoryCursor) => {
           updateThreadState(threadId, (state) => ({
             draftInput: input,
+            draftPromptHistoryCursor: cursor,
             ...(state.draftBotMentions?.length ? {
               draftBotMentions: rebaseGroupMentions(state.draftInput, input, state.draftBotMentions)
             } : {})
@@ -6135,7 +6145,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftBotInput: (input, mentions) => {
           const selected = parseBotMessageMentions(input, mentions)
-          updateThreadState(threadId, () => ({ draftInput: input, draftBotMentions: selected }))
+          updateThreadState(threadId, () => ({ draftInput: input, draftPromptHistoryCursor: undefined, draftBotMentions: selected }))
         },
         setDraftBotReplyTo: (draftBotReplyTo) => {
           updateThreadState(threadId, () => ({ draftBotReplyTo }))

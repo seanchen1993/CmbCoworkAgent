@@ -6484,6 +6484,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
       const channel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      let promptAccepted = false
+      const acknowledgePrompt = (workspacePath: string | undefined): void => {
+        if (!streamRequestId || promptAccepted || runExecutionContext.source !== "desktop") return
+        promptAccepted = true
+        safeSendToWindow(window, channel, { type: "custom", data: { type: "user_prompt_accepted", workspacePath } })
+      }
       if (rejectAgentStartDuringShutdown(window, channel)) return
       if (
         runExecutionContext.source === "desktop" &&
@@ -6689,6 +6695,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 goal.activeWindowId,
                 userMessageId
               )
+              acknowledgePrompt(getThreadWorkspacePath(threadId))
               emitGoalNotice(
                 window,
                 channel,
@@ -6776,6 +6783,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 goal.activeWindowId,
                 userMessageId
               )
+              acknowledgePrompt(getThreadWorkspacePath(threadId))
               emitGoalNotice(
                 window,
                 channel,
@@ -8383,6 +8391,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return
             }
           }
+
+          // A request-specific receipt distinguishes an admitted prompt from a hook or lease rejection.
+          if (!isInternalNotificationTurn) acknowledgePrompt(workspacePath)
 
           if (!isCoordinatorNotificationTurn && effectiveAgentMode === "coordinator") {
             safeSendToWindow(window, channel, {

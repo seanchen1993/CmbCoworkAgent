@@ -56,6 +56,24 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
+  it.each([false, true])("only acknowledges admitted user prompts (accepted=%s)", async accepted => {
+    const receipt = vi.fn()
+    const stream = createElectronStream({
+      threadId: "test",
+      transport: {
+        async stream() {
+          return (async function* () {
+            if (accepted) yield { event: "custom", data: { type: "user_prompt_accepted", workspacePath: "/project" } }
+            else yield { event: "error", data: { error: "WORKSPACE_REQUIRED" } }
+          })()
+        }
+      }
+    })
+    await stream.submit(null, { onPromptAccepted: receipt })
+    expect(receipt).toHaveBeenCalledTimes(accepted ? 1 : 0)
+    if (accepted) expect(receipt).toHaveBeenCalledWith("/project")
+  })
+
   it.each(["values", "messages", "authoritative snapshot"] as const)(
     "clears the completion retry on the first visible reply delivered as %s",
     async (mode) => {

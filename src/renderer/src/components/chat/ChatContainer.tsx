@@ -220,7 +220,9 @@ import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../../shared/goal-events"
 import { findThreadMessageGapTailStart } from "@/lib/thread-message-pages"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
-import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
+import { preparePromptHistory } from "@/lib/prompt-history"
+import { usePromptHistory } from "./usePromptHistory"
+import { isSameGitWorkspacePath, normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
   MAX_ATTACHMENT_FILE_BYTES,
   type SelectedAttachmentFileGrant
@@ -2399,6 +2401,7 @@ export function ChatContainer({
     harnessAgentmdLoadStatus,
     currentModel,
     draftInput: input,
+    draftPromptHistoryCursor,
     draftBotReplyTo,
     draftBotMentions,
     draftAttachments: attachments,
@@ -5672,8 +5675,11 @@ export function ChatContainer({
     threadMessages.length
   ])
 
+  const historyWorkspace = surface === "default" && !managedTurn && !readOnly && workspacePath
+    ? normalizeGitWorkspacePathKey(workspacePath) || "/" : null
+  const promptHistory = usePromptHistory(historyWorkspace, threadId, input, draftPromptHistoryCursor, setInput)
   const slash = useSlashCommands({
-    input: managedTurn?.textOnlyReason || composerReadOnly ? "" : input,
+    input: managedTurn?.textOnlyReason || composerReadOnly || promptHistory.browsing ? "" : input,
     skills: managedTurn?.textOnlyReason || composerReadOnly ? [] : enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser,
@@ -5725,7 +5731,7 @@ export function ChatContainer({
     cursorOffset: managedTurn?.mentionOptions ? botCaret : inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
     loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
-    disabled: composerReadOnly || Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath ||
+    disabled: composerReadOnly || promptHistory.browsing || Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath ||
       Boolean(managedTurn?.mentionOptions && draftBotMentions?.some((item) => botCaret > item.start && botCaret <= item.end))
   })
   const slashPopoverKind = slash.mode.kind
@@ -6126,6 +6132,7 @@ export function ChatContainer({
       return
     }
     const trimmedInput = defaultText || input.trim()
+    const submittedHistoryWorkspace = defaultText ? null : historyWorkspace
     let selectedBotMentions = !defaultText && managedTurn?.mentionOptions
       ? parseBotMessageMentions(trimmedInput, draftBotMentions, input.length - input.trimStart().length)
       : []
@@ -6216,6 +6223,7 @@ export function ChatContainer({
     if (goalControlRoute.shouldUseGoalControlPlane) {
       const shouldLockGoalControl = goalControlRoute.shouldUseSubmitLock
       if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)) return
+      const history = preparePromptHistory(submittedHistoryWorkspace, trimmedInput)
       try {
         if (threadError) {
           clearError()
@@ -6226,6 +6234,7 @@ export function ChatContainer({
         }
         insertLog("send: " + trimmedInput)
         const goalControlResult = await window.api.agent.goalControl(threadId, trimmedInput)
+        if (goalControlResult.handled && isSameGitWorkspacePath(submittedHistoryWorkspace, threadContext.getThreadState(threadId).workspacePath)) history?.accept()
         if (!isSideChannelGoalControl) {
           showGoalControlNotice(
             shouldOpenGoalDetailsForStatus && goalControlResult.notice?.goalId
@@ -6254,6 +6263,7 @@ export function ChatContainer({
           setPendingApproval(null)
         }
       } finally {
+        history?.discard()
         releaseSubmitInFlightLock(submitInFlightRef, shouldLockGoalControl, threadId)
       }
       return
@@ -6274,6 +6284,7 @@ export function ChatContainer({
       return
     }
     if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.add(threadId)
+    const history = preparePromptHistory(submittedHistoryWorkspace, trimmedInput)
 
     try {
       const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
@@ -6658,6 +6669,7 @@ export function ChatContainer({
           addQueuedMessage(composedDraft)
           clearSubmittedReply()
         }
+        if (history && getQueuedMessage(composedDraft.id) && isSameGitWorkspacePath(submittedHistoryWorkspace, threadContext.getThreadState(threadId).workspacePath)) history.accept()
         // An actual enqueue is unambiguous renewed intent to keep going — lift
         // any Stop-driven pause so this (and any earlier still-queued) draft can
         // auto-drain once idle. Cleared here (not merely "past the guards") so a
@@ -6780,11 +6792,16 @@ export function ChatContainer({
       // before useStream propagates isLoading.
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       try {
+        history?.preview()
         await stream.submit(
           {
             messages: [{ type: "human", content: fullMessage }]
           },
           {
+            onPromptAccepted: history && (acceptedWorkspace => {
+              if (isSameGitWorkspacePath(submittedHistoryWorkspace, acceptedWorkspace)) history.accept()
+              else history.discard()
+            }),
             config: {
               configurable: {
                 thread_id: threadId,
@@ -6799,6 +6816,7 @@ export function ChatContainer({
         setActiveTurnStartTime(null)
       }
     } finally {
+      history?.discard()
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.delete(threadId)
       // `done` can flip isLoading to false before stream.submit's promise
@@ -7628,6 +7646,8 @@ export function ChatContainer({
         }
       }
     }
+
+    if (promptHistory.navigate("nativeEvent" in e ? e.nativeEvent : e)) return
 
     // Backspace at start of empty input removes the selected skill/browser chip.
     // Skip while IME is composing — there Backspace edits the pinyin buffer,
@@ -10183,7 +10203,11 @@ export function ChatContainer({
                       <textarea
                         ref={inputRef}
                         value={input}
-                        onChange={(e) => setInput(e.target.value)}
+                        onBlur={promptHistory.cancelPending}
+                        onChange={(e) => {
+                          promptHistory.cancelPending()
+                          setInput(e.target.value)
+                        }}
                         onPaste={
                           managedTurn?.textOnlyReason
                             ? (e) => {
@@ -10195,6 +10219,7 @@ export function ChatContainer({
                             : undefined
                         }
                         onCompositionStart={() => {
+                          promptHistory.cancelPending()
                           isComposingRef.current = true
                         }}
                         onCompositionEnd={() => {

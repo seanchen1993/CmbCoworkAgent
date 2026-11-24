@@ -10,7 +10,9 @@ import { replaceLiveStreamMessageId, type LiveStreamMessage } from "./live-strea
 import { captureModelRetryBaseline, hasModelRetryProgress } from "./model-retry-indicator"
 
 type StreamValues = Record<string, unknown>
-type SubmitOptions = Parameters<UseStreamCustom<StreamValues>["submit"]>[1]
+type SubmitOptions = NonNullable<Parameters<UseStreamCustom<StreamValues>["submit"]>[1]> & {
+  onPromptAccepted?: (workspacePath?: string) => void
+}
 type AssistantSnapshot = Extract<Message, { type: "ai" }> & { id: string }
 
 export interface ElectronStreamOptions {
@@ -216,6 +218,10 @@ export function createElectronStream(options: ElectronStreamOptions) {
               event.event === "custom" && event.data && typeof event.data === "object"
                 ? (event.data as Record<string, unknown>)
                 : undefined
+            if (custom?.type === "user_prompt_accepted") {
+              submitOptions?.onPromptAccepted?.(typeof custom.workspacePath === "string" ? custom.workspacePath : undefined)
+              continue
+            }
             if (
               custom?.type === "model_retry" &&
               typeof custom.attempt === "number" &&
