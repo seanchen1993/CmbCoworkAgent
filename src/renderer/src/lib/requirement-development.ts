@@ -4,12 +4,14 @@ import type {
   RequirementRecord
 } from "@/components/requirement/requirement-data"
 import { marketApi } from "@/api/market"
+import {
+  commitRequirementRelations,
+  getRequirementRelations,
+  setRequirementNavigation,
+  useRequirementProductStore
+} from "@/lib/requirement-product-store"
 
 export const REQUIREMENT_DEVELOPMENT_PLUGIN = "AutobizDevOps_Plugin_Kanban_fullstack"
-export const REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY = "requirement-development:onboarding"
-export const REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT = "requirement-development:onboarding-change"
-export const REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY = "requirement-development-associations"
-
 export type RequirementDevelopmentIntent = {
   action: "create-development"
   /** False when quick start only supplies development context and has no requirement conversation. */
@@ -68,11 +70,13 @@ export async function ensureRequirementDevelopmentPlugin(): Promise<void> {
 export function writeRequirementDevelopmentIntent(
   intent: RequirementDevelopmentOnboardingIntent
 ): void {
-  window.sessionStorage.setItem(REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY, JSON.stringify(intent))
+  setRequirementNavigation({ target: "development", intent })
 }
 
 export function clearRequirementDevelopmentIntent(): void {
-  window.sessionStorage.removeItem(REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY)
+  if (useRequirementProductStore.getState().navigation?.target === "development") {
+    setRequirementNavigation(null)
+  }
 }
 
 type RequirementDevelopmentThreadStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">
@@ -89,26 +93,11 @@ export type RequirementDevelopmentAssociation = RequirementDevelopmentMetadata &
 function readRequirementDevelopmentAssociations(
   storage: RequirementDevelopmentThreadStorage = localStorage
 ): Record<string, RequirementDevelopmentAssociation> {
-  try {
-    const parsed = JSON.parse(
-      storage.getItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY) || "{}"
-    ) as Record<string, unknown>
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, RequirementDevelopmentAssociation] => {
-          const value = asRecord(entry[1])
-          return Boolean(
-            entry[0] &&
-            value?.threadId === entry[0] &&
-            typeof value.requirementId === "string" &&
-            typeof value.requirementFilePath === "string"
-          )
-        }
-      )
-    )
-  } catch {
-    return {}
+  const associations: Record<string, RequirementDevelopmentAssociation> = {}
+  for (const relations of Object.values(getRequirementRelations(storage).requirements)) {
+    Object.assign(associations, relations.developmentThreads)
   }
+  return associations
 }
 
 export function storeRequirementDevelopmentAssociation(
@@ -116,38 +105,49 @@ export function storeRequirementDevelopmentAssociation(
   metadata: RequirementDevelopmentMetadata,
   storage: RequirementDevelopmentThreadStorage = localStorage
 ): void {
-  const associations = readRequirementDevelopmentAssociations(storage)
-  associations[threadId] = {
-    ...metadata,
-    threadId
-  }
-  storage.setItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY, JSON.stringify(associations))
+  commitRequirementRelations((current) => {
+    const existing = current.requirements[metadata.requirementId] ?? {
+      designSessions: {},
+      developmentThreads: {}
+    }
+    return {
+      ...current,
+      requirements: {
+        ...current.requirements,
+        [metadata.requirementId]: {
+          ...existing,
+          developmentThreads: {
+            ...existing.developmentThreads,
+            [threadId]: { ...metadata, threadId }
+          }
+        }
+      }
+    }
+  }, storage)
 }
 
 export function removeRequirementDevelopmentAssociation(
   requirementId: string,
   storage: RequirementDevelopmentThreadStorage = localStorage
 ): void {
-  const associations = readRequirementDevelopmentAssociations(storage)
-  for (const [threadId, association] of Object.entries(associations)) {
-    if (association.requirementId === requirementId) delete associations[threadId]
-  }
-  if (Object.keys(associations).length) {
-    storage.setItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY, JSON.stringify(associations))
-  } else {
-    storage.removeItem(REQUIREMENT_DEVELOPMENT_ASSOCIATIONS_KEY)
-  }
+  commitRequirementRelations((current) => {
+    const existing = current.requirements[requirementId]
+    if (!existing || Object.keys(existing.developmentThreads).length === 0) return current
+    const requirements = { ...current.requirements }
+    if (Object.keys(existing.designSessions).length) {
+      requirements[requirementId] = { ...existing, developmentThreads: {} }
+    } else delete requirements[requirementId]
+    return { ...current, requirements }
+  }, storage)
 }
 
 export function findRequirementDevelopmentAssociation(
   requirementId: string,
   storage: RequirementDevelopmentThreadStorage = localStorage
 ): RequirementDevelopmentAssociation | null {
-  return (
-    Object.values(readRequirementDevelopmentAssociations(storage)).find(
-      (association) => association.requirementId === requirementId
-    ) ?? null
-  )
+  return Object.values(
+    getRequirementRelations(storage).requirements[requirementId]?.developmentThreads ?? {}
+  )[0] ?? null
 }
 
 export function getStoredRequirementDevelopmentMetadata(

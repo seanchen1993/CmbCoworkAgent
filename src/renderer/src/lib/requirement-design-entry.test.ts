@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest"
 
 import {
-  REQUIREMENT_DESIGN_ASSOCIATIONS_KEY,
   buildRequirementDesignPrompt,
   buildFullPrdDesignPrompt,
   buildSpaceRequirementDesignPrompt,
@@ -15,6 +14,7 @@ import {
   storeRequirementDesignEntries,
   type RequirementDesignEntry
 } from "./requirement-design-entry"
+import { REQUIREMENT_RELATIONS_STORAGE_KEY } from "./requirement-product-store"
 
 const entry: RequirementDesignEntry = {
   requirementId: "req-1",
@@ -27,15 +27,20 @@ const entry: RequirementDesignEntry = {
 }
 
 let values: Map<string, string>
+let writes: number
 const storage = {
   getItem: (key: string) => values.get(key) ?? null,
-  setItem: (key: string, value: string) => values.set(key, value),
+  setItem: (key: string, value: string) => {
+    writes += 1
+    values.set(key, value)
+  },
   removeItem: (key: string) => values.delete(key)
 }
 
 describe("active requirement design entry", () => {
   beforeEach(() => {
     values = new Map()
+    writes = 0
   })
 
   it("restores the requirement context for the same design session", () => {
@@ -54,7 +59,9 @@ describe("active requirement design entry", () => {
     storeActiveRequirementDesignEntry(entry, entry.htmlId, storage)
     storeActiveRequirementDesignEntry(null, entry.htmlId, storage)
 
-    expect(storage.getItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY)).toBeNull()
+    expect(storage.getItem(REQUIREMENT_RELATIONS_STORAGE_KEY)).toBe(
+      JSON.stringify({ version: 1, requirements: {} })
+    )
   })
 
   it("keeps associations for different design sessions independent", () => {
@@ -125,7 +132,7 @@ describe("active requirement design entry", () => {
       htmlId: spaceEntry.htmlId
     })
     expect(restored?.requirementContent).toBeUndefined()
-    expect(storage.getItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY)).not.toContain("完整需求正文")
+    expect(storage.getItem(REQUIREMENT_RELATIONS_STORAGE_KEY)).not.toContain("完整需求正文")
   })
 
   it("removes successful session mappings while preserving failed ones for retry", async () => {
@@ -153,6 +160,16 @@ describe("active requirement design entry", () => {
 
     expect(loadActiveRequirementDesignEntry(entry.htmlId, storage)).toBeNull()
     expect(loadActiveRequirementDesignEntry(another.htmlId, storage)).toEqual(another)
+  })
+
+  it("unlinks a batch with one persistence write", () => {
+    const another = { ...entry, htmlId: "design-session-2" }
+    storeRequirementDesignEntries([entry, another], storage)
+    const writesBeforeRemoval = writes
+
+    removeRequirementDesignAssociations([entry.htmlId, another.htmlId], storage)
+
+    expect(writes - writesBeforeRemoval).toBe(1)
   })
 
   it("deduplicates function tabs while preferring the active historical session", () => {

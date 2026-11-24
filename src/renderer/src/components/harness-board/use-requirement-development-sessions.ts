@@ -6,11 +6,9 @@ import {
   ensureRequirementDevelopmentPlugin,
   getRequirementDevelopmentMetadata,
   storeRequirementDevelopmentAssociation,
-  REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
-  REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
-  type RequirementDevelopmentIntent,
-  type RequirementDevelopmentOnboardingIntent
+  type RequirementDevelopmentIntent
 } from "@/lib/requirement-development"
+import { useRequirementProductStore } from "@/lib/requirement-product-store"
 import type { HarnessProjectListItem } from "../../../../shared/harness-board-types"
 
 export function useRequirementDevelopmentSessionRestore(): void {
@@ -53,15 +51,15 @@ export function useRequirementDevelopmentOnboarding(input: {
   useRequirementDevelopmentSessionRestore()
   const callbacksRef = useRef(input)
   callbacksRef.current = input
+  const navigation = useRequirementProductStore((state) => state.navigation)
 
   useEffect(() => {
     const consumeIntent = (): void => {
-      const raw = window.sessionStorage.getItem(REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY)
-      if (!raw) return
+      if (navigation?.target !== "development") return
       try {
-        const intent = JSON.parse(raw) as RequirementDevelopmentOnboardingIntent
+        const intent = navigation.intent
         if (intent.action === "open-session") {
-          window.sessionStorage.removeItem(REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY)
+          clearRequirementDevelopmentIntent()
           void (async () => {
             const state = useAppStore.getState()
             let thread = state.threads.find((item) => item.thread_id === intent.threadId) ?? null
@@ -106,7 +104,5 @@ export function useRequirementDevelopmentOnboarding(input: {
       }
     }
     consumeIntent()
-    window.addEventListener(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT, consumeIntent)
-    return () => window.removeEventListener(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT, consumeIntent)
-  }, [])
+  }, [navigation])
 }

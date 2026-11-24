@@ -1,12 +1,29 @@
-export type RequirementPersona = "business" | "design" | "development"
+import {
+  getRequirementSettings,
+  updateRequirementSettings,
+  type RequirementPersona
+} from "@/lib/requirement-product-store"
 
-export const REQUIREMENT_PERSONA_STORAGE_KEY = "requirement:quick-start-persona"
-export const REQUIREMENT_PERSONA_SKIP_STORAGE_KEY = "requirement:quick-start-skip-persona"
+export type { RequirementPersona }
+
 export const REQUIREMENT_PERSONA_CHANGED_EVENT = "requirement:persona-changed"
 
 export function readStoredRequirementPersona(): RequirementPersona | null {
-  const stored = localStorage.getItem(REQUIREMENT_PERSONA_STORAGE_KEY)
-  return stored === "business" || stored === "design" || stored === "development" ? stored : null
+  return getRequirementSettings().quickStart.persona
+}
+
+export function readSkipRequirementPersonaSelection(): boolean {
+  return getRequirementSettings().quickStart.skipPersonaSelection
+}
+
+export function saveRequirementPersonaSettings(
+  persona: RequirementPersona,
+  skipPersonaSelection: boolean
+): void {
+  updateRequirementSettings((current) => ({
+    ...current,
+    quickStart: { persona, skipPersonaSelection }
+  }))
 }
 
 export function shouldAutoOpenRequirementQuickStart(

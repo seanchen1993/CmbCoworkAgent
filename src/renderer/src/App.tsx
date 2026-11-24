@@ -79,10 +79,10 @@ import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, initializeStartupWorkspace, useAppStore } from "@/lib/store"
 import {
-  REQUIREMENT_CONVERSATION_ENTRY_KEY,
-  REQUIREMENT_CONVERSATION_NAVIGATE_EVENT,
-  REQUIREMENT_DESIGN_NAVIGATE_EVENT
-} from "@/lib/requirement-design-entry"
+  initializeRequirementProductState,
+  setRequirementNavigation,
+  useRequirementProductStore
+} from "@/lib/requirement-product-store"
 import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
 import { BotConversationTransitions } from "@/components/bots/BotConversationTransitions"
@@ -421,7 +421,9 @@ function App(): React.JSX.Element {
     setMainView("harness")
   }, [projectModeEnabled, setMainView])
   const selectRequirementHistory = useCallback(() => {
-    localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+    const wasHydrated = useRequirementProductStore.getState().hydrated
+    initializeRequirementProductState()
+    if (wasHydrated) setRequirementNavigation(null)
     setProductNavigationVisible(true)
     setProductEntryKey((current) => current + 1)
     setActiveModeTab("requirements")
@@ -432,31 +434,27 @@ function App(): React.JSX.Element {
     if (tab === "design") {
       setOpenDesignGallery(true)
     } else {
-      localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+      setRequirementNavigation(null)
       setProductEntryKey((current) => current + 1)
     }
     setActiveModeTab(tab)
   }, [])
 
   useEffect(() => {
-    const navigateToDesign = (): void => {
-      setProductNavigationVisible(false)
-      setOpenDesignGallery(false)
-      setActiveModeTab("design")
-      setMainView("design")
-    }
-    const navigateToRequirement = (): void => {
-      setProductNavigationVisible(false)
-      setActiveModeTab("requirements")
-      setMainView("design")
-    }
-    window.addEventListener(REQUIREMENT_DESIGN_NAVIGATE_EVENT, navigateToDesign)
-    window.addEventListener(REQUIREMENT_CONVERSATION_NAVIGATE_EVENT, navigateToRequirement)
-    return () => {
-      window.removeEventListener(REQUIREMENT_DESIGN_NAVIGATE_EVENT, navigateToDesign)
-      window.removeEventListener(REQUIREMENT_CONVERSATION_NAVIGATE_EVENT, navigateToRequirement)
-    }
-  }, [setMainView])
+    return useRequirementProductStore.subscribe((state, previous) => {
+      if (state.navigation === previous.navigation) return
+      if (state.navigation?.target === "design") {
+        setProductNavigationVisible(false)
+        setOpenDesignGallery(false)
+        setActiveModeTab("design")
+        useAppStore.getState().setMainView("design")
+      } else if (state.navigation?.target === "requirement") {
+        setProductNavigationVisible(false)
+        setActiveModeTab("requirements")
+        useAppStore.getState().setMainView("design")
+      }
+    })
+  }, [])
 
   // Keep the route consumed by the expensive center/right surfaces atomic. A
   // task click updates the lightweight sidebar immediately, while React may

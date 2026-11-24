@@ -52,8 +52,6 @@ import {
   getRequirementDevelopmentMetadata,
   isMissingRequirementThreadError,
   normalizeRequirementPrdFilePath,
-  REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
-  REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   resolveRequirementDevelopmentFiles,
   writeRequirementDevelopmentIntent
 } from "@/lib/requirement-development"
@@ -261,20 +259,15 @@ function RequirementConversationSession({
       ...files
     })
     setShowHarnessBoardView(true)
-    window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
   }, [requirement, requirementSpaceManifest, setShowHarnessBoardView, threadState?.workspacePath])
   const continueRequirementDevelopment = useCallback(
     (developmentThreadId: string): void => {
-      window.sessionStorage.setItem(
-        REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
-        JSON.stringify({
-          action: "open-session",
-          threadId: developmentThreadId,
-          requirementTitle: requirement.title
-        })
-      )
+      writeRequirementDevelopmentIntent({
+        action: "open-session",
+        threadId: developmentThreadId,
+        requirementTitle: requirement.title
+      })
       setShowHarnessBoardView(true)
-      window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
     },
     [requirement.title, setShowHarnessBoardView]
   )

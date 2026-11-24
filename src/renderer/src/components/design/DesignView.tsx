@@ -23,9 +23,9 @@ import {
 } from "../../../../shared/design-captured-frame"
 import { useAppStore } from "@/lib/store"
 import {
-  loadActiveRequirementDesignEntry,
-  REQUIREMENT_DESIGN_ENTRY_KEY
+  loadActiveRequirementDesignEntry
 } from "@/lib/requirement-design-entry"
+import { useRequirementProductStore } from "@/lib/requirement-product-store"
 // 需求详情进入设计模式的适配逻辑集中在独立 Hook，避免侵入设计器主体流程。
 import { useRequirementDesignEntry } from "./use-requirement-design-entry"
 import { usePersistentRequirementDesignEntry } from "./use-persistent-requirement-design-entry"
@@ -1236,7 +1236,9 @@ export function DesignView({
   onListVisibilityChange?: (visible: boolean) => void
 }): React.JSX.Element {
   // ── Session / gallery state ───────────────────────────────
-  const requirementDesignPending = Boolean(localStorage.getItem(REQUIREMENT_DESIGN_ENTRY_KEY))
+  const requirementDesignPending =
+    useRequirementProductStore.getState().navigation?.target === "design" &&
+    (useRequirementProductStore.getState().navigation?.entries.length ?? 0) > 0
   const [sessionIndex, setSessionIndex] = useState<SessionMeta[]>(() => loadIndex())
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
     () =>

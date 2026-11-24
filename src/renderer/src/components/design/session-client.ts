@@ -13,6 +13,7 @@ import type { DesignTweakCommand } from "../../../../shared/design-tweaks"
 import type { DesignEditCommand, DesignEditableDocument } from "../../../../shared/design-edit"
 import type { FileAttachment } from "./types"
 import { compareDesignSessionOrder, withDesignSessionOrder } from "../../../../shared/design-session-order"
+import { setRequirementNavigation } from "@/lib/requirement-product-store"
 
 /** One client per renderer, not per DesignView. Sequenced snapshots make reconnect idempotent. */
 export class DesignSessionClient {
@@ -357,6 +358,6 @@ export async function createPromptDesignSession(input: {
     workspacePath: null
   })
   localStorage.setItem("design_last_session", id)
-  window.dispatchEvent(new Event("requirement-design:navigate"))
+  setRequirementNavigation({ target: "design", entries: [] })
   return id
 }

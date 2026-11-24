@@ -37,7 +37,11 @@ import {
 } from "./requirement-store"
 import { useAppStore } from "@/lib/store"
 import {
-  REQUIREMENT_CONVERSATION_ENTRY_KEY,
+  setRequirementNavigation,
+  removeRequirementRelations,
+  useRequirementProductStore
+} from "@/lib/requirement-product-store"
+import {
   buildRequirementDesignPrompt,
   buildSpaceRequirementDesignPrompt,
   findRequirementDesignEntry,
@@ -60,8 +64,6 @@ import {
   buildRequirementDevelopmentPrompt,
   findRequirementDevelopmentThreads,
   isMissingRequirementThreadError,
-  REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT,
-  REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
   writeRequirementDevelopmentIntent
 } from "@/lib/requirement-development"
 import {
@@ -304,10 +306,11 @@ export function RequirementEntryView({
       .then((nextRequirements) => {
         if (cancelled) return
         setRequirements(nextRequirements)
-        const returnRequirementId = localStorage.getItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        const navigation = useRequirementProductStore.getState().navigation
+        const returnRequirementId = navigation?.target === "requirement" ? navigation.requirementId : null
         const returningToSpaceRequirement = returnRequirementId?.startsWith("space:") ?? false
         if (returningToSpaceRequirement) setSourceFilter("space")
-        else localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        else setRequirementNavigation(null)
         const initialRequirement =
           returnRequirementId && !returningToSpaceRequirement
             ? (nextRequirements.find((item) => item.id === returnRequirementId) ?? null)
@@ -394,10 +397,11 @@ export function RequirementEntryView({
           ...current.filter((item) => item.origin !== "space"),
           ...spaceRequirements
         ])
-        const returnRequirementId = localStorage.getItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        const navigation = useRequirementProductStore.getState().navigation
+        const returnRequirementId = navigation?.target === "requirement" ? navigation.requirementId : null
         if (!returnRequirementId?.startsWith("space:")) return
         const returnRequirement = spaceRequirements.find((item) => item.id === returnRequirementId)
-        localStorage.removeItem(REQUIREMENT_CONVERSATION_ENTRY_KEY)
+        setRequirementNavigation(null)
         if (!returnRequirement) {
           toast.error("未找到关联的需求")
           return
@@ -525,7 +529,6 @@ export function RequirementEntryView({
     })
     setQuickStartPreparation(null)
     setShowHarnessBoardView(true)
-    window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
   }
 
   const replaceRequirement = useCallback((requirement: RequirementRecord): void => {
@@ -600,7 +603,6 @@ export function RequirementEntryView({
           hasPrototype: uniquePrototypeFilePaths.length > 0
         })
         setShowHarnessBoardView(true)
-        window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
         setPendingDevelopmentRequirement(null)
         return true
       } catch (error) {
@@ -613,16 +615,12 @@ export function RequirementEntryView({
 
   const continueSpaceRequirementDevelopment = useCallback(
     (requirement: RequirementRecord, threadId: string): void => {
-      window.sessionStorage.setItem(
-        REQUIREMENT_DEVELOPMENT_ONBOARDING_KEY,
-        JSON.stringify({
-          action: "open-session",
-          threadId,
-          requirementTitle: requirement.title
-        })
-      )
+      writeRequirementDevelopmentIntent({
+        action: "open-session",
+        threadId,
+        requirementTitle: requirement.title
+      })
       setShowHarnessBoardView(true)
-      window.dispatchEvent(new Event(REQUIREMENT_DEVELOPMENT_ONBOARDING_EVENT))
     },
     [setShowHarnessBoardView]
   )
@@ -800,6 +798,7 @@ export function RequirementEntryView({
     if (!result.success) {
       throw new Error(result.error || "删除需求失败")
     }
+    removeRequirementRelations(requirement.id)
 
     setRequirements(remainingRequirements)
     if (shouldOpenAdjacentRequirement) {

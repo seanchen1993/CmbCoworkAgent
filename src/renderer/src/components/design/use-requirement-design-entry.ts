@@ -1,14 +1,16 @@
 import { useEffect } from "react"
 
 import {
-  REQUIREMENT_DESIGN_ENTRY_KEY,
   getRequirementDesignFilePaths,
   storeRequirementDesignEntries,
-  type RequirementDesignEntry,
-  type RequirementDesignEntryPayload
+  type RequirementDesignEntry
 } from "@/lib/requirement-design-entry"
 import { getDesignSessionClient } from "./session-client"
 import type { FileAttachment, SessionMeta } from "./types"
+import {
+  setRequirementNavigation,
+  useRequirementProductStore
+} from "@/lib/requirement-product-store"
 
 export type ActiveRequirementDesignEntry = RequirementDesignEntry & {
   htmlFile?: string
@@ -73,17 +75,17 @@ export function useRequirementDesignEntry({
   onEntryChange: (entry: ActiveRequirementDesignEntry | null) => void
   showToast: (message: string) => void
 }): void {
+  const navigation = useRequirementProductStore((state) => state.navigation)
   // 首次进入时创建会话并立即回写 htmlId；已有会话丢失时不做 HTML 恢复。
   useEffect(() => {
     if (!sessionReady) return
-    const raw = localStorage.getItem(REQUIREMENT_DESIGN_ENTRY_KEY)
-    if (!raw) return
-    localStorage.removeItem(REQUIREMENT_DESIGN_ENTRY_KEY)
+    if (navigation?.target !== "design") return
+    const entries = navigation.entries
+    setRequirementNavigation(null)
+    if (entries.length === 0) return
     void (async () => {
       const readyEntries: ActiveRequirementDesignEntry[] = []
       try {
-        const payload = JSON.parse(raw) as RequirementDesignEntryPayload
-        const entries = "entries" in payload ? payload.entries : [payload]
         if (
           entries.length === 0 ||
           entries.some(
@@ -166,5 +168,5 @@ export function useRequirementDesignEntry({
         showToast(error instanceof Error ? error.message : "打开需求设计失败")
       }
     })()
-  }, [createSession, onEntryChange, openSession, sessionReady, setWorkspacePath, showToast])
+  }, [createSession, navigation, onEntryChange, openSession, sessionReady, setWorkspacePath, showToast])
 }

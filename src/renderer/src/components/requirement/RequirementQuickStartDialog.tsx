@@ -23,8 +23,8 @@ import { cn } from "@/lib/utils"
 import {
   readStoredRequirementPersona,
   REQUIREMENT_PERSONA_CHANGED_EVENT,
-  REQUIREMENT_PERSONA_SKIP_STORAGE_KEY,
-  REQUIREMENT_PERSONA_STORAGE_KEY,
+  readSkipRequirementPersonaSelection,
+  saveRequirementPersonaSettings,
   type RequirementPersona
 } from "./requirement-persona"
 
@@ -73,7 +73,7 @@ function readStoredPersona(): RequirementPersona | null {
 }
 
 function readSkipPersonaSelection(): boolean {
-  return localStorage.getItem(REQUIREMENT_PERSONA_SKIP_STORAGE_KEY) === "true"
+  return readSkipRequirementPersonaSelection()
 }
 
 function initialStep(): "persona" | "source" {
@@ -164,8 +164,7 @@ export function RequirementQuickStartDialog({
 
   const continueWithPersona = (): void => {
     if (!persona) return
-    localStorage.setItem(REQUIREMENT_PERSONA_STORAGE_KEY, persona)
-    localStorage.setItem(REQUIREMENT_PERSONA_SKIP_STORAGE_KEY, String(skipPersonaSelection))
+    saveRequirementPersonaSettings(persona, skipPersonaSelection)
     window.dispatchEvent(new Event(REQUIREMENT_PERSONA_CHANGED_EVENT))
     if (persona === "business") {
       selectSource({ source: "text", target: "conversation" })

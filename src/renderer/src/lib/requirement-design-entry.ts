@@ -1,9 +1,8 @@
-export const REQUIREMENT_DESIGN_ENTRY_KEY = "pending-requirement-design"
-// 独立保存“设计会话 -> 需求功能”映射，不侵入原有设计会话数据结构。
-export const REQUIREMENT_DESIGN_ASSOCIATIONS_KEY = "requirement-design-associations"
-export const REQUIREMENT_DESIGN_NAVIGATE_EVENT = "requirement-design:navigate"
-export const REQUIREMENT_CONVERSATION_ENTRY_KEY = "pending-requirement-conversation"
-export const REQUIREMENT_CONVERSATION_NAVIGATE_EVENT = "requirement-conversation:navigate"
+import {
+  commitRequirementRelations,
+  getRequirementRelations,
+  setRequirementNavigation
+} from "./requirement-product-store"
 
 export type RequirementDesignEntry = {
   origin?: "design" | "uploaded"
@@ -82,19 +81,16 @@ export function buildSpaceRequirementDesignPrompt(requirementName: string): stri
 }
 
 export function openRequirementDesign(entry: RequirementDesignEntry): void {
-  localStorage.setItem(REQUIREMENT_DESIGN_ENTRY_KEY, JSON.stringify(entry))
-  window.dispatchEvent(new Event(REQUIREMENT_DESIGN_NAVIGATE_EVENT))
+  setRequirementNavigation({ target: "design", entries: [entry] })
 }
 
 export function openRequirementDesignBatch(entries: RequirementDesignEntry[]): void {
   if (entries.length === 0) return
-  localStorage.setItem(REQUIREMENT_DESIGN_ENTRY_KEY, JSON.stringify({ entries }))
-  window.dispatchEvent(new Event(REQUIREMENT_DESIGN_NAVIGATE_EVENT))
+  setRequirementNavigation({ target: "design", entries })
 }
 
 export function returnToRequirementConversation(requirementId: string): void {
-  localStorage.setItem(REQUIREMENT_CONVERSATION_ENTRY_KEY, requirementId)
-  window.dispatchEvent(new Event(REQUIREMENT_CONVERSATION_NAVIGATE_EVENT))
+  setRequirementNavigation({ target: "requirement", requirementId })
 }
 
 type RequirementEntryStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">
@@ -107,34 +103,62 @@ export function storeActiveRequirementDesignEntry(
   // entry 为空表示显式删除指定设计会话的关联。
   const associationId = entry ? entry.htmlId : sessionId
   if (!associationId) return
-  const associations = readRequirementDesignAssociations(storage)
-  if (entry) {
-    const persistedEntry = { ...entry }
-    delete persistedEntry.requirementContent
-    associations[associationId] = persistedEntry
-  } else delete associations[associationId]
-  if (Object.keys(associations).length > 0) {
-    storage.setItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY, JSON.stringify(associations))
-  } else {
-    storage.removeItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY)
-  }
+  commitRequirementRelations((current) => {
+    let requirementId = entry?.requirementId
+    if (!requirementId) {
+      for (const [id, relations] of Object.entries(current.requirements)) {
+        if (relations.designSessions[associationId]) {
+          requirementId = id
+          break
+        }
+      }
+    }
+    if (!requirementId) return current
+    const existing = current.requirements[requirementId] ?? {
+      designSessions: {},
+      developmentThreads: {}
+    }
+    const designSessions = { ...existing.designSessions }
+    if (entry) {
+      const persistedEntry = { ...entry }
+      delete persistedEntry.requirementContent
+      designSessions[associationId] = persistedEntry
+    } else delete designSessions[associationId]
+    const requirements = { ...current.requirements }
+    if (Object.keys(designSessions).length || Object.keys(existing.developmentThreads).length) {
+      requirements[requirementId] = { ...existing, designSessions }
+    } else delete requirements[requirementId]
+    return { ...current, requirements }
+  }, storage)
 }
 
 export function storeRequirementDesignEntries(
   entries: RequirementDesignEntry[],
   storage: RequirementEntryStorage = localStorage
 ): void {
-  const associations = readRequirementDesignAssociations(storage)
-  for (const entry of entries) {
-    if (entry.htmlId) {
+  commitRequirementRelations((current) => {
+    let next = current
+    for (const entry of entries) {
+      if (!entry.htmlId) continue
+      const existing = next.requirements[entry.requirementId] ?? {
+        designSessions: {},
+        developmentThreads: {}
+      }
       const persistedEntry = { ...entry }
       delete persistedEntry.requirementContent
-      associations[entry.htmlId] = persistedEntry
+      next = {
+        ...next,
+        requirements: {
+          ...next.requirements,
+          [entry.requirementId]: {
+            ...existing,
+            designSessions: { ...existing.designSessions, [entry.htmlId]: persistedEntry }
+          }
+        }
+      }
     }
-  }
-  if (Object.keys(associations).length > 0) {
-    storage.setItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY, JSON.stringify(associations))
-  }
+    return next
+  }, storage)
 }
 
 export async function removeRequirementDesignSessions(
@@ -144,21 +168,35 @@ export async function removeRequirementDesignSessions(
 ): Promise<string[]> {
   const ids = [...new Set(sessionIds)].filter(Boolean)
   const results = await Promise.allSettled(
-    ids.map(async (sessionId) => {
-      await removeSession(sessionId)
-      storeActiveRequirementDesignEntry(null, sessionId, storage)
-    })
+    ids.map((sessionId) => removeSession(sessionId))
   )
-  return ids.filter((_, index) => results[index].status === "rejected")
+  const failedIds = ids.filter((_, index) => results[index].status === "rejected")
+  const failedSet = new Set(failedIds)
+  removeRequirementDesignAssociations(ids.filter((id) => !failedSet.has(id)), storage)
+  return failedIds
 }
 
 export function removeRequirementDesignAssociations(
   sessionIds: Iterable<string>,
   storage: RequirementEntryStorage = localStorage
 ): void {
-  for (const sessionId of new Set(sessionIds)) {
-    if (sessionId) storeActiveRequirementDesignEntry(null, sessionId, storage)
-  }
+  const ids = new Set([...sessionIds].filter(Boolean))
+  if (ids.size === 0) return
+  commitRequirementRelations((current) => {
+    let changed = false
+    const requirements = { ...current.requirements }
+    for (const [requirementId, existing] of Object.entries(current.requirements)) {
+      const designSessions = Object.fromEntries(
+        Object.entries(existing.designSessions).filter(([sessionId]) => !ids.has(sessionId))
+      )
+      if (Object.keys(designSessions).length === Object.keys(existing.designSessions).length) continue
+      changed = true
+      if (Object.keys(designSessions).length || Object.keys(existing.developmentThreads).length) {
+        requirements[requirementId] = { ...existing, designSessions }
+      } else delete requirements[requirementId]
+    }
+    return changed ? { ...current, requirements } : current
+  }, storage)
 }
 
 export function loadActiveRequirementDesignEntry(
@@ -175,8 +213,9 @@ export function listRequirementDesignEntries(
   preferredSessionId?: string
 ): RequirementDesignEntry[] {
   const entriesByFunction = new Map<string, RequirementDesignEntry>()
-  for (const entry of Object.values(readRequirementDesignAssociations(storage))) {
-    if (entry.requirementId !== requirementId) continue
+  const entries =
+    getRequirementRelations(storage).requirements[requirementId]?.designSessions ?? {}
+  for (const entry of Object.values(entries)) {
     for (const filePath of getRequirementDesignFilePaths(entry)) {
       const existing = entriesByFunction.get(filePath)
       if (
@@ -199,8 +238,8 @@ export function listAllRequirementDesignEntries(
   requirementId: string,
   storage: RequirementEntryStorage = localStorage
 ): RequirementDesignEntry[] {
-  return Object.values(readRequirementDesignAssociations(storage)).filter(
-    (entry) => entry.requirementId === requirementId
+  return Object.values(
+    getRequirementRelations(storage).requirements[requirementId]?.designSessions ?? {}
   )
 }
 
@@ -208,8 +247,8 @@ export function findRequirementDesignEntry(
   requirementId: string,
   storage: RequirementEntryStorage = localStorage
 ): RequirementDesignEntry | null {
-  const matches = Object.values(readRequirementDesignAssociations(storage)).filter(
-    (entry) => entry.requirementId === requirementId
+  const matches = Object.values(
+    getRequirementRelations(storage).requirements[requirementId]?.designSessions ?? {}
   )
   return matches.at(-1) ?? null
 }
@@ -217,12 +256,10 @@ export function findRequirementDesignEntry(
 function readRequirementDesignAssociations(
   storage: RequirementEntryStorage
 ): Record<string, RequirementDesignEntry> {
-  const raw = storage.getItem(REQUIREMENT_DESIGN_ASSOCIATIONS_KEY)
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw) as Record<string, RequirementDesignEntry>
-    const valid: Record<string, RequirementDesignEntry> = {}
-    for (const [id, entry] of Object.entries(parsed)) {
+  void storage
+  const valid: Record<string, RequirementDesignEntry> = {}
+  for (const relations of Object.values(getRequirementRelations(storage).requirements)) {
+    for (const [id, entry] of Object.entries(relations.designSessions)) {
       if (
         entry?.htmlId === id &&
         entry.requirementId &&
@@ -232,8 +269,6 @@ function readRequirementDesignAssociations(
         valid[id] = entry
       }
     }
-    return valid
-  } catch {
-    return {}
   }
+  return valid
 }

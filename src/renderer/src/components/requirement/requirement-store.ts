@@ -1,15 +1,17 @@
 import { create } from "zustand"
 import type { DesignSystemInfo } from "../design/types"
+import {
+  getRequirementSettings,
+  updateRequirementSettings
+} from "@/lib/requirement-product-store"
 
 export const ALL_REQUIREMENT_SYSTEMS_VALUE = "all"
-const LAST_SELECTED_REQUIREMENT_SYSTEM_KEY = "requirement:last-selected-system-id"
-const CUSTOM_REQUIREMENT_SYSTEMS_KEY = "requirement:custom-systems"
 
 export type RequirementSystemInfo = DesignSystemInfo & { theme?: string }
 
 function readCustomSystems(): RequirementSystemInfo[] {
   try {
-    const value = JSON.parse(window.localStorage.getItem(CUSTOM_REQUIREMENT_SYSTEMS_KEY) || "[]")
+    const value = getRequirementSettings().customSystems
     return Array.isArray(value)
       ? value.filter(
           (system): system is RequirementSystemInfo =>
@@ -22,11 +24,7 @@ function readCustomSystems(): RequirementSystemInfo[] {
 }
 
 function persistCustomSystems(systems: RequirementSystemInfo[]): void {
-  try {
-    window.localStorage.setItem(CUSTOM_REQUIREMENT_SYSTEMS_KEY, JSON.stringify(systems))
-  } catch {
-    // localStorage may be unavailable in restricted renderer contexts.
-  }
+  updateRequirementSettings((current) => ({ ...current, customSystems: systems }))
 }
 
 function mergeCustomSystems(
@@ -38,23 +36,11 @@ function mergeCustomSystems(
 }
 
 function readLastSelectedSystemId(): string | null {
-  try {
-    return window.localStorage.getItem(LAST_SELECTED_REQUIREMENT_SYSTEM_KEY)
-  } catch {
-    return null
-  }
+  return getRequirementSettings().selectedSystemId
 }
 
 function persistLastSelectedSystemId(systemId: string | null): void {
-  try {
-    if (systemId) {
-      window.localStorage.setItem(LAST_SELECTED_REQUIREMENT_SYSTEM_KEY, systemId)
-    } else {
-      window.localStorage.removeItem(LAST_SELECTED_REQUIREMENT_SYSTEM_KEY)
-    }
-  } catch {
-    // localStorage may be unavailable in restricted renderer contexts.
-  }
+  updateRequirementSettings((current) => ({ ...current, selectedSystemId: systemId }))
 }
 
 function findSystem(systems: DesignSystemInfo[], systemId: string | null): DesignSystemInfo | null {
