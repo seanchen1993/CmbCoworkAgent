@@ -146,7 +146,7 @@ function buildRequirementInitializationMessage(requirement: RequirementRecord): 
     ? `\n\n用户的初始需求描述：\n${initialDescription}`
     : ""
 
-  return `请为「${requirement.title}」撰写一份产品需求文档。\n\n## 1. 读取原始需求\n${primarySourceInstruction}${initialDescriptionSection}\n\n## 2. 补充背景\n阅读 source 文件夹中的补充材料；如含链接，使用内置浏览器访问总结页面内容，失败则跳过。\n\n## 3. 分析与澄清\n完成信息收集后，综合分析需求，整理需求目标、使用场景、范围和关键疑问，再通过对话与用户逐项澄清。\n\n## 4. 生成 PRD\n待关键疑问确认后，系统梳理目标用户、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准，并生成正式 PRD。`
+  return `请为「${requirement.title}」撰写一份产品需求文档。\n 1. 读取原始需求\n${primarySourceInstruction}${initialDescriptionSection}\n\n 2. 补充背景\n阅读 source 文件夹中的补充材料；如含链接，使用内置浏览器访问总结页面内容作为背景资料，失败则跳过。\n\n 3. 分析与澄清\n完成信息收集后，综合分析需求，整理需求目标、使用场景、范围和关键疑问，再通过对话与用户逐项澄清。\n\n 4. 生成 PRD\n待关键疑问确认后，系统梳理目标用户、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准，并生成正式 PRD。`
 }
 
 function RequirementConversationSession({
