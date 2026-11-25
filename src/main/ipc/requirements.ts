@@ -4,6 +4,11 @@ import path from "path"
 import { randomUUID } from "crypto"
 import mammoth from "mammoth"
 import { getOpenworkDir } from "../storage"
+import {
+  isSupportedRequirementBackgroundFileName,
+  MAX_REQUIREMENT_BACKGROUND_FILE_BYTES,
+  MAX_REQUIREMENT_BACKGROUND_FILES
+} from "../../shared/file-attachment"
 
 type RequirementSourceType = "file" | "text" | "link"
 type NeedDesignChoice = "" | "0" | "1"
@@ -852,6 +857,9 @@ async function readRequirementSourcePreview(item: RequirementIndexItem): Promise
   if (item.source.type === "text") {
     return item.source.initialDescription?.trim() || "暂无原始需求文件。"
   }
+  if (item.source.type === "link") {
+    return item.source.url?.trim() || "暂无线上需求链接。"
+  }
   const previewPath = getRequirementSourcePreviewPath(item)
 
   try {
@@ -883,7 +891,7 @@ async function getRequirementCoreFileStatus(
   if (workspaceMissing) {
     return { missing: true, reason: "需求归档目录已被删除或不可用" }
   }
-  if (item.source.type === "text") return { missing: false, reason: null }
+  if (item.source.type !== "file") return { missing: false, reason: null }
 
   try {
     const sourceStats = await fs.stat(getRequirementSourcePath(item))
@@ -926,13 +934,25 @@ async function createRequirement(
   const systemId = payload?.systemId?.trim()
   const title = payload?.title?.trim()
   const source = payload?.source
-  if (!systemId || !title || !source?.type || (source.type !== "text" && !source.fileName)) {
+  if (
+    !systemId ||
+    !title ||
+    !source?.type ||
+    (source.type === "file" && !source.fileName) ||
+    (source.type === "link" && !source.url?.trim())
+  ) {
     throw new Error("需求标题和需求来源不能为空")
   }
   const workDir = await resolveRequirementWorkDir(payload?.workDir)
-  const primarySourceFileName = source.type === "text" ? "" : safeSegment(source.fileName, "source")
+  const primarySourceFileName = source.type === "file" ? safeSegment(source.fileName, "source") : ""
   const usedSourceFileNames = new Set(primarySourceFileName ? [primarySourceFileName] : [])
+  if ((source.attachments?.length ?? 0) > MAX_REQUIREMENT_BACKGROUND_FILES) {
+    throw new Error(`需求背景补充材料最多上传 ${MAX_REQUIREMENT_BACKGROUND_FILES} 个文件`)
+  }
   const attachmentNames = (source.attachments ?? []).map((attachment, index) => {
+    if (!isSupportedRequirementBackgroundFileName(attachment.fileName)) {
+      throw new Error(`补充材料 ${attachment.fileName} 格式不支持`)
+    }
     const safeName = safeSegment(attachment.fileName, `attachment-${index + 1}`)
     const extension = path.extname(safeName)
     const stem = extension ? safeName.slice(0, -extension.length) : safeName
@@ -968,7 +988,7 @@ async function createRequirement(
     updatedAt: now,
     prdManifest: createEmptyPrdManifest()
   }
-  if (source.type !== "text") {
+  if (source.type === "file") {
     const sourcePath = getRequirementSourcePath(item)
     await fs.mkdir(path.dirname(sourcePath), { recursive: true })
     if (typeof source.content === "string") {
@@ -996,8 +1016,8 @@ async function createRequirement(
     for (const [index, attachment] of source.attachments.entries()) {
       const buffer = Buffer.from(attachment.bytes)
       if (buffer.byteLength === 0) throw new Error(`补充文件 ${index + 1} 内容为空`)
-      if (buffer.byteLength > MAX_TEXT_BYTES)
-        throw new Error(`补充文件 ${attachment.fileName} 超过 5MB 限制`)
+      if (buffer.byteLength > MAX_REQUIREMENT_BACKGROUND_FILE_BYTES)
+        throw new Error(`补充材料 ${attachment.fileName} 超过 10MB 限制`)
       const fileName = attachmentNames[index]
       await fs.writeFile(path.join(sourceDirectory, fileName), buffer)
     }

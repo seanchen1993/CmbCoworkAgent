@@ -31,7 +31,13 @@ import {
   normalizeMarketVersion
 } from "../customize/MarketPanel/MarketUpdateBadge"
 import { fromPersistedRequirement, type RequirementRecord } from "./requirement-data"
-import { MAX_ATTACHMENT_FILE_BYTES } from "../../../../shared/file-attachment"
+import {
+  isSupportedRequirementBackgroundFileName,
+  MAX_ATTACHMENT_FILE_BYTES,
+  MAX_REQUIREMENT_BACKGROUND_FILE_BYTES,
+  MAX_REQUIREMENT_BACKGROUND_FILES,
+  REQUIREMENT_BACKGROUND_FILE_ACCEPT
+} from "../../../../shared/file-attachment"
 import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities,
@@ -50,6 +56,10 @@ type RequirementSkillStatus =
   | { phase: "installing" }
   | { phase: "updating"; version: string }
   | { phase: "failed"; action: "install" | "update" }
+
+function isImageFileName(fileName: string): boolean {
+  return /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i.test(fileName.trim())
+}
 
 async function ensureRequirementSkills(
   onStatusChange: (skillId: string, status: RequirementSkillStatus) => void
@@ -137,17 +147,6 @@ async function ensureRequirementSkills(
 
 function getRequirementTitleFromFileName(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, "").trim() || "新需求草稿"
-}
-
-function getLinkSnapshot(value: string, systemName: string): string {
-  return `# 原始需求链接
-
-- 业务系统：${systemName}
-- 需求链接：${value}
-- 保存时间：${new Date().toLocaleString("zh-CN", { hour12: false })}
-
-> 该文件保存了原始需求链接，后续可在同目录中与规范 PRD 一起查看。
-`
 }
 
 export function NewRequirementDialog({
@@ -252,9 +251,16 @@ export function NewRequirementDialog({
   }
 
   const addAttachments = (nextFiles: File[]): void => {
-    const oversized = nextFiles.find((item) => item.size > MAX_ATTACHMENT_FILE_BYTES)
+    const unsupported = nextFiles.find(
+      (item) => !isSupportedRequirementBackgroundFileName(item.name)
+    )
+    if (unsupported) {
+      toast.error(`补充材料「${unsupported.name}」格式不支持`)
+      return
+    }
+    const oversized = nextFiles.find((item) => item.size > MAX_REQUIREMENT_BACKGROUND_FILE_BYTES)
     if (oversized) {
-      toast.error(`补充文件「${oversized.name}」超过 5MB 限制`)
+      toast.error(`补充材料「${oversized.name}」超过 10MB 限制`)
       return
     }
     setAttachments((current) => {
@@ -264,6 +270,10 @@ export function NewRequirementDialog({
       nextFiles.forEach((item) =>
         byIdentity.set(`${item.name}:${item.size}:${item.lastModified}`, item)
       )
+      if (byIdentity.size > MAX_REQUIREMENT_BACKGROUND_FILES) {
+        toast.error(`需求背景补充材料最多上传 ${MAX_REQUIREMENT_BACKGROUND_FILES} 个文件`)
+        return current
+      }
       return [...byIdentity.values()]
     })
   }
@@ -320,9 +330,9 @@ export function NewRequirementDialog({
             }
           : source === "link"
             ? {
-                fileName: "原始需求链接.md",
+                fileName: "",
                 url: normalizedUrl,
-                content: getLinkSnapshot(normalizedUrl, system.name)
+                attachments: attachmentPayload
               }
             : {
                 fileName: "",
@@ -553,25 +563,34 @@ export function NewRequirementDialog({
           <div className="rounded-xl border border-border bg-white p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold text-foreground">补充文件</div>
+                <div className="text-sm font-semibold text-foreground">需求背景补充材料</div>
                 <div className="mt-0.5 text-xs text-muted-foreground">
-                  可上传多个文件，单个文件不超过 5MB
+                  支持 DOCX、MD、TXT、HTML 和图片，最多 10 个，单个不超过 10MB
                 </div>
               </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={saving}
-                onClick={() => document.getElementById("requirement-attachments")?.click()}
-              >
-                <Plus className="size-3.5" />
-                添加文件
+              <Button asChild variant="outline" size="sm">
+                <label
+                  htmlFor="requirement-attachments"
+                  role="button"
+                  tabIndex={saving ? -1 : 0}
+                  aria-disabled={saving}
+                  className={cn(saving && "pointer-events-none opacity-50")}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return
+                    event.preventDefault()
+                    if (!saving) event.currentTarget.control?.click()
+                  }}
+                >
+                  <Plus className="size-3.5" />
+                  添加文件
+                </label>
               </Button>
               <input
                 id="requirement-attachments"
                 type="file"
                 multiple
+                accept={REQUIREMENT_BACKGROUND_FILE_ACCEPT}
+                disabled={saving}
                 className="hidden"
                 onChange={(event) => {
                   addAttachments(Array.from(event.target.files ?? []))
@@ -587,8 +606,15 @@ export function NewRequirementDialog({
                     className="flex items-center gap-2 rounded-lg bg-muted/45 px-3 py-2"
                   >
                     <FileText className="size-3.5 shrink-0 text-primary" />
-                    <span className="min-w-0 flex-1 truncate text-xs text-foreground">
-                      {attachment.name}
+                    <span className="flex min-w-0 flex-1 items-center gap-2">
+                      <span className="min-w-0 truncate text-xs text-foreground">
+                        {attachment.name}
+                      </span>
+                      {isImageFileName(attachment.name) ? (
+                        <span className="shrink-0 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700">
+                          需多模态模型识别
+                        </span>
+                      ) : null}
                     </span>
                     <span className="shrink-0 text-[11px] text-muted-foreground">
                       {Math.ceil(attachment.size / 1024)} KB

@@ -126,6 +126,73 @@ function getDisplayFileName(filePath: string): string {
   return filePath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? filePath
 }
 
+function isImageFile(filePath: string): boolean {
+  return /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i.test(getDisplayFileName(filePath))
+}
+
+function RequirementSourceFilesBox({
+  title,
+  badge,
+  emptyText,
+  files,
+  tagImageFiles = false,
+  onOpen
+}: {
+  title: string
+  badge: string
+  emptyText: string
+  files: Array<{ path: string; size?: number }>
+  tagImageFiles?: boolean
+  onOpen: (filePath: string) => void
+}): React.JSX.Element {
+  return (
+    <section className="rounded-xl border border-border/80 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-foreground">
+          {title}（{files.length}）
+        </h3>
+        <span className="text-[11px] text-muted-foreground">{badge}</span>
+      </div>
+      {files.length > 0 ? (
+        <div className="space-y-2">
+          {files.map((file) => (
+            <button
+              key={file.path}
+              type="button"
+              onClick={() => onOpen(file.path)}
+              className="flex w-full items-center gap-3 rounded-lg border border-border/70 bg-[#fbfcfe] px-3 py-2.5 text-left transition-colors hover:border-primary/35 hover:bg-primary/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
+            >
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <FileText className="size-4" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 truncate text-sm font-medium text-foreground">
+                    {getDisplayFileName(file.path)}
+                  </span>
+                  {tagImageFiles && isImageFile(file.path) ? (
+                    <span className="shrink-0 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700">
+                      需多模态模型识别
+                    </span>
+                  ) : null}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {file.size ? `${Math.ceil(file.size / 1024)} KB` : badge}
+                </span>
+              </span>
+              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-lg bg-muted/35 px-3 py-4 text-center text-sm text-muted-foreground">
+          {emptyText}
+        </p>
+      )}
+    </section>
+  )
+}
+
 function PrototypeHtmlPreview({
   threadId,
   filePath,
@@ -433,6 +500,17 @@ export function RequirementDetailsPanel({
       onFunctionWorkspaceChange(false)
     }
   }, [onFunctionWorkspaceChange])
+
+  const originalRequirementFileName =
+    requirement.sourceType === "file" ? requirement.fileName.trim().toLocaleLowerCase() : ""
+  const originalRequirementFiles = sourceDocumentFiles.filter(
+    (file) =>
+      originalRequirementFileName &&
+      getDisplayFileName(file.path).toLocaleLowerCase() === originalRequirementFileName
+  )
+  const backgroundMaterialFiles = sourceDocumentFiles.filter(
+    (file) => !originalRequirementFiles.includes(file)
+  )
 
   return (
     <aside
@@ -761,6 +839,25 @@ export function RequirementDetailsPanel({
             </div>
           ) : (
             <div className="space-y-3 bg-[#fbfcfe] p-4">
+              <div className="rounded-xl border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-amber-950">
+                <div className="flex items-start gap-2.5">
+                  <Brain className="mt-0.5 size-4 shrink-0 text-amber-700" />
+                  <div>
+                    <p className="text-sm font-semibold">温馨提示</p>
+                    <ol className="mt-1 list-decimal space-y-1 pl-4 text-xs leading-5 text-amber-900/80">
+                      <li>
+                        推荐使用 DeepSeek V4，以获得更好的需求理解效果；不建议使用 MiniMax M2.5
+                        等模型。
+                      </li>
+                      <li>
+                        开启 YOLO 模式（对话框右上角 →
+                        更多会话设置）后，文件写入将自动执行，无需逐次审批。
+                      </li>
+                    </ol>
+                  </div>
+                </div>
+              </div>
+
               <div className="flex min-h-5 items-center gap-3">
                 <h2 className="text-sm font-semibold leading-5 text-foreground">提供需求</h2>
                 <p className="text-xs leading-4 text-muted-foreground">
@@ -773,53 +870,55 @@ export function RequirementDetailsPanel({
 
               <section className="rounded-xl border border-border/80 bg-white p-4">
                 <div className="mb-2 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-foreground">文本描述</h3>
-                  <span className="text-[11px] text-muted-foreground">直接输入</span>
+                  <h3 className="text-sm font-semibold text-foreground">
+                    {requirement.sourceType === "file"
+                      ? "文件上传（已转换成文本）"
+                      : requirement.sourceType === "link"
+                        ? "线上链接"
+                        : "文本描述"}
+                  </h3>
+                  <span className="text-[11px] text-muted-foreground">
+                    {requirement.sourceType === "file"
+                      ? "原始文件"
+                      : requirement.sourceType === "link"
+                        ? "在线来源"
+                        : "直接输入"}
+                  </span>
                 </div>
-                <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/85">
+                <p
+                  className={cn(
+                    "whitespace-pre-wrap break-words text-sm leading-6 text-foreground/85",
+                    requirement.sourceType !== "link" && "max-h-64 overflow-y-auto pr-2"
+                  )}
+                >
                   {requirement.initialDescription.trim() ||
                     sourcePreview.trim() ||
-                    "未提供额外文本描述"}
+                    (requirement.sourceType === "file"
+                      ? "未提供原始需求文件"
+                      : requirement.sourceType === "link"
+                        ? "未提供线上需求链接"
+                        : "未提供文本描述")}
                 </p>
               </section>
 
-              <section className="rounded-xl border border-border/80 bg-white p-4">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-foreground">
-                    上传文件（{sourceDocumentFiles.length}）
-                  </h3>
-                  <span className="text-[11px] text-muted-foreground">原始输入</span>
-                </div>
-                {sourceDocumentFiles.length > 0 ? (
-                  <div className="space-y-2">
-                    {sourceDocumentFiles.map((file) => (
-                      <button
-                        key={file.path}
-                        type="button"
-                        onClick={() => openWorkspaceFilePreview(file.path)}
-                        className="flex w-full items-center gap-3 rounded-lg border border-border/70 bg-[#fbfcfe] px-3 py-2.5 text-left transition-colors hover:border-primary/35 hover:bg-primary/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
-                      >
-                        <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                          <FileText className="size-4" />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-medium text-foreground">
-                            {getDisplayFileName(file.path)}
-                          </span>
-                          <span className="text-[11px] text-muted-foreground">
-                            {file.size ? `${Math.ceil(file.size / 1024)} KB` : "需求附件"}
-                          </span>
-                        </span>
-                        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="rounded-lg bg-muted/35 px-3 py-4 text-center text-sm text-muted-foreground">
-                    本需求未上传文件
-                  </p>
-                )}
-              </section>
+              {requirement.sourceType === "file" ? (
+                <RequirementSourceFilesBox
+                  title="上传的需求文件"
+                  badge="原始需求"
+                  emptyText="未找到上传的需求文件"
+                  files={originalRequirementFiles}
+                  onOpen={openWorkspaceFilePreview}
+                />
+              ) : null}
+
+              <RequirementSourceFilesBox
+                title="需求背景补充材料"
+                badge="背景材料"
+                emptyText="未添加需求背景补充材料"
+                files={backgroundMaterialFiles}
+                tagImageFiles
+                onOpen={openWorkspaceFilePreview}
+              />
             </div>
           )}
         </TabsContent>

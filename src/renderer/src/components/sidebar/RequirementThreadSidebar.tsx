@@ -186,6 +186,7 @@ export function RequirementThreadSidebar({
   )
   const [deletingRequirement, setDeletingRequirement] = useState(false)
   const [hoveredRequirementId, setHoveredRequirementId] = useState<string | null>(null)
+  const [deleteMenuRequirementId, setDeleteMenuRequirementId] = useState<string | null>(null)
   const [refreshingRequirementId, setRefreshingRequirementId] = useState<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const initialTargetThreadIdRef = useRef(currentThreadId)
@@ -559,12 +560,26 @@ export function RequirementThreadSidebar({
                           />
                           <IconPopoverButton
                             icon={<Trash2 className="size-3" />}
+                            open={deleteMenuRequirementId === requirement.id}
+                            onOpenChange={(open) =>
+                              setDeleteMenuRequirementId(open ? requirement.id : null)
+                            }
+                            openOnHover={false}
+                            closeOnClick={false}
+                            onClick={() =>
+                              setDeleteMenuRequirementId((current) =>
+                                current === requirement.id ? null : requirement.id
+                              )
+                            }
                             popoverContent={
                               <div className="flex flex-col gap-1">
                                 <button
                                   type="button"
                                   className="rounded px-2 py-1 text-left hover:bg-muted"
-                                  onClick={() => setDeleteTarget({ requirement })}
+                                  onClick={() => {
+                                    setDeleteMenuRequirementId(null)
+                                    setDeleteTarget({ requirement })
+                                  }}
                                 >
                                   只删除会话
                                 </button>
@@ -572,6 +587,7 @@ export function RequirementThreadSidebar({
                                   type="button"
                                   className="rounded px-2 py-1 text-left text-destructive hover:bg-muted"
                                   onClick={() => {
+                                    setDeleteMenuRequirementId(null)
                                     setRequirementDeleteTarget(requirement)
                                   }}
                                 >

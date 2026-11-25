@@ -115,6 +115,47 @@ describe("requirement source preview", () => {
     ).toBe(false)
   })
 
+  it("stores a link source without generating a redundant markdown file", async () => {
+    const workDir = join(tempHome, "link-requirement-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")!
+    const getSourcePreview = handlers.get("requirements:get-source-preview")!
+    const remove = handlers.get("requirements:delete")!
+    const url = "https://example.com/requirements/online-source"
+
+    const created = (await create(null, {
+      systemId: "system-link",
+      title: "线上需求",
+      workDir,
+      source: { type: "link", fileName: "", url }
+    })) as {
+      success: boolean
+      requirement?: {
+        reqId: string
+        requirementPath: string
+        coreFilesMissing: boolean
+        source: { fileName: string; url?: string | null }
+      }
+      error?: string
+    }
+
+    expect(created.success, created.error).toBe(true)
+    expect(created.requirement?.source).toMatchObject({ fileName: "", url })
+    expect(created.requirement?.coreFilesMissing).toBe(false)
+    expect(existsSync(join(created.requirement!.requirementPath, "source"))).toBe(false)
+    expect(existsSync(join(created.requirement!.requirementPath, "source-preview.md"))).toBe(false)
+
+    const preview = (await getSourcePreview(null, created.requirement!.reqId)) as {
+      success: boolean
+      content?: string
+      error?: string
+    }
+    expect(preview.success, preview.error).toBe(true)
+    expect(preview.content).toBe(url)
+    expect(existsSync(join(created.requirement!.requirementPath, "source-preview.md"))).toBe(false)
+    await remove(null, created.requirement!.reqId)
+  })
+
   it("extracts uploaded DOCX content and returns it from history", async () => {
     const sourcePath = resolve("node_modules/mammoth/test/test-data/simple-list.docx")
     const workDir = join(tempHome, "requirement-workspace")

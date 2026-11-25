@@ -138,9 +138,11 @@ function buildRequirementInitializationMessage(requirement: RequirementRecord): 
   const sourceInstruction =
     requirement.sourceType === "text"
       ? "请通过对话从零梳理需求，先了解目标和使用场景"
-      : "请先基于 source 文件夹中的原始需求资料完成需求分析"
+      : requirement.sourceType === "link"
+        ? "请基于线上需求链接中的内容完成需求分析"
+        : `请先阅读 source 文件夹中的原始需求文件「${requirement.fileName || "未命名需求文件"}」，并基于其内容完成需求分析`
   const initialDescription = requirement.initialDescription.trim()
-  const prdInstruction = `为「${requirement.title}」撰写一份产品需求文档。${sourceInstruction}，梳理目标用户、使用场景、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准；先与我确认待澄清事项，再生成正式 PRD。${initialDescription ? `\n\n用户的初始需求描述：\n${initialDescription}` : ""}`
+  const prdInstruction = `为「${requirement.title}」撰写一份产品需求文档。${sourceInstruction}；同时将 source 文件夹中的其他文件作为需求背景补充材料（如有）。请系统梳理目标用户、使用场景、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准；先与我确认待澄清事项，再生成正式 PRD。${initialDescription ? `\n\n用户的初始需求描述：\n${initialDescription}` : ""}`
 
   if (requirement.sourceType !== "link") return prdInstruction
 
