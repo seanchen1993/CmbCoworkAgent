@@ -59,8 +59,8 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { getModelClientOptions } from "../models/connection"
-import type { ModelTransport } from "../../shared/model-catalog"
+import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../models/connection"
+import type { IdleModelEnvironment, ModelTransport } from "../../shared/model-catalog"
 import {
   createCmbSummarizationMiddleware,
   isGatewayContextOverflow
@@ -210,6 +210,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import {
   flushStrict,
+  getLegacyImportedToolOccurrenceSources,
   getThreadCore,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
@@ -3937,6 +3938,8 @@ async function getCheckpointerInternal(
         : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
       maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
       maxNonRootCheckpoints: 1,
+      readLegacyToolReplaySources: isSubThreadCheckpoint ? undefined : (id) =>
+        new Set(getLegacyImportedToolOccurrenceSources(id, true).keys()),
       recoverMissingCheckpointMessages: isSubThreadCheckpoint
         ? undefined
         : recoverMainCheckpointMessages
@@ -4300,7 +4303,8 @@ function normalizeLailasInputOverflow(response: Response, rawBody: string): Resp
 function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
-  capture?: { threadId?: string }
+  capture?: { threadId?: string },
+  beforeAttempt?: () => Response | undefined
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -4328,6 +4332,13 @@ function createRetryingFetch(
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+      // Backoff can cross the closing boundary even on an already created model.
+      const rejection = beforeAttempt?.()
+      if (rejection) {
+        const response = await prepareErrorResponse(rejection)
+        if (attempt > 1) hooks?.onRetrySuccess?.()
+        return response
+      }
 
       // Per-attempt controller: fresh each iteration so a timeout on attempt N
       // does not leak into attempt N+1. Parent (user cancel) is forwarded in
@@ -4665,6 +4676,7 @@ export function getModelInstance(
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
     transport?: ModelTransport
+    idleModelEnvironment?: IdleModelEnvironment
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -4697,9 +4709,14 @@ export function getModelInstance(
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
-  const modelFetch = createRetryingFetch(retryHooks, maxRetryAttempts, {
-    threadId: captureThreadId
-  })
+  const modelFetch = createRetryingFetch(
+    retryHooks,
+    maxRetryAttempts,
+    { threadId: captureThreadId },
+    customConfig.transport === "idle-gateway"
+      ? () => getIdleModelServiceHoursRejection(customConfig)
+      : undefined
+  )
 
   const baseFields = {
     model: resolvedModel,

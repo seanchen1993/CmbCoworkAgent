@@ -8,7 +8,6 @@ import { fork, type ChildProcess } from "node:child_process"
 import { accessSync } from "fs"
 import path from "path"
 import { app } from "electron"
-import { IDLE_MODEL_NAME } from "../../shared/model-catalog"
 import { syncSkillsToClaudeDir } from "../storage"
 import { getModelConfigByRef } from "../models/registry"
 import { getGlobalMemoryDir, getProjectMemoryDir } from "../memory/paths"
@@ -62,7 +61,7 @@ function buildClaudeEnv(
   const config = getModelConfigByRef(modelId)
   if (!config) throw new Error(`模型配置不存在: ${modelId}`)
   if (config.transport === "idle-gateway") {
-    throw new Error(`${IDLE_MODEL_NAME}使用 OpenAI 接口，暂不支持 Claude Code 终端，请选择其他模型。`)
+    throw new Error(`${config.name}使用 OpenAI 接口，暂不支持 Claude Code 终端，请选择其他模型。`)
   }
   const proxyBase = getClaudeCodeProxyBase()
   if (!proxyBase) throw new Error("VITE_CLAUDE_CODE_PROXY_BASE 未配置")

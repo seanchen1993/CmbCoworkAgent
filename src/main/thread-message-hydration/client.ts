@@ -1,5 +1,5 @@
 import type { ResourceLimits, Worker } from "node:worker_threads"
-import { getDbPath, getThreadCheckpointDir } from "../storage"
+import { getDbPath, peekThreadCheckpointDir } from "../storage"
 import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../types"
 import type {
   ThreadMessageHydrationWorkerResponse,
@@ -270,7 +270,7 @@ export class ThreadMessageHydrationClient {
             type: "read-page",
             requestId,
             databasePath: this.databasePath(),
-            checkpointDirectory: options.includeVisibleMessagePresence ? this.checkpointDirectory?.() : undefined,
+            checkpointDirectory: this.checkpointDirectory?.(),
             threadId,
             options: {
               beforeOrdinal: options.beforeOrdinal,
@@ -361,7 +361,7 @@ function closeDefaultClientAtProcessExit(): void {
 }
 
 function getDefaultClient(): ThreadMessageHydrationClient {
-  defaultClient ??= new ThreadMessageHydrationClient(createBundledWorker, getDbPath, getThreadCheckpointDir)
+  defaultClient ??= new ThreadMessageHydrationClient(createBundledWorker, getDbPath, peekThreadCheckpointDir)
   if (!defaultShutdownHookRegistered) {
     defaultShutdownHookRegistered = true
     process.once("beforeExit", closeDefaultClientAtProcessExit)

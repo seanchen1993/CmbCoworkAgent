@@ -54,6 +54,7 @@ import {
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
 import { prepareStandardUserPrompt, resolveNamedBotSkill, validateExplicitSkillReference } from "./standard-thread-turn"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import { createHookScope } from "../hooks/scope"
 import { createSkillUseTracker } from "./skill-lifecycle/tracker"
 import { extractErrorDetail } from "./failover"
@@ -115,6 +116,14 @@ describe("managed model routing", () => {
       resolveStandardTurnRouting({ taskSource: "chat", threadId: "managed" })
     ).rejects.toThrow("码豆模型PRO不可用")
     expect(routingMocks.resolveModel).not.toHaveBeenCalled()
+  })
+
+  it("preserves the service-hours denial when resolving an ordinary pinned turn", async () => {
+    const error = new IdleModelServiceHoursError()
+    routingMocks.resolveModel.mockRejectedValue(error)
+    await expect(
+      resolveStandardTurnRouting({ taskSource: "chat", threadId: "ordinary", routingMode: "pinned" })
+    ).rejects.toBe(error)
   })
 })
 

@@ -563,14 +563,37 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
           return { status: "notFound" }
         }
         const [epochBeforeRead, versionBeforeRead] = readTargetVersion(request.threadId, messageId)
-        const page = await readThreadMessagesPageInWorker(request.threadId, {
-          targetMessageId: messageId,
+        const readWindow = (targetMessageId: string) => readThreadMessagesPageInWorker(request.threadId, {
+          targetMessageId,
           residentMessageIds: candidate.residentMessageIds,
           limit: 64,
           byteBudget: 4 * 1024 * 1024 - 400 * 1024
         }).catch(() => null)
+        let page = await readWindow(messageId)
         if (!current()) return { status: "staleIdentity" }
         if (!page) return { status: "failed" }
+        const message = page.messages.find((row) => row.id === messageId)
+        if (!message) return { status: "notFound" }
+        const canonicalMessageId = target.kind === "durableMessage"
+          ? message.legacy_checkpoint_replay_of : undefined
+        let canonicalVersion: [number, number] | undefined
+        if (canonicalMessageId) {
+          canonicalVersion = readTargetVersion(request.threadId, canonicalMessageId)
+          const end = message.legacy_checkpoint_replay_end
+          page = await readWindow(end ?? canonicalMessageId)
+          if (!current()) return { status: "staleIdentity" }
+          if (end && !page?.messages.some(({ id }) => id === canonicalMessageId)) {
+            page = await readWindow(canonicalMessageId)
+            if (!current()) return { status: "staleIdentity" }
+          }
+          if (!page?.messages.some(({ id }) => id === canonicalMessageId)) return { status: "changed" }
+          const outcomes = message.legacy_checkpoint_tool_outcomes
+          if (outcomes?.length) page = {
+            ...page,
+            messages: page.messages.map((row) => row.id === canonicalMessageId
+              ? { ...row, legacy_checkpoint_tool_outcomes: outcomes } : row)
+          }
+        }
         const finalIdentity = await readSearchThread(sender.id, request, false)
         if (!current() || !finalIdentity) return { status: "staleIdentity" }
         if (getThreadRowLifetime(request.threadId) !== lifetime) return { status: "staleIdentity" }
@@ -582,6 +605,10 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
         if (structureEpoch !== epochBeforeRead || messageVersion !== versionBeforeRead) {
           return { status: "changed" }
         }
+        if (canonicalMessageId && canonicalVersion) {
+          const [epoch, version] = readTargetVersion(request.threadId, canonicalMessageId)
+          if (epoch !== canonicalVersion[0] || version !== canonicalVersion[1]) return { status: "changed" }
+        }
         const latestEvent = readGoal()
         if (
           event &&
@@ -590,9 +617,7 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
             latestEvent.message !== event.message)
         )
           return { status: "changed" }
-        const message = page.messages.find((row) => row.id === messageId)
-        if (!message) return { status: "notFound" }
-        const resolved = { status: "resolved", page, structureEpoch, goalEvent: latestEvent }
+        const resolved = { status: "resolved", page, structureEpoch, goalEvent: latestEvent, canonicalMessageId }
         return Buffer.byteLength(JSON.stringify(resolved)) <= 4 * 1024 * 1024
           ? resolved
           : { status: "failed" }
