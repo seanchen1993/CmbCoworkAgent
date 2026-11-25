@@ -23,6 +23,7 @@ import {
 } from "../../../../shared/thread-model-selection"
 import { botWorkModelRoutingMode, isBotCreatedWorkMetadata, resolveLegacyBotWorkModelRef } from "../../../../shared/bots/model-policy"
 import { CustomModelDialog } from "./CustomModelDialog"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
 import {
   invalidateModelCatalogCache,
   readModelCatalogCache,
@@ -184,18 +185,23 @@ function ModelSwitcherImpl({
     const candidate = selectionChanged
       ? hydratedModel.modelId || currentModel
       : currentModel || hydratedModel.modelId || ""
-    let resolvedModel = candidate
+    const candidateModel = models.find((model) => model.id === candidate)
+    if (
+      routingMode === "auto" &&
+      candidateModel?.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE &&
+      availableDefaultModelId
+    ) {
+      // Let new automatic turns submit while preserving the saved pin.
+      if (currentModel !== availableDefaultModelId) restoreCurrentModel(availableDefaultModelId)
+      return
+    }
 
-    const hasValidSelection = candidate && models.some((model) => model.id === candidate)
-    if (!hasValidSelection && models.length > 0) {
+    let resolvedModel = candidate
+    if (!candidateModel && models.length > 0) {
       const migrated = candidate.startsWith("custom:")
         ? models.find((model) => model.model === candidate.slice("custom:".length))
         : undefined
-      resolvedModel =
-        migrated?.id ??
-        models.find((model) => model.id === defaultModelId && model.available)?.id ??
-        models.find((model) => model.available)?.id ??
-        candidate
+      resolvedModel = migrated?.id ?? (availableDefaultModelId || candidate)
     }
 
     if (resolvedModel !== candidate) {
@@ -206,7 +212,7 @@ function ModelSwitcherImpl({
     }
   }, [
     currentModel,
-    defaultModelId,
+    availableDefaultModelId,
     hydratedModel.modelId,
     models,
     restoreCurrentModel,
@@ -387,9 +393,11 @@ function ModelSwitcherImpl({
                 <span className="flex-1 truncate">
                   {model.name}
                   {!model.available
-                    ? model.unavailableReason
-                      ? "（用户信息不完整）"
-                      : "（未配置密钥）"
+                    ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+                      ? "（非服务时段）"
+                      : model.unavailableReason
+                        ? "（用户信息不完整）"
+                        : "（未配置密钥）"
                     : ""}
                 </span>
                 <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">

@@ -1,5 +1,6 @@
 import { resolve } from "node:path"
 import { SelectedModelUnavailableError } from "../models/selection-error"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -795,7 +796,9 @@ export async function resolveStandardTurnRouting(
     continuation: input.continuation,
     routingMode: input.routingMode ?? getGlobalRoutingMode()
   }).catch((error) => {
-    if (error instanceof SelectedModelUnavailableError) throw error
+    if (error instanceof SelectedModelUnavailableError || error instanceof IdleModelServiceHoursError) {
+      throw error
+    }
     return null
   })
   const effectiveModelId = result?.resolvedModelId ?? input.requestedModelId

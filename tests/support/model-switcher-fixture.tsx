@@ -3,19 +3,23 @@ import { flushSync } from "react-dom"
 import { AppErrorBoundary } from "../../src/renderer/src/components/app/AppErrorBoundary"
 import { ModelSwitcher } from "../../src/renderer/src/components/chat/ModelSwitcher"
 import { CustomModelDialog } from "../../src/renderer/src/components/chat/CustomModelDialog"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../src/shared/idle-model-service-window"
 import {
+  IDLE_MODEL_NOTICE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
-  IDLE_MODEL_UAT_NOTICE
+  IDLE_MODEL_UAT_NOTICE,
+  isModelAvailable,
+  isModelSelectable
 } from "../../src/shared/model-catalog"
 import * as store from "./model-switcher-store"
 
 const root = createRoot(document.getElementById("root")!)
-let idleAvailable = true
+let gatewayStatus: "open" | "closed" | "missing-sap" = "open"
 let useUat = false
 const modelChangeListeners = new Set<() => void>()
 const settingsWrites = { names: [] as string[], defaults: [] as string[], maxTokens: [] as number[] }
-const idle = {
+const pro = {
   id: "idle-ultra",
   ref: "builtin:idle-ultra" as const,
   source: "builtin" as const,
@@ -30,26 +34,54 @@ const idle = {
   topP: 0.95,
   topK: 40
 }
+const ultra = {
+  ...pro,
+  id: "maodou-ultra",
+  ref: "builtin:maodou-ultra" as const,
+  name: "闲时模型 Ultra",
+  model: "ultra"
+}
+const gatewayModels = [pro, ultra]
+
+function gatewayUnavailableReason(model: string): string | undefined {
+  if (gatewayStatus === "missing-sap") return IDLE_MODEL_SAP_REQUIRED_MESSAGE
+  if (model === "ultra" && gatewayStatus === "closed" && !useUat) return IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+}
+
+function gatewayNotice(model: string): string | undefined {
+  if (useUat) return IDLE_MODEL_UAT_NOTICE
+  if (model === "ultra") return IDLE_MODEL_NOTICE
+}
+
 const fixture = {
-  idleCatalog(available = true) {
-    idleAvailable = available
+  idleCatalog(status: "open" | "closed" | "missing-sap" = "open") {
+    gatewayStatus = status
     store.setModels([
       ...store.localModels,
-      {
-        ...idle,
-        id: idle.ref,
-        provider: "builtin",
-        available,
-        selectable: available,
-        unavailableReason: available ? undefined : IDLE_MODEL_SAP_REQUIRED_MESSAGE
-      }
+      ...gatewayModels.map((item) => {
+        const config = {
+          apiKey: "test-key",
+          transport: "idle-gateway" as const,
+          unavailableReason: gatewayUnavailableReason(item.model)
+        }
+        return {
+          ...item,
+          id: item.ref,
+          provider: "builtin",
+          available: isModelAvailable(config),
+          selectable: isModelSelectable(config),
+          notice: gatewayNotice(item.model),
+          unavailableReason: config.unavailableReason
+        }
+      })
     ])
     for (const listener of modelChangeListeners) listener()
   },
-  showIdleSettings(uat = false) {
+  showGatewaySettings(model: "pro" | "ultra", uat = false) {
     useUat = uat
     flushSync(() => root.render(null))
-    root.render(<CustomModelDialog open selectedModelId={idle.ref} onOpenChange={() => {}} />)
+    const selectedModelId = model === "ultra" ? ultra.ref : pro.ref
+    root.render(<CustomModelDialog open selectedModelId={selectedModelId} onOpenChange={() => {}} />)
   },
   mount(
     metadata: Record<string, unknown>,
@@ -81,17 +113,16 @@ Object.assign(window, {
         modelChangeListeners.add(listener)
         return () => { modelChangeListeners.delete(listener) }
       },
-      getBuiltinConfigs: async () => [
-        {
-          ...idle,
-          maxTokens: useUat ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS : idle.maxTokens,
+      getBuiltinConfigs: async () =>
+        gatewayModels.map((item) => ({
+          ...item,
+          maxTokens: useUat ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS : item.maxTokens,
           lockedFields: ["baseUrl", "model", "apiKey", ...(useUat ? [] : ["maxTokens"])],
-          notice: useUat ? IDLE_MODEL_UAT_NOTICE : undefined,
-          unavailableReason: idleAvailable ? undefined : IDLE_MODEL_SAP_REQUIRED_MESSAGE
-        }
-      ],
+          notice: gatewayNotice(item.model),
+          unavailableReason: gatewayUnavailableReason(item.model)
+        })),
       getCustomConfigs: async () => [],
-      getDefault: async () => idle.ref,
+      getDefault: async () => pro.ref,
       updateBuiltinConfig: async (_id: string, config: { name: string; maxTokens: number }) => {
         settingsWrites.names.push(config.name)
         settingsWrites.maxTokens.push(config.maxTokens)

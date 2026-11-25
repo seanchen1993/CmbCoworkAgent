@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const idle = vi.hoisted(() => ({
-  id: "idle-ultra",
-  ref: "builtin:idle-ultra",
+  id: "maodou-ultra",
+  ref: "builtin:maodou-ultra",
   source: "builtin",
   tier: "premium",
-  model: "pro",
+  model: "ultra",
   baseUrl: "http://idle.example.test/v1",
   apiKey: "idle-key",
   transport: "idle-gateway" as const,
@@ -133,25 +133,20 @@ describe("routing with managed model refs", () => {
     expect(state.defaultLookup).toHaveBeenCalledTimes(3)
   })
 
-  it.each(["production", "uat"] as const)(
-    "keeps a pinned %s Pro model during the day",
-    async (environment) => {
-      vi.useFakeTimers({ toFake: ["Date"] })
-      vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
-      idle.idleModelEnvironment = environment
-      try {
-        const result = await resolveModel({
-          taskSource: "chat",
-          routingMode: "pinned",
-          requestedModelId: idle.ref
-        })
-        expect(result.resolvedModelId).toBe(idle.ref)
-        expect(result.fallbackChain).toContain(idle.ref)
-      } finally {
-        vi.useRealTimers()
-      }
+  it("blocks a pinned production Ultra during the day and allows UAT", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
+    const request = { taskSource: "chat", routingMode: "pinned", requestedModelId: idle.ref } as const
+    try {
+      await expect(resolveModel(request)).rejects.toMatchObject({ code: "idle_model_outside_service_hours" })
+      expect(state.defaultLookup).not.toHaveBeenCalled()
+      idle.idleModelEnvironment = "uat"
+      expect((await resolveModel(request)).resolvedModelId).toBe(idle.ref)
+    } finally {
+      idle.idleModelEnvironment = "production"
+      vi.useRealTimers()
     }
-  )
+  })
 
   it("reroutes a continuation when its previous managed model no longer exists", async () => {
     state.metadata = JSON.stringify({

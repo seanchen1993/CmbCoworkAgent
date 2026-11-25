@@ -328,25 +328,22 @@ describe("start managed mode with an existing session", () => {
     expect(dependencies.store!.getRun(run).snapshot?.status).toBe("cancelled")
   })
 
-  it.each(["production", "uat"] as const)(
-    "allows managed %s Pro sessions during the day",
-    async (environment) => {
-      await start({ modelSelection: "ultra" })
-      vi.useFakeTimers({ toFake: ["Date"] })
-      vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
-      try {
-        dependencies.modelConfig.mockReturnValue({
-          apiKey: "test-key",
-          transport: "idle-gateway",
-          idleModelEnvironment: environment
-        })
-        expect(getManagedRunModelOverride("origin")).toBe("builtin:idle-ultra")
-        expect(metadata().model).toBe("original-model")
-      } finally {
-        vi.useRealTimers()
-      }
+  it("blocks a managed production Ultra session during the day and allows UAT", async () => {
+    await start({ modelSelection: "idle-ultra" })
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+    const config = { apiKey: "test-key", transport: "idle-gateway", model: "ultra" }
+    try {
+      dependencies.modelConfig.mockReturnValue({ ...config, idleModelEnvironment: "production" })
+      expect(() => getManagedRunModelOverride("origin")).toThrow("非服务时段")
+      dependencies.modelConfig.mockReturnValue({ ...config, idleModelEnvironment: "uat" })
+      expect(getManagedRunModelOverride("origin")).toBe("builtin:maodou-ultra")
+      expect(dependencies.modelConfig).toHaveBeenLastCalledWith("builtin:maodou-ultra")
+      expect(metadata().model).toBe("original-model")
+    } finally {
+      vi.useRealTimers()
     }
-  )
+  })
 
   it("uses the explicit creation model without reading the run store inside the factory", async () => {
     const read = vi.spyOn(dependencies.store!, "getRun").mockImplementation(() => {

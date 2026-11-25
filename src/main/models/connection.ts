@@ -1,16 +1,19 @@
 import { createHash, randomUUID } from "node:crypto"
 import {
-  IDLE_MODEL_MODE,
-  IDLE_MODEL_NAME,
-  isValidSapId,
-  type ModelTransport
+  IDLE_ULTRA_MODEL_NAME,
+  MAODOU_PRO_MODEL_NAME,
+  isValidSapId
 } from "../../shared/model-catalog"
+import {
+  IdleModelServiceHoursError,
+  isIdleModelOutsideServiceHours,
+  type IdleModelServiceHoursConfig
+} from "../../shared/idle-model-service-window"
 import { getUserInfo } from "../storage"
 
-interface ModelConnectionConfig {
+interface ModelConnectionConfig extends IdleModelServiceHoursConfig {
   baseUrl: string
   apiKey?: string
-  transport?: ModelTransport
 }
 
 interface ModelConnectionOptions {
@@ -19,6 +22,18 @@ interface ModelConnectionOptions {
 }
 
 const MAX_IDLE_SESSION_ID_LENGTH = 36
+
+/** Return a local bad request before dispatching to the gateway. */
+export function getIdleModelServiceHoursRejection(
+  config: IdleModelServiceHoursConfig
+): Response | undefined {
+  if (!isIdleModelOutsideServiceHours(config)) return
+  const { message, code, status } = new IdleModelServiceHoursError()
+  return new Response(
+    JSON.stringify({ error: { message, code, type: "invalid_request_error" } }),
+    { status, headers: { "content-type": "application/json" } }
+  )
+}
 
 export function getModelClientOptions(
   config: ModelConnectionConfig,
@@ -30,10 +45,10 @@ export function getModelClientOptions(
   }
 }
 
-export function requireIdleModelSapId(): string {
+function requireIdleModelSapId(name: string): string {
   const sapId = getUserInfo()?.sapId
   if (!isValidSapId(sapId)) {
-    throw new Error(`${IDLE_MODEL_NAME}需要当前登录用户的八位 SAP 员工编号，请完善用户信息后重试。`)
+    throw new Error(`${name}需要当前登录用户的八位 SAP 员工编号，请完善用户信息后重试。`)
   }
   return sapId.trim()
 }
@@ -46,8 +61,10 @@ export function getModelConnection(
   if (config.transport !== "idle-gateway") {
     return { baseURL: config.baseUrl, ...(options.fetch ? { fetch: options.fetch } : {}) }
   }
-  requireIdleModelSapId()
-  if (!config.apiKey) throw new Error(`${IDLE_MODEL_NAME}网关密钥未配置`)
+  const model = config.model === "ultra" ? "ultra" : "pro"
+  const name = model === "ultra" ? IDLE_ULTRA_MODEL_NAME : MAODOU_PRO_MODEL_NAME
+  requireIdleModelSapId(name)
+  if (!config.apiKey) throw new Error(`${name}网关密钥未配置`)
   const originalSessionId = options.sessionId || randomUUID()
   // Hash the whole ID so child threads with the same parent keep distinct sessions.
   const sessionId =
@@ -61,9 +78,11 @@ export function getModelConnection(
   return {
     baseURL: config.baseUrl,
     fetch: async (input, init) => {
+      const rejection = getIdleModelServiceHoursRejection(config)
+      if (rejection) return rejection
       let sapId: string
       try {
-        sapId = requireIdleModelSapId()
+        sapId = requireIdleModelSapId(name)
       } catch (error) {
         // A local identity failure is a bad request, not a retryable network error.
         return new Response(
@@ -88,7 +107,7 @@ export function getModelConnection(
       let body = init?.body
       if (typeof body === "string") {
         const payload = JSON.parse(body)
-        payload.model = IDLE_MODEL_MODE
+        payload.model = model
         body = JSON.stringify(payload)
       }
       const response = await send(input, { ...init, headers, body })
