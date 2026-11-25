@@ -33,12 +33,9 @@ describe("visible chat search content projection", () => {
     expect(projectVisibleChatSearchContent("user", skillPayload)).toBe(
       "visible user needle"
     )
-    expect(
-      projectVisibleChatSearchContent(
-        "user",
-        "使用内置浏览器 browser_*工具。仅当当前模型支持图片识别/视觉输入时，才允许调用截图工具；否则不要调用截图工具，改用 DOM 快照、文本、locator、evaluate 等非视觉方式：visible browser needle"
-      )
-    ).toBe("visible browser needle")
+    expect(projectVisibleChatSearchContent("user", "visible browser needle")).toBe(
+      "visible browser needle"
+    )
     expect(
       projectVisibleChatSearchContent(
         "user",

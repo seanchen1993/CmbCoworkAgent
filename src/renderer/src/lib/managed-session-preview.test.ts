@@ -35,13 +35,12 @@ describe("managed session history preview", () => {
       message(
         "user",
         "user",
-        `使用内置浏览器 browser_*工具：检查登录\n<attachment filename="需求.md">很长的附件正文</attachment>\n${skill}`
+        `检查登录\n<attachment filename="需求.md">很长的附件正文</attachment>\n${skill}`
       )
     ])
     expect(preview[0].content).toContain("检查登录")
     expect(preview[0].content).toContain("需求.md")
     expect(preview[0].content).not.toContain("附件正文")
-    expect(preview[0].content).not.toContain("browser_*")
     expect(preview[0].content).not.toContain("SKILL-USE")
     expect(preview[0].content).not.toContain("/skills/dev-code")
   })

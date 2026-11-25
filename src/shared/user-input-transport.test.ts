@@ -63,6 +63,14 @@ describe("stripUserInputTransportDecorations", () => {
     ).toBe("打开首页")
   })
 
+  it("keeps old persisted browser messages readable without generating that format", () => {
+    expect(
+      stripUserInputTransportDecorations(
+        "使用内置浏览器 browser_*工具（不允许使用截图功能）：打开旧会话"
+      )
+    ).toBe("打开旧会话")
+  })
+
   it("drops a leading slash command but not a leading absolute path", () => {
     expect(stripUserInputTransportDecorations("/goal 把首页速度提上去")).toBe("把首页速度提上去")
     expect(stripUserInputTransportDecorations("/Users/demo/src 看下")).toBe("/Users/demo/src 看下")

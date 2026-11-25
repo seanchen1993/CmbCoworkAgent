@@ -1236,9 +1236,9 @@ export function DesignView({
   onListVisibilityChange?: (visible: boolean) => void
 }): React.JSX.Element {
   // ── Session / gallery state ───────────────────────────────
+  const pendingProductNavigation = useRequirementProductStore.getState().navigation
   const requirementDesignPending =
-    useRequirementProductStore.getState().navigation?.target === "design" &&
-    (useRequirementProductStore.getState().navigation?.entries.length ?? 0) > 0
+    pendingProductNavigation?.target === "design" && pendingProductNavigation.entries.length > 0
   const [sessionIndex, setSessionIndex] = useState<SessionMeta[]>(() => loadIndex())
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
     () =>

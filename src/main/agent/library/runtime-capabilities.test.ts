@@ -1,6 +1,9 @@
 import { beforeEach, expect, it, vi } from "vitest"
 import { buildPersonalIdentityPrompt, isPersonalMemoryEnabled } from "../personal-context"
-import { createAllowedSkillsBackend, resolveAllowedSkillRootDirs } from "./runtime-capabilities"
+import {
+  createAllowedSkillsBackend,
+  resolveAllowedSkillRootDirs
+} from "./runtime-capabilities"
 
 const discovery = vi.hoisted(() => vi.fn())
 vi.mock("../../skills/discovery", () => ({ discoverSkills: discovery }))

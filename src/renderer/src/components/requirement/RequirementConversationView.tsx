@@ -42,6 +42,7 @@ import {
 } from "@/lib/requirement-design-entry"
 import {
   enableRequirementSessionExperts,
+  enableRequirementSessionSkills,
   getRequirementSessionCapabilities
 } from "./requirement-session-capabilities"
 import { RequirementDetailsPanel } from "./RequirementDetailsPanel"
@@ -953,7 +954,10 @@ function RequirementConversationSession({
       },
       onCreateConversation: async (item, initialPrompt) => {
         const capabilities = getRequirementSessionCapabilities()
-        await enableRequirementSessionExperts(capabilities.allowedExperts)
+        await Promise.all([
+          enableRequirementSessionExperts(capabilities.allowedExperts),
+          enableRequirementSessionSkills(capabilities.allowedSkills)
+        ])
         const conversationNumber = String(item.threadIds.length + 1).padStart(3, "0")
         const thread = await createThread(
           {

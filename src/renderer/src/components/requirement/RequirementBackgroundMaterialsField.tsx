@@ -1,8 +1,8 @@
 import {
   forwardRef,
   useCallback,
-  useId,
   useImperativeHandle,
+  useRef,
   useState,
   type ReactNode
 } from "react"
@@ -10,7 +10,6 @@ import { FileText, Link, Plus, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { cn } from "@/lib/utils"
 import {
   isSupportedRequirementBackgroundFileName,
   MAX_REQUIREMENT_BACKGROUND_FILE_BYTES,
@@ -43,7 +42,7 @@ export const RequirementBackgroundMaterialsField = forwardRef<
   { files, urls, disabled = false, browserControlTag, onFilesChange, onUrlsChange },
   ref
 ): React.JSX.Element {
-  const fileInputId = useId()
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [urlDraft, setUrlDraft] = useState("")
 
   const addFiles = (nextFiles: File[]): void => {
@@ -125,25 +124,18 @@ export const RequirementBackgroundMaterialsField = forwardRef<
               DOCX、MD、TXT、HTML 或图片 · 最多 10 个 · 单个不超过 10MB
             </div>
           </div>
-          <Button asChild variant="outline" size="sm">
-            <label
-              htmlFor={fileInputId}
-              role="button"
-              tabIndex={disabled ? -1 : 0}
-              aria-disabled={disabled}
-              className={cn(disabled && "pointer-events-none opacity-50")}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return
-                event.preventDefault()
-                if (!disabled) event.currentTarget.control?.click()
-              }}
-            >
-              <Plus className="size-3.5" />
-              选择文件
-            </label>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Plus className="size-3.5" />
+            选择文件
           </Button>
           <input
-            id={fileInputId}
+            ref={fileInputRef}
             type="file"
             multiple
             accept={REQUIREMENT_BACKGROUND_FILE_ACCEPT}

@@ -405,7 +405,10 @@ export function RequirementHistoryList({
                               aria-label="需求会话正在运行"
                               title="需求会话正在运行"
                             >
-                              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                              <Loader2
+                                className="size-4 animate-spin text-status-info drop-shadow-[0_0_4px_currentColor]"
+                                aria-hidden
+                              />
                             </span>
                           ) : null}
                         </div>

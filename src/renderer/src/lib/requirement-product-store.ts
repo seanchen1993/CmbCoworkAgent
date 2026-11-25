@@ -258,7 +258,7 @@ export function commitRequirementRelations(
     if (next !== current) storage.setItem(REQUIREMENT_RELATIONS_STORAGE_KEY, JSON.stringify(next))
     return
   }
-  initializeRequirementProductState(storage)
+  initializeRequirementProductState()
   const current = useRequirementProductStore.getState().relations
   const next = updater(current)
   if (next === current) return

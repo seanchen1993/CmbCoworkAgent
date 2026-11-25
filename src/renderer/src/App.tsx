@@ -39,6 +39,7 @@ import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
 import { ProductModeNavigation } from "@/components/requirement/ProductModeNavigation"
+import { useProductModeController } from "@/components/requirement/useProductModeController"
 const BotsWorkspace = lazy(() => import("@/components/bots/BotsWorkspace").then(m => ({ default: m.BotsWorkspace })))
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
@@ -78,13 +79,9 @@ import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, initializeStartupWorkspace, useAppStore } from "@/lib/store"
-import {
-  initializeRequirementProductState,
-  setRequirementNavigation,
-  useRequirementProductStore
-} from "@/lib/requirement-product-store"
 import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
+import { openConversationMode } from "@/lib/conversation-mode-navigation"
 import { BotConversationTransitions } from "@/components/bots/BotConversationTransitions"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { getThemeDefinition } from "@/lib/theme-registry"
@@ -412,50 +409,19 @@ function App(): React.JSX.Element {
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
   const projectModeEnabled = true
-  const [activeModeTab, setActiveModeTab] = useState<"design" | "requirements">("requirements")
-  const [productEntryKey, setProductEntryKey] = useState(0)
-  const [openDesignGallery, setOpenDesignGallery] = useState(false)
-  const [productNavigationVisible, setProductNavigationVisible] = useState(true)
+  const {
+    activeModeTab,
+    productEntryKey,
+    openDesignGallery,
+    productNavigationVisible,
+    setProductNavigationVisible,
+    selectRequirementHistory,
+    selectProductModeTab
+  } = useProductModeController()
   const selectDesignProjectMode = useCallback(() => {
     if (!projectModeEnabled) return
     setMainView("harness")
   }, [projectModeEnabled, setMainView])
-  const selectRequirementHistory = useCallback(() => {
-    const wasHydrated = useRequirementProductStore.getState().hydrated
-    initializeRequirementProductState()
-    if (wasHydrated) setRequirementNavigation(null)
-    setProductNavigationVisible(true)
-    setProductEntryKey((current) => current + 1)
-    setActiveModeTab("requirements")
-    setMainView("design")
-  }, [setMainView])
-  const selectProductModeTab = useCallback((tab: "design" | "requirements") => {
-    setProductNavigationVisible(true)
-    if (tab === "design") {
-      setOpenDesignGallery(true)
-    } else {
-      setRequirementNavigation(null)
-      setProductEntryKey((current) => current + 1)
-    }
-    setActiveModeTab(tab)
-  }, [])
-
-  useEffect(() => {
-    return useRequirementProductStore.subscribe((state, previous) => {
-      if (state.navigation === previous.navigation) return
-      if (state.navigation?.target === "design") {
-        setProductNavigationVisible(false)
-        setOpenDesignGallery(false)
-        setActiveModeTab("design")
-        useAppStore.getState().setMainView("design")
-      } else if (state.navigation?.target === "requirement") {
-        setProductNavigationVisible(false)
-        setActiveModeTab("requirements")
-        useAppStore.getState().setMainView("design")
-      }
-    })
-  }, [])
-
   // Keep the route consumed by the expensive center/right surfaces atomic. A
   // task click updates the lightweight sidebar immediately, while React may
   // finish the old surface and yield before committing the new task/mode as a
@@ -1133,7 +1099,7 @@ function App(): React.JSX.Element {
                 type="button"
                 role="tab"
                 aria-selected={mainView === "thread"}
-                onClick={() => setMainView("thread")}
+                onClick={openConversationMode}
                 className={`${panelToggleBaseClass} ${
                   mainView === "thread" ? moduleActiveClass : moduleInactiveClass
                 }`}

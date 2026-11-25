@@ -14,8 +14,11 @@ function readCustomSystems(): RequirementSystemInfo[] {
     const value = getRequirementSettings().customSystems
     return Array.isArray(value)
       ? value.filter(
-          (system): system is RequirementSystemInfo =>
-            Boolean(system && typeof system.id === "string" && typeof system.name === "string")
+          (system): system is RequirementSystemInfo => {
+            if (!system || typeof system !== "object") return false
+            const candidate = system as Record<string, unknown>
+            return typeof candidate.id === "string" && typeof candidate.name === "string"
+          }
         )
       : []
   } catch {

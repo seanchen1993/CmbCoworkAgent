@@ -13,9 +13,6 @@ import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 // renderer modules, share one spelling with the composer.
 
 export const BOT_BROWSER_PROMPT_PREFIX = "使用 Bot 浏览器 bot_browser 工具："
-export const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
-export const LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
-  "使用内置浏览器 browser_*工具（不允许使用截图功能）："
 const BROWSER_SKILL_ROUTING_PROMPT =
   "请使用 devclaw-in-app-browser 技能，并按照该技能中的工具选择、网页操作、安全限制和故障排查说明执行。"
 export const BUILTIN_BROWSER_INSTRUCTIONS_OPEN = "<builtin-browser-instructions>"
@@ -37,6 +34,16 @@ export function stripBuiltinBrowserInstructions(content: string): string | null 
   const closeAt = content.indexOf(BUILTIN_BROWSER_INSTRUCTIONS_CLOSE)
   if (closeAt < 0) return null
   return content.slice(closeAt + BUILTIN_BROWSER_INSTRUCTIONS_CLOSE.length).replace(/^\r?\n/, "")
+}
+
+// Read-only compatibility for messages persisted before browser routing moved
+// into devclaw-in-app-browser. New messages are never generated in this form.
+const LEGACY_BUILTIN_BROWSER_INSTRUCTIONS =
+  /^使用内置浏览器 browser_\*工具(?:（不允许使用截图功能）|。[^：\r\n]*)?：/
+
+export function stripLegacyBuiltinBrowserInstructions(content: string): string | null {
+  const match = content.match(LEGACY_BUILTIN_BROWSER_INSTRUCTIONS)
+  return match ? content.slice(match[0].length) : null
 }
 
 const SKILL_USE_BLOCK_PATTERN = new RegExp(
@@ -64,10 +71,8 @@ export function stripUserInputTransportDecorations(content: string): string {
     text = browserText
   } else if (text.startsWith(BOT_BROWSER_PROMPT_PREFIX)) {
     text = text.slice(BOT_BROWSER_PROMPT_PREFIX.length)
-  } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
-    text = text.slice(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length)
-  } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX)) {
-    text = text.slice(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX.length)
+  } else {
+    text = stripLegacyBuiltinBrowserInstructions(text) ?? text
   }
   return text
     .replace(COORDINATOR_PREFIX_PATTERN, "")

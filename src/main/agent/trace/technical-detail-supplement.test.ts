@@ -76,10 +76,7 @@ describe("hasSuspectedTechnicalDetailSupplement", () => {
     ).toBe(false)
   })
 
-  it("ignores the built-in browser prefix and the coordinator token", () => {
-    expect(hasSuspectedTechnicalDetailSupplement("使用内置浏览器 browser_*工具：打开首页")).toBe(
-      false
-    )
+  it("ignores the coordinator and goal control tokens", () => {
     expect(hasSuspectedTechnicalDetailSupplement("[coordinator] 帮我排期")).toBe(false)
     expect(hasSuspectedTechnicalDetailSupplement("/goal 把首页打开速度提上去")).toBe(false)
   })

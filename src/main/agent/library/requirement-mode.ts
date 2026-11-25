@@ -13,7 +13,12 @@ export interface SessionCapabilityPreset {
 
 export const REQUIREMENT_SESSION_CAPABILITIES: SessionCapabilityPreset = {
   allowedExperts: ["analyst"],
-  allowedSkills: ["requirement-to-prd", "devclaw-in-app-browser"]
+  allowedSkills: [
+    "requirement-to-prd",
+    "generate-feature",
+    "publish-feature",
+    "devclaw-in-app-browser"
+  ]
 }
 
 export const REQUIREMENT_SYSTEM_PROMPT = `## Requirement Mode

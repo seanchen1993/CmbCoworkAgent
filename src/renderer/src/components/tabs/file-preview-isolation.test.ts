@@ -253,7 +253,10 @@ describe("persisted active file preview isolation", () => {
     expect(resourcePanelOverlay).toContain("setOpen(false)")
     expect(resourcePanelOverlay).toContain("clearPreviewRequest()")
     expect(resourcePanelOverlay).toMatch(
-      /if \(standardRightPanelMounted\) \{\s*setOpen\(false\)\s*setRightModule\(nextMode\)/
+      /if \(standardRightPanelMounted\) \{[\s\S]*?setOpen\(false\)\s*setRightModule\(nextMode\)/
+    )
+    expect(resourcePanelOverlay).toMatch(
+      /const close = useCallback\(\(\) => \{[\s\S]*?setOpen\(false\)[\s\S]*?detachBrowser\(\)/
     )
   })
 

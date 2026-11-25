@@ -27,6 +27,7 @@ import {
 } from "./requirement-data"
 import {
   enableRequirementSessionExperts,
+  enableRequirementSessionSkills,
   getRequirementSessionCapabilities,
   type RequirementSessionCapabilities
 } from "./requirement-session-capabilities"
@@ -647,10 +648,13 @@ export function RequirementEntryView({
     requirement: RequirementRecord,
     capabilities: RequirementSessionCapabilities = getRequirementSessionCapabilities()
   ): Promise<{ requirement: RequirementRecord; threadId: string }> => {
+    await Promise.all([
+      enableRequirementSessionExperts(capabilities.allowedExperts),
+      enableRequirementSessionSkills(capabilities.allowedSkills)
+    ])
     const threadIds = getRequirementThreadIds(requirement)
     if (threadIds[0]) return { requirement, threadId: threadIds[0] }
 
-    await enableRequirementSessionExperts(capabilities.allowedExperts)
     const thread = await createThread(
       {
         title: `PRD 沟通 · ${requirement.title}`,

@@ -22,7 +22,11 @@ export const REQUIREMENT_BOUND_SKILLS: RequirementSessionCapabilityItem[] = [
   }
 ]
 
-const REQUIREMENT_BUILTIN_SKILL_IDS = ["devclaw-in-app-browser"]
+const REQUIREMENT_BUILTIN_SKILL_IDS = [
+  "generate-feature",
+  "publish-feature",
+  "devclaw-in-app-browser"
+]
 
 export type RequirementSessionCapabilities = {
   allowedExperts: string[]
@@ -43,4 +47,12 @@ export async function enableRequirementSessionExperts(
   allowedExperts: readonly string[]
 ): Promise<void> {
   await Promise.all(allowedExperts.map((name) => window.api.expertAgents.setEnabled(name, true)))
+}
+
+export async function enableRequirementSessionSkills(
+  allowedSkills: readonly string[]
+): Promise<void> {
+  await Promise.all(
+    allowedSkills.map((skillId) => window.api.skills.setDisabledState(skillId, false))
+  )
 }

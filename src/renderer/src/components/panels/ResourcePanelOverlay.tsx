@@ -60,10 +60,17 @@ export function ResourcePanelOverlay({
   )
   const overlayThreadId = filePreviewThreadId ?? renderedPanelThreadId
 
+  const detachBrowser = useCallback(() => {
+    if (mode !== "browser") return
+    void window.api.browser.detach().catch((error) => {
+      console.error("[ResourcePanelOverlay] Failed to detach Browser panel:", error)
+    })
+  }, [mode])
   const close = useCallback(() => {
     setOpen(false)
     clearPreviewRequest()
-  }, [clearPreviewRequest])
+    detachBrowser()
+  }, [clearPreviewRequest, detachBrowser])
   const closeFromUser = useCallback(() => {
     if (mode === "browser") getBrowserPageConfirmation()?.onCancel()
     close()
@@ -92,18 +99,15 @@ export function ResourcePanelOverlay({
         setFilePreview(null)
         setFilePreviewThreadId(null)
         clearPreviewRequest()
-        void window.api.browser.detach().catch((error) => {
-          console.error("[ResourcePanelOverlay] Failed to destroy Browser panel:", error)
-        })
+        detachBrowser()
       }),
-    [clearPreviewRequest, mode, open]
+    [clearPreviewRequest, detachBrowser, mode, open]
   )
 
   useEffect(() => {
     if (!standardRightPanelMounted) return
-    setOpen(false)
-    clearPreviewRequest()
-  }, [clearPreviewRequest, standardRightPanelMounted])
+    close()
+  }, [close, standardRightPanelMounted])
 
   const selectMode = useCallback(
     (
@@ -115,11 +119,13 @@ export function ResourcePanelOverlay({
       }
     ) => {
       if (standardRightPanelMounted) {
+        if (mode === "browser") detachBrowser()
         setOpen(false)
         setRightModule(nextMode)
         if (options?.filePreview) emitOpenResourcePreview(options.filePreview)
         return
       }
+      if (mode === "browser" && nextMode !== "browser") detachBrowser()
       setMode(nextMode)
       setBrowserUrl(options?.browserUrl ?? null)
       setInlinePreview(options?.inlinePreview ?? null)
@@ -130,7 +136,7 @@ export function ResourcePanelOverlay({
       setFilePreviewThreadId(nextFilePreview?.threadId ?? null)
       setOpen(true)
     },
-    [setRightModule, standardRightPanelMounted]
+    [detachBrowser, mode, setRightModule, standardRightPanelMounted]
   )
 
   useEffect(() => {
@@ -182,7 +188,7 @@ export function ResourcePanelOverlay({
         }
         onResourcePreviewRequestHandled={clearHandledPreviewRequest}
         listenForResourcePreview={false}
-        onRequestPreviewMode={() => setMode("preview")}
+        onRequestPreviewMode={() => selectMode("preview")}
         onRequestWorkMode={closeFromUser}
       />
     </OverlayDrawer>
