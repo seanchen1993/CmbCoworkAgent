@@ -5,7 +5,7 @@ import {
 } from "../services/harness-stage-attribution"
 import { normalizeHarnessAdapterWatchRefs } from "./adapter-detail-normalizer"
 import { harnessRunInspections } from "./run-inspect-cache"
-import { beginHarnessFeatureCatalogRead, harnessProjectDeleted } from "./feature-catalog-lifecycle"
+import { beginHarnessFeatureCatalogRead, harnessProjectDeleted, publishFeatureRepositoryMappings } from "./feature-catalog-lifecycle"
 import {
   assertHarnessConfigAvailable,
   readHarnessConfigV2File,
@@ -2054,6 +2054,7 @@ async function saveFeatureDeployUnitBinding(
       HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
+    publishFeatureRepositoryMappings(projectId, featureId, selectedDeployUnitMappings)
     return binding
   })
 }
@@ -2111,6 +2112,7 @@ async function updateFeatureDeployUnitBinding(
       HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
+    publishFeatureRepositoryMappings(projectId, featureId, selectedDeployUnitMappings)
     return binding
   })
 }

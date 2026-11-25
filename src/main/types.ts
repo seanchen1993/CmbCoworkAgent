@@ -1153,6 +1153,7 @@ export interface ApprovalRequest extends HITLRequest {
   suggestedCommitFileBasePath?: string
   /** For git_commit/git_push: preferred Git operation target (normally the repository root). */
   suggestedGitWorktreePath?: string
+  commitBindingVersion?: string
   /** For git_commit: concrete repository targets when the command cwd contains multiple repos. */
   suggestedGitRepositories?: Array<{
     path: string

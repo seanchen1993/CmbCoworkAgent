@@ -388,6 +388,7 @@ import {
 } from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerTaskCommitBindingHandlers } from "./ipc/task-commit-binding"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { registerManagedLinkHandlers } from "./ipc/managed-links"
@@ -1213,6 +1214,11 @@ if (browserNativeMessagingHostLaunch) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
+    registerTaskCommitBindingHandlers(ipcMain, (event) =>
+      !!mainWindow && event.sender === mainWindow.webContents &&
+      event.senderFrame === mainWindow.webContents.mainFrame &&
+      isTrustedRendererUrl(event.senderFrame?.url, trustedMainRendererUrl)
+    )
     registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
     registerManagedLinkHandlers(ipcMain)

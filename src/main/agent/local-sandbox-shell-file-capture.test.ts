@@ -54,6 +54,33 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })))
 })
 
+it("captures a foreground shell edit in a bound external Git repo without publishing telemetry", async () => {
+  const { root } = await fixture(false)
+  const session = await realpath(await mkdtemp(path.join(tmpdir(), "shell-commit-session-")))
+  roots.push(session)
+  const evidence = vi.fn()
+  const mutation = vi.fn()
+  const sandbox = new LocalSandbox({
+    rootDir: session,
+    runId: "bound-external-shell",
+    windowsSandbox: "none",
+    shellFileTelemetry: false,
+    taskCommitRepositoryPaths: () => [root],
+    onTaskCommitEdit: evidence,
+    onFileMutation: mutation
+  })
+  const target = path.join(root, "a.ts").replace(/\\/g, "/")
+  const outcome = await sandbox.execute(`echo changed > "${target}"`, session)
+  expect(outcome.exitCode, outcome.output).toBe(0)
+  expect(evidence).toHaveBeenCalledTimes(1)
+  const [name, before, after] = evidence.mock.calls[0]
+  expect(name).toBe(path.join(root, "a.ts"))
+  expect(before.toString().trim()).toBe("const a = 1")
+  expect(after).toEqual(await readFile(name))
+  expect(mutation).not.toHaveBeenCalled()
+  expect(recordShellEdit).not.toHaveBeenCalled()
+}, 30_000)
+
 // These integration commands use Unix printf/cp/sleep. The pure profiler
 // tests cover Windows paths; native Windows execution needs a Windows runner.
 describe.skipIf(process.platform === "win32")("LocalSandbox Shell generation pipeline", () => {

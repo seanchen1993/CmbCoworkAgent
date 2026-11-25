@@ -138,6 +138,7 @@ import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
 import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
 import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
+import { TaskCommitBindingControl } from "../git/TaskCommitBindingControl"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import {
@@ -3508,6 +3509,7 @@ export function ChatContainer({
           suggestedCommitFilePaths?: string[]
           suggestedCommitFileBasePath?: string
           suggestedGitWorktreePath?: string
+          commitBindingVersion?: string
           suggestedGitRepositories?: Array<{
             path: string
             displayPath: string
@@ -9787,6 +9789,10 @@ export function ChatContainer({
                         }
                         onGitStatusChange={setGitWorkspaceStatus}
                       />
+                      {surface === "default" && !readOnly && workspacePath && !threadId.includes("__wf_") && (
+                        <TaskCommitBindingControl key={JSON.stringify([threadId, workspacePath])}
+                          threadId={threadId} />
+                      )}
                       <GitBranchSwitcher
                         key={workspacePath}
                         workspacePath={workspacePath}
@@ -10420,6 +10426,12 @@ export function ChatContainer({
                         suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
                         suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
                         suggestedGitWorktreePath={agentCommitApproval?.suggestedGitWorktreePath}
+                        commitBindingVersion={agentCommitApproval?.commitBindingVersion}
+                        reviewReason={
+                          typeof agentCommitApproval?.reason === "string"
+                            ? agentCommitApproval.reason
+                            : undefined
+                        }
                         suggestedGitRepositories={agentCommitApproval?.suggestedGitRepositories}
                         suggestedFileSelectionSource={
                           agentCommitApproval?.suggestedCommitFileSelectionSource

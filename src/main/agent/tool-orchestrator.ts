@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "crypto"
-import { realpath } from "fs/promises"
+import { lstat, realpath } from "fs/promises"
 import path from "path"
 import { ApprovalStore } from "./approval-store"
 import {
@@ -124,6 +124,38 @@ function isUnsupportedProjectedPathspec(filePath: string): boolean {
   if (!normalized.startsWith(":/") && normalized.startsWith(":")) return true
   if (normalized.startsWith(":/") && /^[/!^:]/.test(withoutTopMagic)) return true
   return ["*", "?", "["].some((marker) => withoutTopMagic.includes(marker))
+}
+
+/** Keep a path that names a child checkout rooted in the session, even when the
+ * user later chooses an external repository with the same relative file name. */
+async function anchorSessionRepositoryPaths(workspace: string, paths: string[]): Promise<string[]> {
+  const directories = new Map<string, boolean>()
+  const anchored: string[] = []
+  for (const name of paths) {
+    if (path.isAbsolute(name) || name.startsWith(":") || isUnsupportedProjectedPathspec(name)) {
+      anchored.push(name)
+      continue
+    }
+    const absolute = path.resolve(workspace, name)
+    let directory = absolute
+    let local = false
+    while (directory !== workspace && isPathInsideOrSame(directory, workspace)) {
+      let marker = directories.get(directory)
+      if (marker === undefined) {
+        marker = await lstat(path.join(directory, ".git")).then(() => true, () => false)
+        directories.set(directory, marker)
+      }
+      if (marker) {
+        local = true
+        break
+      }
+      const parent = path.dirname(directory)
+      if (parent === directory) break
+      directory = parent
+    }
+    anchored.push(local ? absolute : name)
+  }
+  return anchored
 }
 
 async function projectExplicitPathsToTarget(
@@ -256,7 +288,8 @@ export class ToolOrchestrator {
     /** Isolated worktree runtimes must never retry a denied command on the host. */
     private sandboxEscapeAllowed: boolean = true,
     /** Thread workspace boundary; execute() cwd may be a nested shell directory. */
-    private workspacePath?: string
+    private workspacePath?: string,
+    private taskCommit?: { threadId: string; canReview: () => boolean }
   ) {}
 
   /**
@@ -541,7 +574,17 @@ export class ToolOrchestrator {
       gitCommandCwd,
       "commit"
     )
-    if (gitCommandCwdError) {
+    const binding = this.taskCommit
+      ? await (await import("../services/task-commit-binding")).readTaskCommitBinding(this.taskCommit.threadId)
+      : null
+    let commitBoundary = workspaceBoundary
+    if (gitCommandCwdError && binding && this.taskCommit) {
+      const { resolveTaskCommitTarget } = await import("../services/task-commit-target")
+      const target = await resolveTaskCommitTarget(this.taskCommit.threadId, workspaceBoundary,
+        gitCommandCwd, binding.version)
+      if (!("error" in target) && target.external) commitBoundary = target.gitRoot
+    }
+    if (gitCommandCwdError && commitBoundary === workspaceBoundary) {
       return {
         output: gitCommandCwdError,
         exitCode: 1,
@@ -563,10 +606,20 @@ export class ToolOrchestrator {
     let operationTarget: string | undefined
     let suggestedGitRepositories: ApprovalRequest["suggestedGitRepositories"]
     let suggestedCommitFilePaths: string[]
-    let suggestedCommitFileBasePath: string
+    let suggestedCommitFileBasePath: string | undefined
 
     if (!gitRoot) {
-      const repositories = await discoverWorkspaceGitRepositories(gitCommandCwd)
+      const fromSessionRoot = !path.relative(workspaceBoundary, gitCommandCwd)
+      const useRegistered = Boolean(binding && fromSessionRoot)
+      const repositories = binding
+        ? binding.repositoryPaths
+            .filter(scope => fromSessionRoot || isPathInsideOrSame(scope, gitCommandCwd))
+            .map(scope => ({
+              repoPath: scope,
+              gitRoot: binding.checkoutRoots?.[scope] ?? scope,
+              displayPath: scope
+            }))
+        : await discoverWorkspaceGitRepositories(gitCommandCwd)
       if (repositories.length === 0) {
         return {
           output: "当前目录不是 Git 仓库，且未发现可提交的子仓库。",
@@ -574,23 +627,26 @@ export class ToolOrchestrator {
           truncated: false
         }
       }
+      const selection = useRegistered
+        ? await anchorSessionRepositoryPaths(gitCommandCwd, extractedPathspecs)
+        : extractedPathspecs
       if (repositories.length > 1) {
         suggestedGitRepositories = repositories.map((repository) => ({
           path: repository.repoPath,
           displayPath: repository.displayPath,
           gitRoot: repository.gitRoot
         }))
-        suggestedCommitFilePaths = extractedPathspecs
-        suggestedCommitFileBasePath = gitCommandCwd
+        suggestedCommitFilePaths = selection
+        suggestedCommitFileBasePath = useRegistered ? undefined : gitCommandCwd
       } else {
         gitRoot = repositories[0].gitRoot
         operationTarget = repositories[0].repoPath
         suggestedCommitFileBasePath = operationTarget
         const projectedPaths = await projectExplicitPathsToTarget(
           gitRoot,
-          gitCommandCwd,
+          useRegistered ? operationTarget : gitCommandCwd,
           operationTarget,
-          extractedPathspecs,
+          selection,
           shellSyntax
         )
         if (!projectedPaths) {
@@ -604,8 +660,8 @@ export class ToolOrchestrator {
       }
     } else {
       const [representedGitRoot, realWorkspace, realGitRoot] = await Promise.all([
-        representExistingPathWithinWorkspace(workspaceBoundary, gitRoot),
-        resolveExistingDirForBoundary(workspaceBoundary),
+        representExistingPathWithinWorkspace(commitBoundary, gitRoot),
+        resolveExistingDirForBoundary(commitBoundary),
         resolveExistingDirForBoundary(gitRoot)
       ])
       operationTarget =
@@ -613,7 +669,7 @@ export class ToolOrchestrator {
         realGitRoot.exists &&
         isPathInsideOrSame(realGitRoot.path, realWorkspace.path)
           ? representedGitRoot
-          : path.resolve(workspaceBoundary)
+          : path.resolve(commitBoundary)
       suggestedCommitFileBasePath = operationTarget
       const projectedPaths = await projectExplicitPathsToTarget(
         gitRoot,
@@ -631,6 +687,31 @@ export class ToolOrchestrator {
       }
       suggestedCommitFilePaths = projectedPaths
     }
+    if (binding && operationTarget && !binding.repositoryPaths.some(scope =>
+      isPathInsideOrSame(operationTarget!, scope) &&
+      !path.relative(binding.checkoutRoots?.[scope] ?? scope, gitRoot!)
+    )) {
+      return { output: "目标 Git 工作树未登记到当前任务", exitCode: 1, truncated: false }
+    }
+    let reviewReason: string | undefined
+    if (binding && this.taskCommit && operationTarget && suggestedCommitMessage?.trim()) {
+      const { tryTaskBoundCommit } = await import("../services/task-commit-request")
+      const outcome = await tryTaskBoundCommit({
+        threadId: this.taskCommit.threadId,
+        binding,
+        target: operationTarget,
+        files: suggestedCommitFilePaths,
+        suggestion: suggestedCommitMessage,
+        signal
+      })
+      if (outcome.status !== "review") {
+        return { output: outcome.message, exitCode: outcome.status === "committed" ? 0 : 1, truncated: false }
+      }
+      reviewReason = outcome.message
+    }
+    if (this.taskCommit && !this.taskCommit.canReview()) {
+      return { output: reviewReason || "需要在桌面确认此提交，改动已保留。", exitCode: 1, truncated: false }
+    }
     console.log(
       `[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`
     )
@@ -645,9 +726,10 @@ export class ToolOrchestrator {
       suggestedCommitFilePaths,
       suggestedCommitFileBasePath,
       suggestedGitWorktreePath: operationTarget,
+      commitBindingVersion: binding?.version,
       suggestedGitRepositories,
       suggestedCommitFileSelectionSource: "pathspec",
-      reason: "Git 提交需要选择任务卡片并确认",
+      reason: reviewReason || "Git 提交需要选择任务卡片并确认",
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
     }

@@ -1,4 +1,5 @@
 import type { GitGraphPage } from "../shared/git-graph"
+import type { TaskCommitBindingApi } from "../shared/task-commit-binding"
 import type {
   GitBranchKind,
   GitBranchListResult,
@@ -2035,8 +2036,13 @@ const api = {
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
         worktreePath?: string
+        commitBindingVersion?: string
+        includeCommitTarget?: boolean
       }
     ): Promise<{
+      commitPreviewRevision?: string
+      unavailableFileCount?: number
+      commitPreviewTarget?: { root: string; scope: string; branch: string }
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -2060,6 +2066,9 @@ const api = {
       error?: string
     }> => {
       return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId, options }) as Promise<{
+        commitPreviewRevision?: string
+        unavailableFileCount?: number
+        commitPreviewTarget?: { root: string; scope: string; branch: string }
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -2086,7 +2095,7 @@ const api = {
     getGitPanelFileDiff: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string }
+      options?: { worktreePath?: string; commitBindingVersion?: string; commitPreviewRevision?: string }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -2269,8 +2278,8 @@ const api = {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string; agentInitiated?: boolean }
-    ): Promise<{ success: boolean; error?: string }> => {
+      options?: { worktreePath?: string; agentInitiated?: boolean; commitBindingVersion?: string; commitPreviewRevision?: string }
+    ): Promise<{ success: boolean; error?: string; warning?: string }> => {
       return ipcRenderer.invoke("workspace:commitWorktree", {
         threadId,
         message,
@@ -2279,6 +2288,7 @@ const api = {
       }) as Promise<{
         success: boolean
         error?: string
+        warning?: string
       }>
     },
     pushWorktree: (
@@ -2992,6 +3002,13 @@ const api = {
       }
     }
   },
+  taskCommitBinding: {
+    read: (threadId) => ipcRenderer.invoke("taskCommitBinding:read", threadId),
+    open: (threadId) => ipcRenderer.invoke("taskCommitBinding:open", threadId),
+    choose: (token) => ipcRenderer.invoke("taskCommitBinding:choose", token),
+    save: (token, card, roots) => ipcRenderer.invoke("taskCommitBinding:save", token, card, roots),
+    revoke: (token) => ipcRenderer.invoke("taskCommitBinding:revoke", token)
+  } satisfies TaskCommitBindingApi,
   autoCommit: {
     getSettings: (): Promise<AgentAutoCommitSettings> =>
       ipcRenderer.invoke("autoCommit:getSettings") as Promise<AgentAutoCommitSettings>,

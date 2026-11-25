@@ -960,6 +960,51 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   )
 
   ensureAppNotificationsSchema(db)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS task_commit_edits (
+      thread_id TEXT NOT NULL, version TEXT NOT NULL, path TEXT NOT NULL,
+      before_hash TEXT, after_hash TEXT,
+      PRIMARY KEY(thread_id, version, path)
+    );
+    CREATE TRIGGER IF NOT EXISTS delete_task_commit_edits AFTER DELETE ON threads
+    BEGIN DELETE FROM task_commit_edits WHERE thread_id = OLD.thread_id; END;
+    CREATE TABLE IF NOT EXISTS task_commit_pending_indexes (
+      worktree TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sha TEXT NOT NULL,
+      branch TEXT NOT NULL, recovery TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_commit_receipts (
+      thread_id TEXT NOT NULL,
+      call_id TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      candidate TEXT,
+      result TEXT,
+      recorded INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(thread_id, call_id)
+    );
+    CREATE TRIGGER IF NOT EXISTS delete_task_commit_receipts AFTER DELETE ON threads
+    BEGIN DELETE FROM task_commit_receipts WHERE thread_id = OLD.thread_id; END;
+    CREATE TABLE IF NOT EXISTS task_commit_bindings (
+      thread_id TEXT PRIMARY KEY, incarnation TEXT NOT NULL, workspace TEXT NOT NULL,
+      version TEXT NOT NULL, card TEXT, repositories TEXT, dirty_at_selection TEXT, guards TEXT
+    );
+    CREATE TRIGGER IF NOT EXISTS delete_task_commit_binding AFTER DELETE ON threads
+    BEGIN
+      DELETE FROM task_commit_bindings WHERE thread_id = OLD.thread_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS invalidate_task_commit_workspace AFTER UPDATE OF metadata ON threads
+    WHEN EXISTS (SELECT 1 FROM task_commit_bindings WHERE thread_id = NEW.thread_id)
+    BEGIN
+      DELETE FROM task_commit_bindings WHERE thread_id = NEW.thread_id AND (
+        workspace IS NOT json_extract(CASE WHEN json_valid(NEW.metadata) THEN NEW.metadata END, '$.workspacePath')
+        OR json_extract(CASE WHEN json_valid(OLD.metadata) THEN OLD.metadata END, '$.isWorktree')
+          IS NOT json_extract(CASE WHEN json_valid(NEW.metadata) THEN NEW.metadata END, '$.isWorktree')
+        OR json_extract(CASE WHEN json_valid(OLD.metadata) THEN OLD.metadata END, '$.harnessFeature.projectId')
+          IS NOT json_extract(CASE WHEN json_valid(NEW.metadata) THEN NEW.metadata END, '$.harnessFeature.projectId')
+        OR json_extract(CASE WHEN json_valid(OLD.metadata) THEN OLD.metadata END, '$.harnessFeature.slug')
+          IS NOT json_extract(CASE WHEN json_valid(NEW.metadata) THEN NEW.metadata END, '$.harnessFeature.slug')
+      );
+    END;
+  `)
   ensureUiGuideSchema(db)
   ensureManagedRunSchedulesSchema(db)
   ensureImServiceSchema(db)

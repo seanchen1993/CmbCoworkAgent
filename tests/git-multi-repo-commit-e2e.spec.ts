@@ -194,6 +194,9 @@ async function runGitPanelCommit(page: Page): Promise<void> {
     )
     return Boolean(button && !button.disabled)
   })
+  // Both checkouts contain a change. Select both so the dialog must narrow
+  // the file list when the user chooses the linked worktree.
+  await page.getByRole("button", { name: "全选文件", exact: true }).click()
   await openCommitButton.click()
 
   const dialog = page.locator('[role="dialog"]').filter({ hasText: "Git Commit" })
@@ -205,6 +208,7 @@ async function runGitPanelCommit(page: Page): Promise<void> {
   await page.getByRole("option", { name: "linked" }).click()
   await dialog.getByText(LINKED_BRANCH, { exact: true }).waitFor({ timeout: 15_000 })
   assert(await dialog.getByText("Git Worktree", { exact: true }).isVisible(), "目标被识别为 linked worktree")
+  await dialog.getByText("1 文件", { exact: true }).waitFor({ timeout: 15_000 })
   assert(await dialog.getByText("1 文件", { exact: true }).isVisible(), "选择目标后仅统计该仓库文件")
 
   await dialog.getByRole("button", { name: "选择任务卡片" }).click()
