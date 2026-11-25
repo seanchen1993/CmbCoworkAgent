@@ -77,6 +77,27 @@ describe("chat document uploads", () => {
     expect(result.mimeType).toBe("text/html")
   })
 
+  it("reads real encoding declarations after comments and raw script text", async () => {
+    const html = "<!-- <meta charset=utf-8> -->" +
+      "<script>const example = '<meta charset=utf-8>'</script>" +
+      '<meta http-equiv="Content-Type" content="text/html; charset=gbk"><p>年度报告</p>'
+    const file = Uint8Array.from(encode(html, "gbk")).buffer
+    expect((await parseFileBytes("report.html", file)).content).toBe("年度报告")
+    expect((await parseFileBytes("bom.html", bytes("\uFEFF<meta charset=gbk><p>年度报告</p>")))
+      .content).toBe("年度报告")
+  })
+
+  it("preserves table columns across merged cells and resets spans between row groups", async () => {
+    const html = `<table><thead><tr><th rowspan="0">组</th><th colspan="2">本期</th>
+      <th>上期</th></tr><tr><td>A</td><td>B</td><td>C</td></tr></thead>
+      <tbody><tr><td>新组</td><td rowspan="2">跨行</td><td>X</td></tr>
+      <tr><td>末行</td><td>Y</td></tr></tbody></table>`
+    const lines = (await parseFileBytes("table.html", bytes(html))).content.split(/\n+/)
+    expect(lines).toEqual(["组\t本期\t\t上期", "\tA\tB\tC", "新组\t跨行\tX", "末行\t\tY"])
+    await expect(parseFileBytes("wide.htm", bytes('<table><td colspan="9999999">x</td></table>')))
+      .rejects.toThrow("表格列数")
+  })
+
   it.each(["json", "jsonl", "yaml", "yml", "xml", "log", "tsv"])(
     "accepts %s and enforces the remaining character budget", async ext => {
       expect(getSupportedExtensions()).toContain("." + ext)
@@ -87,7 +108,7 @@ describe("chat document uploads", () => {
   )
 
   it("explains an empty dynamic document", async () => {
-    await expect(parseFileBytes("empty.html", bytes("<script>go()</script>")))
+    await expect(parseFileBytes("empty.html", bytes("<title>App</title><main> </main><script>go()</script>")))
       .rejects.toThrow("静态正文")
   })
 })

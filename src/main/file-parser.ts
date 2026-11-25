@@ -104,16 +104,18 @@ async function parseAttachmentBuffer(
   switch (ext) {
     case ".html":
     case ".htm": {
-      const { extractHtmlText } = await import("./html-attachment")
-      const bom = buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
-        ? "utf8"
-        : undefined
-      const declared = /<meta\b[^>]*?\bcharset\s*=\s*["']?([\w-]+)/i
-        .exec(buffer.toString("latin1", 0, 4096))?.[1]
-      const encoding = typeof bom === "string" ? bom :
-        buffer[0] === 0xff && buffer[1] === 0xfe ? "utf16le" :
-        buffer[0] === 0xfe && buffer[1] === 0xff ? "utf16be" :
-        declared && iconv.encodingExists(declared) ? declared : detectEncoding(buffer)
+      const { extractHtmlText, htmlEncodingDeclaration } = await import("./html-attachment")
+      let encoding: string
+      if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+        encoding = "utf8"
+      } else if (buffer[0] === 0xff && buffer[1] === 0xfe) {
+        encoding = "utf16le"
+      } else if (buffer[0] === 0xfe && buffer[1] === 0xff) {
+        encoding = "utf16be"
+      } else {
+        const declared = htmlEncodingDeclaration(buffer.toString("latin1", 0, 4096))
+        encoding = declared && iconv.encodingExists(declared) ? declared : detectEncoding(buffer)
+      }
       content = extractHtmlText(iconv.decode(buffer, encoding))
       if (!content.trim()) throw new Error("HTML 缺少静态正文，可用 @文件 分析源码")
       break
