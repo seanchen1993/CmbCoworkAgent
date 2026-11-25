@@ -210,6 +210,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import {
   flushStrict,
+  getLegacyImportedToolOccurrenceSources,
   getThreadCore,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
@@ -3937,6 +3938,8 @@ async function getCheckpointerInternal(
         : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
       maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
       maxNonRootCheckpoints: 1,
+      readLegacyToolReplaySources: isSubThreadCheckpoint ? undefined : (id) =>
+        new Set(getLegacyImportedToolOccurrenceSources(id, true).keys()),
       recoverMissingCheckpointMessages: isSubThreadCheckpoint
         ? undefined
         : recoverMainCheckpointMessages

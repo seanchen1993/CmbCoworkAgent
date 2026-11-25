@@ -21,6 +21,7 @@ import {
 import { getCheckpointGraphInputUserId } from "../../shared/checkpoint-transcript"
 import { readGraphInputForkReplay } from "./fork-replay-proof"
 import { ensureCheckpointRuntimeProjectionInWorker } from "./runtime-projection-client"
+import { LEGACY_TOOL_REPLAY_SOURCE_BYTE_BUDGET } from "./runtime-projection-protocol"
 import {
   buildCheckpointRuntimeProjection,
   CHECKPOINT_RUNTIME_PROJECTION_VERSION
@@ -381,6 +382,8 @@ export interface SqlJsSaverOptions {
   maxNonRootCheckpoints?: number
   /** Size threshold used by explicit/background runMaintenance() calls. */
   maxDatabaseBytes?: number
+  /** Historical import checkpoints still needed to prove exact tool replays. */
+  readLegacyToolReplaySources?: (threadId: string) => ReadonlySet<string>
   /** @deprecated Native SQLite no longer loads the whole file into memory. */
   maxOversizedRecoveryBytes?: number
   /**
@@ -466,6 +469,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private maxNonRootCheckpoints = 1
   private maxDatabaseBytes = DEFAULT_MAX_DB_SIZE_BYTES
   private recoverMissingCheckpointMessages?: SqlJsSaverOptions["recoverMissingCheckpointMessages"]
+  private readonly readLegacyToolReplaySources?: SqlJsSaverOptions["readLegacyToolReplaySources"]
   private readonly checkpointDatabaseKey: string
 
   constructor(dbPath: string, serde?: SerializerProtocol, options: SqlJsSaverOptions = {}) {
@@ -494,6 +498,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       DEFAULT_MAX_DB_SIZE_BYTES
     )
     this.recoverMissingCheckpointMessages = options.recoverMissingCheckpointMessages
+    this.readLegacyToolReplaySources = options.readLegacyToolReplaySources
   }
 
   private async acquireCheckpointNamespace(
@@ -2179,6 +2184,18 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       const keepIds = new Set<string>()
       for (const row of rows.slice(0, this.maxRootCheckpoints)) {
         if (row.checkpoint_id) keepIds.add(row.checkpoint_id)
+      }
+      const legacySources = this.readLegacyToolReplaySources?.(threadId)
+      if (legacySources?.size) {
+        let retainedSources = 0
+        let sourceBytes = 0
+        for (const row of rows.slice(this.maxRootCheckpoints)) {
+          if (!legacySources.has(row.checkpoint_id)) continue
+          if (sourceBytes + row.payload_bytes > LEGACY_TOOL_REPLAY_SOURCE_BYTE_BUDGET) continue
+          keepIds.add(row.checkpoint_id)
+          sourceBytes += row.payload_bytes
+          if (++retainedSources === 4) break
+        }
       }
 
       // Use the same boundary as the fork picker, including markers in the live window.

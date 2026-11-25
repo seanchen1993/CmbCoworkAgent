@@ -10,6 +10,7 @@ import {
   markMemorySessionOptInMigrated
 } from "../storage"
 import { type NativeSqliteAdapter, type NativeSqliteExecResult, type NativeSqliteValue, openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { readPriorToolReplayIds } from "../thread-message-hydration/tool-replay-evidence"
 import { ensureLegacyTranscriptSlots, ensureThreadGraphTranscriptBoundaries } from "./legacy-transcript-slots"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import { ensureLegacyMessageTimeArchive } from "../checkpointer/legacy-message-times"
@@ -924,6 +925,8 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_messages_role_order ON thread_messages(thread_id, role, ordinal DESC, created_at DESC, message_id DESC)`
   )
+  db.run(`CREATE INDEX IF NOT EXISTS idx_thread_messages_tool_call_order
+    ON thread_messages(thread_id, tool_call_id, ordinal) WHERE role = 'tool' AND tool_call_id IS NOT NULL`)
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_message_fragments_message ON thread_message_fragments(thread_id, message_id, fragment_id)`
   )
@@ -2055,6 +2058,33 @@ export function getThreadMessages(threadId: string): Message[] {
   })
 }
 
+export function getLegacyImportedToolOccurrenceSources(
+  threadId: string, assistantsOnly = false
+): Map<string, Set<string>> {
+  const stmt = getDb().prepare(`SELECT message_id, i.published_checkpoint_id,
+      i.owned_by_migration = 1 AND i.partial_version IS NULL AND i.rewrite_progress IS NULL
+      AND COALESCE(m.stream_authority, 0) = 0 AND m.goal_id IS NULL AND m.active_window_id IS NULL AS alias_eligible
+    FROM legacy_checkpoint_transcript_imports AS i
+    JOIN thread_messages AS m USING (thread_id, message_id)
+    WHERE i.thread_id = ? AND m.provider_occurrence > 1
+      AND ((m.role = 'assistant' AND m.tool_calls_json IS NOT NULL AND m.tool_calls_json <> '[]')
+        ${assistantsOnly ? "" : "OR (m.role = 'tool' AND m.tool_call_id IS NOT NULL)"})`)
+  const candidates = new Map<string, Set<string>>()
+  try {
+    stmt.bind([threadId])
+    while (stmt.step()) {
+      const { message_id: id, published_checkpoint_id: source, alias_eligible: eligible } = stmt.getAsObject()
+      if (typeof id !== "string" || typeof source !== "string" || source === NATIVE_DURABLE_CHECKPOINT_ID) continue
+      const group = candidates.get(source) ?? new Set<string>()
+      if (eligible === 1) group.add(id)
+      candidates.set(source, group)
+    }
+  } finally {
+    stmt.free()
+  }
+  return candidates
+}
+
 function normalizeThreadMessagesPageLimit(limit: number | undefined): number {
   if (!Number.isFinite(limit) || limit === undefined || limit <= 0) {
     return DEFAULT_THREAD_MESSAGES_PAGE_LIMIT
@@ -2290,6 +2320,12 @@ function readThreadMessagesPage(database: ReturnType<typeof getDb>, threadId: st
     threadId,
     hasAnchorMessageId ? pageRows : pageRows.reverse()
   )
+  const priorResults = readPriorToolReplayIds(threadId, messages,
+    (sql, currentThreadId, ids, oldest) => database.exec(sql, [currentThreadId, ids, oldest])[0]?.values ?? [])
+  for (const message of messages) {
+    const earlier = priorResults.get(message.id)
+    if (earlier && !message.content_preview_notice) message.historical_tool_replay_id = earlier
+  }
 
   return {
     messages,

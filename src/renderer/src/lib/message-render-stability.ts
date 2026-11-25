@@ -90,7 +90,8 @@ export function areToolDerivationMessagesEqual(
     if (!other || message.id !== other.id || message.role !== other.role) return false
     if (message.role === "user") return true
     if (message.role === "assistant") {
-      return areToolCallsEqual(message.tool_calls, other.tool_calls)
+      return areToolCallsEqual(message.tool_calls, other.tool_calls) &&
+        areStructuredValuesEqual(message.legacy_checkpoint_tool_outcomes, other.legacy_checkpoint_tool_outcomes)
     }
     return (
       message.tool_call_id === other.tool_call_id &&
@@ -128,32 +129,46 @@ export interface IncrementalToolDerivationProjection {
 export function createIncrementalToolDerivationProjector(): (
   messages: readonly Message[],
   changedMessages: readonly Message[],
-  structureVersion: number
+  structureVersion: number,
+  excludedIds?: ReadonlyMap<string, string>
 ) => IncrementalToolDerivationProjection {
   let previousStructureVersion = -1
+  let previousMessages: readonly Message[] | undefined
+  let previousExcludedIds: ReadonlyMap<string, string> | undefined
   let projected: Message[] = []
   let indexById = new Map<string, number>()
   let version = 0
 
-  const rebuild = (messages: readonly Message[]): IncrementalToolDerivationProjection => {
-    projected = selectToolDerivationMessages(messages)
+  const rebuild = (
+    messages: readonly Message[],
+    excludedIds: ReadonlyMap<string, string> | undefined
+  ): IncrementalToolDerivationProjection => {
+    projected = messages.filter((message) =>
+      !excludedIds?.has(message.id) && isToolDerivationMessage(message)
+    )
     indexById = new Map(projected.map((message, index) => [message.id, index]))
     version += 1
     return { messages: projected, version }
   }
 
-  return (messages, changedMessages, structureVersion) => {
-    if (structureVersion !== previousStructureVersion) {
+  return (messages, changedMessages, structureVersion, excludedIds) => {
+    if (
+      messages !== previousMessages ||
+      structureVersion !== previousStructureVersion ||
+      excludedIds !== previousExcludedIds
+    ) {
+      previousMessages = messages
       previousStructureVersion = structureVersion
-      return rebuild(messages)
+      previousExcludedIds = excludedIds
+      return rebuild(messages, excludedIds)
     }
 
     let changed = false
     for (const message of changedMessages) {
       const projectedIndex = indexById.get(message.id)
-      const relevant = isToolDerivationMessage(message)
+      const relevant = !excludedIds?.has(message.id) && isToolDerivationMessage(message)
       if (relevant !== (projectedIndex !== undefined)) {
-        return rebuild(messages)
+        return rebuild(messages, excludedIds)
       }
       if (!relevant || projectedIndex === undefined || projected[projectedIndex] === message) {
         continue

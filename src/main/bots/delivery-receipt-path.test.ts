@@ -5,10 +5,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, it, vi } from "vitest"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
+import { findReplayedToolExchangeAliases } from "../../shared/tool-transcript-replay"
 import * as transcript from "../db"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { bindThreadWorkspace } from "../services/workspace-metadata"
+import type { Message } from "../types"
 import { botAttachmentReceiptKey, workAttachmentStorage } from "./attachment-storage"
 import { linkExistingConversation } from "./conversation-link-service"
 import { readDesktopBotDelivery } from "./delivery-receipt"
@@ -35,6 +37,70 @@ vi.mock("../agent/workflow/run-manager", () => ({
   workflowRunManager: { withThreadTransitionLease: (_threadId: string, action: () => Promise<unknown>) => action() }
 }))
 vi.mock("../services/thread-external-run-busy", () => ({ isExternallyManagedThreadRunBusy: () => false }))
+
+it("keeps the exact assistant ID that authorizes a retained file after transcript replay", async () => {
+  fixture.root = await realpath(await mkdtemp(join(tmpdir(), "bot-delivery-replay-")))
+  const database = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(database)
+  const host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} })
+  try {
+    await transcript.initializeDatabase()
+    const workspace = join(fixture.root, "work")
+    await mkdir(workspace)
+    await writeFile(join(workspace, "report.txt"), "Original attachment bytes")
+    const metadata = {}
+    bindThreadWorkspace(metadata, workspace)
+    const threadId = "delivery-replay-thread"
+    const thread = transcript.createThread(threadId, metadata)
+    const bot = store.create({ name: "Reports", instructions: "", color: "#123456", modelRef: null })
+    const work = await linkExistingConversation(host, {
+      botId: bot.id,
+      operationId: "link",
+      title: "Report",
+      goal: "Deliver the report",
+      conversation: { kind: "local_thread", threadId, incarnation: captureThreadIncarnation(thread) }
+    })
+    const storage = workAttachmentStorage(workspace, work)!
+    const [deliver] = createBotDeliveryTools(
+      workspace, new AbortController().signal, undefined, undefined, false, storage, work.id
+    )
+    const created_at = new Date()
+    const callId = "file-delivery"
+    const assistant: Message = {
+      id: "assistant-delivery", role: "assistant", content: "", created_at,
+      tool_calls: [{ id: callId, name: deliver.name, args: { files: ["report.txt"] } }]
+    }
+    const result: Message = {
+      id: "1c711082-5111-4632-976d-7c05ee064c33", role: "tool", created_at,
+      content: String(await deliver.invoke({ files: ["report.txt"] })),
+      name: deliver.name, tool_call_id: callId
+    }
+    const copy = (row: Message): Message => ({
+      ...row,
+      id: `${row.id}::cmb-same-role-duplicate:${row.role}:2`,
+      provider_source_id: row.id,
+      provider_occurrence: 2
+    })
+    const authorized = copy(assistant)
+    transcript.upsertThreadMessages(threadId, [
+      assistant,
+      { id: "interim", role: "assistant", content: "Delivering now", created_at },
+      result, authorized, copy(result)
+    ])
+    const read = (assistantMessageId: string) =>
+      readDesktopBotDelivery(host, { threadId, assistantMessageId, callId, fileIndex: 0 })
+    expect(() => read(assistant.id)).toThrow(/原交付附件已不可用/)
+    const retained = read(authorized.id)
+    await expect(readFile(retained.path, "utf8")).resolves.toBe("Original attachment bytes")
+    const aliases = findReplayedToolExchangeAliases(transcript.getThreadMessages(threadId))
+    expect(aliases.has(authorized.id)).toBe(false)
+  } finally {
+    await host.stop()
+    database.close()
+    await transcript.closeDatabase()
+    await rm(fixture.root, { recursive: true, force: true })
+  }
+})
 
 it("keeps only exact managed Markdown images after moving a linked workspace stored through an alias", async () => {
   fixture.root = await realpath(await mkdtemp(join(tmpdir(), "bot-delivery-path-")))

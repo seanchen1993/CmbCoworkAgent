@@ -298,7 +298,11 @@ import {
   type ChatSearchCorpus,
   type ChatSearchDocument
 } from "@/lib/chat-search-matches"
-import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import {
+  createChatMessageProjector,
+  noReplayAssistantContent,
+  resolveChatReplayAliases
+} from "@/lib/chat-message-projection"
 import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
 import {
   createChatSearchPlan,
@@ -1201,7 +1205,10 @@ const threadDisplayBaselineCache = new WeakMap<
   ThreadDisplayBaselineCacheEntry
 >()
 
-function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: number): Message[] {
+function getThreadDisplayBaseline(
+  messages: readonly Message[],
+  contentVersion: number
+): Message[] {
   const cached = threadDisplayBaselineCache.get(messages)
   if (cached?.contentVersion === contentVersion) return cached.baseline
   const sourceTail = messages.at(-1)
@@ -3638,11 +3645,35 @@ export function ChatContainer({
     liveDisplayMessages,
     streamData.messages,
     messagesContentVersion,
-    liveDisplayProjection
+    liveDisplayProjection,
+    streamData.stream?.messageOrderRevision
   )
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  // Values hints can reorder results sharing one provider call ID. Prove the
+  // pairs on the same order used by the tool cards before filtering any rows.
+  const replayProjection = threadProjectionRuntime.projectReplayAliases(displayMessageProjection)
+  const replayAliases = resolveChatReplayAliases(
+    replayProjection.aliases,
+    liveDisplayMessages,
+    displayMessageProjection,
+    liveDisplayProjection.messageIds
+  )
+  const assistantReplayContent = replayAliases === replayProjection.aliases
+    ? replayProjection.assistantContent
+    : noReplayAssistantContent
+  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
+    displayMessages,
+    displayMessageProjection.changedMessages,
+    displayMessagesStructureVersion,
+    replayAliases.size ? replayAliases : undefined
+  )
+  const toolDerivationMessages = toolDerivationProjection.messages
+  const resolveDisplayMessageId = useCallback(
+    (messageId: string) => replayAliases.get(messageId) ?? messageId,
+    [replayAliases]
+  )
   const chatScrollQuestionStructureRevision =
     threadProjectionRuntime.projectChatScrollQuestionRevision({
       scopeKey: threadId,
@@ -3734,13 +3765,6 @@ export function ChatContainer({
     hookLogBuckets
   })
 
-  // Fold the actual committed + streamed timeline. The parent only owns committed history.
-  // Reuse the existing tool projection version so ordinary text tokens do not rescan results.
-  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
-    displayMessages,
-    displayMessageProjection.changedMessages,
-    displayMessagesStructureVersion
-  )
   const inlineQuestion = useMemo(() => {
     const callId =
       surface === "bot" && canAnswerUserInput && pendingUserInput?.threadId === threadId
@@ -3775,10 +3799,6 @@ export function ChatContainer({
         : parentToolPresentation?.(tool, result, assistantMessageId, deliveryScope),
     [showExecutionDetails, searchExpandsExecutionDetails, inlineQuestionCallId, parentToolPresentation]
   )
-  // Ordinary assistant tokens update only the changed display slot. Keep the
-  // tool projection stable and replace a slot only when that changed row is
-  // itself tool-relevant.
-  const toolDerivationMessages = toolDerivationProjection.messages
   const toolResults = threadProjectionRuntime.projectToolResults(
     toolDerivationMessages,
     toolDerivationProjection.version
@@ -3800,6 +3820,7 @@ export function ChatContainer({
         const orderedToolCalls: Array<{
           key: string
           call: { id: string; name: string; args: Record<string, unknown> }
+          historicalStatus?: ToolCallStatus
         }> = []
 
         for (const message of toolDerivationMessages) {
@@ -3808,7 +3829,10 @@ export function ChatContainer({
             if (!toolCall?.id) return
             orderedToolCalls.push({
               key: getWorkerToolUiKey(message.id, toolCall.id, index),
-              call: toolCall
+              call: toolCall,
+              historicalStatus: message.legacy_checkpoint_tool_outcomes?.find((outcome) =>
+                outcome.assistantId === message.id && outcome.slot === index && outcome.callId === toolCall.id
+              )?.status
             })
           })
         }
@@ -3833,7 +3857,7 @@ export function ChatContainer({
         let activeAssigned = false
         const nextStates = new Map<string, ToolCallState>()
 
-        for (const { key, call: toolCall } of orderedToolCalls) {
+        for (const { key, call: toolCall, historicalStatus } of orderedToolCalls) {
           const baseState =
             lastOccurrenceKeyByCallId.get(toolCall.id) === key
               ? toolCallStates[toolCall.id]
@@ -3844,6 +3868,8 @@ export function ChatContainer({
 
           if (result !== undefined) {
             status = result.is_error ? "failed" : "completed"
+          } else if (historicalStatus) {
+            status = historicalStatus
           } else if (isTerminalToolCallStatus(baseState?.status)) {
             status = baseState!.status
           } else if (approvalKeys.has(key)) {
@@ -3884,7 +3910,7 @@ export function ChatContainer({
     () =>
       surface === "bot" && !showExecutionDetails
         ? projectBotExecution(
-            displayMessages,
+            replayAliases.size ? displayMessages.filter((message) => !replayAliases.has(message.id)) : displayMessages,
             isLoading,
             executionCardCallIds,
             inlineQuestionCallId,
@@ -3900,6 +3926,7 @@ export function ChatContainer({
       displayMessages,
       displayMessagesStructureVersion,
       toolDerivationProjection.version,
+      replayAliases,
       dynamicVisibilityProjection.version,
       inlineQuestionCallId,
       toolCallDisplayStates,
@@ -3917,16 +3944,18 @@ export function ChatContainer({
   })
   const visibleMessageIndexes = useMemo(
     () =>
-      hiddenMessageIds.size || (!searchExpandsExecutionDetails && foldedMessageIds.size)
+      hiddenMessageIds.size || replayAliases.size || (!searchExpandsExecutionDetails && foldedMessageIds.size)
         ? unfilteredVisibleMessageIndexes.filter(
             (index) =>
               !hiddenMessageIds.has(displayMessages[index].id) &&
+              !replayAliases.has(displayMessages[index].id) &&
               (searchExpandsExecutionDetails || !foldedMessageIds.has(displayMessages[index].id))
           )
         : unfilteredVisibleMessageIndexes,
     [
       unfilteredVisibleMessageIndexes,
       hiddenMessageIds,
+      replayAliases,
       foldedMessageIds,
       searchExpandsExecutionDetails,
       displayMessages,
@@ -3969,7 +3998,9 @@ export function ChatContainer({
       : (displayMessages[lastVisibleMessageIndex]?.id ?? null)
 
   const buildSearchDocument = useCallback(
-    (message: Message, sortIndex: number): ChatSearchDocument | null => {
+    (row: Message, sortIndex: number): ChatSearchDocument | null => {
+      const content = assistantReplayContent.get(row.id)
+      const message = content === undefined ? row : { ...row, content }
       const hookLogBucket =
         hookLogConfig.enabled && message.role === "user"
           ? hookLogBucketByTurnId.get(message.id)
@@ -4009,13 +4040,14 @@ export function ChatContainer({
         sortIndex
       }
     },
-    [hookLogBucketByTurnId, hookLogConfig.enabled, searchBodyOnly, surface, replySource]
+    [assistantReplayContent, hookLogBucketByTurnId, hookLogConfig.enabled, searchBodyOnly, surface, replySource]
   )
   const stableSearchDocumentsRef = useRef<{
     baseline: readonly Message[]
     baselineIndexLookup: MessageIdIndexLookup
     rawMessages: readonly Message[]
     indexById: ReadonlyMap<string, number>
+    replayAliases: ReadonlyMap<string, string>
     buildDocument: typeof buildSearchDocument
     gapBeforeMessageId: string | null | undefined
     contentVersion: number
@@ -4031,6 +4063,7 @@ export function ChatContainer({
     liveStructureVersion: number
     liveContentVersion: number
     displayIndexById: ReadonlyMap<string, number>
+    replayAliases: ReadonlyMap<string, string>
     buildDocument: typeof buildSearchDocument
     documents: ChatSearchDocument[]
     documentIndexById: Map<string, number>
@@ -4052,6 +4085,7 @@ export function ChatContainer({
         cached.baseline === threadDisplayBaseline &&
         cached.rawMessages === threadMessages &&
         cached.indexById === displayMessageProjection.indexById &&
+        cached.replayAliases === replayAliases &&
         cached.buildDocument === buildSearchDocument &&
         cached.gapBeforeMessageId === historyGapBeforeRawMessageId
       if (cached && stableIdentityMatches && cached.contentVersion !== messagesContentVersion) {
@@ -4109,6 +4143,7 @@ export function ChatContainer({
         cached.baseline !== threadDisplayBaseline ||
         cached.rawMessages !== threadMessages ||
         cached.indexById !== displayMessageProjection.indexById ||
+        cached.replayAliases !== replayAliases ||
         cached.buildDocument !== buildSearchDocument ||
         cached.gapBeforeMessageId !== historyGapBeforeRawMessageId
       ) {
@@ -4127,6 +4162,7 @@ export function ChatContainer({
         const startIndex = Math.max(0, threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
         const addDocument = (messageIndex: number): boolean => {
           const message = threadDisplayBaseline[messageIndex]
+          if (replayAliases.has(message.id)) return true
           const sortIndex = displayMessageProjection.indexById.get(message.id)
           if (sortIndex === undefined) return true
           const detached = messageIndex < contiguousTailStartIndex
@@ -4161,6 +4197,7 @@ export function ChatContainer({
           baselineIndexLookup: createMessageIdIndexLookup(threadDisplayBaseline),
           rawMessages: threadMessages,
           indexById: displayMessageProjection.indexById,
+          replayAliases,
           buildDocument: buildSearchDocument,
           gapBeforeMessageId: historyGapBeforeRawMessageId,
           contentVersion: messagesContentVersion,
@@ -4187,6 +4224,7 @@ export function ChatContainer({
         ) {
           await yieldIfNeeded()
           const liveMessage = liveDisplayMessages[liveIndex]
+          if (replayAliases.has(liveMessage.id)) continue
           const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
           if (sortIndex === undefined) continue
           const message = displayMessages[sortIndex]
@@ -4212,6 +4250,7 @@ export function ChatContainer({
           liveStructureVersion: liveDisplayProjection.structureVersion,
           liveContentVersion: liveDisplayProjection.contentVersion,
           displayIndexById: displayMessageProjection.indexById,
+          replayAliases,
           buildDocument: buildSearchDocument,
           documents,
           documentIndexById: new Map(
@@ -4225,6 +4264,7 @@ export function ChatContainer({
         !dynamicCache ||
         dynamicCache.liveStructureVersion !== liveDisplayProjection.structureVersion ||
         dynamicCache.displayIndexById !== displayMessageProjection.indexById ||
+        dynamicCache.replayAliases !== replayAliases ||
         dynamicCache.buildDocument !== buildSearchDocument
       ) {
         dynamicCache = await rebuildDynamicDocuments()
@@ -4233,6 +4273,7 @@ export function ChatContainer({
         dynamicCache = { ...dynamicCache, documents: [...dynamicCache.documents] }
         for (const liveMessage of liveDisplayProjection.changedMessages) {
           await yieldIfNeeded()
+          if (replayAliases.has(liveMessage.id)) continue
           const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
           if (sortIndex === undefined) {
             requiresRebuild = true
@@ -4294,6 +4335,7 @@ export function ChatContainer({
       liveDisplayMessages,
       historyGapBeforeRawMessageId,
       messagesContentVersion,
+      replayAliases,
       threadMessages,
       threadDisplayBaseline
     ]
@@ -4447,8 +4489,12 @@ export function ChatContainer({
       const message = displayMessages[messageIndex]
       if (message) indexById.set(message.id, visibleIndex)
     })
+    for (const [alias, canonical] of replayAliases) {
+      const visibleIndex = indexById.get(canonical)
+      if (visibleIndex !== undefined) indexById.set(alias, visibleIndex)
+    }
     return indexById
-  }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
+  }, [displayMessages, displayMessagesStructureVersion, replayAliases, visibleMessageIndexes])
   const [releasedHistoryRevealRevision, setReleasedHistoryRevealRevision] = useState(0)
   const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
     visibleMessageIndexes.length
@@ -4744,7 +4790,7 @@ export function ChatContainer({
   }, [navigation, navigationReady, historyRestorationFailed, historyRestorationPending, retryHistoryRestoration])
 
   const revealDurableMessage = useCallback(
-    async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal" | "externalNavigation">): Promise<void> => {
+    async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal" | "externalNavigation">): Promise<string | void> => {
       const request = match.externalNavigation
       if (request) {
         if (!isCurrentThreadSearchNavigation(request.id)) throw new Error("Search navigation superseded")
@@ -4780,7 +4826,7 @@ export function ChatContainer({
         if (resolved.status !== "resolved") return null
         if (request.onProjectAccessResolved) confirmedProjectTargetAccess.current = request.id
         return resolved
-      } : undefined)
+      } : undefined, setPendingDurableRevealMessageId)
       if (
         !chatViewMountedRef.current ||
         durableMessageWindowGenerationRef.current !== revealGeneration
@@ -4792,6 +4838,7 @@ export function ChatContainer({
         throw new Error("Unable to hydrate durable chat search result")
       }
       await waitForTranscriptCommit()
+      return loaded
     },
     [
       dispatchChatScrollEvent,
@@ -4981,7 +5028,7 @@ export function ChatContainer({
       cancelActiveSearchNavigation()
       invalidateDurableMessageReveal()
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
-      const targetElement = contentMessageRefs.current.get(messageId)
+      const targetElement = contentMessageRefs.current.get(replayAliases.get(messageId) ?? messageId)
       const viewport = getViewport()
       const topInset = chatScrollInsets(viewport).top
       if (targetElement && viewport) {
@@ -4995,7 +5042,7 @@ export function ChatContainer({
       }
       virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: virtualBehavior, offset: -topInset })
     },
-    [cancelActiveSearchNavigation, dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
+    [cancelActiveSearchNavigation, dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, replayAliases, visibleMessageIndexById]
   )
   const revealMessage = useCallback(
     (messageId: string): void => {
@@ -5005,11 +5052,11 @@ export function ChatContainer({
         invalidateDurableMessageReveal()
         dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       }
-      const targetElement = contentMessageRefs.current.get(messageId)
+      const targetElement = contentMessageRefs.current.get(replayAliases.get(messageId) ?? messageId)
       if (targetElement?.isConnected) return
       virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
     },
-    [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
+    [dispatchChatScrollEvent, invalidateDurableMessageReveal, replayAliases, visibleMessageIndexById]
   )
   const replySelection = useRef(0)
   const cancelBotReply = useCallback(() => {
@@ -5185,6 +5232,7 @@ export function ChatContainer({
     if (!messageId || historyPageLoading || !scrollParent) return
     const index = visibleMessageIndexById.get(messageId)
     if (index === undefined) return
+    const visibleId = replayAliases.get(messageId) ?? messageId
     // A replacement window has its own measurement cache. Keep the seek
     // alive across its first height measurements until the real row mounts.
     const deadline = performance.now() + 3_000
@@ -5198,7 +5246,7 @@ export function ChatContainer({
         return
       }
       const { scrollHeight, scrollTop } = scrollParent
-      if (!contentMessageRefs.current.get(messageId)?.isConnected &&
+      if (!contentMessageRefs.current.get(visibleId)?.isConnected &&
           (scrollHeight !== previousHeight || scrollTop !== previousTop)) {
         previousHeight = scrollHeight
         previousTop = scrollTop
@@ -5212,6 +5260,7 @@ export function ChatContainer({
     historyPageLoading,
     historyWindowRevision,
     releasedHistoryRevealRevision,
+    replayAliases,
     scrollParent,
     setPendingDurableRevealMessageId,
     visibleMessageIndexById
@@ -5228,7 +5277,8 @@ export function ChatContainer({
     ) {
       return
     }
-    const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+    const displayId = resolveDisplayMessageId(anchor.messageId)
+    const visibleIndex = visibleMessageIndexById.get(displayId)
     if (visibleIndex === undefined) {
       pendingChatSessionAnchorRef.current = null
       return
@@ -5244,9 +5294,9 @@ export function ChatContainer({
       if (pendingChatSessionAnchorRef.current !== anchor) return
       const viewport = getViewport()
       const target =
-        contentMessageRefs.current.get(anchor.messageId) ??
+        contentMessageRefs.current.get(displayId) ??
         Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
-          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+          (candidate) => candidate.dataset.chatMessageId === displayId
         )
       if (viewport && target) {
         const viewportTop = viewport.getBoundingClientRect().top
@@ -5281,6 +5331,7 @@ export function ChatContainer({
     getViewport,
     historyLoading,
     historyPageLoading,
+    resolveDisplayMessageId,
     scrollParent,
     threadId,
     visibleMessageIndexById
@@ -5411,6 +5462,7 @@ export function ChatContainer({
     ) {
       return
     }
+    const displayId = resolveDisplayMessageId(anchor.messageId)
     let frame: number | null = null
     const finishRestore = (): void => {
       if (pendingDurableHistoryAnchorRef.current !== anchor) return
@@ -5421,9 +5473,9 @@ export function ChatContainer({
       if (pendingDurableHistoryAnchorRef.current !== anchor) return
       const viewport = getViewport()
       const target =
-        contentMessageRefs.current.get(anchor.messageId) ??
+        contentMessageRefs.current.get(displayId) ??
         Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
-          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+          (candidate) => candidate.dataset.chatMessageId === displayId
         )
       if (viewport && target) {
         const delta = getChatHistoryAnchorTop(target) - anchor.viewportTop
@@ -5434,7 +5486,7 @@ export function ChatContainer({
           return
         }
       }
-      const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+      const visibleIndex = visibleMessageIndexById.get(displayId)
       if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
         virtuosoRef.current?.scrollToIndex({
           index: visibleIndex,
@@ -5459,6 +5511,7 @@ export function ChatContainer({
     getViewport,
     historyLoadedMessageCount,
     historyPageLoading,
+    resolveDisplayMessageId,
     threadId,
     visibleMessageIndexById
   ])
@@ -8807,6 +8860,7 @@ export function ChatContainer({
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         validateSearchLocation={validateSearchLocation}
+        resolveDisplayMessageId={resolveDisplayMessageId}
         onCancelLocalSearch={cancelLocalSearch}
         searchLocalCorpus={searchLocalCorpus}
         onRevealSearchContext={setSearchReveal}
@@ -9054,6 +9108,7 @@ export function ChatContainer({
                         messageAttempts={streamData.messageAttempts}
                         searchReveal={searchOpen || externalNavigation ? searchReveal : null}
                         messages={displayMessages}
+                        assistantReplayContent={assistantReplayContent}
                         visibleMessageIndexes={visibleMessageIndexes}
                         lastUserMessageIndex={lastUserMessageIndex}
                         contentVersion={displayMessagesContentVersion}

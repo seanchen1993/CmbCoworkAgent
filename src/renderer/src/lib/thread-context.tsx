@@ -100,10 +100,13 @@ import {
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
+  readCheckpointReplayTurns,
+  type CheckpointReplayTurns,
   isCheckpointEmptyAssistantToolCallMessage,
   isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
+import { prepareToolTranscriptReplayMerge } from "../../../shared/tool-transcript-replay"
 import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
@@ -313,6 +316,8 @@ type HistoryCheckpoint = {
         tool_calls?: unknown[]
         tool_call_id?: string
         name?: string
+        status?: string
+        is_error?: boolean
         additional_kwargs?: Record<string, unknown>
         kwargs?: {
           id?: string
@@ -321,6 +326,8 @@ type HistoryCheckpoint = {
           tool_calls?: unknown[]
           tool_call_id?: string
           name?: string
+          status?: string
+          is_error?: boolean
           additional_kwargs?: Record<string, unknown>
         }
       }>
@@ -486,10 +493,12 @@ function rememberSearchGoalEvent(previous: readonly GoalEvent[], event: GoalEven
 
 const mergePersistedMessagesIntoTranscript = (
   baseMessages: Message[],
-  persistedMessages: Message[]
+  persistedMessages: readonly Message[],
+  useStableProviderOccurrences = false
 ): Message[] => {
   return mergeCheckpointAuthorityTranscriptMessages(baseMessages, persistedMessages, {
-    isSameMessage: sameGoalCommandMessage
+    isSameMessage: sameGoalCommandMessage,
+    useStableProviderOccurrences
   })
 }
 
@@ -990,8 +999,11 @@ export interface ThreadActions {
   loadEarlierMessages: () => Promise<number>
   loadMessageWindowAround: (
     target: { messageId: string; ordinal: number },
-    readPage?: (residentMessageIds: readonly string[]) => Promise<{ page: ThreadMessagesPage; goalEvent?: GoalEvent } | null>
-  ) => Promise<boolean>
+    readPage?: (residentMessageIds: readonly string[]) => Promise<{
+      page: ThreadMessagesPage; goalEvent?: GoalEvent; canonicalMessageId?: string
+    } | null>,
+    onTargetResolved?: (messageId: string) => void
+  ) => Promise<string | false>
   loadReleasedMessageWindow: () => Promise<{ revealMessageId: string | null } | false>
   restoreLatestMessageWindow: () => Promise<boolean>
   cancelMessageWindowLoad: () => void
@@ -1898,7 +1910,7 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
       isLoading: latestStream.isLoading,
       stream: latestStream
     })
-  }, [stream.messages, stream.isLoading, threadId])
+  }, [stream.messages, stream.messageOrderRevision, stream.isLoading, threadId])
 
   return null
 })
@@ -5418,7 +5430,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return 0
           }
         },
-        loadMessageWindowAround: async (target, readPage) => {
+        loadMessageWindowAround: async (target, readPage, onTargetResolved) => {
           const state = threadStatesRef.current[threadId]
           if (!state) return false
           if (!target.messageId || !Number.isSafeInteger(target.ordinal) || target.ordinal < 0) {
@@ -5436,10 +5448,30 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const residentMessageIds = selectTargetedThreadMessageTail(
               state.messages, THREAD_MESSAGE_PROTECTED_TAIL, state.historyWindowGap
             ).filter((message) => message.ordinal !== undefined).map((message) => message.id)
-            const result = readPage ? await readPage(residentMessageIds) : { page: await window.api.threads.getMessagesPage(threadId, {
-              targetMessageId: target.messageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
-            }), goalEvent: undefined }
+            const readLocalPage = async () => {
+              const load = (targetMessageId: string) => window.api.threads.getMessagesPage(threadId, {
+                targetMessageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
+              })
+              let page = await load(target.messageId)
+              const message = page.messages.find(({ id }) => id === target.messageId)
+              const canonicalMessageId = message?.legacy_checkpoint_replay_of
+              if (canonicalMessageId && isCurrentLoad()) {
+                const end = message?.legacy_checkpoint_replay_end
+                page = await load(end ?? canonicalMessageId)
+                if (end && isCurrentLoad() && !page.messages.some(({ id }) => id === canonicalMessageId))
+                  page = await load(canonicalMessageId)
+                const outcomes = message?.legacy_checkpoint_tool_outcomes
+                if (outcomes?.length) page = {
+                  ...page,
+                  messages: page.messages.map((row) => row.id === canonicalMessageId
+                    ? { ...row, legacy_checkpoint_tool_outcomes: outcomes } : row)
+                }
+              }
+              return { page, goalEvent: undefined, canonicalMessageId }
+            }
+            const result = readPage ? await readPage(residentMessageIds) : await readLocalPage()
             const page = result?.page
+            const targetId = result?.canonicalMessageId ?? target.messageId
             await pendingGoalTranscriptEventsRef.current[threadId]
             if (!isCurrentLoad()) return false
             if (!page) {
@@ -5472,12 +5504,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const targetMessages = mergeGoalUserEventsIntoDurablePage(durableMessages, goalEvents, raw,
               getGoalTranscriptPageRange(raw, page.hasMore, page.hasNewerMessages === false ? undefined : { kind: "target" }),
               targetTail)
-            if (!targetMessages.some((message) => message.id === target.messageId)) {
+            if (!targetMessages.some((message) => message.id === targetId)) {
               updateThreadState(threadId, () => ({ historyPageLoading: false }))
               messageWindowIntentCoordinator.finish(intent)
               return false
             }
 
+            onTargetResolved?.(targetId)
             let loaded = false
             updateThreadState(threadId, (latest) => {
               const live = liveStreamAccumulatorsRef.current[threadId]
@@ -5489,7 +5522,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 latest.messages,
                 targetMessages,
                 {
-                  targetMessageId: target.messageId,
+                  targetMessageId: targetId,
                   maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
                   protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
                   existingGap: latest.historyWindowGap,
@@ -5500,7 +5533,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 }
               )
               const messages = windowResult.messages
-              loaded = windowResult.messages.some((message) => message.id === target.messageId)
+              loaded = windowResult.messages.some((message) => message.id === targetId)
               const nextToolCallStates = retainResidentToolCallStates(
                 upsertToolCallStatesFromMessages(latest.toolCallStates, targetMessages),
                 messages
@@ -5513,7 +5546,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   historyPageLoading: false
                 }
               }
-              const durableTarget = result?.goalEvent?.transcript_message_id ?? target.messageId
+              const durableTarget = result?.goalEvent?.transcript_message_id ??
+                (result?.canonicalMessageId ? raw.at(-1)?.id : undefined) ?? targetId
               const targetPageWindow = createThreadMessagePageWindow(targetMessages, {
                 targetMessageId: durableTarget
               }, undefined, raw)
@@ -5550,7 +5584,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               }
             })
             messageWindowIntentCoordinator.finish(intent)
-            return loaded
+            return loaded ? targetId : false
           } catch (error) {
             if (!isCurrentLoad()) return false
             console.warn("[ThreadContext] Failed to load targeted message window:", error)
@@ -6402,6 +6436,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let durableConversationPresence: ThreadConversationPresence = "unknown"
       let hasPersistedVisibleTailAfterCheckpoint = false
       let checkpointMessagesLoaded = false
+      let checkpointReplayTurns: CheckpointReplayTurns | undefined
       let checkpointPresenceFallbackResolved = false
       let mainTranscriptPublished = false
       let criticalHistoryHydrationFailed = false
@@ -6823,6 +6858,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             Array.isArray(channelValues.messages)
           ) {
             checkpointMessagesLoaded = true
+            checkpointReplayTurns = readCheckpointReplayTurns(
+              latestCheckpoint.checkpoint
+            )
             let internalGoalPromptIndex = 0
             const checkpointRawRestoredMessages = channelValues.messages.flatMap(
               (msg, index): Message | [] => {
@@ -6891,6 +6929,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
                 const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
                 const toolName = msg.name ?? msg.kwargs?.name
+                const toolStatus = msg.status ?? msg.kwargs?.status
+                const toolIsError = msg.is_error === true || msg.kwargs?.is_error === true ||
+                  additionalKwargs?.is_error === true || toolStatus === "error"
                 const messageId =
                   msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
                 const fallbackTime = new Date()
@@ -6925,7 +6966,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   }
                 }
                 const providerTuple =
-                  role === "assistant"
+                  role === "assistant" || role === "tool"
                     ? getMessageProviderTupleFromMetadata(additionalKwargs)
                     : undefined
 
@@ -6938,6 +6979,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   tool_calls: toolCalls as Message["tool_calls"],
                   ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                   ...(role === "tool" && toolName && { name: toolName }),
+                  ...(role === "tool" && toolStatus && { status: toolStatus }),
+                  ...(role === "tool" && toolIsError && { is_error: true }),
                   created_at: startAt,
                   start_at: startAt,
                   end_at: endAt
@@ -7080,9 +7123,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ),
               goalTranscriptPageRange !== undefined
             )
-      const restoredTranscript = mergePersistedMessagesIntoTranscript(
+      const replay = prepareToolTranscriptReplayMerge(
+        visiblePersistedThreadMessages,
         checkpointTranscript,
-        visiblePersistedThreadMessages
+        checkpointReplayTurns
+      )
+      const restoredTranscript = mergePersistedMessagesIntoTranscript(
+        replay.checkpoint,
+        replay.durable,
+        checkpointMessagesLoaded
       )
       const restoredTranscriptMessages = restoreVisibleCheckpointMessageTimes(
         restoredTranscript,
@@ -7096,7 +7145,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // legacy-checkpoint restoration.
       let hydratedTranscriptMessages = mergePersistedMessagesIntoTranscript(
         preserveBotNotices(restoredTranscriptMessages),
-        threadStatesRef.current[threadId]?.messages ?? []
+        threadStatesRef.current[threadId]?.messages ?? [],
+        checkpointMessagesLoaded
       )
       delete hydrationAttempt.botNotices
       const botHistoryOrigins = new Map(visiblePersistedThreadMessages.flatMap(message =>

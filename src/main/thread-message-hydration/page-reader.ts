@@ -2,6 +2,7 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
 import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
+import { readLegacyReplayCheckpoint, readLegacyReplayCheckpointAncestors } from "../checkpointer/runtime-projection-store"
 import {
   beginLegacyCheckpointRecoveryHash, legacyCheckpointReplayRowSql, NATIVE_DURABLE_CHECKPOINT_ID
 } from "../checkpointer/legacy-checkpoint-source"
@@ -21,7 +22,18 @@ import type {
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "./order-sql"
+import { readPriorToolReplayIds } from "./tool-replay-evidence"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
+import { readLegacyImportedCheckpointReplayEvidence } from "../../shared/tool-transcript-replay"
+import {
+  getRawWorkerToolCallId,
+  getWorkerToolResultKey,
+  getWorkerToolUiKey,
+  readToolOwnershipId,
+  resolveToolResultOwnership,
+  type ToolOwnershipMessage,
+  type VerifiedToolOutcome
+} from "../../shared/tool-result-ownership"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -39,6 +51,8 @@ export const THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET = 8 * 1024 * 1024
 const THREAD_MESSAGE_HYDRATION_MIN_BYTE_BUDGET = 64 * 1024
 const THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD = 1024
 const OVERSIZED_MESSAGE_MARKER = "\n[完整消息过大，当前仅显示有界预览]"
+type LegacyReplayPageFields = Pick<Message,
+  "legacy_checkpoint_replay_of" | "legacy_checkpoint_replay_end" | "legacy_checkpoint_tool_outcomes">
 
 interface ThreadMessageRow {
   thread_id: string
@@ -1016,6 +1030,32 @@ export function readThreadMessagesPage(
     const hasNewerMessages = head && Boolean(database.prepare(`SELECT 1 FROM thread_messages
       WHERE thread_id = ? AND (ordinal, message_id) > (?, ?) LIMIT 1`)
       .get(request.threadId, head.ordinal, head.message_id))
+    if (!request.options.recoveryCheckpointId) {
+      const priorResults = readPriorToolReplayIds(request.threadId, orderedMessages,
+        (sql, threadId, ids, oldest) => database.prepare(sql).all(threadId, ids, oldest)
+          .map(({ message_id, earlier_id }) => [message_id, earlier_id]))
+      for (const message of orderedMessages) {
+        const earlier = priorResults.get(message.id)
+        if (!earlier || message.content_preview_notice) continue
+        const extraBytes = jsonBytes({ historical_tool_replay_id: earlier })
+        if (responseBytes + extraBytes > byteBudget) continue
+        responseBytes += extraBytes
+        message.historical_tool_replay_id = earlier
+      }
+      const legacyAliases = readPageLegacyReplayAliases(
+        database, request, orderedMessages, truncatedMessageIds, isForwardPage, cancellation
+      )
+      const aliasBytes = [...legacyAliases.values()].reduce((bytes, alias) => bytes + jsonBytes(alias), 0)
+      // The exchange joins the view as a unit. Avoid transferring only some of
+      // its aliases if the page was already at the response byte budget.
+      if (responseBytes + aliasBytes <= byteBudget) {
+        responseBytes += aliasBytes
+        for (const message of orderedMessages) {
+          const alias = legacyAliases.get(message.id)
+          if (alias) Object.assign(message, alias)
+        }
+      }
+    }
     throwIfCancelled(cancellation)
     database.exec("COMMIT")
     const oldest = returnedCandidates.at(-1)
@@ -1064,4 +1104,264 @@ export function readThreadMessagesPage(
     }
     throw error
   }
+}
+
+function readPageLegacyReplayAliases(
+  database: DatabaseSync,
+  request: ThreadMessageHydrationReadRequest,
+  messages: readonly Message[],
+  truncatedIds: readonly string[],
+  forward: boolean,
+  cancellation: Int32Array
+): ReadonlyMap<string, LegacyReplayPageFields> {
+  const aliases = new Map<string, LegacyReplayPageFields>()
+  const { checkpointDirectory, threadId } = request
+  if (!checkpointDirectory || !/^[a-zA-Z0-9_-]+$/.test(threadId) || !messages.some((row) =>
+    (row.provider_occurrence ?? 1) > 1 &&
+    ((row.role === "assistant" && row.tool_calls?.length) || row.role === "tool")
+  )) return aliases
+  const ids = messages.filter((row) => (row.provider_occurrence ?? 1) > 1 &&
+    (row.role === "assistant" || row.role === "tool")).map(({ id }) => id)
+  if (!database.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table'
+    AND name = 'legacy_checkpoint_transcript_imports'`).get()) return aliases
+  const groups = new Map<string, { ids: Set<string>; assistant: boolean }>()
+  const readReceipts = database.prepare(`SELECT m.message_id, m.role, i.published_checkpoint_id
+    FROM thread_messages AS m JOIN legacy_checkpoint_transcript_imports AS i USING (thread_id, message_id)
+    WHERE m.thread_id = ? AND m.message_id IN (SELECT value FROM json_each(?))
+      AND i.owned_by_migration = 1 AND i.partial_version IS NULL AND i.rewrite_progress IS NULL
+      AND COALESCE(m.stream_authority, 0) = 0 AND m.goal_id IS NULL AND m.active_window_id IS NULL`)
+  const visibleReceipts = readReceipts.all(threadId, JSON.stringify(ids))
+  if (!visibleReceipts.length) return aliases
+  const clipped = new Set(truncatedIds)
+  const visible = (forward ? messages : messages.slice().reverse()).map((row) =>
+    clipped.has(row.id) ? { ...row, content_is_projection: true } : row
+  )
+  const before = visible[0]
+  const after = visible.at(-1)
+  const prior = before.role === "user" ? [] :
+    readLegacyReplayPageContext(database, threadId, before.ordinal, "before", cancellation)
+  const later = !after ? [] :
+    readLegacyReplayPageContext(database, threadId, after.ordinal, "after", cancellation)
+  const ordered = [...prior, ...visible, ...later]
+  const supplementalIds = [...prior, ...later].filter((row) => (row.provider_occurrence ?? 1) > 1)
+    .map(({ id }) => id)
+  const rows = supplementalIds.length
+    ? [...visibleReceipts, ...readReceipts.all(threadId, JSON.stringify(supplementalIds))]
+    : visibleReceipts
+  if (!rows.some((row) => row.role === "assistant")) return aliases
+  const first = ordered[0].ordinal
+  const last = ordered.at(-1)?.ordinal
+  if (first === undefined || last === undefined) return aliases
+  const physical = database.prepare(`SELECT message_id FROM thread_messages
+    WHERE thread_id = ? AND ordinal BETWEEN ? AND ? LIMIT ?`)
+    .all(threadId, first, last, ordered.length + 1)
+  const byId = new Map(ordered.map((row) => [row.id, row]))
+  if (physical.length !== ordered.length || physical.some(({ message_id: id }) =>
+    typeof id !== "string" || !byId.has(id)
+  )) return aliases
+  const missingSlots = resolveToolResultOwnership(ordered)
+  const positions = new Map(ordered.map(({ id }, index) => [id, index]))
+  const laterOwnerFences = new Map<string, number>()
+  for (const row of rows) {
+    if (typeof row.message_id !== "string" || typeof row.published_checkpoint_id !== "string" ||
+        row.published_checkpoint_id === NATIVE_DURABLE_CHECKPOINT_ID) continue
+    const stored = byId.get(row.message_id)
+    if (row.role === "assistant" && stored?.tool_calls?.some(({ id }, index) => {
+      if (missingSlots.has(getWorkerToolUiKey(stored.id, id, index))) return false
+      const identity = getWorkerToolResultKey(stored.id, id) ?? id
+      let fence = laterOwnerFences.get(identity)
+      if (fence === undefined) {
+        fence = proveLaterToolResultOwners(database, threadId, id, identity, first, last, cancellation)
+        laterOwnerFences.set(identity, fence)
+      }
+      return fence <= (stored.ordinal ?? last)
+    })) continue
+    const group = groups.get(row.published_checkpoint_id) ?? { ids: new Set(), assistant: false }
+    group.assistant ||= row.role === "assistant"
+    group.ids.add(row.message_id)
+    groups.set(row.published_checkpoint_id, group)
+  }
+  const checkpointPath = join(checkpointDirectory, `${threadId}.sqlite`)
+  const visibleIds = new Set(ids)
+  let latest: ReturnType<typeof readLegacyReplayCheckpoint>
+  let ancestors: ReadonlySet<string> | undefined
+  let inspected = 0
+  for (const [source, group] of groups) {
+    if (!group.assistant) continue
+    if (inspected++ === 4) break
+    try {
+      const original = readLegacyReplayCheckpoint(checkpointPath, threadId, source, cancellation)
+      if (!original && !ancestors) {
+        latest = readLegacyReplayCheckpoint(checkpointPath, threadId, undefined, cancellation)
+        ancestors = latest ? readLegacyReplayCheckpointAncestors(
+          checkpointPath, request.databasePath, threadId, latest.id, [...groups.keys()]
+        ) : new Set()
+      }
+      const checkpoint = original ?? (ancestors?.has(source) ? latest : undefined)
+      if (!checkpoint) continue
+      const evidence = readLegacyImportedCheckpointReplayEvidence(ordered, checkpoint.checkpoint, group.ids)
+      for (const [id, retained] of evidence.aliases) {
+        if (!visibleIds.has(id)) continue
+        const canonical = byId.get(retained)
+        let end: string | undefined
+        const outcomes: VerifiedToolOutcome[] = []
+        if (canonical?.role === "assistant") {
+          let last = positions.get(retained) ?? -1
+          for (const [index, call] of (canonical.tool_calls ?? []).entries()) {
+            const result = missingSlots.get(getWorkerToolUiKey(retained, call.id, index))
+            const position = result && positions.get(result.id)
+            if (!result) continue
+            if (typeof position === "number" && position > last) {
+              last = position
+              end = result.id
+            }
+            const { status } = result
+            outcomes.push({ assistantId: retained, resultId: result.id, callId: call.id, slot: index,
+              status: status === "rejected" || status === "interrupted" ? status
+                : result.is_error || status === "error" || status === "failed" ? "failed" : "completed" })
+          }
+        }
+        aliases.set(id, {
+          legacy_checkpoint_replay_of: retained,
+          ...(end ? { legacy_checkpoint_replay_end: end } : {}),
+          ...(outcomes.length ? { legacy_checkpoint_tool_outcomes: outcomes } : {})
+        })
+      }
+    } catch {
+      // A missing or unreadable historical checkpoint supplies no display proof.
+      throwIfCancelled(cancellation)
+    }
+  }
+  return aliases
+}
+
+function proveLaterToolResultOwners(
+  database: DatabaseSync, threadId: string, callId: string, oldCallIdentity: string, first: number, last: number,
+  cancellation: Int32Array
+): number {
+  // Return the oldest positively identified user turn with a matching result.
+  // An empty suffix cannot receive the old call. An unresolved suffix can.
+  const limit = 64
+  const byCall = database.prepare(`SELECT message_id, ordinal, tool_call_id FROM thread_messages
+    WHERE thread_id = ? AND role = 'tool' AND tool_call_id = ? AND ordinal > ?
+    ORDER BY ordinal LIMIT ?`)
+  const rawCallId = getRawWorkerToolCallId(callId)
+  const rawMatches = [...new Set([callId, rawCallId])]
+    .flatMap((id) => byCall.all(threadId, id, last, limit + 1))
+  const scopedMatches = database.prepare(`SELECT message_id, ordinal, tool_call_id FROM thread_messages
+    WHERE thread_id = ? AND role = 'tool' AND ordinal > ?
+      AND tool_call_id >= 'worker-turn-' AND tool_call_id < 'worker-turn.'
+      AND instr(tool_call_id, '::') > 0 AND substr(tool_call_id, instr(tool_call_id, '::') + 2) = ?
+    LIMIT ?`).all(threadId, last, rawCallId, limit + 1)
+  const results = [...new Map([...rawMatches, ...scopedMatches].map((row) => [row.message_id, row])).values()]
+  if (!results.length) return Infinity
+  if (results.length > limit) return -Infinity
+  const nearestUser = database.prepare(`SELECT ordinal FROM thread_messages
+    WHERE thread_id = ? AND role = 'user' AND ordinal < ? ORDER BY ordinal DESC LIMIT 1`)
+  const turns = new Map<number, { end: number; results: Map<string, string | undefined> }>()
+  let lastUnscopedResult = first - 1
+  for (const { message_id: id, ordinal, tool_call_id: resultCallId } of results) {
+    throwIfCancelled(cancellation)
+    if (typeof id !== "string" || typeof ordinal !== "number" || typeof resultCallId !== "string") return -Infinity
+    const user = nearestUser.get(threadId, ordinal)?.ordinal
+    if (typeof user !== "number" || user <= first) return -Infinity
+    const identity = getWorkerToolResultKey(id, rawCallId) !== rawCallId
+      ? getWorkerToolResultKey(id, resultCallId) : undefined
+    if (identity === oldCallIdentity) return -Infinity
+    if (!identity) lastUnscopedResult = Math.max(lastUnscopedResult, ordinal)
+    const turn = turns.get(user) ?? { end: ordinal, results: new Map() }
+    turn.end = Math.max(turn.end, ordinal)
+    turn.results.set(id, identity)
+    turns.set(user, turn)
+  }
+  // Scoped worker rows can reset the resolver's turn counter. A skipped
+  // interval containing any such row cannot prove a newer main-agent turn.
+  if (lastUnscopedResult >= first && database.prepare(`SELECT 1 FROM thread_messages WHERE thread_id = ?
+    AND message_id >= 'worker-turn-' AND message_id < 'worker-turn.'
+    AND ordinal BETWEEN ? AND ? LIMIT 1`).get(threadId, first, lastUnscopedResult)) return -Infinity
+  const readTurn = database.prepare(`SELECT message_id, role, tool_call_id,
+      CASE WHEN length(CAST(tool_calls_json AS BLOB)) <= 65536 THEN tool_calls_json END AS tool_calls,
+      length(CAST(tool_calls_json AS BLOB)) > 65536 AS incomplete
+    FROM thread_messages WHERE thread_id = ? AND ordinal BETWEEN ? AND ?
+      AND (role = 'user'
+        OR (message_id >= 'worker-turn-' AND message_id < 'worker-turn.')
+        OR (role = 'assistant' AND tool_calls_json IS NOT NULL AND tool_calls_json <> '[]')
+        OR (role = 'tool' AND (tool_call_id IN (?, ?)
+          OR (tool_call_id >= 'worker-turn-' AND tool_call_id < 'worker-turn.'
+            AND instr(tool_call_id, '::') > 0 AND substr(tool_call_id, instr(tool_call_id, '::') + 2) = ?))))
+    ORDER BY ordinal, created_at, message_id LIMIT ?`)
+  let remainingBytes = 512 * 1024
+  for (const [user, { end, results: expected }] of turns) {
+    throwIfCancelled(cancellation)
+    const rows = readTurn.all(threadId, user, end, callId, rawCallId, rawCallId, limit + 1)
+    if (rows.length > limit || rows[0]?.role !== "user" ||
+        rows.slice(1).some(({ incomplete, role }) => incomplete || role === "user")) return -Infinity
+    remainingBytes -= rows.reduce((sum, row) => sum +
+      (typeof row.tool_calls === "string" ? Buffer.byteLength(row.tool_calls) : 0), 0)
+    if (remainingBytes < 0) return -Infinity
+    const messages: ToolOwnershipMessage[] = rows.flatMap((row) => {
+      if (typeof row.message_id !== "string" || typeof row.role !== "string") return []
+      const calls = parseJsonValue(row.tool_calls, cancellation)
+      return [{
+        id: row.message_id,
+        role: row.role,
+        tool_calls: Array.isArray(calls) ? calls : undefined,
+        tool_call_id: typeof row.tool_call_id === "string" ? row.tool_call_id : undefined
+      }]
+    })
+    const callIdentities = new Map<string, string>()
+    for (const message of messages) {
+      if (message.role !== "assistant") continue
+      for (const [index, call] of (message.tool_calls ?? []).entries()) {
+        const id = readToolOwnershipId(call)
+        const identity = id && getWorkerToolResultKey(message.id, id)
+        if (id && identity) callIdentities.set(getWorkerToolUiKey(message.id, id, index), identity)
+      }
+    }
+    const owners = new Map([...resolveToolResultOwnership(messages)]
+      .map(([key, result]) => [result.id, callIdentities.get(key)]))
+    for (const [id, identity] of expected) {
+      // A scoped result can fall back to an older turn. Only an exact scoped
+      // declaration proves that it cannot belong to the historical call.
+      if (!owners.has(id) || (identity && owners.get(id) !== identity)) return -Infinity
+    }
+  }
+  return Math.min(...turns.keys())
+}
+
+function readLegacyReplayPageContext(
+  database: DatabaseSync, threadId: string, ordinal: number | undefined,
+  direction: "before" | "after", cancellation: Int32Array
+): Message[] {
+  if (ordinal === undefined) return []
+  const before = direction === "before"
+  const comparison = before ? "<" : ">"
+  const order = before ? "DESC" : "ASC"
+  const candidates = database.prepare(`SELECT message_id, role,
+      length(CAST(content_json AS BLOB)) + COALESCE(length(CAST(tool_calls_json AS BLOB)), 0)
+        + COALESCE(length(CAST(reasoning AS BLOB)), 0) AS bytes
+    FROM thread_messages WHERE thread_id = ? AND ordinal ${comparison} ?
+    ORDER BY ordinal ${order}, created_at ${order}, message_id ${order} LIMIT 64`)
+    .all(threadId, ordinal)
+  const ids: string[] = []
+  let bytes = 0
+  for (const row of candidates) {
+    throwIfCancelled(cancellation)
+    bytes += Number(row.bytes) + 128
+    if (typeof row.message_id !== "string" || bytes > 512 * 1024) break
+    ids.push(row.message_id)
+    if (before && (row.role === "user" || row.role === "system")) break
+  }
+  if (!ids.length) return []
+  const rows = readRowsById(database, threadId, ids, cancellation)
+  const fragments = readFragmentSummaries(database, threadId, ids, cancellation)
+  if (before) ids.reverse()
+  return ids.flatMap((id) => {
+    const row = rows.get(id)
+    if (!row) return []
+    const summary = fragments.get(id)
+    const { message, truncated } = rowToMessage(row, summary, cancellation)
+    return [truncated || (summary?.length ?? 0) > 0
+      ? { ...message, content_is_projection: true } : message]
+  })
 }

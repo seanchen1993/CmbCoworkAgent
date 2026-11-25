@@ -115,6 +115,7 @@ export interface ChatMessageVirtualListProps {
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
   messages: Message[]
+  assistantReplayContent?: ReadonlyMap<string, Message["content"]>
   visibleMessageIndexes: readonly number[]
   lastUserMessageIndex: number
   contentVersion: number
@@ -395,6 +396,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   canAnimateMessages = true,
   messageAttempts,
   messages,
+  assistantReplayContent,
   visibleMessageIndexes,
   lastUserMessageIndex,
   contentVersion,
@@ -535,8 +537,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
 
   const renderMessage = useCallback(
     (visibleIndex: number, messageIndex: number): React.JSX.Element | null => {
-      const message = messages[messageIndex]
-      if (!message) return null
+      const row = messages[messageIndex]
+      if (!row) return null
+      const content = assistantReplayContent?.get(row.id)
+      const message = content === undefined ? row : { ...row, content }
       const startsAfterReleasedHistory = message.id === historyGapBeforeMessageId
       const previousMessageIndex = visibleMessageIndexes[visibleIndex - 1]
       const previousMessage =
@@ -591,6 +595,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     },
     [
       assistantDurationMsById,
+      assistantReplayContent,
       autoApproveGitPush,
       contentMessageRefs,
       contentVersion,

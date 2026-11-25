@@ -228,6 +228,14 @@ export interface Message {
   botHistoryDeliveryScope?: import("../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
+  /** An exact physical tool result persisted before this read window. */
+  historical_tool_replay_id?: string
+  /** An exact raw checkpoint replay verified against its original legacy import. */
+  legacy_checkpoint_replay_of?: string
+  /** Last bound result of the verified canonical exchange in the saved transcript. */
+  legacy_checkpoint_replay_end?: string
+  /** Proven outcomes for a replay target, including results outside the history window. */
+  legacy_checkpoint_tool_outcomes?: readonly import("../shared/tool-result-ownership").VerifiedToolOutcome[]
   provider_source_id?: string
   provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
