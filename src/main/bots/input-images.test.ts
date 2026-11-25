@@ -5,7 +5,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHash } from "node:crypto"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { canonicalBotMessageInput } from "../../shared/bots/message-mentions"
+import { LocalBotHost } from "./host"
 import { BotStore } from "./store"
+import { attachmentFallbackText } from "../../shared/file-attachment"
 import { isBotImageInput, prepareBotInputImages } from "./input-images"
 import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
 import type { FileAttachment } from "../../shared/file-attachment"
@@ -14,6 +17,11 @@ const png: FileAttachment = {
   filename: "diagram.png", size: 3, truncated: false, filePath: "diagram.png",
   content: "Selected diagram", mimeType: "image/png"
 }
+
+it("preserves blank user text for pure Bot images and the existing fallback for documents", () => {
+  expect(attachmentFallbackText([{ ...png, filePath: "", botInputId: "user-selection" }])).toBe("")
+  expect(attachmentFallbackText([{ ...png, mimeType: "text/plain" }])).toBe("请分析以下文件内容。")
+})
 
 it("freezes group images by source group, request and selected member", () => {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
@@ -87,5 +95,54 @@ it("stages only the uniquely approved version and checks the same bytes it gives
   } finally {
     db.close()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it.each(["accept", "reject"] as const)("reports private image admission after the runtime decision: %s", async result => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  let signalPrepared!: () => void
+  let finish!: () => void
+  const running = new Promise<void>(resolve => { signalPrepared = resolve })
+  const decision = new Promise<void>(resolve => { finish = resolve })
+  const host = new LocalBotHost(store, {
+    onAvailable: () => () => {},
+    acquire: (_bot, task) => ({
+      release: vi.fn(),
+      async execute() {
+        signalPrepared()
+        await decision
+        if (result === "reject") return { state: "failed", error: "没有视觉模型" }
+        host.acceptDesktopImageInput(task.id)
+        return { state: "completed" }
+      }
+    })
+  })
+  try {
+    const bot = store.create({ name: "Reader", instructions: "", color: "#112233", modelRef: null })
+    const file = store.retainInputFile(bot.id, png, "/host-snapshot")
+    const request = { botId: bot.id, requestId: "private-image", inputFileIds: [file.botInputId!],
+      message: buildAttachmentMessageParts([file]).attachmentModelBlocks.trim() }
+    const hash = createHash("sha256").update(canonicalBotMessageInput(request.message, undefined, request.inputFileIds)).digest("hex")
+    const receipt = () => host.requestReceipts(bot.id, [{ requestId: request.requestId, messageHash: hash }])[0].state
+    const submission = Promise.resolve(host.sendDesktopMessage(request))
+    let done = false
+    submission.then(() => { done = true }, () => { done = true })
+    await running
+    expect(done).toBe(false)
+    expect(receipt()).toBe("absent")
+    finish()
+    if (result === "accept") {
+      const first = await submission
+      expect(receipt()).toBe("accepted")
+      expect((await host.sendDesktopMessage(request)).id).toBe(first.id)
+    } else {
+      await expect(submission).rejects.toThrow("没有视觉模型")
+      expect(receipt()).toBe("rejected")
+    }
+  } finally {
+    finish()
+    await host.stop()
+    db.close()
   }
 })

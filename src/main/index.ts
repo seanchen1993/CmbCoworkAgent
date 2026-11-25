@@ -342,6 +342,7 @@ import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { invalidateGitPanelHeadCaches, registerModelHandlers } from "./ipc/models"
 import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
+import { trackChatDocumentNavigation, trustedChatDocumentWindow } from "./ipc/chat-attachment-window"
 import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
 import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
 import {
@@ -774,6 +775,7 @@ function createWindow(): void {
   // Only the trusted app frame may initiate a new embedded document. The built-in browser
   // has separate webContents and keeps its own navigation policy.
   const previewWebContents = mainWindow.webContents
+  trackChatDocumentNavigation(previewWebContents)
   previewWebContents.on("will-frame-navigate", (event) => {
     if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
   })
@@ -1170,13 +1172,18 @@ if (browserNativeMessagingHostLaunch) {
     startRegisteredGitHookEventSync()
 
     // Register IPC handlers
-    registerAgentHandlers(ipcMain)
+    const chatDocumentUrl = resolveTrustedRendererUrl(
+      (!app.isPackaged && process.env["ELECTRON_RENDERER_URL"]) || import.meta.env.VITE_RENDER_URL ||
+        pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    )
+    const getChatWindow = () => trustedChatDocumentWindow(mainWindow, chatDocumentUrl)
+    registerAgentHandlers(ipcMain, getChatWindow)
     registerWorkflowHandlers(ipcMain)
     const deleteThread = registerThreadHandlers(ipcMain)
-    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow)
+    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow, getChatWindow)
     registerThreadSearchHandlers(ipcMain)
-    registerModelHandlers(ipcMain, () => mainWindow)
-    registerWorkspaceFilePreviewHandlers(ipcMain, () => mainWindow)
+    registerModelHandlers(ipcMain, getChatWindow)
+    registerWorkspaceFilePreviewHandlers(ipcMain, getChatWindow)
     registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)

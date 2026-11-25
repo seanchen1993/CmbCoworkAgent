@@ -1,5 +1,5 @@
 import { BotError } from "./contracts"
-import { MAX_ATTACHMENT_PICKER_FILES, type FileAttachment } from "../file-attachment"
+import { MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_PICKER_FILES, type FileAttachment } from "../file-attachment"
 
 export const BOT_INPUT_FILE_ID_PATTERN = /^input-[a-f0-9-]{36}$/
 
@@ -15,6 +15,22 @@ export interface BotInputFile {
   blockHash?: string
 }
 
+export function botImageMime(name: string, size: number): string | undefined {
+  if (size <= 0 || size > MAX_ATTACHMENT_FILE_BYTES) return
+  switch (name.slice(name.lastIndexOf(".")).toLowerCase()) {
+    case ".png": return "image/png"
+    case ".jpg":
+    case ".jpeg": return "image/jpeg"
+    case ".webp": return "image/webp"
+    default: return undefined
+  }
+}
+
+export function isBotImageInput(file: BotInputFile): boolean {
+  const mime = botImageMime(file.file.filename, file.file.size)
+  return Boolean(mime && file.attachment?.mimeType === mime && file.blockHash)
+}
+
 export function parseBotInputFileIds(value: unknown): string[] {
   if (value === undefined) return []
   if (!Array.isArray(value) || value.length > MAX_ATTACHMENT_PICKER_FILES ||
@@ -22,6 +38,10 @@ export function parseBotInputFileIds(value: unknown): string[] {
       new Set(value).size !== value.length)
     throw new BotError("INVALID_INPUT", "附件引用无效，请重新选择附件")
   return [...value]
+}
+
+export function botAttachmentIdentity(file: FileAttachment): string {
+  return file.botInputId ?? file.filePath
 }
 
 export function botInputFileIds(attachments: readonly FileAttachment[]): string[] {

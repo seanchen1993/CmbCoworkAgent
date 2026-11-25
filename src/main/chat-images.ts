@@ -7,6 +7,7 @@ import { captureThreadIncarnation, type ThreadIncarnationRow } from "./services/
 import type { AgentInvokeParams } from "./types"
 import { chatImageMarker } from "../shared/attachment-message-parts"
 import { normalizeGitWorkspacePathKey } from "../shared/workspace-path"
+import { threadIncarnationKey } from "../shared/thread-incarnation"
 import { chatImageExtensions, type SubmittedChatImage, MAX_ATTACHMENT_FILE_BYTES, type ChatImageRef,
   type FileAttachment } from "../shared/file-attachment"
 
@@ -25,6 +26,35 @@ function scope(threadId: string) {
   return join(getCmbCoworkAgentDataRoot(), "chat-images", imageDirectoryName(threadId, row))
 }
 
+export function chatImageIdForKey(key: string) {
+  const digest = createHash("sha256").update(key).digest("hex")
+  return [digest.slice(0, 8), digest.slice(8, 12), digest.slice(12, 16),
+    digest.slice(16, 20), digest.slice(20, 32)].join("-")
+}
+
+const publishingImages = new Set<string>()
+const heldImageFiles = new Map<string, number>()
+
+export function holdBotImageStage(threadId: string, deduplicationKey: string) {
+  return holdImageFile(threadId, scope(threadId), chatImageIdForKey(deduplicationKey))
+}
+
+function holdImageFile(threadId: string, root: string, id: string) {
+  const path = join(root, id + ".webp")
+  heldImageFiles.set(path, (heldImageFiles.get(path) ?? 0) + 1)
+  let released = false
+  return async () => {
+    if (released) return
+    released = true
+    const remaining = (heldImageFiles.get(path) ?? 1) - 1
+    if (remaining) heldImageFiles.set(path, remaining)
+    else {
+      heldImageFiles.delete(path)
+      await removeUnownedImage(threadId, root, id)
+    }
+  }
+}
+
 export async function stageChatImage(threadId: string, name: string, bytes: ArrayBuffer,
   options?: { deduplicationKey?: string; beforePublish?: () => void; draftWorkspace?: string }):
 Promise<FileAttachment> {
@@ -33,12 +63,7 @@ Promise<FileAttachment> {
   if (!chatImageExtensions.includes(extension) || bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES)
     throw new Error("图片格式或大小超限")
   if (decoding >= 3) throw new Error("其他图片正在处理，请稍后重试")
-  const digest = options?.deduplicationKey &&
-    createHash("sha256").update(options.deduplicationKey).digest("hex")
-  const id = digest
-    ? [digest.slice(0, 8), digest.slice(8, 12), digest.slice(12, 16),
-      digest.slice(16, 20), digest.slice(20, 32)].join("-")
-    : randomUUID()
+  const id = options?.deduplicationKey ? chatImageIdForKey(options.deduplicationKey) : randomUUID()
   const tempPath = join(root, randomUUID() + ".tmp")
   const size = bytes.byteLength
   decoding++
@@ -56,6 +81,7 @@ Promise<FileAttachment> {
       })
       if (scope(threadId) !== root) throw new Error("会话已变更")
       options?.beforePublish?.()
+      publishingImages.add(join(root, id + ".webp"))
       await rename(tempPath, join(root, id + ".webp"))
       if (options?.draftWorkspace !== undefined) {
         try {
@@ -75,6 +101,7 @@ Promise<FileAttachment> {
       await worker.terminate()
     }
   } finally {
+    publishingImages.delete(join(root, id + ".webp"))
     decoding--
     await rm(tempPath, { force: true })
   }
@@ -123,6 +150,43 @@ function submissionDigest(input: unknown): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex")
 }
 
+type SubmissionScope = { workspace: string; incarnation: string }
+
+function currentSubmissionScope(threadId: string): SubmissionScope | undefined {
+  const row = getThreadCore(threadId)
+  if (!row) return
+  const metadata = JSON.parse(row.metadata || "{}") as { workspacePath?: string }
+  return {
+    workspace: normalizeGitWorkspacePathKey(metadata.workspacePath ?? ""),
+    incarnation: threadIncarnationKey(captureThreadIncarnation(row))
+  }
+}
+
+function matchesSubmissionScope(saved?: SubmissionScope, current?: SubmissionScope): boolean {
+  return Boolean(saved && current && saved.workspace === current.workspace && saved.incarnation === current.incarnation)
+}
+
+/** The transport may replay an encoded body after backoff, without running middleware again. */
+export function captureDesktopImageAccess(threadId: string) {
+  const source = currentSubmissionScope(threadId)
+  return () => {
+    if (!matchesSubmissionScope(source, currentSubmissionScope(threadId)))
+      throw new Error("图片消息所属工作区或会话已变更")
+  }
+}
+
+function parseStoredReceipt(json: unknown) {
+  const value = JSON.parse(String(json)) as (ChatImageReceipt & { phase?: SubmissionPhase; scope?: SubmissionScope }) | SubmittedChatImage[]
+  if (Array.isArray(value)) return { receipt: { images: value } as ChatImageReceipt, phase: undefined, scope: undefined }
+  const { phase, scope, ...receipt } = value
+  return { receipt, phase, scope }
+}
+
+function approvedHistory(record: ReturnType<typeof parseStoredReceipt>, current: SubmissionScope | undefined) {
+  if ((record.phase || record.scope) && !matchesSubmissionScope(record.scope, current)) return null
+  return record.phase === "reserved" || record.phase === "rejected" ? null : record.receipt
+}
+
 function storedImageSubmission(threadId: string, messageId: string, bySubmissionId = false) {
   // A display-ID rename moves the message binding. The original request still owns its receipt.
   const byRequest = bySubmissionId && getDb().exec(
@@ -134,8 +198,7 @@ function storedImageSubmission(threadId: string, messageId: string, bySubmission
     [threadId, messageId]
   )[0]?.values[0]
   if (!row) return
-  const saved = JSON.parse(String(row[1])) as SubmittedChatImage[] | ChatImageReceipt
-  return { digest: String(row[0]), receipt: Array.isArray(saved) ? { images: saved } : saved }
+  return { digest: String(row[0]), ...parseStoredReceipt(row[1]) }
 }
 
 function writeImageReceipt(threadId: string, messageId: string, digest: string, receipt: ChatImageReceipt) {
@@ -158,6 +221,9 @@ export function bindChatImages(threadId: string, messageId: string, original: st
   })
 }
 
+type SubmissionPhase = "reserved" | "accepted" | "running" | "succeeded" | "failed" | "rejected"
+export type ChatImageSubmissionStatus = Exclude<SubmissionPhase, "reserved"> | "pending" | "unknown" | "missing"
+
 type PendingImageSubmission = {
   digest: string
   assetIds: string[]
@@ -176,13 +242,19 @@ function assertImageInputOwner(threadId: string, id: string, messageId?: string)
   if (!owner) throw new Error("图片已失效或不属于当前草稿，请重新添加")
 }
 
-export function pinQueuedChatImages(threadId: string, workspace: string | null, messageId: string, ids: string[]) {
+export function pinQueuedChatImages(threadId: string, workspace: string | null, messageId: string, ids: string[], previousMessageId = "") {
   if (!validId.test(messageId) || !Array.isArray(ids) || !ids.length || ids.length > 3 ||
       new Set(ids).size !== ids.length || ids.some(id => typeof id !== "string" || !validId.test(id)))
     throw new Error("图片队列引用无效")
   const db = getDb(), key = normalizeGitWorkspacePathKey(workspace ?? "")
-  const args = [threadId, key, JSON.stringify(ids)]
-  const source = "FROM chat_image_input_owners WHERE thread_id=? AND workspace_key=? AND message_id='' AND asset_id IN (SELECT value FROM json_each(?))"
+  const existing = db.exec("SELECT asset_id FROM chat_image_input_owners WHERE thread_id=? AND workspace_key=? AND message_id=?",
+    [threadId, key, messageId])[0]?.values ?? []
+  if (existing.length) {
+    if (existing.length === ids.length && existing.every(([id]) => ids.includes(String(id)))) return
+    throw new Error("队列消息图片已变更")
+  }
+  const args = [threadId, key, previousMessageId, JSON.stringify(ids)]
+  const source = "FROM chat_image_input_owners WHERE thread_id=? AND workspace_key=? AND message_id=? AND asset_id IN (SELECT value FROM json_each(?))"
   if (db.exec("SELECT count(*) " + source, args)[0]?.values[0][0] !== ids.length)
     throw new Error("图片已失效，请重新添加")
   db.run("INSERT OR IGNORE INTO chat_image_input_owners SELECT thread_id, ?, asset_id, workspace_key " +
@@ -203,7 +275,7 @@ async function removeUnownedImage(threadId: string, root: string, id: string) {
   const db = getDb()
   const owners = db.exec("SELECT 1 FROM chat_image_input_owners WHERE thread_id=? AND asset_id=? LIMIT 1",
     [threadId, id])[0]?.values.length
-  if (owners || [...pendingImageSubmissions.values()].some(item =>
+  if (owners || publishingImages.has(join(root, id + ".webp")) || heldImageFiles.has(join(root, id + ".webp")) || [...pendingImageSubmissions.values()].some(item =>
     item.threadId === threadId && item.assetIds.includes(id))) return
   const bound = db.exec(`SELECT 1 FROM chat_image_messages, json_each(
     CASE WHEN json_type(images_json) = 'array' THEN images_json ELSE json_extract(images_json, '$.images') END
@@ -219,12 +291,39 @@ export async function discardChatDraftImage(threadId: string, workspace: string 
   if (db.getRowsModified()) await removeUnownedImage(threadId, root, id)
 }
 
+export function getChatImageSubmissionStatus(threadId: string, messageId: string): ChatImageSubmissionStatus {
+  const record = storedImageSubmission(threadId, messageId, true)
+  if (!record) return "missing"
+  if (record.phase && !matchesSubmissionScope(record.scope, currentSubmissionScope(threadId))) return "unknown"
+  const active = pendingImageSubmissions.has(JSON.stringify([threadId, record.receipt.submissionId ?? messageId]))
+  if (record.phase === "reserved") return active ? "pending" : "unknown"
+  if (record.phase === "running") return active ? "running" : "unknown"
+  return record.phase ?? "unknown"
+}
+
+/** A continuation already owns the thread lease and proved this exact user ID in its checkpoint. */
+export function settleContinuedChatImageSubmission(threadId: string, messageId: string,
+  outcome: "success" | "error") {
+  const record = storedImageSubmission(threadId, messageId, true)
+  if (record?.phase !== "running" || !record.receipt.submissionId ||
+      !matchesSubmissionScope(record.scope, currentSubmissionScope(threadId))) return
+  getDb().run(`UPDATE chat_image_messages SET images_json=json_set(images_json, '$.phase', ?)
+    WHERE thread_id=? AND json_extract(images_json, '$.submissionId')=?
+    AND json_extract(images_json, '$.phase')='running'`,
+    [outcome === "success" ? "succeeded" : "failed", threadId, record.receipt.submissionId])
+}
+
 export interface ChatImageAdmission {
+  recovered?: ChatImageReceipt
+  beginHook(): void
+  reject(): void
   accept(preparedText: string, images: SubmittedChatImage[]): void
+  start(): void
+  finish(outcome: "success" | "error" | "unknown"): void
   release(): void
 }
 
-/** Claim before hooks or replacing an active physical run. Each subscriber has its own stream. */
+/** A persisted reservation precedes Hook execution. An abandoned reservation cannot rerun a Hook. */
 export function beginChatImageSubmission(request: AgentInvokeParams):
   | { owner: ChatImageAdmission }
   | { replay: Promise<ChatImageReceipt | undefined> }
@@ -245,66 +344,137 @@ export function beginChatImageSubmission(request: AgentInvokeParams):
       !Number.isInteger(ref.slot) || ref.slot < 0 || ref.slot >= 3) throw new Error("图片引用无效")
     return [ref.id, ref.slot, ref.filename]
   })
-  const digest = "v2:" + submissionDigest([message, refs, request.modelId ?? null,
-    request.agentMode ?? null, Boolean(request.managedExecution), Boolean(request.coordinatorInternalNotification)])
+  const sourceScope = currentSubmissionScope(threadId)
+  if (!sourceScope) throw new Error("图片消息所属会话已关闭")
+  const fingerprint = [message, refs, request.modelId ?? null, request.agentMode ?? null,
+    Boolean(request.managedExecution), Boolean(request.coordinatorInternalNotification)]
+  const digest = "v3:" + submissionDigest([...fingerprint, sourceScope.workspace, sourceScope.incarnation])
   if (stored) {
-    const expected = stored.digest.startsWith("v2:") ? digest : submissionDigest([message, chatImages])
+    if (stored.scope && !matchesSubmissionScope(stored.scope, sourceScope))
+      throw new Error("图片消息所属工作区或会话已变更，请回到原工作区核对")
+    const expected = stored.digest.startsWith("v3:") ? digest : stored.digest.startsWith("v2:")
+      ? "v2:" + submissionDigest(fingerprint) : submissionDigest([message, chatImages])
     if (stored.digest !== expected) throw new Error("同一消息已提交不同内容或图片")
-    return { replay: Promise.resolve(stored.receipt) }
   }
   if (pending) {
     if (pending.digest !== digest) throw new Error("同一消息已提交不同内容或图片")
     return { replay: pending.outcome }
   }
+  if (stored && (stored.phase !== "accepted" || !matchesSubmissionScope(stored.scope, sourceScope))) {
+    return { replay: Promise.resolve(stored.receipt) }
+  }
+
   const root = scope(threadId)
-  for (const ref of chatImages) assertImageInputOwner(threadId, ref.id, userMessageId)
+  const db = getDb()
+  const recovered = stored?.receipt
+  if (!stored) {
+    for (const ref of chatImages) assertImageInputOwner(threadId, ref.id, userMessageId)
+    db.run("INSERT INTO chat_image_messages (thread_id, message_id, request_digest, images_json) VALUES (?, ?, ?, ?)",
+      [threadId, userMessageId, digest, JSON.stringify({ submissionId: userMessageId, phase: "reserved", scope: sourceScope, images: [] })])
+  }
   let settle!: (receipt?: ChatImageReceipt) => void
   const outcome = new Promise<ChatImageReceipt | undefined>(resolve => { settle = resolve })
   pendingImageSubmissions.set(key, { digest, outcome, threadId, assetIds: chatImages.map(ref => ref.id) })
-  const release = () => {
-    if (pendingImageSubmissions.get(key)?.outcome === outcome) {
-      pendingImageSubmissions.delete(key)
-      for (const ref of chatImages) {
-        void removeUnownedImage(threadId, root, ref.id).catch(error =>
-          console.warn("[ChatImages] Unable to release staged image", error?.code))
-      }
-    }
-    settle()
+  let phase: SubmissionPhase = recovered ? "accepted" : "reserved"
+  let approved = recovered
+  let hookStarted = false
+  function transition(next: SubmissionPhase, receipt?: ChatImageReceipt) {
+    if (pendingImageSubmissions.get(key)?.outcome !== outcome ||
+        !matchesSubmissionScope(sourceScope, currentSubmissionScope(threadId)))
+      throw new Error("图片消息所属工作区或会话已变更")
+    const payload = { ...(receipt ?? approved ?? { submissionId: userMessageId, images: [] }), scope: sourceScope, phase: next }
+    db.run(`UPDATE chat_image_messages SET images_json=? WHERE thread_id=? AND request_digest=?
+      AND json_extract(images_json, '$.submissionId')=? AND json_extract(images_json, '$.phase')=?`,
+      [JSON.stringify(payload), threadId, digest, userMessageId!, phase])
+    if (db.getRowsModified() !== 1) throw new Error("图片消息接纳状态已变更，请刷新会话")
+    phase = next
   }
   return { owner: {
+    recovered,
+    beginHook() {
+      if (!matchesSubmissionScope(sourceScope, currentSubmissionScope(threadId)))
+        throw new Error("图片消息所属工作区或会话已变更")
+      hookStarted = true
+    },
+    reject() { if (phase === "reserved") transition("rejected") },
     accept(preparedText, images) {
-      if (scope(threadId) !== root || pendingImageSubmissions.get(key)?.outcome !== outcome)
-        throw new Error("图片消息所属会话已变更")
+      if (recovered) {
+        if (!matchesSubmissionScope(sourceScope, currentSubmissionScope(threadId)))
+          throw new Error("图片消息所属工作区或会话已变更")
+        return
+      }
+      if (phase !== "reserved") throw new Error("图片消息所属会话已变更")
       for (const image of images) assertImageInputOwner(threadId, image.id, userMessageId)
-      const db = getDb()
-      let receipt: ChatImageReceipt
+      const receipt = { submissionId: userMessageId, preparedText, images }
       db.run("SAVEPOINT accept_chat_image_submission")
       try {
-        receipt = writeImageReceipt(threadId, userMessageId, digest, {
-          submissionId: userMessageId, preparedText, images
-        })
+        transition("accepted", receipt)
         db.run("DELETE FROM chat_image_input_owners WHERE thread_id=? AND message_id=?", [threadId, userMessageId])
         db.run("DELETE FROM chat_image_input_owners WHERE thread_id=? AND message_id='' AND asset_id IN (SELECT value FROM json_each(?))",
           [threadId, JSON.stringify(chatImages.map(ref => ref.id))])
         db.run("RELEASE accept_chat_image_submission")
+        approved = receipt
       } catch (error) {
         db.run("ROLLBACK TO accept_chat_image_submission")
         db.run("RELEASE accept_chat_image_submission")
+        phase = "reserved"
         throw error
       }
-      settle(receipt)
-      release()
     },
-    release
+    start() {
+      if (!matchesSubmissionScope(sourceScope, currentSubmissionScope(threadId)))
+        throw new Error("图片消息所属工作区或会话已变更")
+      if (phase === "running") return
+      if (phase !== "accepted") throw new Error("图片尚未接纳，无法启动")
+      transition("running")
+    },
+    finish(outcome) {
+      if (outcome === "unknown" || !matchesSubmissionScope(sourceScope, currentSubmissionScope(threadId))) return
+      if (phase === "reserved" && outcome === "error") transition("rejected")
+      if (phase === "running" || (phase === "accepted" && outcome === "error"))
+        transition(outcome === "success" ? "succeeded" : "failed")
+    },
+    release() {
+      if (pendingImageSubmissions.get(key)?.outcome !== outcome) return
+      try {
+        if (phase === "reserved" && !hookStarted && matchesSubmissionScope(sourceScope, currentSubmissionScope(threadId)))
+          transition("rejected")
+      } finally {
+        pendingImageSubmissions.delete(key)
+        settle(approved)
+        for (const ref of chatImages) {
+          void removeUnownedImage(threadId, root, ref.id).catch(error =>
+            console.warn("[ChatImages] Unable to release staged image", error?.code))
+        }
+      }
+    }
   } }
 }
 
 export function boundChatImages(threadId: string, messageId: string): SubmittedChatImage[] {
-  return storedImageSubmission(threadId, messageId)?.receipt.images ?? []
+  return boundChatImageReceipt(threadId, messageId)?.images ?? []
+}
+
+/** null denotes a durable reservation with no approved input. */
+export function chatImageHistoryProjection(threadId: string, messageId: string): ChatImageReceipt | null | undefined {
+  const record = storedImageSubmission(threadId, messageId)
+  return record && approvedHistory(record, currentSubmissionScope(threadId))
+}
+
+export function getChatImageHistoryProjections(threadId: string, ids: readonly string[]) {
+  const results = new Map<string, ChatImageReceipt | null>()
+  if (!ids.length) return results
+  const rows = getDb().exec(`SELECT message_id, images_json FROM chat_image_messages
+    WHERE thread_id=? AND message_id IN (SELECT value FROM json_each(?))`, [threadId, JSON.stringify(ids)])[0]?.values ?? []
+  const current = rows.length ? currentSubmissionScope(threadId) : undefined
+  for (const [id, json] of rows) {
+    results.set(String(id), approvedHistory(parseStoredReceipt(json), current))
+  }
+  return results
 }
 
 export function boundChatImageReceipt(threadId: string, messageId: string): ChatImageReceipt | undefined {
-  return storedImageSubmission(threadId, messageId)?.receipt
+  return chatImageHistoryProjection(threadId, messageId) ?? undefined
 }
 
 export function bindBotChatImages(threadId: string, messageId: string, original: string,
@@ -316,18 +486,32 @@ export function bindBotChatImages(threadId: string, messageId: string, original:
 }
 
 export async function copyBoundChatImages(source: string, target: string, messageId: string) {
-  const receipt = boundChatImageReceipt(source, messageId)
-  if (!receipt?.images.length || receipt.source === "bot") return
-  const refs = receipt.images
-  const root = scope(target)
-  await mkdir(root, { recursive: true, mode: 0o700 })
-  for (const ref of refs) {
-    if (!validId.test(ref.id)) throw new Error("图片引用无效")
-    await copyFile(join(scope(source), ref.id + ".webp"), join(root, ref.id + ".webp"))
+  const receipt = chatImageHistoryProjection(source, messageId)
+  if (receipt === undefined || receipt?.source === "bot") return
+  if (receipt === null) {
+    const digest = "omitted:" + submissionDigest([source, messageId])
+    const json = JSON.stringify({ phase: "rejected", images: [] })
+    getDb().run("INSERT OR IGNORE INTO chat_image_messages VALUES (?, ?, ?, ?)", [target, messageId, digest, json])
+    return
   }
-  writeImageReceipt(target, messageId, "fork:" + submissionDigest([source, messageId, refs]), {
-    preparedText: receipt.preparedText, images: refs
-  })
+  const refs = receipt.images
+  if (refs.some(ref => !validId.test(ref.id))) throw new Error("图片引用无效")
+  const root = scope(target)
+  const sourceRoot = scope(source)
+  // A startup sweep may run between the first copy and committing the fork's receipt.
+  const release = refs.map(ref => holdImageFile(target, root, ref.id))
+  try {
+    if (refs.length) await mkdir(root, { recursive: true, mode: 0o700 })
+    for (const ref of refs) {
+      await copyFile(join(sourceRoot, ref.id + ".webp"), join(root, ref.id + ".webp"))
+    }
+    if (scope(target) !== root || scope(source) !== sourceRoot) throw new Error("分叉会话已变更")
+    writeImageReceipt(target, messageId, "fork:" + submissionDigest([source, messageId, refs]), {
+      preparedText: receipt.preparedText, images: refs
+    })
+  } finally {
+    await Promise.all(release.map(finish => finish()))
+  }
 }
 
 export function captureImageScopeCleanup(threadId: string) {
@@ -345,9 +529,9 @@ export async function sweepChatImageStorage() {
   const folders = entries.filter(entry => entry.isDirectory() && /^[a-f0-9]{64}$/.test(entry.name))
   if (!folders.length) return
   const rows = getDb().exec("SELECT thread_id, created_at, metadata FROM threads")[0]?.values ?? []
-  const live = new Set(rows.map(([id, created, metadata]) => imageDirectoryName(String(id), {
+  const live = new Map(rows.map(([id, created, metadata]) => [imageDirectoryName(String(id), {
     created_at: Number(created), metadata: typeof metadata === "string" ? metadata : null
-  })))
+  }), String(id)] as const))
   for (const folder of folders) {
     const path = join(root, folder.name)
     if (!live.has(folder.name)) {
@@ -355,6 +539,11 @@ export async function sweepChatImageStorage() {
       continue
     }
     for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".webp") && validId.test(entry.name.slice(0, -5))) {
+        const id = entry.name.slice(0, -5)
+        await removeUnownedImage(live.get(folder.name)!, path, id)
+        continue
+      }
       if (!entry.isFile() || !entry.name.endsWith(".tmp") || !validId.test(entry.name.slice(0, -4))) continue
       const file = join(path, entry.name)
       const info = await stat(file).catch(() => undefined)

@@ -9,7 +9,7 @@ import type { ThreadActions } from "./thread-context"
 import { getQueuedBotMessageInput, getQueuedModelContent } from "./queued-message-content"
 import { canonicalBotMessageInput } from "../../../shared/bots/message-mentions"
 import { botErrorMessage } from "./bot-error-message"
-import type { FileAttachment } from "../../../shared/file-attachment"
+import { attachmentFallbackText, type FileAttachment } from "../../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
 import { botInputFileIds } from "../../../shared/bots/input-files"
 import type { BotSkillSelection } from "../../../shared/bots/skill-selection"
@@ -57,7 +57,7 @@ export function queueBotChatDraft(
   const inputFileIds = botInputFileIds(attachments)
   const draft: QueuedMessage = {
     id: crypto.randomUUID(),
-    text: text.trim() || (attachments.length ? "请分析以下文件内容。" : ""),
+    text: text.trim() || attachmentFallbackText(attachments),
     ...buildAttachmentMessageParts(attachments, true),
     ...(inputFileIds.length ? { botInputFileIds: inputFileIds } : {}),
     created_at: now,
@@ -155,7 +155,17 @@ export class BotDraftSender {
       else this.clearSettledError()
     })
   }
-  private async accepted(draft: QueuedMessage): Promise<boolean> {
+  private restoreRejectedImageDraft(draft: QueuedMessage, detail?: string): void {
+    if (!this.same(draft)) return
+    const id = crypto.randomUUID()
+    this.queue.updateQueuedMessage(draft.id, { id, handoffRequestedAt: undefined }, error => {
+      if (error) { this.reportDraftError(draft, error); return }
+      this.failedDraftId = id
+      this.report((detail || "图片消息未通过接纳") + "。原文与附件已保留，调整后可重新发送。")
+    }, true)
+  }
+
+  private async accepted(draft: QueuedMessage, detail?: string): Promise<boolean> {
     const check = await checkFor(draft)
     const receipt = (await this.client.requestReceipts(this.botId, [check])).find(
       (item) => item.requestId === draft.id
@@ -163,6 +173,10 @@ export class BotDraftSender {
     if (!receipt) throw new Error("未收到有效的发送回执，请稍后重试。")
     if (receipt.state === "accepted") {
       this.acknowledge(draft)
+      return true
+    }
+    if (receipt.state === "rejected") {
+      this.restoreRejectedImageDraft(draft, detail)
       return true
     }
     if (receipt.state === "conflict")
@@ -297,7 +311,7 @@ export class BotDraftSender {
       } catch (error) {
         // Main may have committed before the transport failed. Do not infer absence from an exception.
         try {
-          if (await this.accepted(draft)) return
+          if (await this.accepted(draft, botErrorMessage(error))) return
         } catch (receiptError) {
           this.reportDraftError(draft, `${botErrorMessage(receiptError)} 原消息已保留。`)
           return
@@ -332,6 +346,7 @@ export class BotDraftSender {
           if (this.sending.has(draft.id) || !this.same(draft)) continue
           const state = receipts.find((receipt) => receipt.requestId === draft.id)?.state
           if (state === "accepted") this.acknowledge(draft)
+          else if (state === "rejected") this.restoreRejectedImageDraft(draft)
           else if (state === "conflict")
             this.reportDraftError(draft, "待确认消息与已接收记录不一致，请先核对会话记录。")
           // Absent or unknown stays parked. Reopening a window never reruns side effects.

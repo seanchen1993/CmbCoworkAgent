@@ -1014,9 +1014,11 @@ export interface ThreadActions {
   updateQueuedMessage: (
     messageId: string,
     updates: Partial<QueuedMessage>,
-    onPersist?: (error: string | null) => void
+    onPersist?: (error: string | null) => void,
+    replaceRejectedBotId?: true
   ) => void
   deleteQueuedMessage: (messageId: string, onPersist?: (error: string | null) => void) => void
+  replaceQueuedImage: (original: QueuedMessage, replacement: QueuedMessage) => string | null
   reorderQueuedMessages: (orderedIds: string[]) => void
   promoteQueuedMessage: (messageId: string) => void
   setQueueAutoDrainSuppressed: (suppressed: boolean) => void
@@ -1124,6 +1126,9 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     // malformed; the Bot sender rejects it instead of silently dropping files.
     ...(item.botInputFileIds !== undefined ? { botInputFileIds: item.botInputFileIds } : {}),
     ...(Array.isArray(item.chatImages) ? { chatImages: item.chatImages } : {}),
+    ...(item.imageDelivery && typeof item.imageDelivery.workspacePath === "string" &&
+      typeof item.imageDelivery.incarnation === "string" && typeof item.imageDelivery.source === "string"
+      ? { imageDelivery: item.imageDelivery } : {}),
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:
@@ -5922,6 +5927,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, (state) => {
             const next = [...state.queuedMessages, message]
             error = persistQueuedMessages(threadId, next)
+            if (message.imageDelivery && error) return {}
             return { queuedMessages: next }
           })
           onPersist?.(error)
@@ -5941,7 +5947,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             (message) => message.id === messageId
           )
         },
-        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>, onPersist) => {
+        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>, onPersist, replaceRejectedBotId) => {
           let error: string | null = "会话已关闭，消息未发送。"
           updateThreadState(threadId, (state) => {
             const next = state.queuedMessages.map((message) =>
@@ -5949,12 +5955,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 ? {
                     ...message,
                     ...updates,
-                    id: message.id,
+                    id: replaceRejectedBotId && updates.id && message.handoffRequestedAt ? updates.id : message.id,
                     updated_at: new Date()
                   }
                 : message
             )
             error = persistQueuedMessages(threadId, next)
+            if ((replaceRejectedBotId || updates.imageDelivery) && error) return {}
             return { queuedMessages: next }
           })
           onPersist?.(error)
@@ -5964,9 +5971,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, (state) => {
             const next = state.queuedMessages.filter((message) => message.id !== messageId)
             error = persistQueuedMessages(threadId, next)
+            if (error && state.queuedMessages.some(message => message.id === messageId && message.imageDelivery)) return {}
             return { queuedMessages: next }
           })
           onPersist?.(error)
+        },
+        replaceQueuedImage: (original, replacement) => {
+          let error: string | null = "图片消息已变更，请重新打开编辑。"
+          updateThreadState(threadId, state => {
+            if (!state.queuedMessages.includes(original)) return {}
+            const next = state.queuedMessages.map(item => item === original ? replacement : item)
+            error = persistQueuedMessages(threadId, next)
+            return error ? {} : { queuedMessages: next }
+          })
+          return error
         },
         reorderQueuedMessages: (orderedIds: string[]) => {
           updateThreadState(threadId, (state) => {

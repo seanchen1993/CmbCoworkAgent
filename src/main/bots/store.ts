@@ -8,7 +8,8 @@ import type { AgentRunTerminal } from "../agent/agent-run-service"
 import type { BotConversationToolSource, BotThreadRenameInput, BotThreadSummary } from "../../shared/bots/thread-history"
 import type { BotWorkDeletionIdentity, BotWorkDeletionRecord } from "./work-deletion"
 import type { BotInputHistoryResolver } from "./attachment-storage"
-import { BOT_INPUT_FILE_ID_PATTERN, parseBotInputFileIds, type BotInputFile } from "../../shared/bots/input-files"
+import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
+import { BOT_INPUT_FILE_ID_PATTERN, isBotImageInput, parseBotInputFileIds, type BotInputFile } from "../../shared/bots/input-files"
 import type { FileAttachment } from "../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
 import {
@@ -3775,6 +3776,21 @@ export class BotStore {
     })
   }
 
+  managedImageSnapshotPaths(root: string): string[] {
+    const prefix = root + sep
+    return this.rows(`SELECT json_extract(payload,'$.filePath') AS path FROM bot_input_files
+      WHERE instr(json_extract(payload,'$.filePath'),?)=1
+      UNION SELECT json_extract(payload,'$.file.filePath') AS path FROM bot_group_image_inputs
+      WHERE instr(json_extract(payload,'$.file.filePath'),?)=1`, [prefix, prefix]).map(row => String(row.path))
+  }
+
+  retainImageSelection(botId: string, groupId: string | undefined, workId: string | undefined,
+    inputs: import("./image-import").PrivateImageInput[]): FileAttachment[] {
+    return this.transaction(() => inputs.map(({ attachment, path }) => groupId
+      ? this.retainGroupImage(groupId, attachment, path)
+      : this.retainInputFile(botId, attachment, path, workId)))
+  }
+
   retainGroupImage(groupId: string, attachment: FileAttachment, snapshotPath: string): FileAttachment {
     const group = this.getGroup(groupId)
     if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除")
@@ -3907,6 +3923,12 @@ export class BotStore {
       }
       return this.enqueue(input)
     })
+  }
+
+  acceptDesktopImageInput(taskId: string): void {
+    this.db.run(`UPDATE bot_tasks SET origin_json=json_set(origin_json,'$.imageAdmission','accepted')
+      WHERE id=? AND state IN ('running','waiting_user') AND json_extract(origin_json,'$.imageAdmission')='pending'`, [taskId])
+    if (this.db.getRowsModified()) this.changed()
   }
 
   beginInputPreparation(taskId: string): void {
@@ -4271,8 +4293,11 @@ export class BotStore {
       if (inputFileIds.length && (origin.kind !== "user" || mockSource ||
           (targetWork && targetWork.audienceKey !== "desktop")))
         throw new BotError("INVALID_INPUT", "此附件引用只属于原私聊请求")
-      if (inputFileIds.length)
-        this.desktopInputFiles(input.botId, inputFileIds, input.skillDraftFromMain ? undefined : input.workId)
+      const files = inputFileIds.length
+        ? this.desktopInputFiles(input.botId, inputFileIds, input.skillDraftFromMain ? undefined : input.workId) : []
+      if (origin.kind === "user" && files.some(isBotImageInput) &&
+          !selectedMainBotSkill({ workId: input.workId, origin: { ...origin, explicitSkill }, message: input.message }))
+        origin = { ...origin, imageAdmission: "pending" }
       if (mentions.length && (origin.kind !== "user" || mockSource))
         throw new BotError("INVALID_INPUT", "仅本机用户消息可以提及 Bot")
       if (mockSource) {
@@ -4863,9 +4888,10 @@ export class BotStore {
     // A single SQLite read sees task pruning and receipt insertion atomically.
     const rows = this.rows(
       `SELECT request_id,bot_id,COALESCE(json_extract(origin_json,'$.groupId'),'') AS group_id,
-        message,NULL AS message_hash,work_id,origin_json FROM bot_tasks WHERE request_id IN (${placeholders})
-       UNION ALL SELECT request_id,bot_id,COALESCE(group_id,''),NULL,message_hash,work_id,NULL
-        FROM bot_task_receipts WHERE request_id IN (${placeholders})`,
+        message,NULL AS message_hash,work_id,origin_json,state FROM bot_tasks WHERE request_id IN (${placeholders})
+       UNION ALL SELECT r.request_id,r.bot_id,COALESCE(r.group_id,''),NULL,r.message_hash,r.work_id,a.origin_json,a.state
+        FROM bot_task_receipts r LEFT JOIN bot_exchange_archive a ON a.request_id=r.request_id AND a.bot_id=r.bot_id
+        WHERE r.request_id IN (${placeholders})`,
       [...ids, ...ids]
     )
     const byId = new Map<string, typeof rows>()
@@ -4900,7 +4926,10 @@ export class BotStore {
                 )
                 .digest("hex") === messageHash
       })
-      return { requestId, state: ownsAll && sameMessage ? "accepted" : "conflict" }
+      if (!ownsAll || !sameMessage) return { requestId, state: "conflict" }
+      const preparing = matches.find(row => row.origin_json && JSON.parse(String(row.origin_json)).imageAdmission === "pending")
+      if (preparing) return { requestId, state: ["queued", "running", "waiting_user"].includes(String(preparing.state)) ? "absent" : "rejected" }
+      return { requestId, state: "accepted" }
     })
   }
 

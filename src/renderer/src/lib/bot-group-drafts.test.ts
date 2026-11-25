@@ -38,7 +38,7 @@ describe("durable group drafts", () => {
     const sendGroup = vi.fn().mockRejectedValueOnce(new Error("ACK lost")).mockResolvedValue(undefined)
     const client = { hostId: "local", sendGroup } as unknown as BotClient
     const images = [1, 2].map(i => ({
-      ...file, filename: "same.png", mimeType: "image/png",
+      ...file, filename: "same.png", filePath: "", mimeType: "image/png",
       botInputId: `input-00000000-0000-0000-0000-00000000000${i}`
     }))
     useBotGroupDrafts.getState().edit(key, { text: "compare", attachments: images, targets: ["a"] })

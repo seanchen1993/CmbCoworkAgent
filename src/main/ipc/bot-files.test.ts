@@ -1,8 +1,16 @@
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { IpcMain } from "electron"
 import type { LocalBotHost } from "../bots/host"
 
+const groupWorkspace = join("/test-data", "bots", "workspaces", "group-g")
+const imWorkspace = join("/test-data", "bots", "workspaces", "mock-im-binding")
+
 const fixture = vi.hoisted(() => ({
+  dataRoot: vi.fn(() => "/test-data"),
+  retainImageSelection: vi.fn(),
   getBot: vi.fn(),
   getGroupMember: vi.fn(),
   getGroup: vi.fn(),
@@ -34,9 +42,9 @@ vi.mock("electron", () => ({
   dialog: { showOpenDialog: fixture.open, showSaveDialog: fixture.save }
 }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: fixture.prepare }))
-vi.mock("../app-data-root", () => ({ getCmbCoworkAgentDataRoot: () => "/test-data" }))
+vi.mock("../app-data-root", () => ({ getCmbCoworkAgentDataRoot: fixture.dataRoot }))
 vi.mock("../bots/paths", () => ({
-  botDirectory: (root: string, kind: string, id: string) => `${root}/${kind}/${id}`
+  botDirectory: (root: string, kind: string, id: string) => join(root, kind, id)
 }))
 vi.mock("../bots/workspace-file", () => ({ resolveBotWorkspaceFile: fixture.resolve }))
 vi.mock("../bots/file-copy", () => ({
@@ -83,6 +91,7 @@ function register(source: "desktop" | "subframe" | "secondary" = "desktop") {
 }
 beforeEach(() => {
   vi.resetAllMocks()
+  fixture.dataRoot.mockReturnValue("/test-data")
   fixture.getBot.mockImplementation((id) => ({ id, threadId: `private-${id}`, archived: false }))
   fixture.getGroupMember.mockImplementation((_group, id) => fixture.getBot(id))
   fixture.getGroup.mockImplementation((id) => ({ id, memberIds: [] }))
@@ -117,25 +126,54 @@ beforeEach(() => {
 
 it.each(["private", "group"] as const)("issues an image receipt only to its %s owner", async scope => {
   const groupId = scope === "group" ? "g" : undefined
-  const root = groupId ? "/group" : "/private/a"
   const bytes = new Uint8Array([1, 2, 3]).buffer
-  fixture.destination.mockResolvedValue({ id: "shared/photo.png", path: root + "/shared/photo.png" })
-  fixture.stableOpen.mockResolvedValue({ size: 3, handle: { close: fixture.stableClose } })
-  fixture.retainGroupImage.mockImplementation((_group, _bot, attachment) => ({
-    ...attachment, botInputId: "input-22222222-2222-2222-2222-222222222222"
-  }))
-  await expect(register()("attach-bytes", "a", [{ fileName: "photo.png", bytes }], 500, groupId))
-    .resolves.toEqual([expect.objectContaining({ mimeType: "image/png", botInputId: expect.any(String) })])
-  const image = expect.objectContaining({ filename: "photo.png", mimeType: "image/png" })
-  const path = root + "/.bot-deliveries/hash/photo.png"
-  if (groupId) {
-    expect(fixture.retainGroupImage).toHaveBeenCalledWith(groupId, "a", image, path)
-    expect(fixture.retainInputFile).not.toHaveBeenCalled()
-  } else {
-    expect(fixture.retainInputFile).toHaveBeenCalledWith("a", image, path)
-    expect(fixture.retainGroupImage).not.toHaveBeenCalled()
-  }
-  expect(fixture.parse).not.toHaveBeenCalled()
+  const dir = await mkdtemp(join(tmpdir(), "bot-image-selection-"))
+  fixture.dataRoot.mockReturnValue(dir)
+  fixture.retainImageSelection.mockImplementation((_bot, _group, _work, inputs) =>
+    inputs.map((input: { attachment: object }) => ({ ...input.attachment,
+      botInputId: "input-22222222-2222-2222-2222-222222222222" })))
+  try {
+    const result = await register()("attach-bytes", "a", [{ fileName: "photo.png", bytes }], 500, groupId)
+    expect(result).toEqual([expect.objectContaining({ mimeType: "image/png", filePath: "", content: "" })])
+    const call = fixture.retainImageSelection.mock.calls[0]
+    expect(call.slice(0, 3)).toEqual(["a", groupId, undefined])
+    expect(await readFile(call[3][0].path)).toEqual(Buffer.from(bytes))
+    expect(await readdir(dir)).toEqual(["bot-image-inputs"])
+    expect(fixture.destination).not.toHaveBeenCalled()
+    expect(fixture.copyBytes).not.toHaveBeenCalled()
+    expect(fixture.parse).not.toHaveBeenCalled()
+    const bad = [{ fileName: "draft.png", bytes }, { fileName: "empty.png", bytes: new ArrayBuffer(0) }]
+    await expect(register()("attach-bytes", "a", bad, 500, groupId)).rejects.toThrow()
+    expect(await readdir(join(dir, "bot-image-inputs"))).toHaveLength(1)
+    expect(fixture.retainImageSelection).toHaveBeenCalledTimes(1)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+it("keeps picker, mixed group selection and unreferenced original cleanup in their own scopes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bot-mixed-image-"))
+  fixture.dataRoot.mockReturnValue(dir)
+  const photo = { fileName: "photo.png", bytes: new Uint8Array([1, 2, 3]).buffer }
+  const note = { fileName: "notes.md", bytes: new Uint8Array([35]).buffer }
+  const paths: string[] = []
+  fixture.retainImageSelection.mockImplementation((_bot, _group, _work, inputs) =>
+    inputs.map((input: { path: string; attachment: object }) => {
+      paths.push(input.path)
+      return { ...input.attachment, botInputId: "input-22222222-2222-2222-2222-222222222222" }
+    }))
+  try {
+    const invoke = register()
+    const mixed = await invoke("attach-bytes", "a", [photo, note, photo], 500, "g") as { mimeType: string }[]
+    expect(mixed.map(file => file.mimeType)).toEqual(["image/png", "text/markdown", "image/png"])
+    expect(fixture.copyBytes).toHaveBeenCalledTimes(1)
+    fixture.open.mockResolvedValueOnce({ canceled: false, filePaths: ["/selected/photo.png"] })
+    await invoke("attach", "a", 1, 500, "g")
+    expect(fixture.copy).not.toHaveBeenCalled()
+    const { sweepBotImageInputs } = await import("../bots/image-import")
+    await sweepBotImageInputs(() => [paths[0]])
+    await expect(readFile(paths[0])).resolves.toEqual(Buffer.from(photo.bytes))
+    await expect(readFile(paths[1])).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(readFile(paths[2])).rejects.toMatchObject({ code: "ENOENT" })
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
 it.each(["subframe", "secondary"] as const)("rejects image attachments from a %s sender before copying", async source => {
@@ -167,9 +205,9 @@ it("exports a retained IM group snapshot only through its owning Bot and binding
   const invoke = register()
   fixture.imGateway.binding.mockReturnValue({ binding: { botId: "a", kind: "group", state: "revoked" } })
   await expect(invoke("export-im", "a", "im-binding", "report.md")).resolves.toBe(true)
-  expect(fixture.resolve).toHaveBeenCalledWith("/test-data/bots/workspaces/mock-im-binding", "report.md", { allowAbsolute: true })
-  expect(fixture.exportCopy).toHaveBeenCalledWith("/test-data/bots/workspaces/mock-im-binding",
-    "/test-data/bots/workspaces/mock-im-binding/report.md", "/saved/report.md")
+  expect(fixture.resolve).toHaveBeenCalledWith(imWorkspace, "report.md", { allowAbsolute: true })
+  expect(fixture.exportCopy).toHaveBeenCalledWith(imWorkspace,
+    imWorkspace + "/report.md", "/saved/report.md")
   await expect(invoke("export-im", "other", "im-binding", "report.md")).rejects.toThrow("会话")
   fixture.imGateway.binding.mockReturnValue({ binding: { botId: "a", kind: "dm" } })
   await expect(invoke("export-im", "a", "im-binding", "report.md")).rejects.toThrow("会话")
@@ -203,7 +241,7 @@ it("permits real IM work files while preserving the simulated-channel restrictio
 describe("Bot file IPC group scope", () => {
   it("lists and pages retained empty-group files without resolving a member or execution thread", async () => {
     const call = register()
-    const workspace = "/test-data/bots/workspaces/group-g"
+    const workspace = groupWorkspace
     fixture.page.mockResolvedValueOnce({
       workspacePath: workspace,
       files: [{ path: "/report.md", is_dir: false }],
@@ -278,7 +316,7 @@ describe("Bot file IPC group scope", () => {
         fixture.page.mockImplementationOnce(async () => {
           revoke()
           return {
-            workspacePath: "/test-data/bots/workspaces/group-g",
+            workspacePath: groupWorkspace,
             files: [{ path: "/report.md" }],
             done: false
           }
@@ -291,7 +329,7 @@ describe("Bot file IPC group scope", () => {
   it("does not grant imports, composer attachments or sharing through empty-group read access", async () => {
     const call = register()
     fixture.page.mockResolvedValueOnce({
-      workspacePath: "/test-data/bots/workspaces/group-g",
+      workspacePath: groupWorkspace,
       files: [{ path: "/report.md" }],
       done: true
     })
@@ -346,7 +384,7 @@ describe("Bot file IPC group scope", () => {
 
   it("resolves a retained group's root without member or execution-thread access", async () => {
     const call = register()
-    expect(await call("group-workspace", "g")).toBe("/test-data/bots/workspaces/group-g")
+    expect(await call("group-workspace", "g")).toBe(groupWorkspace)
     expect(fixture.getGroup).toHaveBeenCalledWith("g")
     expect(fixture.getGroupMember).not.toHaveBeenCalled()
     expect(fixture.prepare).not.toHaveBeenCalled()
@@ -363,13 +401,13 @@ describe("Bot file IPC group scope", () => {
     })
     expect(await call("export-group", "g", "report.md")).toBe(true)
     expect(fixture.resolve).toHaveBeenCalledWith(
-      "/test-data/bots/workspaces/group-g",
+      groupWorkspace,
       "report.md",
       { allowAbsolute: true }
     )
     expect(fixture.exportCopy).toHaveBeenCalledWith(
-      "/test-data/bots/workspaces/group-g",
-      "/test-data/bots/workspaces/group-g/report.md",
+      groupWorkspace,
+      groupWorkspace + "/report.md",
       "/saved/report.md"
     )
     expect(fixture.getGroupMember).not.toHaveBeenCalled()

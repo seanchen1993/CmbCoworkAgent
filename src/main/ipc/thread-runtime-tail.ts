@@ -1,4 +1,4 @@
-import { boundChatImageReceipt } from "../chat-images"
+import { getChatImageHistoryProjections } from "../chat-images"
 import type { BaseMessage } from "@langchain/core/messages"
 import type { CheckpointTuple } from "@langchain/langgraph-checkpoint"
 import {
@@ -313,9 +313,11 @@ export async function getDurableRuntimeTail(
   const inputProjections = options.userInputProjections?.(
     persistedTail.filter(message => message.role === "user").map(message => message.id)
   )
+  const images = getChatImageHistoryProjections(threadId,
+    persistedTail.filter(message => message.role === "user").map(message => message.id))
   const acceptedTail = persistedTail.filter(message =>
-    message.role !== "user" || !inputProjections?.has(message.id) ||
-    Boolean(inputProjections.get(message.id)))
+    message.role !== "user" || (images.get(message.id) !== null &&
+    (!inputProjections?.has(message.id) || Boolean(inputProjections.get(message.id)))))
   return {
     checkpointTuple,
     messages: acceptedTail
@@ -328,14 +330,10 @@ export async function getDurableRuntimeTail(
           projected.additional_kwargs.cmb_visible_user_message = message.content
           projected.additional_kwargs[BOT_PREPARED_USER_REQUEST_KEY] = content
         }
-        if (projected && message.role === "user" && typeof content !== "string" &&
-          typeof message.content === "string" &&
-          (message.content.includes('media="image"') || message.content.includes("📎"))) {
-          const receipt = boundChatImageReceipt(threadId, message.id)
-          if (receipt?.images.length && receipt.source !== "bot") {
-            projected.content = receipt.preparedText ?? message.content
-            projected.additional_kwargs.cmb_chat_images = receipt.images
-          }
+        const receipt = message.role === "user" ? images.get(message.id) : undefined
+        if (projected && receipt && receipt.source !== "bot" && typeof content !== "string") {
+          if (receipt.preparedText !== undefined) projected.content = receipt.preparedText
+          if (receipt.images.length) projected.additional_kwargs.cmb_chat_images = receipt.images
         }
         return projected
       })

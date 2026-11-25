@@ -1,3 +1,4 @@
+import { sweepBotImageInputs } from "./image-import"
 import { getThreadCore, getThreadMessagesByIds, getThreadMessagesAfterAnyId } from "../db"
 import { pendingNotificationScheduler } from "../agent/pending-notification-scheduler"
 import { createBotNotificationDispatcher } from "./notification-dispatch"
@@ -320,6 +321,9 @@ export function getLocalBotHost(): LocalBotHost {
           return context
         }
       )
+    const reclaimImageInputs = () => sweepBotImageInputs(root => store.managedImageSnapshotPaths(root))
+      .catch(error => console.warn("[Bots] Image selection cleanup failed", error?.code))
+    void reclaimImageInputs()
     host = new LocalBotHost(
       store,
       {
@@ -330,6 +334,7 @@ export function getLocalBotHost(): LocalBotHost {
           summaries
         ),
         ...botWorkApprovals,
+        reclaimImageInputs,
         validateSkillSelection: async (selection) => {
           const { validateExplicitSkillReference } = await import("../agent/standard-thread-turn")
           const error = await validateExplicitSkillReference(selection, undefined, undefined, true)

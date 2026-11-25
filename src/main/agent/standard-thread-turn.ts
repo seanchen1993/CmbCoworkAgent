@@ -46,7 +46,7 @@ import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
 import { requestedBotSkill } from "../bots/named-skill"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
-import { resolveModel, type RoutingContext, type RoutingResult } from "../routing"
+import { resolveImageRoutingContinuity, resolveModel, type RoutingContext, type RoutingResult } from "../routing"
 import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
 import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { intersectSkillNames } from "../../shared/skill-selection"
@@ -779,15 +779,18 @@ export async function resolveStandardTurnRouting(
   if (input.requiresImages) {
     const pinned = Boolean(managedModelId) || (input.routingMode ?? getGlobalRoutingMode()) === "pinned"
     const eligible = eligibleChatImageModels(managedModelId || input.requestedModelId, pinned)
-    const first = eligible[0]
+    const continuity = !pinned && input.taskSource === "chat" && input.threadId
+      ? resolveImageRoutingContinuity(input.threadId, input.continuation,
+        new Set(eligible.filter(config => config != null).map(toModelRef))) : undefined
+    const first = (continuity && eligible.find(config => config && toModelRef(config) === continuity.modelId)) || eligible[0]
     if (!first) throw new Error("当前没有可用的视觉模型，请切换到支持图片输入的模型")
     const effectiveModelId = toModelRef(first)
     const primaryTier = first.tier ?? "premium"
-    const orderedModelIds = [...new Set(eligible.flatMap(config =>
+    const orderedModelIds = [...new Set([first, ...eligible].flatMap(config =>
       config && (config === first || config.tier !== "economy") ? [toModelRef(config)] : []))]
     return { effectiveModelId, primaryTier, orderedModelIds, result: {
-      resolvedModelId: effectiveModelId, resolvedTier: primaryTier, routeReason: "image-input",
-      fallbackChain: orderedModelIds.slice(1), layer: pinned ? "pinned" : "layer1"
+      resolvedModelId: effectiveModelId, resolvedTier: primaryTier, routeReason: continuity?.reason ?? "image-input",
+      fallbackChain: orderedModelIds.slice(1), layer: pinned ? "pinned" : continuity ? "thread" : "layer1"
     } }
   }
   if (managedModelId) {

@@ -381,6 +381,12 @@ export interface Message {
  *                               current run (awaiting injection); cleared on run end
  */
 export interface QueuedMessage {
+  imageDelivery?: {
+    workspacePath: string
+    incarnation: string
+    source: string
+    frozen?: { message: string; mode: "normal" | "coordinator" | "workflow"; modelId: string }
+  }
   chatImages?: import("../../shared/file-attachment").SubmittedChatImage[]
   id: string
   text: string

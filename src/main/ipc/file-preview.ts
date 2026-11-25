@@ -1,7 +1,8 @@
 import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
 import path from "node:path"
 import { assertChatAttachmentWindow } from "./chat-attachment-window"
-import type { ChatImageOwnerRequest } from "../../shared/file-attachment"
+import type { ChatImageOwnerRequest, ChatImageStatusRequest } from "../../shared/file-attachment"
+import { threadIncarnationKey } from "../../shared/thread-incarnation"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   WORKSPACE_FILE_PREVIEW_MAX_LANE_LENGTH,
@@ -307,6 +308,7 @@ export function registerWorkspaceFilePreviewHandlers(
   ipcMain: IpcMain, getMainWindow: () => BrowserWindow | null = () => null
 ): void {
   ipcMain.handle("workspace:attachChatImage", async (event, request) => {
+    assertChatAttachmentWindow(event, getMainWindow)
     const { stageWorkspaceChatImage } = await import("../workspace-chat-image")
     return stageWorkspaceChatImage(request, () => { assertChatAttachmentWindow(event, getMainWindow) })
   })
@@ -316,9 +318,15 @@ export function registerWorkspaceFilePreviewHandlers(
     if (!request || !(request.workspacePath === null || typeof request.workspacePath === "string"))
       throw new Error("图片草稿所属工作区无效")
     const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
-    const { discardChatDraftImage, pinQueuedChatImages, unpinQueuedChatImages } = await import("../chat-images")
-    const { root, assertCurrent } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
-    if (request.action === "pin") return pinQueuedChatImages(request.threadId, root, request.messageId, request.ids)
+    const { discardChatDraftImage, pinQueuedChatImages, unpinQueuedChatImages, getChatImageSubmissionStatus } = await import("../chat-images")
+    const { root, assertCurrent, identity } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
+    if (request.incarnation !== undefined && request.incarnation !== threadIncarnationKey(identity))
+      throw new Error("图片所属会话已变更")
+    if (request.action === "pin") {
+      if (request.previousMessageId && getChatImageSubmissionStatus(request.threadId, request.previousMessageId) !== "rejected")
+        throw new Error("原消息尚未明确拒收，请先核对记录")
+      return pinQueuedChatImages(request.threadId, root, request.messageId, request.ids, request.previousMessageId)
+    }
     if (request.action === "unpin") return unpinQueuedChatImages(request.threadId, request.messageId, root)
     if (request.action !== "discard" || !Array.isArray(request.ids) || request.ids.length > 3)
       throw new Error("图片草稿请求无效")
@@ -326,6 +334,18 @@ export function registerWorkspaceFilePreviewHandlers(
       assertCurrent()
       await discardChatDraftImage(request.threadId, root, id)
     }
+  })
+  ipcMain.handle("workspace:chatImageSubmissionStatus", async (event, request: ChatImageStatusRequest) => {
+    const assertWindow = () => { assertChatAttachmentWindow(event, getMainWindow) }
+    assertWindow()
+    if (!request || typeof request.messageId !== "string" || !/^[0-9a-f-]{36}$/i.test(request.messageId) ||
+        !(typeof request.workspacePath === "string" || request.workspacePath === null))
+      throw new Error("图片消息身份无效")
+    const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
+    const { getChatImageSubmissionStatus } = await import("../chat-images")
+    const { identity } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
+    if (threadIncarnationKey(identity) !== request.incarnation) throw new Error("图片所属会话已变更")
+    return getChatImageSubmissionStatus(request.threadId, request.messageId)
   })
   ipcMain.handle(
     "workspace:authorizeToolFilePreview",

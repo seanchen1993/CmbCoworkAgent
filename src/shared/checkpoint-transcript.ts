@@ -641,15 +641,16 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
 }
 
-export function checkpointHasChatImages(checkpoint: unknown): boolean {
+export function checkpointHasChatImages(checkpoint: unknown, botMessageId?: string): boolean {
   const channels = isRecord(checkpoint) ? checkpoint.channel_values : undefined
   const event = isRecord(channels) ? channels._summarizationEvent : undefined
   const cutoff = isRecord(event) && typeof event.cutoffIndex === "number" &&
     Number.isSafeInteger(event.cutoffIndex) && event.cutoffIndex >= 0 ? event.cutoffIndex : 0
-  return getCheckpointMessages(checkpoint).slice(cutoff).some(message => {
+  return getCheckpointMessages(checkpoint).slice(cutoff).some((message, index) => {
     if (!isRecord(message) || getMessageRole(message) !== "user") return false
     const metadata = getAdditionalKwargs(message)
-    if (metadata?.cmb_chat_images_source === "bot") return false
+    const botInput = metadata?.cmb_chat_images_source === "bot"
+    if (botMessageId ? !botInput || getMessageId(message, index + cutoff) !== botMessageId : botInput) return false
     const images = metadata?.cmb_chat_images
     return Array.isArray(images) && images.length > 0
   })

@@ -1,5 +1,6 @@
 import { createChatImageMiddleware, type ChatImageMessageScope } from "./chat-image-middleware"
-import { imageRequestRejection } from "../models/image-request"
+import { captureDesktopImageAccess } from "../chat-images"
+import { inspectImageRequest } from "../models/image-request"
 import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
 import { createBotDispatchFeedbackMiddleware } from "./bot-dispatch-feedback"
 import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
@@ -65,6 +66,7 @@ import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../mod
 import type { IdleModelEnvironment, ModelTransport } from "../../shared/model-catalog"
 import {
   createCmbSummarizationMiddleware,
+  isCmbContextOverflow,
   isGatewayContextOverflow
 } from "./context-summarization-middleware"
 import {
@@ -4315,10 +4317,9 @@ function createRetryingFetch(
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
   return async (input, init) => {
-    const imageError = imageRequestRejection(init?.body, capture?.allowImages === true)
-    if (imageError) return imageError
-    const validateAccess = typeof init?.body === "string" && init.body.includes('"image_url"')
-      ? capture?.validateImageAccess : undefined
+    const imageRequest = inspectImageRequest(init?.body, capture?.allowImages === true)
+    if (imageRequest?.rejection) return imageRequest.rejection
+    const validateAccess = imageRequest ? capture?.validateImageAccess : undefined
     const parentSignal = (init?.signal ?? undefined) as AbortSignal | undefined
     let lastError: unknown = undefined
 
@@ -4327,20 +4328,32 @@ function createRetryingFetch(
     // gateway codes (480/485/…) or non-OpenAI bodies this clone is the only place
     // the real reason survives. Called both for non-retryable statuses and when
     // the retry budget is exhausted on a retryable status (432/433/429/5xx).
-    const prepareErrorResponse = async (res: Response): Promise<Response> => {
-      const imageRequest = typeof init?.body === "string" && init.body.includes('"image_url"')
-      if (res.status !== 485 && !hooks?.onFetchError && !imageRequest) return res
-      const requestId = res.headers.get("x-request-id") ?? undefined
+    const prepareErrorResponse = async (res: Response, upstreamImage = Boolean(imageRequest)): Promise<Response> => {
+      if (res.status !== 485 && !hooks?.onFetchError && !upstreamImage) return res
       let rawBody: string | undefined
       try {
         rawBody = await res.clone().text()
-        if (/data:image\//i.test(rawBody)) {
-          rawBody = "[image request error]"
-          res = Response.json({ error: { message: rawBody } }, { status: res.status })
-        }
       } catch {
-        // The SDK still receives the original response when its body cannot be read.
+        // The SDK can still consume the original response on the ordinary text path.
       }
+      if (upstreamImage || (rawBody && /data:image\//i.test(rawBody))) {
+        // Some gateways echo the bare encoded pixels without a data URL prefix.
+        // Keep the recovery signal and numeric limit, never the upstream error text.
+        const failure = { status: res.status, responseBody: rawBody }
+        const overflow = isCmbContextOverflow(failure)
+        const limit = overflow ? contextWindowFromError(rawBody) : undefined
+        const message = overflow
+          ? "当前任务上下文超过最大限度" + (limit ? ` (maximum context length is ${limit} tokens)` : "")
+          : "图片请求失败（HTTP " + res.status + "）"
+        const code = overflow ? "context_length_exceeded" : "image_request_failed"
+        const safeBody = JSON.stringify({ error: { code, message } })
+        hooks?.onFetchError?.({ status: res.status, rawBody: safeBody })
+        return new Response(safeBody, {
+          status: res.status,
+          headers: { "content-type": "application/json" }
+        })
+      }
+      const requestId = res.headers.get("x-request-id") ?? undefined
       hooks?.onFetchError?.({ status: res.status, requestId, rawBody })
       return res.status === 485 && rawBody ? normalizeLailasInputOverflow(res, rawBody) : res
     }
@@ -4355,7 +4368,7 @@ function createRetryingFetch(
       // Backoff can cross the closing boundary even on an already created model.
       const rejection = beforeAttempt?.()
       if (rejection) {
-        const response = await prepareErrorResponse(rejection)
+        const response = await prepareErrorResponse(rejection, false)
         if (attempt > 1) hooks?.onRetrySuccess?.()
         return response
       }
@@ -4398,7 +4411,7 @@ function createRetryingFetch(
         // turn ("Received empty response from chat model call.") can be traced
         // back to the exact upstream response that produced it.
         console.log(
-          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
+          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${imageRequest ? "omitted" : res.headers.get("content-type") ?? "unknown"}, request-id=${imageRequest ? "omitted" : res.headers.get("x-request-id") ?? "unknown"}`
         )
 
         // 580 also represents context overflow. Let summarization reduce the
@@ -4848,6 +4861,7 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 }
 
 export interface CreateAgentRuntimeOptions {
+  validateChatDocument?: () => void
   /** Optional working-context budget; does not change the provider output limit. */
   contextBudgetTokens?: number
   /** Internal inheritance override; absent on top-level runs to capture the global setting. */
@@ -5300,8 +5314,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const modelPurpose = options.botCommunication && options.botSkillDispatch && !options.botResultReport
     ? "bot-skill-dispatch" : "agent"
   const activeImageScope = options.chatImageMessageScope
-  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId,
-    typeof activeImageScope === "object" ? activeImageScope.validateAccess : undefined)
+  const validateMediaScope = activeImageScope === "desktop" && threadId
+    ? captureDesktopImageAccess(threadId)
+    : typeof activeImageScope === "object" ? activeImageScope.validateAccess : undefined
+  const validateDocument = options.validateChatDocument
+  const validateImageAccess = activeImageScope === "desktop" && validateDocument
+    ? () => { validateDocument(); validateMediaScope?.() }
+    : validateMediaScope
+  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId, validateImageAccess)
   const contextCompactionModel = getModelInstance(
     customConfig,
     retryHooks,

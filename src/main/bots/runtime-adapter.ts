@@ -19,7 +19,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { lstatSync, realpathSync } from "node:fs"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { createThread, getThreadCore, updateThread } from "../db"
-import { isBotImageInput, prepareBotInputImages } from "./input-images"
+import { boundChatImageReceipt } from "../chat-images"
+import { isBotImageInput, prepareBotInputImages, botBoundImageIds } from "./input-images"
 import { startAgentRun, steerAgentRun, type AgentRunTerminal } from "../agent/agent-run-service"
 import {
   createManagedTransportAgentRunDelivery,
@@ -690,6 +691,7 @@ export function createLocalBotRunPort(
           return
         if (interruptModel?.()) yielded = true
       }
+      const imageStages = new Set<() => Promise<void>>()
       let releaseImInteraction: (() => void) | undefined
       return {
         approvalRequestIds,
@@ -845,6 +847,9 @@ export function createLocalBotRunPort(
           return result.queued
         },
         release() {
+          for (const release of imageStages)
+            void release().catch(error => console.warn("[Bots] Image release failed", error?.code))
+          imageStages.clear()
           approvalRequestIds.clear()
           releaseImInteraction?.()
           stopQuestionCapture()
@@ -1496,11 +1501,18 @@ export function createLocalBotRunPort(
           const files = hasInputFiles || hasGroupImages ? getHost().inputFilesForTask(task.id) : []
           let admittedImageFileIds: string[] = []
           const validateBotChatImageAccess = () => {
-            const allowed = new Set(getHost().imagesForRunningTask(task.id).map(file => file.id))
+            const current = getHost().imagesForRunningTask(task.id)
+            if (checkpointId) {
+              const receipt = boundChatImageReceipt(task.threadId, task.requestId)
+              const allowed = botBoundImageIds(task, current)
+              if (receipt?.source !== "bot" || receipt.images.some(ref => !allowed.has(ref.id)))
+                throw new BotError("CONFLICT", "图片授权已发生变化")
+            }
+            const allowed = new Set(current.map(file => file.id))
             if (admittedImageFileIds.some(id => !allowed.has(id)))
               throw new BotError("CONFLICT", "图片授权已发生变化")
           }
-          const localImages = !task.mockSource && !work?.source && !checkpointId && !continueBotTaskCheckpointId &&
+          const localImages = !task.mockSource && !work?.source &&
             files.some(isBotImageInput)
           if (hasInputFiles)
             await verifyInputFiles(task.origin.kind === "work" ? files : files.filter(file => file.blockHash), signal)
@@ -1744,11 +1756,18 @@ export function createLocalBotRunPort(
                 source: "bot",
                 ...(localImages ? {
                   validateBotChatImageAccess,
+                  ...(checkpointId ? { resumeBotChatImageMessageId: task.requestId } : {}),
+                  ...(!checkpointId && task.origin.kind === "user" ? {
+                    onBotChatImageAdmission: () => getHost().acceptDesktopImageInput(task.id)
+                  } : {}),
                   prepareBotChatImages: async (body: string, activeSignal: AbortSignal) => {
                     const current = getHost().imagesForRunningTask(task.id)
                     admittedImageFileIds = retainedInputFileIds(current.filter(isBotImageInput), body, task)
                     const result = await prepareBotInputImages(task, previewThreadId ?? task.threadId,
-                      body, current, activeSignal)
+                      body, current, activeSignal, undefined, imageStages)
+                    if (!result.length && task.origin.kind === "user" &&
+                        !body.replace(/<attachment\b[^>]*\btype="image\/(?:png|jpeg|webp)"[^>]*>[\s\S]*?<\/attachment>/gi, "").trim())
+                      throw new BotError("CONFLICT", "图片已被输入处理移除，草稿已保留。")
                     validateBotChatImageAccess()
                     return result
                   }

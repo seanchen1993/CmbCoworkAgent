@@ -744,3 +744,19 @@ describe("Bot sends through the original durable draft queue", () => {
     expect(f.changed).toHaveBeenCalledTimes(2)
   })
 })
+
+it("keeps a rejected image draft editable under a fresh request identity", async () => {
+  const f = fixture()
+  const before = f.draft()
+  const client = {
+    send: async () => { throw new Error("没有可用视觉模型") },
+    requestReceipts: async () => [{ requestId: before.id, state: "rejected" as const }]
+  }
+  const sender = new BotDraftSender(client, "bot-1", f.queue, f.report, f.changed)
+  await sender.send(before)
+  const after = f.draft()
+  expect(after.id).not.toBe(before.id)
+  expect(after.text).toBe(before.text)
+  expect(after.handoffRequestedAt).toBeUndefined()
+  expect(f.report).toHaveBeenCalledWith(expect.stringContaining("没有可用视觉模型"))
+})

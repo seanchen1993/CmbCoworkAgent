@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { copyFile } from "node:fs/promises"
+import { promises as nativeFs } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createServer } from "node:http"
@@ -19,16 +21,25 @@ import {
   boundChatImageReceipt,
   boundChatImages,
   copyBoundChatImages,
+  captureDesktopImageAccess,
+  getChatImageHistoryProjections,
+  getChatImageSubmissionStatus,
+  settleContinuedChatImageSubmission,
   discardChatDraftImage,
   pinQueuedChatImages,
   readChatImage,
   stageChatImage,
+  holdBotImageStage,
   sweepChatImageStorage,
   unpinQueuedChatImages
 } from "./chat-images"
 import * as db from "./db"
 
 const state = vi.hoisted(() => ({ path: "" }))
+vi.mock("node:fs/promises", async importOriginal => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>()
+  return { ...fs, copyFile: vi.fn(fs.copyFile) }
+})
 vi.mock("./storage", async importOriginal => ({
   ...(await importOriginal<typeof import("./storage")>()),
   getDbPath: () => state.path,
@@ -67,48 +78,133 @@ describe("chat image input", () => {
     chatImages: [{ id: "2a1f79f4-dbf8-40a0-bc67-59f219b8bfe0", filename: "report.png", slot: 0 }]
   }
 
-  it("joins a pending invoke and replays the original approval after ACK loss", async () => {
+  function makeClaim(messageId: string) {
     db.getDb().run("INSERT OR IGNORE INTO chat_image_input_owners VALUES (?, '', ?, '')",
       ["parent", request.chatImages[0].id])
-    const first = beginChatImageSubmission(request)
-    const concurrent = beginChatImageSubmission({ ...request, streamRequestId: "different-listener" })
-    if (!first || !("owner" in first) || !concurrent || !("replay" in concurrent)) throw new Error("bad admission")
-    expect(() => beginChatImageSubmission({ ...request, chatImages: [] })).toThrow("不同内容")
-    expect(() => beginChatImageSubmission({ ...request, modelId: "other" })).toThrow("不同内容")
-    first.owner.accept("edited text without the attachment", [])
-    first.owner.release()
-    const expected = {
-      submissionId: request.userMessageId, preparedText: "edited text without the attachment", images: []
-    }
+    const input = { ...request, userMessageId: messageId }
+    const first = beginChatImageSubmission(input)
+    if (!first || !("owner" in first)) throw new Error("missing original claim")
+    return { input, owner: first.owner }
+  }
+
+  it("claims an accepted but unstarted message once and recovers even an empty image manifest", async () => {
+    const { input, owner } = makeClaim(request.userMessageId)
+    const concurrent = beginChatImageSubmission({ ...input, streamRequestId: "second-listener" })
+    if (!concurrent || !("replay" in concurrent)) throw new Error("duplicate admitted")
+    expect(() => beginChatImageSubmission({ ...input, modelId: "other" })).toThrow("不同内容")
+    owner.beginHook()
+    owner.accept("edited text without the attachment", [])
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("accepted")
+    owner.release() // No graph start or terminal marker before process exit.
+    const expected = { submissionId: input.userMessageId, images: [], preparedText: "edited text without the attachment" }
     expect(await concurrent.replay).toEqual(expected)
-    const afterAckLoss = beginChatImageSubmission(request)
-    if (!afterAckLoss || !("replay" in afterAckLoss)) throw new Error("replayed as a new submission")
-    expect(await afterAckLoss.replay).toEqual(expected)
-    expect(boundChatImageReceipt("parent", request.userMessageId)).toEqual(expected)
-    expect(() => beginChatImageSubmission({ ...request, message: "changed" })).toThrow("不同内容")
     db.upsertThreadMessages("parent", [
-      { id: request.userMessageId, role: "user", content: request.message, created_at: new Date(1) }
+      { id: input.userMessageId, role: "user", content: input.message, created_at: new Date(1) }
     ])
-    expect(db.replaceThreadMessageId("parent", request.userMessageId, "renamed", "user")).toBe(true)
-    const afterRename = beginChatImageSubmission(request)
-    if (!afterRename || !("replay" in afterRename)) throw new Error("lost receipt after display rename")
-    expect(await afterRename.replay).toEqual(expected)
+    expect(db.replaceThreadMessageId("parent", input.userMessageId, "renamed", "user")).toBe(true)
+    const retry = beginChatImageSubmission(input)
+    if (!retry || !("owner" in retry)) throw new Error("accepted input was lost")
+    expect(retry.owner.recovered).toEqual(expected)
+    expect(beginChatImageSubmission(input)).toHaveProperty("replay")
+    retry.owner.start()
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("running")
+    retry.owner.finish("success")
+    retry.owner.release()
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("succeeded")
+    expect(beginChatImageSubmission(input)).toHaveProperty("replay")
+    expect(() => beginChatImageSubmission({ ...input, chatImages: [] })).toThrow("不同内容")
+    await copyBoundChatImages("parent", "child", "renamed")
+    expect(getChatImageHistoryProjections("child", ["renamed"]).get("renamed"))
+      .toMatchObject({ images: [], preparedText: expected.preparedText })
   })
 
-  it("releases rejected claims without committing approvals or injecting a second turn", async () => {
-    db.getDb().run("INSERT OR IGNORE INTO chat_image_input_owners VALUES (?, '', ?, '')",
-      ["parent", request.chatImages[0].id])
-    const attempt = { ...request, userMessageId: "rejected" }
-    const first = beginChatImageSubmission(attempt)
-    const duplicate = beginChatImageSubmission(attempt)
-    if (!first || !("owner" in first) || !duplicate || !("replay" in duplicate)) throw new Error("bad admission")
-    first.owner.release()
-    expect(await duplicate.replay).toBeUndefined()
-    expect(boundChatImageReceipt("parent", attempt.userMessageId)).toBeUndefined()
-    const retry = beginChatImageSubmission({ ...attempt, message: "corrected" })
-    if (!retry || !("owner" in retry)) throw new Error("retry not admitted")
-    retry.owner.accept("corrected", request.chatImages)
-    expect(() => first.owner.accept("stale owner", [])).toThrow("已变更")
+  it("omits unknown Hook input and rejects replay of rejected and failed messages", async () => {
+    const abandoned = makeClaim("hook-crashed")
+    abandoned.owner.beginHook()
+    expect(getChatImageSubmissionStatus("parent", "hook-crashed")).toBe("pending")
+    abandoned.owner.release()
+    expect(getChatImageSubmissionStatus("parent", "hook-crashed")).toBe("unknown")
+    expect(beginChatImageSubmission(abandoned.input)).toHaveProperty("replay")
+    expect(getChatImageHistoryProjections("parent", ["hook-crashed"]).get("hook-crashed")).toBeNull()
+    await copyBoundChatImages("parent", "child", "hook-crashed")
+    expect(getChatImageHistoryProjections("child", ["hook-crashed"]).get("hook-crashed")).toBeNull()
+
+    const rejected = makeClaim("rejected")
+    rejected.owner.beginHook()
+    rejected.owner.reject()
+    rejected.owner.release()
+    expect(boundChatImageReceipt("parent", "rejected")).toBeUndefined()
+    expect(getChatImageSubmissionStatus("parent", "rejected")).toBe("rejected")
+    expect(beginChatImageSubmission(rejected.input)).toHaveProperty("replay")
+    expect(() => beginChatImageSubmission({ ...rejected.input, message: "corrected" })).toThrow("不同内容")
+
+    const failed = makeClaim("failed")
+    failed.owner.accept("approved", [])
+    failed.owner.start()
+    failed.owner.finish("error")
+    failed.owner.release()
+    expect(getChatImageSubmissionStatus("parent", "failed")).toBe("failed")
+    expect(beginChatImageSubmission(failed.input)).toHaveProperty("replay")
+  })
+
+  it("requires checkpoint continuation once graph execution may have started", () => {
+    const { input, owner } = makeClaim("crashed-running")
+    owner.accept("approved", [])
+    owner.start()
+    owner.finish("unknown")
+    owner.release()
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("unknown")
+    expect(beginChatImageSubmission(input)).toHaveProperty("replay")
+    settleContinuedChatImageSubmission("parent", "another-origin", "success")
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("unknown")
+    settleContinuedChatImageSubmission("parent", input.userMessageId, "success")
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("succeeded")
+  })
+
+  it("binds recovery and graph start to the authoritative workspace and thread incarnation", () => {
+    const threadId = "scope-recovery"
+    const input = { ...request, threadId, userMessageId: "scope-request" }
+    const fileId = input.chatImages[0].id
+    db.createThread(threadId, { workspacePath: "/first" })
+    db.getDb().run("INSERT INTO chat_image_input_owners VALUES (?, '', ?, ?)", [threadId, fileId, "/first"])
+    const claim = beginChatImageSubmission(input)
+    if (!claim || !("owner" in claim)) throw new Error("missing claim")
+    claim.owner.accept("approved only in first workspace", [])
+    claim.owner.release()
+
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/another" }) })
+    expect(getChatImageSubmissionStatus(threadId, input.userMessageId)).toBe("unknown")
+    expect(() => beginChatImageSubmission(input)).toThrow("工作区或会话已变更")
+    expect(getChatImageHistoryProjections(threadId, [input.userMessageId]).get(input.userMessageId)).toBeNull()
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/first/" }) })
+    const retry = beginChatImageSubmission(input)
+    if (!retry || !("owner" in retry)) throw new Error("unable to recover approval")
+    const validateHttpAttempt = captureDesktopImageAccess(threadId)
+    expect(validateHttpAttempt).not.toThrow()
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/another" }) })
+    expect(() => retry.owner.start()).toThrow("工作区或会话已变更")
+    expect(validateHttpAttempt).toThrow("工作区或会话已变更")
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/first" }) })
+    const saved = db.getDb().exec("SELECT request_digest, images_json FROM chat_image_messages WHERE thread_id=?",
+      [threadId])[0].values[0]
+    db.deleteThread(threadId)
+    db.createThread(threadId, { workspacePath: "/first" })
+    expect(() => retry.owner.start()).toThrow("工作区或会话已变更")
+    retry.owner.release()
+    // Simulate a restored stale receipt in a thread recreated with the same public ID and workspace.
+    db.getDb().run("INSERT INTO chat_image_messages VALUES (?, ?, ?, ?)", [threadId, input.userMessageId, ...saved])
+    expect(() => beginChatImageSubmission(input)).toThrow("工作区或会话已变更")
+    expect(getChatImageSubmissionStatus(threadId, input.userMessageId)).toBe("unknown")
+  })
+
+  it("requires review when an older accepted record cannot prove its workspace and incarnation", () => {
+    const { input, owner } = makeClaim("unscoped-receipt")
+    owner.accept("approved", [])
+    owner.release()
+    db.getDb().run("UPDATE chat_image_messages SET images_json=json_remove(images_json, '$.scope') WHERE thread_id=? AND message_id=?",
+      [input.threadId, input.userMessageId])
+    expect(getChatImageSubmissionStatus(input.threadId, input.userMessageId)).toBe("unknown")
+    expect(beginChatImageSubmission(input)).toHaveProperty("replay")
   })
 
   it("reads legacy image receipts and forbids copying Bot grants on fork", async () => {
@@ -120,6 +216,7 @@ describe("chat image input", () => {
     const legacy = beginChatImageSubmission({ ...request, userMessageId: "legacy-approval" })
     if (!legacy || !("replay" in legacy)) throw new Error("legacy receipt not found")
     expect(await legacy.replay).toEqual({ images: request.chatImages })
+    expect(getChatImageSubmissionStatus("parent", "legacy-approval")).toBe("unknown")
     bindBotChatImages("parent", "bot-message", "bot body", "prepared body", request.chatImages)
     await copyBoundChatImages("parent", "child", "bot-message")
     expect(boundChatImageReceipt("child", "bot-message")).toBeUndefined()
@@ -162,6 +259,11 @@ describe("chat image input", () => {
     expect(bot[0]).toBe(message)
     expect(bot[1].content).toEqual(outbound.content)
     expect(checkpointHasChatImages({ channel_values: { messages: [task] } })).toBe(false)
+    const botHistory = { channel_values: { messages: [message, task] } }
+    expect(checkpointHasChatImages(botHistory, task.id)).toBe(true)
+    expect(checkpointHasChatImages(botHistory, "another-task")).toBe(false)
+    expect(checkpointHasChatImages({ channel_values: { messages: [task, message],
+      _summarizationEvent: { cutoffIndex: 1 } } }, task.id)).toBe(false)
     expect(checkpointHasChatImages({ channel_values: { messages: [message] } })).toBe(true)
     const [forked] = await materializeChatImages("child", [task], "desktop")
     expect(forked.content).toContain(file.filename)
@@ -257,6 +359,52 @@ describe("chat image input", () => {
     }
   }, 60_000)
 
+  it.each([
+    { status: 400, reason: "text only", overflow: false, dataUrl: false, textOnly: true },
+    { status: 400, reason: "invalid image", overflow: false, dataUrl: false },
+    { status: 485, reason: "任务上下文超过最大限度", overflow: true, dataUrl: true },
+    { status: 580, reason: "任务上下文超过最大限度", overflow: true, dataUrl: false },
+    { status: 485, reason: "服务暂时不可用", overflow: false, dataUrl: false },
+    { status: 400, reason: "maximum context length is 4096 tokens", overflow: true, dataUrl: true }
+  ])("keeps overflow recovery and redacts image error details ($status $reason)", async row => {
+    const { getModelInstance } = await import("./agent/runtime")
+    const { isCmbContextOverflow } = await import("./agent/context-summarization-middleware")
+    const { contextWindowFromError } = await import("./agent/context-compaction-recovery")
+    const encoded = Buffer.from("private fixture bytes").toString("base64")
+    const url = "data:image/png;base64," + encoded
+    const server = createServer((_request, response) => {
+      response.writeHead(row.status, { "content-type": "application/json", "x-request-id": encoded })
+      response.end(JSON.stringify({ error: { message: row.reason + " " + (row.dataUrl ? url : encoded) } }))
+    })
+    await new Promise<void>(done => server.listen(0, "127.0.0.1", done))
+    try {
+      const address = server.address()
+      if (!address || typeof address === "string") throw new Error("unexpected server address")
+      const onFetchError = vi.fn()
+      const model = getModelInstance({ id: "vision", model: "sample", apiKey: "fixture",
+        baseUrl: "http://127.0.0.1:" + address.port + "/v1", inputModalities: ["text", "image"]
+      }, { onFetchError }, 1)
+      const message = row.textOnly ? new HumanMessage("image_url") : new HumanMessage({
+        content: [{ type: "image_url", image_url: { url } }]
+      })
+      const failure = await model.invoke([message]).catch((error: unknown) => error)
+      expect(failure).toBeInstanceOf(Error)
+      expect(onFetchError).toHaveBeenCalledOnce()
+      if (row.textOnly) {
+        expect(onFetchError.mock.calls[0][0].requestId).toBe(encoded)
+        expect(String(failure)).toContain(row.reason)
+        return
+      }
+      expect(JSON.stringify(onFetchError.mock.calls)).not.toContain(encoded)
+      expect(String(failure) + JSON.stringify(failure)).not.toContain(encoded)
+      expect(isCmbContextOverflow(failure)).toBe(row.overflow)
+      if (row.reason.includes("4096")) expect(contextWindowFromError(failure)).toBe(4096)
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(done => server.close(() => done()))
+    }
+  }, 60_000)
+
   it("moves an approved binding with a user message alias and rejects conflicting merges", () => {
     const ref = { id: "alias-image", filename: "alias.png", slot: 0 }
     db.upsertThreadMessages("parent", [
@@ -268,6 +416,20 @@ describe("chat image input", () => {
     expect(db.replaceThreadMessageId("parent", "draft-id", "final-id", "user")).toBe(true)
     expect(boundChatImages("parent", "draft-id")).toEqual([])
     expect(boundChatImages("parent", "final-id")).toEqual([ref])
+  })
+
+  it("keeps copied pixels during a sweep before the fork receipt is written", async () => {
+    const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: "orange" } })
+      .png().toBuffer()
+    const attachment = await stageChatImage("parent", "fork.png", Uint8Array.from(png).buffer)
+    const refs = [{ slot: 0, filename: attachment.filename, id: attachment.image!.id }]
+    bindChatImages("parent", "fork-sweep", "caption", refs, refs)
+    vi.mocked(copyFile).mockImplementationOnce(async (...args) => {
+      await nativeFs.copyFile(...args)
+      await sweepChatImageStorage()
+    })
+    await copyBoundChatImages("parent", "child", "fork-sweep")
+    await expect(readChatImage("child", refs[0].id)).resolves.toHaveProperty("image_url.url")
   })
 
   it("sweeps a deleted parent without removing the child image", async () => {
@@ -298,6 +460,23 @@ describe("chat image input", () => {
     const wide = await sharp({ create: { width: 8193, height: 1, channels: 3, background: "red" } })
       .png().toBuffer()
     await expect(stageChatImage("parent", "wide.png", Uint8Array.from(wide).buffer)).rejects.toThrow()
+  })
+
+  it("reclaims failed Bot stages on release or restart while retaining a second holder", async () => {
+    const source = await sharp({ create: { width: 1, height: 1, channels: 3, background: "red" } }).png().toBuffer()
+    const stage = (key: string) => stageChatImage("parent", "photo.png", Uint8Array.from(source).buffer,
+      { deduplicationKey: key })
+    const first = holdBotImageStage("parent", "two holders")
+    const second = holdBotImageStage("parent", "two holders")
+    const file = await stage("two holders")
+    await first()
+    await sweepChatImageStorage()
+    await expect(readChatImage("parent", file.image!.id)).resolves.toHaveProperty("image_url.url")
+    await second()
+    await expect(readChatImage("parent", file.image!.id)).rejects.toThrow()
+    const interrupted = await stage("prior process exited after decoding")
+    await sweepChatImageStorage()
+    await expect(readChatImage("parent", interrupted.image!.id)).rejects.toThrow()
   })
 
   it("rejects mismatched formats", async () => {

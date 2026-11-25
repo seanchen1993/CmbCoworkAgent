@@ -80,7 +80,8 @@ export function registerBotHandlers(
   ipcMain: IpcMain,
   deleteThread?: ThreadDeletionService,
   im?: Pick<BuiltinRobotManager, "setBotHostResolver" | "botChannelStatus" | "requireBotChannel">,
-  getFeatureWindow?: () => BrowserWindow | null
+  getFeatureWindow?: () => BrowserWindow | null,
+  getChatWindow = getFeatureWindow
 ): void {
   if (getFeatureWindow) configureBotFeatureWindow(getFeatureWindow)
   setBotConversationDeletionService(deleteThread)
@@ -124,7 +125,7 @@ export function registerBotHandlers(
     console.error("[Bots] Local host unavailable", error)
   }
 
-  registerBotFileHandlers(ipcMain, hostFor, getFeatureWindow)
+  registerBotFileHandlers(ipcMain, hostFor, getChatWindow)
   const desktopHost = (event: IpcMainInvokeEvent, hostId: unknown) => {
     if (
       !event.senderFrame ||
@@ -135,7 +136,7 @@ export function registerBotHandlers(
     return hostFor(hostId)
   }
   const desktopAttachmentHost = (event: IpcMainInvokeEvent, hostId: unknown) => {
-    if (getFeatureWindow) assertChatAttachmentWindow(event, getFeatureWindow)
+    if (getChatWindow) assertChatAttachmentWindow(event, getChatWindow)
     return desktopHost(event, hostId)
   }
   const historyCursor = (value: unknown): string | undefined => {

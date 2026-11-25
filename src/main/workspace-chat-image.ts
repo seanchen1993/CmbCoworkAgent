@@ -32,7 +32,7 @@ export function captureOrdinaryImageDraft(
     const current = readScope()
     if (current.root !== root || !matchesThreadIncarnation(current.row, identity)) throw new Error("@图片所属会话已变更")
   }
-  return { root, assertCurrent }
+  return { root, assertCurrent, identity }
 }
 
 /** The submitted workspace is a consistency check. Only the stored thread root grants access. */

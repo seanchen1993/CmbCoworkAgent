@@ -10,6 +10,7 @@ import { isThreadRetired } from "./store"
 import type { Thread } from "../types"
 import { normalizeGitWorkspacePathKey } from "../../../shared/workspace-path"
 import { threadIncarnationKey } from "../../../shared/thread-incarnation"
+import { ownsParkedImageComposer } from "./image-outbox"
 import {
   BOT_CONVERSATION_DRAFT_PREFIX,
   ORDINARY_IMAGE_DRAFT_PREFIX,
@@ -85,11 +86,26 @@ export function bindOrdinaryImageDraft(context: DraftContext, row: Thread, works
     context.getThreadActions(id).setDraftAttachments(state.draftAttachments.filter(
       file => !file.image || file.image.draftWorkspace === root))
   }
-  return bindDraft(context, id, () => restoreDraft(context, id, () => {
-    const record = loadBotDraftRecord(key, ordinaryImageDraft)
-    saved = Boolean(record.draft)
-    return record
-  }), () => {
+  return bindDraft(context, id, () => {
+    let fromStorage = false
+    const error = restoreDraft(context, id, () => {
+      const record = loadBotDraftRecord(key, ordinaryImageDraft)
+      saved = Boolean(record.draft)
+      fromStorage = saved
+      return record
+    })
+    const restored = context.getThreadState(id)
+    if (!error && fromStorage && ownsParkedImageComposer(restored, restored.queuedMessages ?? [], workspace, incarnation)) {
+      const actions = context.getThreadActions(id)
+      actions.setDraftInput("")
+      actions.setDraftAttachments([])
+      actions.setDraftMentionedWorkspaceFiles([])
+      actions.setDraftSkill(null)
+      actions.setDraftBuiltinBrowser(false)
+      actions.setDraftBotReplyTo(null)
+    }
+    return error
+  }, () => {
     if (isThreadRetired(id) || normalizeGitWorkspacePathKey(context.getThreadState(id).workspacePath ?? "") !== root)
       return null
     const { draft } = composerDraft(context, id)

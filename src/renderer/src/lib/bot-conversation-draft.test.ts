@@ -27,6 +27,7 @@ import {
   pruneBotConversationDrafts
 } from "./bot-conversation-draft"
 import { botThreadDraftKey } from "./bot-draft-storage"
+import { imageComposerSource } from "./image-outbox"
 import { parseFileBytes } from "../../../main/file-parser"
 import { findEnabledSkillSelection } from "./skill-ids"
 import type { ThreadDraftSkill } from "./thread-context"
@@ -59,6 +60,7 @@ const fixture = () => {
     draftBotReplyTo: null as BotMessageReply | null,
     draftSkill: null as ThreadDraftSkill | null,
     draftBuiltinBrowser: false,
+    queuedMessages: [] as QueuedMessage[],
     messages: []
   }
   const listeners = new Set<() => void>()
@@ -139,6 +141,30 @@ it("restores cold ordinary image drafts only to their incarnation and workspace 
   recovered.session.publish({ draftAttachments: [], draftInput: "" })
   expect(values.size).toBe(0)
   recovered.close()
+})
+
+it("recovers a crash after the complete outbox was saved but before its image composer was cleared", () => {
+  const row: Thread = { thread_id: "interrupted", created_at: new Date(1), updated_at: new Date(1), status: "idle" }
+  const image: FileAttachment = { filename: "figure.png", filePath: "", content: "", size: 10,
+    mimeType: "image/webp", truncated: false, image: { filename: "figure.png", width: 2, height: 2, draftWorkspace: "/work",
+      id: "10000000-2000-4000-8000-000000000123" } }
+  const original = fixture()
+  original.publish({ workspacePath: "/work" })
+  const close = bindOrdinaryImageDraft(original.context, row, "/work", () => {})
+  original.publish({ draftInput: "问题", draftAttachments: [image] })
+  const source = imageComposerSource(original.state())
+  close()
+  const durable = { id: "1880a326-a5f0-4869-a8cc-89ec9fee814b", text: "问题",
+    created_at: new Date(), updated_at: new Date(), chatImages: [{ id: image.image!.id, filename: image.filename, slot: 0 }],
+    imageDelivery: { workspacePath: "/work", incarnation: "legacy:1", source } }
+  const restored = fixture()
+  restored.publish({ workspacePath: "/work", queuedMessages: [durable] })
+  const unsubscribe = bindOrdinaryImageDraft(restored.context, row, "/work", () => {})
+  expect(restored.state().draftInput).toBe("")
+  expect(restored.state().draftAttachments).toEqual([])
+  expect(restored.state().queuedMessages).toEqual([durable])
+  expect(values.size).toBe(0)
+  unsubscribe()
 })
 
 describe("drafts that remain with an unlinked native thread", () => {

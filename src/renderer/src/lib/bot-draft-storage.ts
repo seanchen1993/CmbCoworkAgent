@@ -29,7 +29,7 @@ export const botDraftContentSchema = z.object({
     .array(
       z.object({
         filename: z.string().max(512),
-        filePath: z.string().min(1).max(4096),
+        filePath: z.string().max(4096),
         // Ordinary attachment parsing appends its truncation notice after the
         // 24k content budget. Preserve that valid output when linking a draft.
         content: z.string().max(25_000),
@@ -38,7 +38,8 @@ export const botDraftContentSchema = z.object({
         truncated: z.boolean(),
         botInputId: z.string().regex(BOT_INPUT_FILE_ID_PATTERN).optional(),
         originalUnavailable: z.literal(true).optional()
-      })
+      }).refine(file => Boolean(file.filePath || (file.botInputId &&
+        ["image/png", "image/jpeg", "image/webp"].includes(file.mimeType))))
     )
     .max(MAX_ATTACHMENT_PICKER_FILES)
 })

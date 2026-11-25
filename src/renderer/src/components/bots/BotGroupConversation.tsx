@@ -1,3 +1,4 @@
+import { botAttachmentIdentity } from "../../../../shared/bots/input-files"
 import { BotGroupMentionInput, type BotGroupInputControl } from "./BotGroupMentionInput"
 import {
   displayedGroupMentions,
@@ -1125,7 +1126,7 @@ function GroupComposer({
         <div className="flex flex-wrap gap-2 pb-2">
           {draft.attachments.map((file) => (
             <span
-              key={file.filePath}
+              key={botAttachmentIdentity(file)}
               className="inline-flex max-w-full items-center gap-2 rounded-xl bg-muted px-3 py-1.5 text-xs"
             >
               <span className="truncate">{file.filename}</span>
@@ -1136,7 +1137,7 @@ function GroupComposer({
                 disabled={attaching || draft.sending}
                 onClick={() =>
                   editDraft({
-                    attachments: draft.attachments.filter((item) => item.filePath !== file.filePath)
+                    attachments: draft.attachments.filter(item => botAttachmentIdentity(item) !== botAttachmentIdentity(file))
                   })
                 }
               >

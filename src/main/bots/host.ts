@@ -143,6 +143,7 @@ export interface BotRunLease {
 }
 
 export interface BotRunPort {
+  reclaimImageInputs?(): Promise<void>
   independentResultPublication?: boolean
   workHistory?: BotWorkHistoryPort
   workRuntimeStatus?(work: BotWorkSummary): BotWorkRuntimeState
@@ -780,6 +781,12 @@ export class LocalBotHost {
     this.requireRunning()
     return this.store.inputProjections(botId, threadId, messageIds, workIds, purpose)
   }
+  retainImageSelection(botId: string, groupId: string | undefined, workId: string | undefined,
+    inputs: import("./image-import").PrivateImageInput[]) {
+    this.requireRunning()
+    if (groupId) this.getGroupMember(groupId, botId)
+    return this.store.retainImageSelection(botId, groupId, workId, inputs)
+  }
   retainGroupImage(groupId: string, memberId: string, attachment: FileAttachment, path: string) {
     this.getGroupMember(groupId, memberId)
     return this.store.retainGroupImage(groupId, attachment, path)
@@ -935,6 +942,7 @@ export class LocalBotHost {
         return { botId, workId, deletedThreadId, state: "cleanup_pending", error: "原会话已删除，工作清理回执尚未写入。" }
       }
       this.changed()
+      await this.runtime.reclaimImageInputs?.()
       return { botId, workId, state: "deleted", ...(deletedThreadId ? { deletedThreadId } : {}) }
     }).finally(() => this.workDeletions.delete(workId))
     this.workDeletions.set(workId, deletion)
@@ -2273,6 +2281,7 @@ export class LocalBotHost {
         }
         this.store.finishDeletion(id, threads)
         this.changed()
+        await this.runtime.reclaimImageInputs?.()
       })
       .finally(() => this.deletions.delete(id))
     this.deletions.set(id, deletion)
@@ -2293,9 +2302,10 @@ export class LocalBotHost {
     this.wake()
     const deletion = Promise.resolve()
       .then(() => cleanup(threads))
-      .then(() => {
+      .then(async () => {
         this.store.finishGroupDeletion(id)
         this.changed()
+        await this.runtime.reclaimImageInputs?.()
       })
       .finally(() => this.deletions.delete(key))
     this.deletions.set(key, deletion)
@@ -2600,6 +2610,32 @@ export class LocalBotHost {
     return this.notifyUserMessageAccepted(this.store.enqueue(input))
   }
 
+  private readonly waitingImageInputs = new Set<() => void>()
+  acceptDesktopImageInput(taskId: string): void {
+    this.workToolSource(taskId)
+    this.store.acceptDesktopImageInput(taskId)
+    this.changed()
+  }
+  private waitForDesktopImageInput(task: BotTask): BotTask | Promise<BotTask> {
+    if (task.origin.kind !== "user" || task.origin.imageAdmission !== "pending") return task
+    return new Promise<BotTask>((resolve, reject) => {
+      const check = () => {
+        try {
+          this.requireRunning()
+          const current = this.store.getTask(task.id)
+          if (current.origin.kind === "user" && current.origin.imageAdmission === "accepted") resolve(current)
+          else if (["queued", "running", "waiting_user"].includes(current.state)) return
+          else throw new BotError("CONFLICT", current.error || "图片消息未通过接纳，草稿已保留。")
+        } catch (error) { reject(error) }
+        this.waitingImageInputs.delete(check)
+        unsubscribe()
+      }
+      const unsubscribe = this.subscribe(check)
+      this.waitingImageInputs.add(check)
+      check()
+    })
+  }
+
   private notifyUserMessageAccepted(task: BotTask): BotTask {
     this.changed()
     this.steerUserMessage(task)
@@ -2609,6 +2645,12 @@ export class LocalBotHost {
 
   /** Direct input from a private desktop task composer requires user control. */
   sendDesktopMessage(input: SendBotMessageInput): BotTask | Promise<BotTask> {
+    const result = this.enqueueDesktopMessage(input)
+    return result instanceof Promise
+      ? result.then(task => this.waitForDesktopImageInput(task)) : this.waitForDesktopImageInput(result)
+  }
+
+  private enqueueDesktopMessage(input: SendBotMessageInput): BotTask | Promise<BotTask> {
     this.assertDesktopWorkInputControl(input)
     if (input.workId && !input.skillDraftFromMain && input.inputFileIds?.length) {
       const files = this.store.desktopDraftInputFiles(input.inputFileIds)
@@ -3545,6 +3587,7 @@ export class LocalBotHost {
   async stop(): Promise<void> {
     if (!this.stopping) {
       this.stopping = true
+      for (const check of this.waitingImageInputs) check()
       if (this.mockRecoveryTimer) clearTimeout(this.mockRecoveryTimer)
       this.mockRecoveryTimer = undefined
       this.lifecycle.abort()

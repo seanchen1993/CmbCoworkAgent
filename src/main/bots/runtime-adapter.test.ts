@@ -874,6 +874,30 @@ describe("Bot Runtime integration", () => {
     }
   })
 
+  it("resumes the same group image task with the original admitted message and a live access check", async () => {
+    const file = { filename: "image.png", filePath: "", content: "", size: 3, mimeType: "image/png", truncated: false }
+    fixture.groupCheckpoint.mockReturnValue("original-checkpoint")
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    fixture.inputFilesForTask.mockReturnValueOnce([{ id: "input", botId: "g", attachment: file,
+      blockHash: inputAttachmentHash(file), file }])
+    const current: BotTask = { ...task, threadId: "group-g-a", message: buildAttachmentMessageParts([file]).attachmentModelBlocks,
+      origin: { kind: "group", groupId: "g", messageId: "current" } }
+    let resumed = false
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context: AgentRunExecutionContext) => {
+      expect(context.resumeCheckpointId).toBe("original-checkpoint")
+      expect(context.resumeBotChatImageMessageId).toBe(current.requestId)
+      fixture.imagesForRunningTask.mockImplementationOnce(() => { throw new Error("membership revoked") })
+      expect(context.validateBotChatImageAccess).toThrow("membership revoked")
+      resumed = true
+      return { completion: Promise.resolve() }
+    })
+    const lease = port().acquire(bot, current)!
+    try {
+      await lease.execute(new AbortController().signal, vi.fn())
+      expect(resumed).toBe(true)
+    } finally { lease.release() }
+  })
+
   it("records the input boundary before runtime entry and resolves only exact history identities", async () => {
     fixture.inputProjections.mockReturnValueOnce(new Map([["old-rejected", null], ["old-rewritten", "Allowed body"]]))
     fixture.start.mockImplementationOnce(async (_request, _delivery, context: AgentRunExecutionContext) => {

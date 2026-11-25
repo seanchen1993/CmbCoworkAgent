@@ -125,6 +125,8 @@ export interface AgentGoalControlResult {
  * that their lease or security policy belongs to the desktop.
  */
 export interface AgentRunExecutionContext {
+  /** Real renderer transports revalidate their originating document before sending pixels. */
+  validateChatDocument?: () => void
   source: StandardTurnSource
   /** Opt-in per-run model pin from a trusted caller; omitted callers keep global routing. */
   modelRoutingMode?: "pinned"
@@ -221,6 +223,8 @@ export interface AgentRunExecutionContext {
   prepareBotChatImages?: (submittedBody: string, signal: AbortSignal) =>
     Promise<import("../../shared/file-attachment").SubmittedChatImage[]>
   /** Revalidate live ownership immediately before a provider request uses a prepared Bot image. */
+  resumeBotChatImageMessageId?: string
+  onBotChatImageAdmission?: () => void
   validateBotChatImageAccess?: () => void
   /** Trusted Bot history only. Missing ids stay unchanged; null excludes an unaccepted input. */
   persistedUserInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>

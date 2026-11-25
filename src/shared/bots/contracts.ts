@@ -30,7 +30,7 @@ export interface BotRequestCheck {
 export interface BotRequestReceipt {
   requestId: string
   /** Acceptance is independent of execution success. No other conversation's data is returned. */
-  state: "accepted" | "conflict" | "absent"
+  state: "accepted" | "conflict" | "absent" | "rejected"
 }
 export const BOT_AVATAR_SHAPES = [
   "circle",
@@ -187,6 +187,7 @@ export type BotTaskOrigin =
       inputFileIds?: string[]
       /** Host receipt from this submission's actual prompt preparation. */
       allowedInputFileIds?: string[]
+      imageAdmission?: "pending" | "accepted"
       explicitSkill?: import("./skill-selection").BotSkillSelection
     }
   | { kind: "introduction" }

@@ -165,7 +165,7 @@ import type {
   AttachmentBytesParseRequest,
   AttachmentFileSelectionResult,
   AttachmentGrantParseRequest,
-  WorkspaceChatImageRequest, ChatImageOwnerRequest
+  WorkspaceChatImageRequest, ChatImageOwnerRequest, ChatImageStatusRequest, ChatImageSubmissionStatus
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
@@ -2413,6 +2413,8 @@ const api = {
   file: {
     updateImageOwners: (request: ChatImageOwnerRequest): Promise<void> =>
       ipcRenderer.invoke("workspace:updateChatImageOwners", request),
+    chatImageSubmissionStatus: (request: ChatImageStatusRequest): Promise<ChatImageSubmissionStatus> =>
+      ipcRenderer.invoke("workspace:chatImageSubmissionStatus", request),
     attachWorkspaceImage: (request: WorkspaceChatImageRequest): Promise<ParsedAttachment> =>
       ipcRenderer.invoke("workspace:attachChatImage", request),
     parseSelected: (

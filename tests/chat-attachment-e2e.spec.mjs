@@ -40,7 +40,18 @@ try {
     const html = new TextEncoder().encode("<h1>Report</h1><script>hidden()</script><table><tr><td>Q2</td><td>317</td></tr></table>")
     const document = await window.api.file.parseBytes({ threadId, workspacePath: profile, fileName: "report.html", bytes: html.buffer })
     const image = await window.api.file.parseBytes({ threadId, workspacePath: profile, fileName: "chart.png", bytes: Uint8Array.from(png).buffer })
-    return { document, image }
+    const token = thread.metadata?.cmb_thread_incarnation
+    const incarnation = token ? "uuid:" + token : "legacy:" + new Date(thread.created_at).getTime()
+    const messageId = crypto.randomUUID()
+    const request = { threadId, workspacePath: profile, incarnation, messageId }
+    const status = await window.api.file.chatImageSubmissionStatus(request)
+    const stale = await window.api.file.chatImageSubmissionStatus({ ...request, incarnation: "uuid:old" })
+      .then(() => false, () => true)
+    const ids = [image.attachment.image.id]
+    await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "pin", messageId, ids })
+    await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "pin", messageId, ids })
+    await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "unpin", messageId })
+    return { document, image, status, stale }
   }, { profile, png: Array.from(bytes) })
   assert.equal(result.document.success, true, result.document.error)
   assert.match(result.document.attachment.content, /Q2\s+317/)
@@ -49,7 +60,9 @@ try {
   assert.equal(result.image.attachment.image.width, 12)
   assert.equal(result.image.attachment.image.height, 6)
   assert.equal(result.image.attachment.content, "")
-  console.log("HTML extraction and PNG normalization passed through Electron IPC")
+  assert.equal(result.status, "missing")
+  assert.equal(result.stale, true, "a recreated thread must reject an old image submission")
+  console.log("HTML, PNG, queue ownership and submission lookup passed through Electron IPC")
 } finally {
   try {
     await app?.close()

@@ -34,11 +34,22 @@ export interface WorkspaceChatImageRequest {
 export type ChatImageOwnerRequest = {
   threadId: string
   workspacePath: string | null
+  incarnation?: string
 } & (
-  | { action: "pin"; messageId: string; ids: string[] }
+  | { action: "pin"; messageId: string; ids: string[]; previousMessageId?: string }
   | { action: "unpin"; messageId: string }
   | { action: "discard"; ids: string[] }
 )
+
+export interface ChatImageStatusRequest {
+  threadId: string
+  workspacePath: string | null
+  incarnation: string
+  messageId: string
+}
+
+export type ChatImageSubmissionStatus =
+  | "missing" | "pending" | "unknown" | "accepted" | "running" | "succeeded" | "failed" | "rejected"
 export const chatUploadExtensions = [...attachmentExtensions, ...chatImageExtensions]
 export const chatUploadLabel = chatUploadExtensions.map(ext => ext.slice(1)).join("、")
 
@@ -101,4 +112,11 @@ export interface FileAttachment {
   mimeType: string
   size: number
   truncated: boolean
+}
+
+/** A pure visual turn already has a payload; the UI must preserve the user's empty text. */
+export function attachmentFallbackText(files: readonly FileAttachment[]): string {
+  const hasDocument = files.some(file => !file.image &&
+    !(file.botInputId && ["image/png", "image/jpeg", "image/webp"].includes(file.mimeType)))
+  return hasDocument ? "请分析以下文件内容。" : ""
 }
