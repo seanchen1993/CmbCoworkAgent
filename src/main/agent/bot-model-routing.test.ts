@@ -30,10 +30,15 @@ const source = ts.createSourceFile("agent.ts",
   readFileSync(new URL("../ipc/agent.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true)
 let routingInput: string | undefined
 function visit(node: ts.Node): void {
-  if (ts.isVariableDeclaration(node) && node.name.getText(source) === "preparedRouting" &&
-      node.initializer && ts.isAwaitExpression(node.initializer) &&
-      ts.isCallExpression(node.initializer.expression)) {
-    routingInput = node.initializer.expression.arguments[0].getText(source)
+  if (ts.isVariableDeclaration(node) && node.name.getText(source) === "preparedRouting") {
+    const initializer = node.initializer
+    const fallback = initializer && ts.isBinaryExpression(initializer) &&
+      initializer.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+      ? initializer.right : initializer
+    if (fallback && ts.isAwaitExpression(fallback) && ts.isCallExpression(fallback.expression) &&
+        fallback.expression.expression.getText(source) === "resolveStandardTurnRouting") {
+      routingInput = fallback.expression.arguments[0].getText(source)
+    }
   }
   ts.forEachChild(node, visit)
 }
