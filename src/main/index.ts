@@ -1214,11 +1214,16 @@ if (browserNativeMessagingHostLaunch) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
-    registerTaskCommitBindingHandlers(ipcMain, (event) =>
-      !!mainWindow && event.sender === mainWindow.webContents &&
-      event.senderFrame === mainWindow.webContents.mainFrame &&
-      isTrustedRendererUrl(event.senderFrame?.url, trustedMainRendererUrl)
-    )
+    // A locally built desktop can load the bundled file without a dev server.
+    const bundledRendererUrl = pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    registerTaskCommitBindingHandlers(ipcMain, (event) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false
+      const contents = mainWindow.webContents
+      const expectedUrl = trustedMainRendererUrl ?? bundledRendererUrl
+      return event.sender === contents && event.senderFrame === contents.mainFrame &&
+        isTrustedRendererUrl(contents.getURL(), expectedUrl) &&
+        isTrustedRendererUrl(event.senderFrame?.url, expectedUrl)
+    })
     registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
     registerManagedLinkHandlers(ipcMain)

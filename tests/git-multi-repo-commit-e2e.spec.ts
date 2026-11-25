@@ -51,12 +51,28 @@ interface WindowWithApi {
       set: (threadId: string, workspacePath: string) => Promise<unknown>
       getGitPanelDiffs: (
         threadId: string,
-        options: { includeDiffs: boolean; includeChangedFiles: boolean }
+        options: {
+          includeDiffs: boolean
+          includeChangedFiles: boolean
+          worktreePath?: string
+          commitBindingVersion?: string
+        }
       ) => Promise<{
         success: boolean
         error?: string
         repositories?: Array<{ path: string; displayPath: string }>
+        changedFiles?: string[]
+        commitPreviewRevision?: string
       }>
+      commitWorktree: (
+        thread: string,
+        message: string,
+        files: string[],
+        options: { worktreePath: string; commitBindingVersion: string; commitPreviewRevision: string }
+      ) => Promise<{ success: boolean; error?: string }>
+    }
+    taskCommitBinding: {
+      read: (thread: string) => Promise<{ cardNumber: string; version: string; repositoryPaths: string[] } | null>
     }
   }
 }
@@ -228,6 +244,71 @@ async function runGitPanelCommit(page: Page): Promise<void> {
   log("PASS 真实 Electron UI 完成 Commit")
 }
 
+async function verifyExternalTaskBinding(
+  app: ElectronApplication,
+  page: Page,
+  threadId: string,
+  external: string
+): Promise<void> {
+  // Supply only the native folder-picker response. The desktop frame, binding
+  // editor, authorization checks, database, preview and Git execution are real.
+  await app.evaluate(({ dialog }, folder) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [folder] })
+  }, external)
+  page.setDefaultTimeout(15_000)
+  await page.getByRole("button", { name: "任务提交设置", exact: true }).click()
+  log("已打开当前会话的任务提交设置")
+  const settings = page.getByRole("dialog", { name: "本任务的 Git 提交" })
+  const choose = settings.getByRole("button", { name: "选择本地仓库" })
+  await choose.or(settings.getByRole("alert")).first().waitFor()
+  if (!(await choose.isVisible())) throw new Error(await settings.innerText())
+  await choose.click()
+  await settings.getByRole("checkbox", { name: external }).waitFor()
+  const clear = settings.getByRole("button", { name: "清除预选任务卡" })
+  if (await clear.isVisible()) await clear.click()
+  await settings.getByRole("button", { name: "选择或输入任务卡号" }).click()
+  await page.getByPlaceholder("手动输入卡号").fill("QA-EXTERNAL")
+  await page.keyboard.press("Escape")
+  const screenshotDir = join(PROJECT_ROOT, "tests", "screenshots")
+  mkdirSync(screenshotDir, { recursive: true })
+  await settings.screenshot({ path: join(screenshotDir, "task-commit-desktop.png") })
+  await settings.getByRole("button", { name: "确认本任务授权" }).click()
+  await settings.waitFor({ state: "hidden" })
+  await page.getByRole("button", { name: "QA-EXTERNAL", exact: true }).waitFor()
+
+  writeFileSync(join(external, "tracked.txt"), "reviewed external change\n")
+  const message = "QA-EXTERNAL #comment test:review external change #CMBDevClaw"
+  const result = await page.evaluate(
+    async ({ threadId, external, message }) => {
+      const { taskCommitBinding, workspace } = (window as unknown as WindowWithApi).api
+      const binding = await taskCommitBinding.read(threadId)
+      if (!binding?.repositoryPaths.includes(external) || binding.cardNumber !== "QA-EXTERNAL") {
+        throw new Error(`Expected persisted binding for ${external}, got ${JSON.stringify(binding)}`)
+      }
+      const options = { worktreePath: external, commitBindingVersion: binding.version }
+      const preview = await workspace.getGitPanelDiffs(threadId, {
+        ...options,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+      if (
+        !preview.success ||
+        preview.changedFiles?.join() !== "tracked.txt" ||
+        !preview.commitPreviewRevision
+      ) {
+        throw new Error(preview.error || "Expected one reviewed external file")
+      }
+      return workspace.commitWorktree(threadId, message, ["tracked.txt"], {
+        ...options,
+        commitPreviewRevision: preview.commitPreviewRevision
+      })
+    },
+    { threadId, external, message }
+  )
+  assert(result.success, result.error || "桌面授权的外部仓库已完成提交")
+  assert(git(external, ["log", "-1", "--format=%s"]) === message, "外部提交使用已保存的任务卡号")
+}
+
 async function deleteWorkspaceThread(page: Page, threadId: string): Promise<void> {
   await page.evaluate<void, string>(async (id) => {
     await (window as unknown as WindowWithApi).api.threads.delete(id)
@@ -298,6 +379,12 @@ async function main(): Promise<void> {
     assert(linkedHead !== initialCommit, "linked worktree 分支产生新 commit")
     assert(mainHead === initialCommit, "主仓库分支 HEAD 未被移动")
     assert(linkedSubject === EXPECTED_COMMIT_MESSAGE, "最终 commit message 符合 CMB 规范")
+    const external = join(testRoot, "external")
+    git(testRoot, ["clone", "-q", "--no-local", mainRepository, external])
+    git(external, ["config", "user.name", "Task Commit QA"])
+    git(external, ["config", "user.email", "test@example.invalid"])
+    await verifyExternalTaskBinding(app, page, threadId, external)
+    assert(git(mainRepository, ["rev-parse", "HEAD"]) === mainHead, "外部提交保留会话内主仓库的 HEAD")
     log("ALL PASS multi-repository Git commit E2E")
   } finally {
     if (app) {
