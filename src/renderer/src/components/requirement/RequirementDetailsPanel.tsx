@@ -7,6 +7,7 @@ import {
   Eye,
   FileCheck2,
   FileText,
+  Link,
   Loader2,
   PanelRightClose,
   RotateCcw,
@@ -31,7 +32,10 @@ import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-te
 import type { RequirementDesignEntry } from "@/lib/requirement-design-entry"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import { destroyOpenBrowserResourcePanel } from "@/lib/resource-panel-overlay-events"
+import {
+  destroyOpenBrowserResourcePanel,
+  openResourcePanelOverlay
+} from "@/lib/resource-panel-overlay-events"
 import {
   findRequirementDevelopmentThreads,
   normalizeRequirementPrdFilePath
@@ -54,6 +58,10 @@ import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
 import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
 import { REQUIREMENT_SPACE_LIST_EVENT } from "./requirement-navigation"
 import { BatchPrototypeDesignDialog } from "./BatchPrototypeDesignDialog"
+
+function normalizeClickableRequirementUrl(value: string): string {
+  return value.trim().replace(/[。！？，；、]+$/u, "")
+}
 
 export type RequirementPreviewTab = "expert-process" | "source" | "prd"
 export type RequirementPrototypeStatus = {
@@ -135,6 +143,7 @@ function RequirementSourceFilesBox({
   badge,
   emptyText,
   files,
+  urls = [],
   tagImageFiles = false,
   onOpen
 }: {
@@ -142,6 +151,7 @@ function RequirementSourceFilesBox({
   badge: string
   emptyText: string
   files: Array<{ path: string; size?: number }>
+  urls?: string[]
   tagImageFiles?: boolean
   onOpen: (filePath: string) => void
 }): React.JSX.Element {
@@ -149,11 +159,11 @@ function RequirementSourceFilesBox({
     <section className="rounded-xl border border-border/80 bg-white p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-foreground">
-          {title}（{files.length}）
+          {title}（{files.length + urls.length}）
         </h3>
         <span className="text-[11px] text-muted-foreground">{badge}</span>
       </div>
-      {files.length > 0 ? (
+      {files.length > 0 || urls.length > 0 ? (
         <div className="space-y-2">
           {files.map((file) => (
             <button
@@ -179,6 +189,23 @@ function RequirementSourceFilesBox({
                 <span className="text-[11px] text-muted-foreground">
                   {file.size ? `${Math.ceil(file.size / 1024)} KB` : badge}
                 </span>
+              </span>
+              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+            </button>
+          ))}
+          {urls.map((url) => (
+            <button
+              key={url}
+              type="button"
+              onClick={() => openResourcePanelOverlay("browser", { browserUrl: url })}
+              className="flex w-full items-center gap-3 rounded-lg border border-border/70 bg-[#fbfcfe] px-3 py-2.5 text-left transition-colors hover:border-primary/35 hover:bg-primary/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
+            >
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Link className="size-4" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium text-foreground">{url}</span>
+                <span className="text-[11px] text-muted-foreground">线上背景资料</span>
               </span>
               <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
             </button>
@@ -384,6 +411,7 @@ export function RequirementDetailsPanel({
   onContinueDevelopment,
   onResetDevelopment
 }: RequirementDetailsPanelProps): React.JSX.Element {
+  const clickableRequirementUrl = normalizeClickableRequirementUrl(requirement.link)
   const threads = useAppStore((state) => state.threads)
   const developmentThreads = useMemo(
     () => findRequirementDevelopmentThreads(requirement.id, threads),
@@ -885,20 +913,35 @@ export function RequirementDetailsPanel({
                         : "直接输入"}
                   </span>
                 </div>
-                <p
-                  className={cn(
-                    "whitespace-pre-wrap break-words text-sm leading-6 text-foreground/85",
-                    requirement.sourceType !== "link" && "max-h-64 overflow-y-auto pr-2"
-                  )}
-                >
-                  {requirement.initialDescription.trim() ||
-                    sourcePreview.trim() ||
-                    (requirement.sourceType === "file"
-                      ? "未提供原始需求文件"
-                      : requirement.sourceType === "link"
-                        ? "未提供线上需求链接"
-                        : "未提供文本描述")}
-                </p>
+                {requirement.sourceType === "link" && clickableRequirementUrl ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openResourcePanelOverlay("browser", {
+                        browserUrl: clickableRequirementUrl
+                      })
+                    }
+                    className="flex w-full items-center gap-3 rounded-lg border border-border/70 bg-[#fbfcfe] px-3 py-2.5 text-left transition-colors hover:border-primary/35 hover:bg-primary/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
+                  >
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <Link className="size-4" />
+                    </span>
+                    <span className="min-w-0 flex-1 break-all text-sm font-medium text-primary">
+                      {clickableRequirementUrl}
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                  </button>
+                ) : (
+                  <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words pr-2 text-sm leading-6 text-foreground/85">
+                    {requirement.initialDescription.trim() ||
+                      sourcePreview.trim() ||
+                      (requirement.sourceType === "file"
+                        ? "未提供原始需求文件"
+                        : requirement.sourceType === "link"
+                          ? "未提供线上需求链接"
+                          : "未提供文本描述")}
+                  </p>
+                )}
               </section>
 
               {requirement.sourceType === "file" ? (
@@ -916,6 +959,7 @@ export function RequirementDetailsPanel({
                 badge="背景材料"
                 emptyText="未添加需求背景补充材料"
                 files={backgroundMaterialFiles}
+                urls={requirement.backgroundUrls ?? []}
                 tagImageFiles
                 onOpen={openWorkspaceFilePreview}
               />

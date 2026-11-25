@@ -3,6 +3,7 @@ export const MAX_ATTACHMENT_PICKER_FILES = 3
 export const MAX_ATTACHMENT_FILE_NAME_LENGTH = 512
 export const MAX_REQUIREMENT_BACKGROUND_FILE_BYTES = 10 * 1024 * 1024
 export const MAX_REQUIREMENT_BACKGROUND_FILES = 10
+export const MAX_REQUIREMENT_BACKGROUND_URLS = 10
 export const REQUIREMENT_BACKGROUND_FILE_ACCEPT =
   ".docx,.md,.txt,.html,.htm,.avif,.bmp,.gif,.heic,.heif,.jpg,.jpeg,.png,.svg,.webp"
 

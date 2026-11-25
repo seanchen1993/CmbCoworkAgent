@@ -51,6 +51,7 @@ export type RequirementRecord = {
   sourceType: "file" | "text" | "link"
   sourceName: string
   initialDescription: string
+  backgroundUrls?: string[]
   needDesign: NeedDesignChoice
   prdManifest: RequirementPrdManifest
   prd: "是" | "否"
@@ -131,6 +132,7 @@ export function fromPersistedRequirement(
     sourceType: item.source.type,
     sourceName: item.source.fileName,
     initialDescription: item.source.initialDescription ?? "",
+    backgroundUrls: item.source.backgroundUrls ?? [],
     needDesign: item.needDesign === "1" || item.needDesign === "0" ? item.needDesign : "",
     prdManifest: item.prdManifest,
     origin: "local",

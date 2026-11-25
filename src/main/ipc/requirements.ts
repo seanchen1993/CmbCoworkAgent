@@ -7,7 +7,8 @@ import { getOpenworkDir } from "../storage"
 import {
   isSupportedRequirementBackgroundFileName,
   MAX_REQUIREMENT_BACKGROUND_FILE_BYTES,
-  MAX_REQUIREMENT_BACKGROUND_FILES
+  MAX_REQUIREMENT_BACKGROUND_FILES,
+  MAX_REQUIREMENT_BACKGROUND_URLS
 } from "../../shared/file-attachment"
 
 type RequirementSourceType = "file" | "text" | "link"
@@ -17,6 +18,7 @@ export type RequirementSource = {
   type: RequirementSourceType
   fileName: string
   attachmentNames?: string[]
+  backgroundUrls?: string[]
   url?: string | null
   initialDescription?: string
 }
@@ -98,6 +100,7 @@ type CreateRequirementPayload = {
     bytes?: ArrayBuffer
     initialDescription?: string
     attachments?: Array<{ fileName: string; bytes: ArrayBuffer }>
+    backgroundUrls?: string[]
   }
 }
 
@@ -153,6 +156,7 @@ const REQUIREMENTS_INDEX_FILENAME = "index.json"
 const PRD_DIRNAME = "prd"
 const PRD_MANIFEST_FILENAME = "prd-manifest.json"
 const SOURCE_PREVIEW_FILENAME = "source-preview.md"
+const BACKGROUND_LINKS_FILENAME = "background-links.md"
 const REQUIREMENT_SETTINGS_FILENAME = "settings.json"
 const IMPORTED_HTML_DIRNAME = "imported-html"
 
@@ -402,6 +406,9 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
           ? "text"
           : "text"
     const normalizedManifest = normalizePrdManifest(item.prdManifest)
+    const backgroundUrls = Array.isArray(item.source?.backgroundUrls)
+      ? item.source.backgroundUrls.filter((value): value is string => typeof value === "string")
+      : []
     return {
       ...item,
       threadIds: normalizedThreadIds,
@@ -409,7 +416,8 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
       needDesign: normalizeNeedDesign(item.needDesign),
       source: {
         ...item.source,
-        type: sourceType
+        type: sourceType,
+        ...(backgroundUrls.length ? { backgroundUrls } : {})
       },
       prdManifest: normalizedManifest
     }
@@ -949,6 +957,18 @@ async function createRequirement(
   if ((source.attachments?.length ?? 0) > MAX_REQUIREMENT_BACKGROUND_FILES) {
     throw new Error(`需求背景补充材料最多上传 ${MAX_REQUIREMENT_BACKGROUND_FILES} 个文件`)
   }
+  if ((source.backgroundUrls?.length ?? 0) > MAX_REQUIREMENT_BACKGROUND_URLS) {
+    throw new Error(`需求背景链接最多添加 ${MAX_REQUIREMENT_BACKGROUND_URLS} 个`)
+  }
+  const backgroundUrls = [...new Set(source.backgroundUrls ?? [])].map((value) => {
+    try {
+      const parsed = new URL(value.trim())
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error()
+      return parsed.toString()
+    } catch {
+      throw new Error(`需求背景链接无效：${value}`)
+    }
+  })
   const attachmentNames = (source.attachments ?? []).map((attachment, index) => {
     if (!isSupportedRequirementBackgroundFileName(attachment.fileName)) {
       throw new Error(`补充材料 ${attachment.fileName} 格式不支持`)
@@ -979,6 +999,7 @@ async function createRequirement(
       type: source.type,
       fileName: primarySourceFileName,
       ...(attachmentNames.length ? { attachmentNames } : {}),
+      ...(backgroundUrls.length ? { backgroundUrls } : {}),
       ...(source.type === "link" ? { url: source.url?.trim() || null } : {}),
       ...(source.type === "text"
         ? { initialDescription: source.initialDescription?.trim() || "" }
@@ -1021,6 +1042,17 @@ async function createRequirement(
       const fileName = attachmentNames[index]
       await fs.writeFile(path.join(sourceDirectory, fileName), buffer)
     }
+  }
+  if (backgroundUrls.length) {
+    const sourceDirectory = path.join(getRequirementRoot(item), "source")
+    await fs.mkdir(sourceDirectory, { recursive: true })
+    const content = [
+      "# 线上背景资料",
+      "",
+      ...backgroundUrls.map((url, index) => `${index + 1}. ${url}`),
+      ""
+    ].join("\n")
+    await fs.writeFile(path.join(sourceDirectory, BACKGROUND_LINKS_FILENAME), content, "utf-8")
   }
   await fs.mkdir(getRequirementPrdDir(item), { recursive: true })
   await saveLastRequirementWorkDir(workDir)

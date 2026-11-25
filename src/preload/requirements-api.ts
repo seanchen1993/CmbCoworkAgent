@@ -29,6 +29,7 @@ export const requirementsApi = {
       bytes?: ArrayBuffer
       initialDescription?: string
       attachments?: Array<{ fileName: string; bytes: ArrayBuffer }>
+      backgroundUrls?: string[]
     }
   }) =>
     ipcRenderer.invoke("requirements:create", payload) as Promise<{

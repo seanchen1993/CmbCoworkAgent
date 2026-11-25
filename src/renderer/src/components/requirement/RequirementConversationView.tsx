@@ -135,18 +135,18 @@ function isRequirementPrdGenerationCompleted(
 }
 
 function buildRequirementInitializationMessage(requirement: RequirementRecord): string {
-  const sourceInstruction =
+  const primarySourceInstruction =
     requirement.sourceType === "text"
-      ? "请通过对话从零梳理需求，先了解目标和使用场景"
+      ? "阅读并理解用户的初始需求描述。"
       : requirement.sourceType === "link"
-        ? "请基于线上需求链接中的内容完成需求分析"
-        : `请先阅读 source 文件夹中的原始需求文件「${requirement.fileName || "未命名需求文件"}」，并基于其内容完成需求分析`
+        ? `使用内置浏览器完整阅读主需求链接：\n${requirement.link}`
+        : "阅读并理解 source-preview.md 中的原始需求内容。"
   const initialDescription = requirement.initialDescription.trim()
-  const prdInstruction = `为「${requirement.title}」撰写一份产品需求文档。${sourceInstruction}；同时将 source 文件夹中的其他文件作为需求背景补充材料（如有）。请系统梳理目标用户、使用场景、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准；先与我确认待澄清事项，再生成正式 PRD。${initialDescription ? `\n\n用户的初始需求描述：\n${initialDescription}` : ""}`
+  const initialDescriptionSection = initialDescription
+    ? `\n\n用户的初始需求描述：\n${initialDescription}`
+    : ""
 
-  if (requirement.sourceType !== "link") return prdInstruction
-
-  return `请先使用内置浏览器打开以下 WPS Office 在线需求文档：\n${requirement.link}\n\n完整读取并逐字输出全部需求内容，不得总结、改写、压缩或遗漏。然后继续执行以下任务：\n\n${prdInstruction}`
+  return `请为「${requirement.title}」撰写一份产品需求文档。\n\n## 1. 读取原始需求\n${primarySourceInstruction}${initialDescriptionSection}\n\n## 2. 补充背景\n阅读 source 文件夹中的补充材料；如含链接，使用内置浏览器访问，失败则跳过。\n\n## 3. 分析与澄清\n完成信息收集后，综合分析需求，整理需求目标、使用场景、范围和关键疑问，再通过对话与用户逐项澄清。\n\n## 4. 生成 PRD\n待关键疑问确认后，系统梳理目标用户、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准，并生成正式 PRD。`
 }
 
 function RequirementConversationSession({

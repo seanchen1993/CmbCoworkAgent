@@ -27,6 +27,7 @@ export interface RequirementsApi {
       bytes?: ArrayBuffer
       initialDescription?: string
       attachments?: Array<{ fileName: string; bytes: ArrayBuffer }>
+      backgroundUrls?: string[]
     }
   }) => Promise<RequirementResult>
   getWorkDir: () => Promise<string | null>

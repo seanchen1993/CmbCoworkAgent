@@ -162,6 +162,7 @@ function fromRequirementSpaceItem(
     sourceType: "link",
     sourceName: item.code,
     initialDescription: `需求编号 ${item.code}${item.priority ? ` · 优先级 ${item.priority}` : ""}`,
+    backgroundUrls: [],
     needDesign: "",
     prdManifest: {
       prd: {

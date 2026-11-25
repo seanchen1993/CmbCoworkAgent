@@ -7,10 +7,9 @@ import {
   FileText,
   Link,
   Loader2,
-  Plus,
+  RefreshCw,
   Sparkles,
-  Upload,
-  X
+  Upload
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -31,13 +30,7 @@ import {
   normalizeMarketVersion
 } from "../customize/MarketPanel/MarketUpdateBadge"
 import { fromPersistedRequirement, type RequirementRecord } from "./requirement-data"
-import {
-  isSupportedRequirementBackgroundFileName,
-  MAX_ATTACHMENT_FILE_BYTES,
-  MAX_REQUIREMENT_BACKGROUND_FILE_BYTES,
-  MAX_REQUIREMENT_BACKGROUND_FILES,
-  REQUIREMENT_BACKGROUND_FILE_ACCEPT
-} from "../../../../shared/file-attachment"
+import { MAX_ATTACHMENT_FILE_BYTES } from "../../../../shared/file-attachment"
 import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities,
@@ -47,6 +40,10 @@ import {
 } from "./requirement-session-capabilities"
 import type { DesignSystemInfo } from "../design/types"
 import { RequirementWorkDirPicker } from "./RequirementWorkDirPicker"
+import {
+  RequirementBackgroundMaterialsField,
+  type RequirementBackgroundMaterialsFieldHandle
+} from "./RequirementBackgroundMaterialsField"
 
 export type UploadSource = "file" | "text" | "link"
 
@@ -57,8 +54,62 @@ type RequirementSkillStatus =
   | { phase: "updating"; version: string }
   | { phase: "failed"; action: "install" | "update" }
 
-function isImageFileName(fileName: string): boolean {
-  return /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i.test(fileName.trim())
+type BrowserControlState = "loading" | "enabled" | "restart-required" | "error"
+
+function BrowserControlTag({
+  state,
+  restarting,
+  onRestart
+}: {
+  state: BrowserControlState
+  restarting: boolean
+  onRestart: () => void
+}): React.JSX.Element {
+  if (state === "restart-required") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+        <Check className="size-3" />
+        内置浏览器已帮你开启，需重启
+        <button
+          type="button"
+          className="ml-0.5 inline-flex items-center gap-1 rounded-full bg-amber-600 px-2 py-0.5 text-white hover:bg-amber-700 disabled:opacity-60"
+          disabled={restarting}
+          onClick={onRestart}
+        >
+          {restarting ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : (
+            <RefreshCw className="size-3" />
+          )}
+          重启 App
+        </button>
+      </span>
+    )
+  }
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        state === "enabled"
+          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+          : state === "error"
+            ? "border-red-200 bg-red-50 text-red-700"
+            : "border-border bg-muted/40 text-muted-foreground"
+      )}
+    >
+      {state === "enabled" ? (
+        <Check className="size-3" />
+      ) : state === "loading" ? (
+        <Loader2 className="size-3 animate-spin" />
+      ) : null}
+      {state === "enabled"
+        ? "内置浏览器已开启"
+        : state === "error"
+          ? "内置浏览器开启失败"
+          : "正在检测内置浏览器"}
+    </span>
+  )
 }
 
 async function ensureRequirementSkills(
@@ -170,6 +221,7 @@ export function NewRequirementDialog({
   const [source, setSource] = useState<UploadSource>(initialSource)
   const [file, setFile] = useState<File | null>(null)
   const [attachments, setAttachments] = useState<File[]>([])
+  const [backgroundUrls, setBackgroundUrls] = useState<string[]>([])
   const [title, setTitle] = useState("")
   const [url, setUrl] = useState("")
   const [initialDescription, setInitialDescription] = useState("")
@@ -178,7 +230,10 @@ export function NewRequirementDialog({
   const [preparingSkill, setPreparingSkill] = useState(false)
   const [enabledExperts, setEnabledExperts] = useState<Set<string>>(new Set())
   const [skillStatuses, setSkillStatuses] = useState<Record<string, RequirementSkillStatus>>({})
+  const [browserControlState, setBrowserControlState] = useState<BrowserControlState>("loading")
+  const [restartingApp, setRestartingApp] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const backgroundMaterialsRef = useRef<RequirementBackgroundMaterialsFieldHandle>(null)
   const lastAutoFilledTitleRef = useRef("")
 
   useEffect(() => {
@@ -225,6 +280,49 @@ export function NewRequirementDialog({
     }
   }, [open])
 
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setBrowserControlState("loading")
+    window.api.browser
+      .getCdpConfig()
+      .then(async (config) => {
+        if (config.enabled) return "enabled" as const
+        await window.api.browser.saveCdpConfig({ enabled: true })
+        return "restart-required" as const
+      })
+      .then((state) => {
+        if (!cancelled) setBrowserControlState(state)
+      })
+      .catch((error) => {
+        console.error("[Requirement] 开启内置浏览器失败：", error)
+        if (!cancelled) {
+          setBrowserControlState("error")
+          toast.error("开启内置浏览器失败，请前往设置中手动开启")
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
+  const restartApp = (): void => {
+    setRestartingApp(true)
+    void window.api.app.restart().catch((error) => {
+      console.error("[Requirement] 重启应用失败：", error)
+      setRestartingApp(false)
+      toast.error("重启应用失败，请稍后手动重启")
+    })
+  }
+
+  const browserControlTag = (
+    <BrowserControlTag
+      state={browserControlState}
+      restarting={restartingApp}
+      onRestart={restartApp}
+    />
+  )
+
   const updateSkillStatus = (skillId: string, status: RequirementSkillStatus): void => {
     setSkillStatuses((current) => ({ ...current, [skillId]: status }))
   }
@@ -248,34 +346,6 @@ export function NewRequirementDialog({
       return currentTitle
     })
     lastAutoFilledTitleRef.current = nextAutoFilledTitle
-  }
-
-  const addAttachments = (nextFiles: File[]): void => {
-    const unsupported = nextFiles.find(
-      (item) => !isSupportedRequirementBackgroundFileName(item.name)
-    )
-    if (unsupported) {
-      toast.error(`补充材料「${unsupported.name}」格式不支持`)
-      return
-    }
-    const oversized = nextFiles.find((item) => item.size > MAX_REQUIREMENT_BACKGROUND_FILE_BYTES)
-    if (oversized) {
-      toast.error(`补充材料「${oversized.name}」超过 10MB 限制`)
-      return
-    }
-    setAttachments((current) => {
-      const byIdentity = new Map(
-        current.map((item) => [`${item.name}:${item.size}:${item.lastModified}`, item])
-      )
-      nextFiles.forEach((item) =>
-        byIdentity.set(`${item.name}:${item.size}:${item.lastModified}`, item)
-      )
-      if (byIdentity.size > MAX_REQUIREMENT_BACKGROUND_FILES) {
-        toast.error(`需求背景补充材料最多上传 ${MAX_REQUIREMENT_BACKGROUND_FILES} 个文件`)
-        return current
-      }
-      return [...byIdentity.values()]
-    })
   }
 
   const handleConfirm = async (): Promise<void> => {
@@ -302,6 +372,9 @@ export function NewRequirementDialog({
     }
     const normalizedUrl = url.trim()
     const sourceName = source === "file" ? file?.name || "新需求草稿.docx" : null
+    const pendingBackgroundUrls = backgroundMaterialsRef.current?.getUrlsForSubmit()
+    if (pendingBackgroundUrls === null) return
+    const submittedBackgroundUrls = pendingBackgroundUrls ?? backgroundUrls
 
     setSaving(true)
     try {
@@ -326,18 +399,21 @@ export function NewRequirementDialog({
           ? {
               fileName: sourceName || "新需求草稿.docx",
               bytes: sourceBytes,
-              attachments: attachmentPayload
+              attachments: attachmentPayload,
+              backgroundUrls: submittedBackgroundUrls
             }
           : source === "link"
             ? {
                 fileName: "",
                 url: normalizedUrl,
-                attachments: attachmentPayload
+                attachments: attachmentPayload,
+                backgroundUrls: submittedBackgroundUrls
               }
             : {
                 fileName: "",
                 initialDescription: initialDescription.trim(),
-                attachments: attachmentPayload
+                attachments: attachmentPayload,
+                backgroundUrls: submittedBackgroundUrls
               }
       const result = await window.api.requirements.create({
         systemId: system.id,
@@ -382,324 +458,288 @@ export function NewRequirementDialog({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !saving && onOpenChange(nextOpen)}>
-      <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[680px]">
+      <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[1100px]">
         <DialogHeader>
           <div className="px-6 pt-5">
             <DialogTitle>
               {`新增需求 · ${source === "file" ? "文件" : source === "text" ? "文本" : "链接"}`}
             </DialogTitle>
             <DialogDescription className="mt-1.5">
-              先选择归档工作目录，再选择文件、文本或链接作为需求来源。
+              完善需求来源与背景信息后，开始需求沟通。
             </DialogDescription>
           </div>
         </DialogHeader>
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-5 pt-4">
-          <div className="rounded-xl border-[1.5px] border-primary/30 bg-primary/5 p-4">
-            <div className="flex items-center gap-3">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                <Building2 className="size-4" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="text-xs font-medium text-muted-foreground">业务系统</div>
-                <div className="truncate text-sm font-semibold text-foreground">{system.name}</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">默认沿用上次选择的系统</div>
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={saving}
-                onClick={onChangeSystem}
-              >
-                切换系统
-              </Button>
-            </div>
-          </div>
-
-          <RequirementWorkDirPicker
-            workDir={workDir}
-            onWorkDirChange={setWorkDir}
-            disabled={saving}
-          />
-
-          <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
-            {[
-              { id: "file" as const, label: "文件", icon: Upload },
-              { id: "text" as const, label: "文本", icon: ArrowRight },
-              { id: "link" as const, label: "链接", icon: Link }
-            ].map((item) => {
-              const Icon = item.icon
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setSource(item.id)}
-                  className={cn(
-                    "flex h-8 items-center gap-1.5 rounded px-3 text-sm font-semibold transition-colors",
-                    source === item.id
-                      ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <Icon className="size-3.5" />
-                  {item.label}
-                </button>
-              )
-            })}
-          </div>
-
-          {source === "file" ? (
-            <div className="space-y-3">
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => {
-                  event.preventDefault()
-                  updateFile(event.dataTransfer.files.item(0))
-                }}
-                className="flex min-h-44 w-full flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed border-[#d8cbbb] bg-[#fdfbf7] px-6 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:border-primary focus-visible:outline-none"
-              >
-                <Upload className="mb-3 size-7 text-primary" />
-                <span className="text-sm font-semibold text-foreground">
-                  {file ? file.name : "拖拽文件到此处，或点击上传"}
-                </span>
-                <span className="mt-1 text-sm text-muted-foreground">
-                  仅支持 .docx 格式 · 请将旧版 .doc 文件另存为 .docx 后上传
-                </span>
-                {file ? (
-                  <span className="mt-3 flex w-full items-center gap-2 rounded-lg border border-border bg-[#fbf8f4] px-3 py-2 text-left">
-                    <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-[#f8f0df] text-[#8f6a2a]">
-                      <FileText className="size-3.5" />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] font-semibold text-foreground">
-                        {file.name}
-                      </span>
-                      <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                        {Math.ceil(file.size / 1024)} KB · 草稿已就绪
-                      </span>
-                    </span>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-5 pt-4">
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_3rem_minmax(0,1fr)] lg:gap-5">
+            <div className="min-w-0 space-y-4">
+              <div className="rounded-xl border-[1.5px] border-primary/30 bg-primary/5 p-4">
+                <div className="flex items-center gap-3">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                    <Building2 className="size-4" />
                   </span>
-                ) : null}
-                <input
-                  ref={inputRef}
-                  type="file"
-                  accept=".docx"
-                  className="hidden"
-                  onChange={(event) => {
-                    updateFile(event.target.files?.item(0) ?? null)
-                    event.target.value = ""
-                  }}
-                />
-              </button>
-            </div>
-          ) : source === "link" ? (
-            <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
-              <label
-                className="mb-2 block text-sm font-semibold text-foreground"
-                htmlFor="requirement-link"
-              >
-                粘贴需求链接
-              </label>
-              <div className="relative">
-                <Link className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-primary" />
-                <Input
-                  id="requirement-link"
-                  value={url}
-                  onChange={(event) => setUrl(event.target.value)}
-                  placeholder="https://docs.example.com/prd/..."
-                  className="h-10 bg-white pl-9"
-                />
-              </div>
-              <p className="mt-3 text-sm leading-5 text-muted-foreground">
-                支持 WPS、Wiki 等链接，链接信息会一起归档。
-              </p>
-            </div>
-          ) : (
-            <div className="rounded-xl border-[1.5px] border-primary/25 bg-primary/5 p-5">
-              <label
-                className="mb-2 block text-sm font-semibold text-foreground"
-                htmlFor="requirement-initial-description"
-              >
-                简要描述需求
-              </label>
-              <textarea
-                id="requirement-initial-description"
-                value={initialDescription}
-                onChange={(event) => setInitialDescription(event.target.value)}
-                placeholder="例如：为柜员增加批量导入客户资料的能力，并在失败时展示原因。"
-                className="min-h-32 w-full resize-y rounded-md border border-input bg-white px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                disabled={saving}
-              />
-              <p className="mt-3 text-sm leading-5 text-muted-foreground">
-                这段说明会作为首条消息主动发送到需求会话，用于开始澄清和整理。
-              </p>
-            </div>
-          )}
-          <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
-            <label
-              className="mb-2 block text-sm font-semibold text-foreground"
-              htmlFor="requirement-title"
-            >
-              需求名称
-            </label>
-            <Input
-              id="requirement-title"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder={
-                source === "file" ? "上传文件后会自动回填，也可手动输入" : "例如：支付流程优化需求"
-              }
-              className="h-10 bg-white"
-              disabled={saving}
-            />
-            <p className="mt-3 text-sm leading-5 text-muted-foreground">
-              {source === "file"
-                ? "上传需求文件后会默认带出文件名，支持继续编辑。"
-                : "建议填写一个便于检索和沟通的需求名称。"}
-            </p>
-          </div>
-          <div className="rounded-xl border border-border bg-white p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-foreground">需求背景补充材料</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">
-                  支持 DOCX、MD、TXT、HTML 和图片，最多 10 个，单个不超过 10MB
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-medium text-muted-foreground">业务系统</div>
+                    <div className="truncate text-sm font-semibold text-foreground">
+                      {system.name}
+                    </div>
+                    <div className="mt-0.5 text-xs text-muted-foreground">
+                      默认沿用上次选择的系统
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={saving}
+                    onClick={onChangeSystem}
+                  >
+                    切换系统
+                  </Button>
                 </div>
               </div>
-              <Button asChild variant="outline" size="sm">
-                <label
-                  htmlFor="requirement-attachments"
-                  role="button"
-                  tabIndex={saving ? -1 : 0}
-                  aria-disabled={saving}
-                  className={cn(saving && "pointer-events-none opacity-50")}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return
-                    event.preventDefault()
-                    if (!saving) event.currentTarget.control?.click()
-                  }}
-                >
-                  <Plus className="size-3.5" />
-                  添加文件
-                </label>
-              </Button>
-              <input
-                id="requirement-attachments"
-                type="file"
-                multiple
-                accept={REQUIREMENT_BACKGROUND_FILE_ACCEPT}
+
+              <RequirementWorkDirPicker
+                workDir={workDir}
+                onWorkDirChange={setWorkDir}
                 disabled={saving}
-                className="hidden"
-                onChange={(event) => {
-                  addAttachments(Array.from(event.target.files ?? []))
-                  event.target.value = ""
-                }}
               />
-            </div>
-            {attachments.length > 0 ? (
-              <div className="mt-3 space-y-2">
-                {attachments.map((attachment) => (
-                  <div
-                    key={`${attachment.name}:${attachment.size}:${attachment.lastModified}`}
-                    className="flex items-center gap-2 rounded-lg bg-muted/45 px-3 py-2"
-                  >
-                    <FileText className="size-3.5 shrink-0 text-primary" />
-                    <span className="flex min-w-0 flex-1 items-center gap-2">
-                      <span className="min-w-0 truncate text-xs text-foreground">
-                        {attachment.name}
-                      </span>
-                      {isImageFileName(attachment.name) ? (
-                        <span className="shrink-0 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700">
-                          需多模态模型识别
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className="shrink-0 text-[11px] text-muted-foreground">
-                      {Math.ceil(attachment.size / 1024)} KB
-                    </span>
+
+              <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
+                {[
+                  { id: "file" as const, label: "文件", icon: Upload },
+                  { id: "text" as const, label: "文本", icon: ArrowRight },
+                  { id: "link" as const, label: "链接", icon: Link }
+                ].map((item) => {
+                  const Icon = item.icon
+                  return (
                     <button
+                      key={item.id}
                       type="button"
-                      className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                      aria-label={`移除 ${attachment.name}`}
-                      onClick={() =>
-                        setAttachments((current) => current.filter((item) => item !== attachment))
-                      }
+                      onClick={() => setSource(item.id)}
+                      className={cn(
+                        "flex h-8 items-center gap-1.5 rounded px-3 text-sm font-semibold transition-colors",
+                        source === item.id
+                          ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
                     >
-                      <X className="size-3.5" />
+                      <Icon className="size-3.5" />
+                      {item.label}
                     </button>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
-            ) : null}
-          </div>
-          <div className="space-y-4 border-t border-border pt-4">
-            <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
-              <div className="mb-3 flex items-center gap-2">
-                <BadgeCheck className="size-4 text-primary" />
-                <h3 className="text-sm font-semibold text-foreground">已绑定专家</h3>
-                <span className="text-[12px] font-normal text-muted-foreground">
-                  自动启用，无需你手动操作
-                </span>
-              </div>
-              {REQUIREMENT_BOUND_EXPERTS.map((expert) => {
-                const Icon = expert.icon
-                return (
-                  <div
-                    key={expert.id}
-                    className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground"
+
+              {source === "file" ? (
+                <div className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => inputRef.current?.click()}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      updateFile(event.dataTransfer.files.item(0))
+                    }}
+                    className="flex min-h-44 w-full flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed border-[#d8cbbb] bg-[#fdfbf7] px-6 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:border-primary focus-visible:outline-none"
                   >
-                    <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Icon className="size-3.5" />
+                    <Upload className="mb-3 size-7 text-primary" />
+                    <span className="text-sm font-semibold text-foreground">
+                      {file ? file.name : "拖拽文件到此处，或点击上传"}
                     </span>
-                    {expert.label}
-                    {enabledExperts.has(expert.id) ? (
-                      <Check className="size-4 shrink-0 text-emerald-600" aria-label="已启用" />
-                    ) : null}
-                  </div>
-                )
-              })}
-            </section>
-            <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
-              <div className="mb-3 flex items-center gap-2">
-                <Sparkles className="size-4 text-primary" />
-                <h3 className="text-sm font-semibold text-foreground">已绑定技能</h3>
-                <span className="text-[12px] font-normal text-muted-foreground">
-                  自动安装最新版本，无需你手动操作
-                </span>
-              </div>
-              {REQUIREMENT_BOUND_SKILLS.map((skill) => {
-                const Icon = skill.icon
-                const status = skillStatuses[skill.id]
-                return (
-                  <div
-                    key={skill.id}
-                    className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground"
-                  >
-                    <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Icon className="size-3.5" />
+                    <span className="mt-1 text-sm text-muted-foreground">
+                      仅支持 .docx 格式 · 请将旧版 .doc 文件另存为 .docx 后上传
                     </span>
-                    {skill.label}
-                    {status?.phase === "installing" || status?.phase === "updating" ? (
-                      <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                        <Loader2 className="size-3.5 animate-spin" />
-                        {status.phase === "installing" ? "安装中" : "更新中"}
-                      </span>
-                    ) : status?.phase === "installed" ? (
-                      <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-emerald-600">
-                        <Check className="size-4" aria-hidden="true" />
-                        {status.version}
-                      </span>
-                    ) : status?.phase === "failed" ? (
-                      <span className="ml-1 text-xs font-medium text-destructive">
-                        {status.action === "install" ? "安装失败" : "更新失败"}
+                    {file ? (
+                      <span className="mt-3 flex w-full items-center gap-2 rounded-lg border border-border bg-[#fbf8f4] px-3 py-2 text-left">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-[#f8f0df] text-[#8f6a2a]">
+                          <FileText className="size-3.5" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[12px] font-semibold text-foreground">
+                            {file.name}
+                          </span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                            {Math.ceil(file.size / 1024)} KB · 草稿已就绪
+                          </span>
+                        </span>
                       </span>
                     ) : null}
+                    <input
+                      ref={inputRef}
+                      type="file"
+                      accept=".docx"
+                      className="hidden"
+                      onChange={(event) => {
+                        updateFile(event.target.files?.item(0) ?? null)
+                        event.target.value = ""
+                      }}
+                    />
+                  </button>
+                </div>
+              ) : source === "link" ? (
+                <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <label
+                      className="text-sm font-semibold text-foreground"
+                      htmlFor="requirement-link"
+                    >
+                      粘贴需求链接
+                    </label>
+                    {browserControlTag}
                   </div>
-                )
-              })}
-            </section>
+                  <div className="relative">
+                    <Link className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-primary" />
+                    <Input
+                      id="requirement-link"
+                      value={url}
+                      onChange={(event) => setUrl(event.target.value)}
+                      placeholder="https://docs.example.com/prd/..."
+                      className="h-10 bg-white pl-9"
+                    />
+                  </div>
+                  <p className="mt-3 text-sm leading-5 text-muted-foreground">
+                    支持 WPS、Wiki 等链接，链接信息会一起归档。
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-xl border-[1.5px] border-primary/25 bg-primary/5 p-5">
+                  <label
+                    className="mb-2 block text-sm font-semibold text-foreground"
+                    htmlFor="requirement-initial-description"
+                  >
+                    简要描述需求
+                  </label>
+                  <textarea
+                    id="requirement-initial-description"
+                    value={initialDescription}
+                    onChange={(event) => setInitialDescription(event.target.value)}
+                    placeholder="例如：为柜员增加批量导入客户资料的能力，并在失败时展示原因。"
+                    className="min-h-32 w-full resize-y rounded-md border border-input bg-white px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                    disabled={saving}
+                  />
+                  <p className="mt-3 text-sm leading-5 text-muted-foreground">
+                    这段说明会作为首条消息主动发送到需求会话，用于开始澄清和整理。
+                  </p>
+                </div>
+              )}
+              <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
+                <label
+                  className="mb-2 block text-sm font-semibold text-foreground"
+                  htmlFor="requirement-title"
+                >
+                  需求名称
+                </label>
+                <Input
+                  id="requirement-title"
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder={
+                    source === "file"
+                      ? "上传文件后会自动回填，也可手动输入"
+                      : "例如：支付流程优化需求"
+                  }
+                  className="h-10 bg-white"
+                  disabled={saving}
+                />
+                <p className="mt-3 text-sm leading-5 text-muted-foreground">
+                  {source === "file"
+                    ? "上传需求文件后会默认带出文件名，支持继续编辑。"
+                    : "建议填写一个便于检索和沟通的需求名称。"}
+                </p>
+              </div>
+            </div>
+
+            <div
+              className="relative hidden min-h-full items-center justify-center lg:flex"
+              aria-hidden="true"
+            >
+              <span className="h-full w-[2px] rounded-full bg-gradient-to-b from-transparent via-primary/70 to-transparent shadow-[0_0_10px_rgba(196,134,84,0.3)]" />
+              <span className="absolute size-2.5 rotate-45 rounded-[2px] border border-primary/80 bg-primary ring-4 ring-background shadow-[0_0_10px_rgba(196,134,84,0.5)]" />
+            </div>
+
+            <div
+              className="h-[2px] rounded-full bg-gradient-to-r from-transparent via-primary/70 to-transparent shadow-[0_0_8px_rgba(196,134,84,0.25)] lg:hidden"
+              aria-hidden="true"
+            />
+
+            <div className="min-w-0 space-y-4">
+              <RequirementBackgroundMaterialsField
+                ref={backgroundMaterialsRef}
+                files={attachments}
+                urls={backgroundUrls}
+                disabled={saving}
+                browserControlTag={browserControlTag}
+                onFilesChange={setAttachments}
+                onUrlsChange={setBackgroundUrls}
+              />
+              <div className="space-y-4">
+                <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <BadgeCheck className="size-4 text-primary" />
+                    <h3 className="text-sm font-semibold text-foreground">已绑定专家</h3>
+                    <span className="text-[12px] font-normal text-muted-foreground">
+                      自动启用，无需你手动操作
+                    </span>
+                  </div>
+                  {REQUIREMENT_BOUND_EXPERTS.map((expert) => {
+                    const Icon = expert.icon
+                    return (
+                      <div
+                        key={expert.id}
+                        className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground"
+                      >
+                        <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+                          <Icon className="size-3.5" />
+                        </span>
+                        {expert.label}
+                        {enabledExperts.has(expert.id) ? (
+                          <Check className="size-4 shrink-0 text-emerald-600" aria-label="已启用" />
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                </section>
+                <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <Sparkles className="size-4 text-primary" />
+                    <h3 className="text-sm font-semibold text-foreground">已绑定技能</h3>
+                    <span className="text-[12px] font-normal text-muted-foreground">
+                      自动安装最新版本，无需你手动操作
+                    </span>
+                  </div>
+                  {REQUIREMENT_BOUND_SKILLS.map((skill) => {
+                    const Icon = skill.icon
+                    const status = skillStatuses[skill.id]
+                    return (
+                      <div
+                        key={skill.id}
+                        className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground"
+                      >
+                        <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+                          <Icon className="size-3.5" />
+                        </span>
+                        {skill.label}
+                        {status?.phase === "installing" || status?.phase === "updating" ? (
+                          <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                            <Loader2 className="size-3.5 animate-spin" />
+                            {status.phase === "installing" ? "安装中" : "更新中"}
+                          </span>
+                        ) : status?.phase === "installed" ? (
+                          <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-emerald-600">
+                            <Check className="size-4" aria-hidden="true" />
+                            {status.version}
+                          </span>
+                        ) : status?.phase === "failed" ? (
+                          <span className="ml-1 text-xs font-medium text-destructive">
+                            {status.action === "install" ? "安装失败" : "更新失败"}
+                          </span>
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                </section>
+              </div>
+            </div>
           </div>
         </div>
         <DialogFooter className="border-t border-border bg-[#fbf8f4] px-6 py-3">
