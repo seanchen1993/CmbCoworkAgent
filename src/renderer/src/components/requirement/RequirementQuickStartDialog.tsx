@@ -53,7 +53,7 @@ const personas: Array<{
   {
     value: "development",
     title: "开发人员",
-    description: "创建技术需求，原型设计，需求开发",
+    description: "创建技术需求，原型设计，代码开发",
     image: developerRoleImage,
     featureColorLight: "rgba(190, 224, 255, 0.82)",
     tagClassName: "bg-[#3495ed] text-white shadow-[0_5px_12px_-6px_rgba(52,149,237,0.9)]"
@@ -61,7 +61,7 @@ const personas: Array<{
   {
     value: "design",
     title: "设计人员",
-    description: "基于已有需求开始UI设计",
+    description: "基于已有特性 需求澄清，UI设计",
     image: designerRoleImage,
     featureColorLight: "rgba(222, 202, 255, 0.82)",
     tagClassName: "bg-[#8547ef] text-white shadow-[0_5px_12px_-6px_rgba(133,71,239,0.9)]"
@@ -90,7 +90,7 @@ const quickStartItems: Array<{
 }> = [
   {
     source: "text",
-    title: "从 0 到 1 新建技术需求",
+    title: "新建技术需求 / 需求澄清",
     description: "白纸起步，边聊边把需求梳理清楚",
     actions: [{ label: "新建", target: "conversation" }],
     icon: Plus
@@ -123,6 +123,14 @@ const quickStartItems: Array<{
     icon: Link
   }
 ]
+
+const designerRequirementClarificationItem: (typeof quickStartItems)[number] = {
+  source: "text",
+  title: "需求澄清",
+  description: "边聊边把业务需求梳理清楚",
+  actions: [{ label: "新建", target: "conversation" }],
+  icon: Plus
+}
 
 export function RequirementQuickStartDialog({
   open,
@@ -173,15 +181,16 @@ export function RequirementQuickStartDialog({
     setStep("source")
   }
 
-  const availableItems = quickStartItems
-    .filter((item) => persona === "development" || item.source !== "text")
-    .map((item) => ({
-      ...item,
-      actions:
-        persona === "design"
-          ? item.actions.filter((action) => action.target !== "development")
-          : item.actions
-    }))
+  const availableItems = [
+    ...(persona === "design" ? [designerRequirementClarificationItem] : []),
+    ...quickStartItems.filter((item) => persona === "development" || item.source !== "text")
+  ].map((item) => ({
+    ...item,
+    actions:
+      persona === "design"
+        ? item.actions.filter((action) => action.target !== "development")
+        : item.actions
+  }))
 
   return (
     <>

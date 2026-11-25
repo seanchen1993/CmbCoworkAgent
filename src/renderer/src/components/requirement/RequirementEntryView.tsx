@@ -238,6 +238,7 @@ export function RequirementEntryView({
     target: "design" | "development"
   } | null>(null)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
+  const setSelectedSystemId = useRequirementStore((state) => state.setSelectedSystemId)
   const setSystemList = useRequirementStore((state) => state.setSystemList)
   const selectedSystem = useRequirementStore((state) =>
     getSelectedRequirementSystem(state.selectedSystemId)
@@ -951,6 +952,7 @@ export function RequirementEntryView({
           initialSystemId={draftSystemId}
           onCancel={() => setSystemDialogOpen(false)}
           onConfirm={(systemId) => {
+            setSelectedSystemId(systemId)
             setDraftSystemId(systemId)
             setSystemDialogOpen(false)
             setRequirementDialogOpen(true)
