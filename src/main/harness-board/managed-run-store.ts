@@ -1,4 +1,5 @@
 import {
+  isManagedRunModelSelection,
   resolveManagedRunModelSelection,
   type ManagedRunModelSelection
 } from "../../shared/managed-run-model"
@@ -451,9 +452,7 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     (snapshot.botOperationId !== undefined &&
       (typeof snapshot.botOperationId !== "string" ||
         !/^[0-9a-f]{64}$/.test(snapshot.botOperationId))) ||
-    (snapshot.modelSelection !== undefined &&
-      snapshot.modelSelection !== "default" &&
-      snapshot.modelSelection !== "ultra") ||
+    (snapshot.modelSelection !== undefined && !isManagedRunModelSelection(snapshot.modelSelection)) ||
     !isManagedRunCurrentSession(snapshot.currentSession) ||
     !isManagedRunDecisionBaseline(snapshot.decisionBaseline) ||
     (snapshot.currentSession === undefined) !== (snapshot.decisionBaseline === undefined) ||

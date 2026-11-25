@@ -256,22 +256,39 @@ async function main(): Promise<void> {
     console.log(
       "PASS model switcher: smart routing toggles/reopen, imported/legacy IDs, pending writes, manual selection and catalog loading"
     )
+    await page.evaluate(() => {
+      const fixture = (window as unknown as FixtureWindow).modelSwitcherFixture
+      const model = "builtin:maodou-ultra"
+      fixture.mount({ model, routingState: { lastResolvedModelId: model } }, true, model, "auto")
+      fixture.idleCatalog()
+    })
+    assert.deepEqual(await settle(), { currentModel: "builtin:maodou-ultra", writes: [] })
+    await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog("closed")
+    )
+    assert.deepEqual(
+      await settle(),
+      { currentModel: "custom:local-a", writes: [] },
+      "automatic routing keeps sending after closing without updating the saved pin"
+    )
+
     await mount({ model: "custom:local-a" })
     await page.evaluate(() =>
-      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog()
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog("closed")
     )
     await page.getByRole("button", { name: "Local A", exact: true }).click()
-    const idleOption = page.getByRole("button", { name: /码豆模型PRO/ })
+    const idleOption = page.getByRole("button", { name: /闲时模型 Ultra.*非服务时段/ })
     assert.equal(await idleOption.isEnabled(), true)
+    assert.equal(await page.getByRole("button", { name: /码豆模型PRO/ }).isEnabled(), true)
     await idleOption.click()
-    assert.equal((await settle()).currentModel, "builtin:idle-ultra")
-    await page.getByRole("button", { name: "码豆模型PRO", exact: true }).click()
-    assert.equal(await page.getByText(/全天可用/).count(), 0)
+    assert.equal((await settle()).currentModel, "builtin:maodou-ultra")
+    await page.getByRole("button", { name: "闲时模型 Ultra", exact: true }).click()
+    await page.getByText(/生产环境服务时间为北京时间 22:00 至次日 07:00/).waitFor()
     await page.evaluate(() =>
-      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false)
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog("missing-sap")
     )
     const unavailableIdleOption = page.getByRole("button", {
-      name: /码豆模型PRO.*用户信息不完整/
+      name: /闲时模型 Ultra.*用户信息不完整/
     })
     await unavailableIdleOption.waitFor()
     assert.equal(
@@ -279,30 +296,38 @@ async function main(): Promise<void> {
       true,
       "missing identity still prevents selection"
     )
-    assert.equal((await settle()).currentModel, "builtin:idle-ultra")
-    assert.equal((await settle()).writes.at(-1), "builtin:idle-ultra")
-    await page.evaluate(() =>
-      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(true)
-    )
+    assert.equal((await settle()).currentModel, "builtin:maodou-ultra")
+    assert.equal((await settle()).writes.at(-1), "builtin:maodou-ultra")
     await page.keyboard.press("Escape")
-    await page.evaluate(() =>
-      (window as unknown as FixtureWindow).modelSwitcherFixture.showIdleSettings()
-    )
+    await page.evaluate(() => {
+      const fixture = (window as unknown as FixtureWindow).modelSwitcherFixture
+      fixture.idleCatalog("closed")
+      fixture.showGatewaySettings("pro")
+    })
     await page.locator('input[value="pro"]').waitFor()
     assert.equal(await page.locator('input[value="pro"]').isDisabled(), true)
     assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
-    assert.equal(await page.getByRole("button", { name: "码豆模型PRO", exact: true }).count(), 1)
-    assert.equal(await page.getByText(/全天可用/).count(), 0)
+    assert.equal(await page.getByText(/非服务时段/).count(), 0)
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isEnabled(), true)
-    const nameInput = page.locator('input[value="码豆模型PRO"]')
+
+    await page.evaluate(() => {
+      const fixture = (window as unknown as FixtureWindow).modelSwitcherFixture
+      fixture.idleCatalog()
+      fixture.showGatewaySettings("ultra")
+    })
+    await page.locator('input[value="ultra"]').waitFor()
+    assert.equal(await page.locator('input[value="ultra"]').isDisabled(), true)
+    await page.getByText(/生产环境服务时间为北京时间 22:00 至次日 07:00/).waitFor()
+    assert.equal(await page.getByRole("button", { name: /测试连接/ }).isEnabled(), true)
+    const nameInput = page.locator('input[value="闲时模型 Ultra"]')
     await nameInput.fill("未保存的模型名称")
     await page.evaluate(() =>
-      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false)
+      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog("closed")
     )
-    await page.getByText(/请先完善当前用户的八位 SAP 员工编号/).waitFor()
+    await page.getByText(/当前为非服务时段/).waitFor()
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isDisabled(), true)
     assert.equal(await page.locator('input[value="未保存的模型名称"]').count(), 1)
-    assert.equal((await settle()).currentModel, "builtin:idle-ultra")
+    assert.equal((await settle()).currentModel, "builtin:maodou-ultra")
     await page.getByRole("button", { name: "保存", exact: true }).click()
     await settle()
     assert.deepEqual(
@@ -311,12 +336,12 @@ async function main(): Promise<void> {
       ),
       { names: ["未保存的模型名称"], defaults: [], maxTokens: [128_000] }
     )
-    console.log("PASS Pro model: selection, identity checks, locked context, and settings save")
+    console.log("PASS Maodou models: daytime Pro, restricted Ultra, preselection, identity checks, and settings save")
 
     await page.evaluate(() => {
       const fixture = (window as unknown as FixtureWindow).modelSwitcherFixture
-      fixture.idleCatalog(true)
-      fixture.showIdleSettings(true)
+      fixture.idleCatalog()
+      fixture.showGatewaySettings("pro", true)
     })
     await page.getByText("当前使用 UAT 测试环境。").waitFor()
     const contextWindow = page.locator('input[value="200000"]')

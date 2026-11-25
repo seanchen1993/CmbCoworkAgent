@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ChatOpenAICompletions } from "@langchain/openai"
 import * as storage from "../storage"
 import { getModelInstance } from "./runtime"
+import { isRetryableApiError, isRetryableManagedProviderError } from "./failover"
 
 const config = {
-  id: "idle-ultra",
-  model: "pro",
+  id: "maodou-ultra",
+  model: "ultra",
   apiKey: "test-key",
   baseUrl: "http://idle.example.test/pattern/llm/v1",
   transport: "idle-gateway" as const
@@ -49,12 +50,11 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe("Pro model runtime availability", () => {
+describe("Maodou model runtime availability", () => {
   it.each(["HTTP", "network"])(
-    "completes a %s retry when backoff crosses 07:00",
+    "blocks a %s retry when backoff crosses 07:00",
     async (failure) => {
       const send = vi.fn(async () => {
-        if (send.mock.calls.length > 1) return reply()
         if (failure === "network") throw new TypeError("fetch failed")
         return new Response(JSON.stringify({ error: { message: "temporary failure" } }), {
           status: 503,
@@ -66,22 +66,32 @@ describe("Pro model runtime availability", () => {
       const onRetry = vi.fn(() => vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00")))
       const onRetrySuccess = vi.fn()
       const model = getModelInstance(config, { onRetry, onRetrySuccess }, 2, "agent", "thread")
-      expect((await model.invoke("hello")).content).toBe("ok")
-      expect(send).toHaveBeenCalledTimes(2)
+      const error = await model.invoke("hello").catch((error) => error)
+      expect(error).toMatchObject({ status: 400, code: "idle_model_outside_service_hours" })
+      expect(isRetryableApiError(error)).toBe(false)
+      expect(isRetryableManagedProviderError(error)).toBe(false)
+      expect(send).toHaveBeenCalledTimes(1)
       expect(onRetry).toHaveBeenCalledTimes(1)
       expect(onRetrySuccess).toHaveBeenCalledTimes(1)
     }
   )
 
-  it.each(["agent", "context-compaction"] as const)(
-    "sends %s requests with mode pro during the day",
-    async (purpose) => {
+  it.each([
+    ["pro", "production", "agent"],
+    ["pro", "production", "context-compaction"],
+    ["ultra", "uat", "agent"],
+    ["ultra", "uat", "context-compaction"]
+  ] as const)(
+    "sends %s %s %s requests during the day",
+    async (mode, environment, purpose) => {
       vi.spyOn(ChatOpenAICompletions.prototype, "getNumTokens").mockResolvedValue(1)
       vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
       const send = vi.fn<typeof fetch>(async () => reply(purpose === "context-compaction"))
       vi.stubGlobal("fetch", send)
       const thinkingConfig = {
         ...config,
+        model: mode,
+        idleModelEnvironment: environment,
         enableThinking: true,
         enableThinkingEffort: true,
         thinkingEffort: "high" as const
@@ -90,7 +100,7 @@ describe("Pro model runtime availability", () => {
       expect((await model.invoke("daytime request")).content).toBe("ok")
       expect(send).toHaveBeenCalledTimes(1)
       const payload = JSON.parse(String(send.mock.calls[0][1]?.body))
-      expect(payload.model).toBe("pro")
+      expect(payload.model).toBe(mode)
       expect(payload.chat_template_kwargs).toEqual(
         purpose === "agent"
           ? { enable_thinking: true, reasoning_effort: "high" }
@@ -99,7 +109,7 @@ describe("Pro model runtime availability", () => {
     }
   )
 
-  it("continues an SSE stream and its next round across 07:00", async () => {
+  it("lets an existing SSE stream finish after 07:00 and blocks its next round", async () => {
     vi.spyOn(ChatOpenAICompletions.prototype, "getNumTokens").mockResolvedValue(1)
     let stream!: ReadableStreamDefaultController<Uint8Array>
     let requestSignal: AbortSignal | undefined
@@ -113,7 +123,6 @@ describe("Pro model runtime availability", () => {
       }
     })
     const send = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      if (send.mock.calls.length > 1) return reply(true)
       requestSignal = init?.signal ?? undefined
       markStarted()
       return new Response(body, { headers: { "content-type": "text/event-stream" } })
@@ -136,7 +145,10 @@ describe("Pro model runtime availability", () => {
     stream.close()
     expect((await result).content).toBe("finished")
     expect(requestSignal?.aborted).toBe(false)
-    expect((await model.invoke("next tool round")).content).toBe("ok")
-    expect(send).toHaveBeenCalledTimes(2)
+    await expect(model.invoke("next tool round")).rejects.toMatchObject({
+      status: 400,
+      code: "idle_model_outside_service_hours"
+    })
+    expect(send).toHaveBeenCalledTimes(1)
   })
 })

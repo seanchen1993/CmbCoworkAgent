@@ -1,5 +1,6 @@
 import { getModelClientOptions } from "../models/connection"
 import { isModelAvailable } from "../../shared/model-catalog"
+import { assertIdleModelServiceHours } from "../../shared/idle-model-service-window"
 import { createHash } from "crypto"
 import { SelectedModelUnavailableError } from "../models/selection-error"
 import { ChatOpenAI } from "@langchain/openai"
@@ -994,6 +995,7 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
       if (!requestedConfig.apiKey?.trim())
         throw new SelectedModelUnavailableError(requestedId, "missing_credentials")
     }
+    assertIdleModelServiceHours(requestedConfig)
     const selectedConfig = requestedConfig ?? getAvailableModelConfigOrDefault()
     const modelId = selectedConfig ? toModelRef(selectedConfig) : ""
     const tier = selectedConfig?.tier ?? "premium"
