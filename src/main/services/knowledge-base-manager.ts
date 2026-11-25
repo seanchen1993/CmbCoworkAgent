@@ -27,6 +27,7 @@ import {
   writeKnowledgeState
 } from "./knowledge-base-state"
 import {
+  KnowledgeRepositoryFallbackError,
   KnowledgeRepositoryLocalChangesError,
   knowledgeWorkspaceHasChanges,
   syncKnowledgeRepository,
@@ -272,8 +273,12 @@ async function syncWorkspace(
     const blocked = error instanceof KnowledgeRepositoryLocalChangesError
     const message = blocked ? error.message : formatKnowledgeSyncError(error)
     if (!blocked) {
+      const sshFailure =
+        error instanceof KnowledgeRepositoryFallbackError
+          ? `\nSSH 失败：${errorMessage(error.sshError, item)}`
+          : ""
       console.warn(
-        `[knowledge_manage] ${item.idKey}/${role} 同步失败：${errorMessage(error, item)}`
+        `[knowledge_manage] ${item.idKey}/${role} 同步失败：${errorMessage(error, item)}${sshFailure}`
       )
     }
     await updateWorkspace(item.idKey, {

@@ -20,7 +20,6 @@ let sshFailure: Error | undefined
 let httpsProbeFailure: Error | undefined
 let sshProbeFailure: Error | undefined
 let probeExistingCheckout = false
-let sshConfig = ""
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "knowledge-fallback-"))
@@ -34,10 +33,8 @@ beforeEach(async () => {
   httpsProbeFailure = undefined
   sshProbeFailure = undefined
   probeExistingCheckout = false
-  sshConfig = ""
   runGit.mockReset()
   runGit.mockImplementation(async (_file, args: string[], options: { cwd: string }) => {
-    if (args.includes("--get-regexp")) return { stdout: sshConfig, stderr: "" }
     if (args.includes("ls-remote")) {
       if (args.includes(url) && httpsProbeFailure) throw httpsProbeFailure
       if (args.includes(sshUrl) && sshProbeFailure) throw sshProbeFailure
@@ -220,41 +217,36 @@ it("queries an existing checkout over SSH without prompting or trying HTTPS on s
   expect(probes).toHaveLength(1)
   expect(probes[0][1]).toContain(sshUrl)
   expect(probes[0][1]).toContain("core.askPass=")
+  expect(probes[0][2].env.GIT_SSH_COMMAND).toBeUndefined()
   expect(probes[0][2].env).toMatchObject({
     GCM_INTERACTIVE: "never",
     GIT_ASKPASS: "",
     GIT_TERMINAL_PROMPT: "0",
-    GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
     SSH_ASKPASS: "",
     SSH_ASKPASS_REQUIRE: "never"
   })
 })
 
-it("adds the batch option while retaining a configured SSH command", async () => {
-  sshConfig = 'core.sshcommand\n"/path with spaces/plink.exe" -i custom-key\0ssh.variant\nplink\0'
-  await syncKnowledgeRepository(source)
-  const clone = runGit.mock.calls.find((call) => call[1].includes("clone"))
-  expect(clone?.[2].env.GIT_SSH_COMMAND).toBe('"/path with spaces/plink.exe" -batch -i custom-key')
-})
+it.each(['"/path with spaces/plink.exe" -i custom-key', "env SSH_PROFILE=work ssh -i custom-key"])(
+  "passes an existing SSH command through unchanged: %s",
+  async (command) => {
+    vi.stubEnv("GIT_SSH_COMMAND", command)
 
-it("respects an explicitly selected SSH command and its configured key", async () => {
-  sshConfig = "core.sshcommand\nssh -i old-key\0"
-  vi.stubEnv("GIT_SSH_COMMAND", "ssh -i custom-key")
+    await syncKnowledgeRepository(source)
+    const clone = runGit.mock.calls.find((call) => call[1].includes("clone"))
+    expect(clone?.[2].env.GIT_SSH_COMMAND).toBe(command)
+  }
+)
 
-  await syncKnowledgeRepository(source)
-  const clone = runGit.mock.calls.find((call) => call[1].includes("clone"))
-  expect(clone?.[2].env.GIT_SSH_COMMAND).toBe("ssh -o BatchMode=yes -i custom-key")
-})
-
-it("keeps the arguments of a Git simple SSH wrapper while suppressing AskPass", async () => {
+it("lets Git use the selected SSH executable without adding a shell command", async () => {
   vi.stubEnv("GIT_SSH", "custom-ssh-wrapper")
-  vi.stubEnv("GIT_SSH_VARIANT", "simple")
+  vi.stubEnv("GIT_SSH_VARIANT", "ssh")
 
   await syncKnowledgeRepository(source)
   const clone = runGit.mock.calls.find((call) => call[1].includes("clone"))
   expect(clone?.[2].env).toMatchObject({
     GIT_SSH: "custom-ssh-wrapper",
-    GIT_SSH_VARIANT: "simple",
+    GIT_SSH_VARIANT: "ssh",
     SSH_ASKPASS_REQUIRE: "never"
   })
   expect(clone?.[2].env.GIT_SSH_COMMAND).toBeUndefined()

@@ -37,6 +37,16 @@ export class KnowledgeRepositoryLocalChangesError extends Error {
   }
 }
 
+export class KnowledgeRepositoryFallbackError extends AggregateError {
+  constructor(
+    message: string,
+    primaryError: unknown,
+    readonly sshError: unknown
+  ) {
+    super([primaryError, sshError], message)
+  }
+}
+
 function normalizeSource(
   source: KnowledgeRepositorySource
 ): KnowledgeRepositorySource & { ref: string } {
@@ -64,8 +74,7 @@ async function git(
   args: string[],
   cwd: string,
   signal?: AbortSignal,
-  timeout = GIT_TIMEOUT_MS,
-  sshCommand?: string
+  timeout = GIT_TIMEOUT_MS
 ): Promise<string> {
   const { stdout } = await execFileAsync(
     "git",
@@ -84,8 +93,7 @@ async function git(
         GIT_ASKPASS: "",
         GIT_TERMINAL_PROMPT: "0",
         SSH_ASKPASS: "",
-        SSH_ASKPASS_REQUIRE: "never",
-        ...(sshCommand ? { GIT_SSH_COMMAND: sshCommand } : {})
+        SSH_ASKPASS_REQUIRE: "never"
       },
       timeout,
       maxBuffer: 1024 * 1024,
@@ -98,59 +106,6 @@ async function git(
 
 function isAborted(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error as Error).name === "AbortError"
-}
-
-async function nonInteractiveSshCommand(
-  cwd: string,
-  signal?: AbortSignal
-): Promise<string | undefined> {
-  let config = ""
-  try {
-    config = await git(
-      ["config", "--null", "--get-regexp", "^(core\\.sshcommand|ssh\\.variant)$"],
-      cwd,
-      signal
-    )
-  } catch (error) {
-    // git config exits with 1 when none of the requested keys are set.
-    if (isAborted(error, signal) || (error as { code?: number }).code !== 1) throw error
-  }
-  const settings = new Map(
-    config
-      .split("\0")
-      .filter(Boolean)
-      .map((entry) => {
-        const separator = entry.indexOf("\n")
-        return [entry.slice(0, separator), entry.slice(separator + 1)] as const
-      })
-  )
-  const configuredCommand = process.env.GIT_SSH_COMMAND ?? settings.get("core.sshcommand")
-  const sshPath = process.env.GIT_SSH || "ssh"
-  const command = configuredCommand?.trimStart()
-  const executable = command?.match(/^(?:"[^"]+"|'[^']+'|\S+)/)?.[0]
-  const name = (executable ? executable.replace(/^['"]|['"]$/g, "") : sshPath)
-    .split(/[\\/]/)
-    .at(-1)
-    ?.toLowerCase()
-    .replace(/\.exe$/, "")
-  const variant = (
-    process.env.GIT_SSH_VARIANT ??
-    settings.get("ssh.variant") ??
-    "auto"
-  ).toLowerCase()
-  // Git's simple variant is for custom commands that accept only the host and remote command.
-  if (variant === "simple") return undefined
-  const client = variant === "auto" ? name : variant
-  const batchOption =
-    client === "plink" || client === "putty" || client === "tortoiseplink"
-      ? "-batch"
-      : "-o BatchMode=yes"
-  // Keep the user's SSH executable and options, with batch mode taking precedence.
-  if (command && executable)
-    return `${executable} ${batchOption}${command.slice(executable.length)}`
-  return sshPath === "ssh"
-    ? `ssh ${batchOption}`
-    : `'${sshPath.replaceAll("'", "'\\''")}' ${batchOption}`
 }
 
 async function withPreferredRemote<T>(
@@ -179,9 +134,10 @@ async function withPreferredRemote<T>(
     } catch (primaryError) {
       if (isAborted(primaryError, signal)) throw primaryError
       // The existing error formatter uses the configured primary URL's error.
-      throw new AggregateError(
-        [primaryError, sshError],
-        `知识库 SSH 和 ${fallback} ${operation}均失败`
+      throw new KnowledgeRepositoryFallbackError(
+        `知识库 SSH 和 ${fallback} ${operation}均失败`,
+        primaryError,
+        sshError
       )
     }
   }
@@ -304,9 +260,8 @@ export async function syncKnowledgeRepository(
   const destination = knowledgeDirectory(normalized.idKey, normalized.role)
   await mkdir(join(root, normalized.idKey), { recursive: true })
   const localCommit = await getReusableLocalCommit(destination, normalized, options.signal)
-  const sshCommand = await nonInteractiveSshCommand(root, options.signal)
   const runGit = (args: string[], timeout: number): Promise<string> =>
-    git(args, root, options.signal, timeout, sshCommand)
+    git(args, root, options.signal, timeout)
   if (localCommit) {
     const remoteCommit = await getRemoteCommit(normalized, runGit, options.signal)
     if (remoteCommit === localCommit) {
