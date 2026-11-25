@@ -1,3 +1,4 @@
+import { boundChatImageReceipt } from "../chat-images"
 import type { BaseMessage } from "@langchain/core/messages"
 import type { CheckpointTuple } from "@langchain/langgraph-checkpoint"
 import {
@@ -326,6 +327,15 @@ export async function getDurableRuntimeTail(
           projected.additional_kwargs.cmb_coordinator_augmented_user_message = true
           projected.additional_kwargs.cmb_visible_user_message = message.content
           projected.additional_kwargs[BOT_PREPARED_USER_REQUEST_KEY] = content
+        }
+        if (projected && message.role === "user" && typeof content !== "string" &&
+          typeof message.content === "string" &&
+          (message.content.includes('media="image"') || message.content.includes("📎"))) {
+          const receipt = boundChatImageReceipt(threadId, message.id)
+          if (receipt?.images.length && receipt.source !== "bot") {
+            projected.content = receipt.preparedText ?? message.content
+            projected.additional_kwargs.cmb_chat_images = receipt.images
+          }
         }
         return projected
       })

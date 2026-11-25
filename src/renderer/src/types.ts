@@ -53,6 +53,7 @@ export interface Provider {
 }
 
 export interface ModelConfig {
+  inputModalities?: ("text" | "image")[]
   id: string
   name: string
   provider: ProviderId
@@ -380,6 +381,7 @@ export interface Message {
  *                               current run (awaiting injection); cleared on run end
  */
 export interface QueuedMessage {
+  chatImages?: import("../../shared/file-attachment").SubmittedChatImage[]
   id: string
   text: string
   /** Bot-only durable reference; ordinary thread composition does not use it. */

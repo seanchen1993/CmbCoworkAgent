@@ -17,6 +17,7 @@ import { completeBotConversationTransition } from "./bot-conversation-transition
 import { applyCommittedThreadDeletion, useAppStore } from "./store"
 import {
   bindBotConversationDraft,
+  bindOrdinaryImageDraft,
   bindDetachedBotThreadDraft,
   hasBotThreadDraft,
   loadBotConversationDraft,
@@ -50,6 +51,7 @@ const skill: SkillMetadata = {
 const skillIdentity = { name: skill.name, path: skill.path }
 const fixture = () => {
   let state = {
+    workspacePath: null as string | null,
     draftInput: "",
     draftBotMentions: undefined as BotMessageMention[] | undefined,
     draftAttachments: [] as FileAttachment[],
@@ -107,6 +109,37 @@ beforeEach(() => {
   })
 })
 afterEach(() => vi.unstubAllGlobals())
+
+it("restores cold ordinary image drafts only to their incarnation and workspace and clears a consumed draft", () => {
+  const row: Thread = { thread_id: "img-thread", created_at: new Date(1), updated_at: new Date(1), status: "idle" }
+  const image = { filename: "pic.png", filePath: "", content: "", size: 10, mimeType: "image/webp",
+    truncated: false, image: { filename: "pic.png", width: 2, height: 2, draftWorkspace: "/original",
+      id: "10000000-2000-4000-8000-000000000123" } }
+  function open(thread: Thread, root: string) {
+    const session = fixture()
+    session.publish({ workspacePath: root })
+    const errors: string[] = []
+    const close = bindOrdinaryImageDraft(session.context, thread, root, error => { if (error) errors.push(error) })
+    return { session, close, errors }
+  }
+  const original = open(row, "/original")
+  original.session.publish({ draftInput: "compare", draftAttachments: [file, image] })
+  original.close()
+  expect(values.size).toBe(1)
+  expect(original.errors).toEqual([])
+  const detached = open(row, "/different")
+  expect(detached.session.state().draftAttachments).toEqual([])
+  detached.close()
+  const recreated = open({ ...row, created_at: new Date(2) }, "/original")
+  expect(recreated.session.state().draftAttachments).toEqual([])
+  recreated.close()
+  const recovered = open(row, "/original")
+  expect(recovered.session.state().draftAttachments).toEqual([file, image])
+  expect(recovered.session.state().draftInput).toBe("compare")
+  recovered.session.publish({ draftAttachments: [], draftInput: "" })
+  expect(values.size).toBe(0)
+  recovered.close()
+})
 
 describe("drafts that remain with an unlinked native thread", () => {
   const ref: BotOrdinaryThreadRef = {
@@ -216,7 +249,8 @@ describe("drafts that remain with an unlinked native thread", () => {
     const bytes = new TextEncoder().encode("field,value\n".repeat(6_000)).buffer
     const attachment = await parseFileBytes(`reading.${extension}`, bytes)
     expect(attachment.truncated).toBe(true)
-    expect(attachment.content.length).toBeGreaterThan(24_000)
+    expect(attachment.content.length).toBeGreaterThan(23_900)
+    expect(attachment.content.length).toBeLessThanOrEqual(24_000)
     const f = associationFixture()
     f.original.publish({ draftInput: "Use this attachment", draftAttachments: [attachment], draftSkill: skill })
     await f.complete()

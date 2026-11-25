@@ -1147,6 +1147,8 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
+    void import("./chat-images").then(images => images.sweepChatImageStorage())
+      .catch(error => console.warn("[Main] 图片缓存清理失败", error))
     initializeNotificationRuntime()
     await notificationService.recover()
     // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
@@ -1173,8 +1175,8 @@ if (browserNativeMessagingHostLaunch) {
     const deleteThread = registerThreadHandlers(ipcMain)
     registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow)
     registerThreadSearchHandlers(ipcMain)
-    registerModelHandlers(ipcMain)
-    registerWorkspaceFilePreviewHandlers(ipcMain)
+    registerModelHandlers(ipcMain, () => mainWindow)
+    registerWorkspaceFilePreviewHandlers(ipcMain, () => mainWindow)
     registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)

@@ -476,6 +476,12 @@ export class BotStore {
         id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, payload TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS bot_input_files_owner ON bot_input_files(bot_id);
+      CREATE TABLE IF NOT EXISTS bot_group_image_inputs (
+        id TEXT PRIMARY KEY, group_id TEXT NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS bot_group_message_images (
+        message_id TEXT PRIMARY KEY, group_id TEXT NOT NULL, inputs_json TEXT NOT NULL, request_hash TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS bot_schedules (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_groups (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_group_discussions (group_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
@@ -3767,6 +3773,47 @@ export class BotStore {
           attachment: retained, blockHash: inputAttachmentHash(retained), ...(workId ? { workId } : {}) })])
       return retained
     })
+  }
+
+  retainGroupImage(groupId: string, attachment: FileAttachment, snapshotPath: string): FileAttachment {
+    const group = this.getGroup(groupId)
+    if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除")
+    const id = `input-${randomUUID()}`
+    const retained = { ...attachment, botInputId: id }
+    const file: BotInputFile = {
+      id, botId: groupId, attachment: retained, blockHash: inputAttachmentHash(retained),
+      file: { filename: attachment.filename, filePath: snapshotPath, mimeType: attachment.mimeType,
+        size: attachment.size }
+    }
+    this.db.run("INSERT INTO bot_group_image_inputs(id,group_id,payload) VALUES(?,?,?)",
+      [id, groupId, JSON.stringify(file)])
+    this.changed()
+    return retained
+  }
+
+  private groupImageInputs(groupId: string, ids: readonly string[]): BotInputFile[] {
+    return parseBotInputFileIds(ids).map(id => {
+      const row = this.rows("SELECT payload FROM bot_group_image_inputs WHERE group_id=? AND id=?",
+        [groupId, id])[0]
+      if (!row) throw new BotError("INVALID_INPUT", "图片不属于当前群聊")
+      return JSON.parse(String(row.payload)) as BotInputFile
+    })
+  }
+
+  groupImagesForTask(task: BotTask): BotInputFile[] {
+    if (task.origin.kind !== "group") return []
+    const { groupId, messageId } = task.origin
+    const group = this.getGroup(groupId)
+    const bot = this.getBot(task.botId)
+    const row = this.rows(`SELECT m.targets_json, i.inputs_json FROM bot_group_message_images i
+      JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
+      WHERE i.group_id=? AND i.message_id=?`, [groupId, messageId])[0]
+    if (!row) return []
+    const expected = "group-" + createHash("sha256").update(messageId + task.botId).digest("hex")
+    if (group.deleting || bot.deleting || bot.archived || !group.memberIds.includes(task.botId) ||
+      task.requestId !== expected || !JSON.parse(String(row.targets_json)).includes(task.botId))
+      throw new BotError("CONFLICT", "该任务的群图片授权已失效")
+    return this.groupImageInputs(groupId, JSON.parse(String(row.inputs_json)))
   }
 
   inputFiles(botId: string, ids: readonly string[]): BotInputFile[] {
@@ -10177,6 +10224,8 @@ export class BotStore {
         "DELETE FROM bot_exchange_archive WHERE json_extract(origin_json,'$.groupId')=?",
         [id]
       )
+      this.db.run("DELETE FROM bot_group_message_images WHERE group_id=?", [id])
+      this.db.run("DELETE FROM bot_group_image_inputs WHERE group_id=?", [id])
       this.db.run("DELETE FROM bot_group_messages WHERE group_id=?", [id])
       this.db.run("DELETE FROM bot_groups WHERE id=?", [id])
       this.db.run("DELETE FROM bot_group_discussions WHERE group_id=?", [id])
@@ -10940,18 +10989,22 @@ export class BotStore {
         }
       })
   }
-  sendGroup(input: SendBotGroupMessageInput): boolean {
+  sendGroup(input: SendBotGroupMessageInput, checkImageRecipient?: (bot: BotDefinition) => void): boolean {
     input = parseGroupMessage(input)
     return this.transaction(() => {
       const group = this.getGroup(input.groupId)
       if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除，请完成删除后重试")
       const targets = [...new Set(input.targetBotIds)].sort()
       const mentions = input.mentions?.length ? JSON.stringify(input.mentions) : null
-      const prior = this.rows("SELECT * FROM bot_group_messages WHERE id=?", [input.requestId])[0]
+      const images = input.inputImageIds?.length ? JSON.stringify(input.inputImageIds) : null
+      const inputHash = images ? createHash("sha256").update(input.text).digest("hex") : null
+      const prior = this.rows(`SELECT m.*, i.inputs_json, i.request_hash FROM bot_group_messages m
+        LEFT JOIN bot_group_message_images i ON i.message_id=m.id WHERE m.id=?`, [input.requestId])[0]
       if (prior) {
         if (
           prior.group_id !== group.id ||
-          prior.text !== input.text ||
+          (prior.inputs_json ?? null) !== images ||
+          (images ? prior.request_hash !== inputHash : prior.text !== input.text) ||
           prior.targets_json !== JSON.stringify(targets) ||
           (prior.reply_to_id ?? undefined) !== input.replyToId ||
           (prior.mentions_json ?? null) !== mentions
@@ -10997,6 +11050,22 @@ export class BotStore {
       }) : targets
       if (!recipients.length)
         throw new BotError("CONFLICT", "群内没有可接收任务的 Bot，请先恢复或添加成员")
+      if (images && checkImageRecipient) {
+        for (const id of recipients) checkImageRecipient(this.getBot(id))
+      }
+      let visibleText = input.text
+      if (images) {
+        const files = this.groupImageInputs(group.id, input.inputImageIds!)
+        if (retainedInputFileIds(files, input.text).length !== files.length)
+          throw new BotError("INVALID_INPUT", "群图片与提交的附件不一致，请重新选择")
+        for (const file of files) {
+          const block = buildAttachmentMessageParts([file.attachment!]).attachmentModelBlocks.trim()
+          visibleText = visibleText.replace(block, () => `📎 ${file.file.filename}`)
+        }
+        this.db.run(`INSERT INTO bot_group_message_images
+          (message_id,group_id,inputs_json,request_hash) VALUES(?,?,?,?)`,
+          [input.requestId, group.id, images, inputHash])
+      }
       const participants = notifiedAuthor ? [...recipients, notifiedAuthor] : recipients
       const obsoleteDiscussion = this.groupDiscussionTask(group.id, input.requestId)
       if (obsoleteDiscussion && this.getTask(obsoleteDiscussion).state === "queued")
@@ -11007,14 +11076,14 @@ export class BotStore {
         [
           input.requestId,
           group.id,
-          input.text,
+          visibleText,
           JSON.stringify(targets),
           this.now(),
           mentions,
           input.replyToId ?? null
         ]
       )
-      this.noteActivity("group", group.id, input.text, false)
+      this.noteActivity("group", group.id, visibleText, false)
       const memberNames = new Map(group.memberIds.map((id) => [id, this.getBot(id).name]))
       const recent = this.groupMessages(group.id, undefined, false)
       const currentOrdinal = recent.find((item) => item.id === input.requestId)!.ordinal
@@ -11080,7 +11149,7 @@ export class BotStore {
                 replyAuthorId: replyAuthor,
                 addressedAsReplyAuthor: botId === replyAuthor
               }
-            )}. ${replyNotification ? "You are notified as the author of a quoted message, not an explicitly selected recipient. The quote alone assigns no work or tool permission. Only perform the part the current user explicitly assigns to the quoted author. Do not take over another participant's work. If no part is assigned to you, return exactly (pass) without tools or a public acknowledgement." : "Only the supplied recipients are selected; quoting another member does not add recipients."}\n\nUser request for group ${JSON.stringify(group.name)}:\n${input.text}`
+            )}. ${replyNotification ? "You are notified as the author of a quoted message, not an explicitly selected recipient. The quote alone assigns no work or tool permission. Only perform the part the current user explicitly assigns to the quoted author. Do not take over another participant's work. If no part is assigned to you, return exactly (pass) without tools or a public acknowledgement." : "Only the supplied recipients are selected; quoting another member does not add recipients."}\n\nUser request for group ${JSON.stringify(group.name)}:\n${replyNotification ? visibleText : input.text}`
           },
           replyNotification
             ? { kind: "discussion", groupId: group.id, messageId: input.requestId, round: 1 }

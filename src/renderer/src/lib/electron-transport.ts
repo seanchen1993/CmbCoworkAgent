@@ -933,7 +933,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       agentMode,
       coordinatorInternalNotification,
       userMessageId,
-      managedAutoSendRunId
+      managedAutoSendRunId,
+      payload.config?.configurable?.chat_images as import("../../../shared/file-attachment").SubmittedChatImage[] | undefined
     )
   }
 
@@ -1501,7 +1502,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     agentMode?: TransportAgentMode,
     coordinatorInternalNotification = false,
     userMessageId?: string,
-    managedAutoSendRunId?: string
+    managedAutoSendRunId?: string,
+    chatImages?: import("../../../shared/file-attachment").SubmittedChatImage[]
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue = new CursorQueue<QueuedStreamEvent>()
@@ -1591,7 +1593,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
             modelId,
             agentMode,
             coordinatorInternalNotification,
-            userMessageId
+            userMessageId,
+            ...(chatImages?.length ? [chatImages] as const : [])
           )
     const cleanup = subscribeToIPCEvents((ipcEvent) => {
       if (terminalReceived) return

@@ -1123,6 +1123,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     // Preserve the original request identity even when a restored reference is
     // malformed; the Bot sender rejects it instead of silently dropping files.
     ...(item.botInputFileIds !== undefined ? { botInputFileIds: item.botInputFileIds } : {}),
+    ...(Array.isArray(item.chatImages) ? { chatImages: item.chatImages } : {}),
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:

@@ -65,6 +65,7 @@ function truncateString(
   path: string,
   state: TruncationState
 ): string {
+  if (/data:image\//i.test(value)) return "[image]"
   const effective = maybeBinaryLike(value) ? LIMITS.binary : limit
   if (value.length <= effective.max) return value
 

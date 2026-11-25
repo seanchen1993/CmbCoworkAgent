@@ -33,7 +33,7 @@ import {
   mergeThreadDirectoryFirstPage
 } from "./thread-directory-pagination"
 import { queueStorageKey } from "./queued-message-content"
-import { botConversationDraftKey, botThreadDraftKey } from "./bot-draft-storage"
+import { botConversationDraftKey, botThreadDraftKey, clearOrdinaryImageDrafts } from "./bot-draft-storage"
 import { LOCAL_BOT_HOST_ID } from "../../../shared/bots/contracts"
 import type { BotConversationDeletionOutcome } from "../../../shared/bots/conversation"
 import {
@@ -92,7 +92,10 @@ export function applyCommittedThreadDeletion(threadId: string, deferDirectoryUpd
     },
     {
       label: "Failed to remove deleted thread draft",
-      run: () => window.localStorage.removeItem(botThreadDraftKey(threadId))
+      run: () => {
+        window.localStorage.removeItem(botThreadDraftKey(threadId))
+        clearOrdinaryImageDrafts(threadId)
+      }
     },
     {
       label: "Failed to clear deleted thread projection",

@@ -1,3 +1,6 @@
+import { eligibleChatImageModels } from "../models/image-candidates"
+import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
+import { getGlobalRoutingMode } from "../storage"
 import { botPublicationLease } from "./work-result-settlement"
 import type { BotWorkDispatchSource } from "../../shared/bots/work"
 import { createHash } from "node:crypto"
@@ -777,10 +780,27 @@ export class LocalBotHost {
     this.requireRunning()
     return this.store.inputProjections(botId, threadId, messageIds, workIds, purpose)
   }
+  retainGroupImage(groupId: string, memberId: string, attachment: FileAttachment, path: string) {
+    this.getGroupMember(groupId, memberId)
+    return this.store.retainGroupImage(groupId, attachment, path)
+  }
   inputFilesForTask(taskId: string) {
     const task = this.store.getTask(taskId)
+    if (task.origin.kind === "group") return this.store.groupImagesForTask(task)
     return this.store.inputFiles(task.botId,
       task.origin.kind === "user" || task.origin.kind === "work" ? task.origin.inputFileIds ?? [] : [])
+  }
+  imagesForRunningTask(taskId: string) {
+    this.requireRunning()
+    const active = this.active.get(taskId)
+    if (!active || active.controller.signal.aborted) throw new BotError("CONFLICT", "图片所属任务已停止")
+    const task = this.store.getTask(taskId)
+    if (task.mockSource) throw new BotError("CONFLICT", "此来源不支持桌面图片")
+    if (task.origin.kind === "group") return this.store.groupImagesForTask(task)
+    this.workToolSource(taskId)
+    if (task.origin.kind !== "user" && task.origin.kind !== "work") return []
+    const approved = new Set(task.origin.allowedInputFileIds ?? [])
+    return this.inputFilesForTask(taskId).filter(file => approved.has(file.id))
   }
   async verifyInputFilesForRun(runTaskId: string, inputTaskId: string): Promise<void> {
     const run = this.workToolSource(runTaskId), input = this.store.getTask(inputTaskId)
@@ -1960,7 +1980,13 @@ export class LocalBotHost {
   sendGroup(input: SendBotGroupMessageInput): void {
     this.requireRunning()
     const obsolete = this.store.groupDiscussionTask(input.groupId, input.requestId)
-    const fresh = this.store.sendGroup(input)
+    const fresh = this.store.sendGroup(input, recipient => {
+      const fallback = recipient.modelRef ? null : getAvailableModelConfigOrDefault()
+      const requested = recipient.modelRef || (fallback ? toModelRef(fallback) : undefined)
+      const pinned = Boolean(recipient.modelRef) || getGlobalRoutingMode() === "pinned"
+      if (!eligibleChatImageModels(requested, pinned).length)
+        throw new BotError("CONFLICT", `${recipient.name} 没有可用的视觉模型，请更换模型或收件人`)
+    })
     if (fresh && obsolete) this.cancel(obsolete)
     this.changed()
     for (const run of this.active.values()) {

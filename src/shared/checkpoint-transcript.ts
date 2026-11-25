@@ -641,6 +641,20 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
 }
 
+export function checkpointHasChatImages(checkpoint: unknown): boolean {
+  const channels = isRecord(checkpoint) ? checkpoint.channel_values : undefined
+  const event = isRecord(channels) ? channels._summarizationEvent : undefined
+  const cutoff = isRecord(event) && typeof event.cutoffIndex === "number" &&
+    Number.isSafeInteger(event.cutoffIndex) && event.cutoffIndex >= 0 ? event.cutoffIndex : 0
+  return getCheckpointMessages(checkpoint).slice(cutoff).some(message => {
+    if (!isRecord(message) || getMessageRole(message) !== "user") return false
+    const metadata = getAdditionalKwargs(message)
+    if (metadata?.cmb_chat_images_source === "bot") return false
+    const images = metadata?.cmb_chat_images
+    return Array.isArray(images) && images.length > 0
+  })
+}
+
 export interface CheckpointReplayTurns {
   hiddenAnchors: ReadonlySet<string>
   hiddenAssistants: ReadonlySet<string>
@@ -822,6 +836,9 @@ export function getForkReplayMessagePayload(value: unknown): unknown[] | undefin
       isRecord(call) ? [call.id, call.name, call.args, call.function] : call
     )
     return [role, content, calls, additional?.reasoning, additional?.function_call]
+  }
+  if (role === "user" && Array.isArray(additional?.cmb_chat_images) && additional.cmb_chat_images.length) {
+    return [role, content, additional.cmb_chat_images]
   }
   return [role, content]
 }

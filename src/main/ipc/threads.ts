@@ -1,3 +1,4 @@
+import { captureImageScopeCleanup } from "../chat-images"
 import { createBotThreadReplyResolver } from "../bots/thread-message-replies"
 import { copyForkInputProjections, readForkReplyOrigins } from "../bots/fork-input-projection"
 import { BOT_PREPARED_USER_REQUEST_KEY } from "../agent/agent-run-service"
@@ -706,6 +707,11 @@ async function copyForkedThreadMessages(input: {
       })
       const legacy = botLegacyHistoryRequests(input.sourceThreadId, input.sourceRow,
         inputs.filter(message => message.text === null).map(message => message.id))
+      for (const user of messages.filter(item => item.role === "user" &&
+        typeof item.content === "string" && (item.content.includes('media="image"') || item.content.includes("📎")))) {
+        const { copyBoundChatImages } = await import("../chat-images")
+        await copyBoundChatImages(input.sourceThreadId, input.targetThreadId, user.id)
+      }
       copyForkInputProjections({
         sourceThreadId: input.sourceThreadId,
         targetThreadId: input.targetThreadId,
@@ -1668,7 +1674,9 @@ async function cleanupFailedFork(
   if (options.rowCreated) {
     try {
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(targetThreadId)
+      const cleanImages = captureImageScopeCleanup(targetThreadId)
       dbDeleteThread(targetThreadId)
+      await cleanImages().catch(error => console.warn("[Threads] 图片清理失败", error))
       clearTrustedToolFilePreviewSourcesForThread(targetThreadId, previewScopeKeys)
     } catch (error) {
       console.warn("[Threads] Failed to cleanup fork thread row:", error)
@@ -4042,6 +4050,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       }
 
       // Delete from our metadata store — the point of no return.
+      const cleanImages = captureImageScopeCleanup(threadId)
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
       if (getThreadMessageCount(threadId) >= 1_000) {
         getDb().withoutAutomaticCheckpoint(() => dbDeleteThread(threadId))
@@ -4050,6 +4059,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         // Avoid a worker startup per item in batches of empty/small tasks.
         dbDeleteThread(threadId)
       }
+      void cleanImages().catch(error => console.warn("[Threads] 图片清理失败", error))
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       void cancelSearchBackfill(threadId)
       forgetLegacySubagentTranscriptMigration(threadId)

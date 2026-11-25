@@ -250,7 +250,8 @@ import type {
 import type {
   AttachmentBytesParseRequest,
   AttachmentFileSelectionResult,
-  AttachmentGrantParseRequest
+  AttachmentGrantParseRequest,
+  WorkspaceChatImageRequest, ChatImageOwnerRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
@@ -1121,7 +1122,8 @@ interface CustomAPI {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      chatImages?: import("../shared/file-attachment").SubmittedChatImage[]
     ) => () => void
     interrupt: (
       threadId: string,
@@ -1501,6 +1503,7 @@ interface CustomAPI {
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
     upsertCustomConfig: (config: {
+      inputModalities?: ("text" | "image")[]
       id?: string
       name: string
       baseUrl: string
@@ -1852,6 +1855,8 @@ interface CustomAPI {
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
+    attachWorkspaceImage: (request: WorkspaceChatImageRequest) => Promise<ParsedAttachment>
+    updateImageOwners: (request: ChatImageOwnerRequest) => Promise<void>
     parseSelected: (request: AttachmentGrantParseRequest) => Promise<{
       success: boolean
       attachment?: ParsedAttachment

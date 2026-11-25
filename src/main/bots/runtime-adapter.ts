@@ -19,6 +19,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { lstatSync, realpathSync } from "node:fs"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { createThread, getThreadCore, updateThread } from "../db"
+import { isBotImageInput, prepareBotInputImages } from "./input-images"
 import { startAgentRun, steerAgentRun, type AgentRunTerminal } from "../agent/agent-run-service"
 import {
   createManagedTransportAgentRunDelivery,
@@ -87,7 +88,7 @@ import { applyBotSkillSelection } from "./skill-policy"
 import { BOT_TEAM_UNSUPPORTED } from "../../shared/bots/team-policy"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { createBotWorkTools, createBotWorkResultTools } from "./work-tools"
-import { projectSkillWorkInput, verifyInputFiles } from "./input-files"
+import { projectSkillWorkInput, retainedInputFileIds, verifyInputFiles } from "./input-files"
 import type { BotMockExecution } from "../../shared/bots/mock-channel"
 import {
   botMockMetadataSafe,
@@ -752,6 +753,9 @@ export function createLocalBotRunPort(
             JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")).enabled) return false
           // The same audience can steer at a graph boundary. An unrelated peer or routine cannot.
           if (!canSteerBotTask(task, message)) return false
+          // A message with pixels needs its own model-routing/capability decision.
+          if (!message.mockSource && /type="image\/(?:png|jpeg|webp)"/.test(message.message) &&
+            getHost().inputFilesForTask(message.id).some(isBotImageInput)) return false
           // Forwarding context is not an answer or a request to abandon the current turn.
           // Keep it in the existing inbox until the original interaction is resolved.
           if (message.origin.kind === "work" &&
@@ -1488,7 +1492,16 @@ export function createLocalBotRunPort(
             task.origin.kind === "notification" &&
             ["workflow", "coordinator"].includes(task.origin.notificationKind)
           const hasInputFiles = (task.origin.kind === "user" || task.origin.kind === "work") && Boolean(task.origin.inputFileIds?.length)
-          const files = hasInputFiles ? getHost().inputFilesForTask(task.id) : []
+          const hasGroupImages = task.origin.kind === "group" && /type="image\/(?:png|jpeg|webp)"/.test(task.message)
+          const files = hasInputFiles || hasGroupImages ? getHost().inputFilesForTask(task.id) : []
+          let admittedImageFileIds: string[] = []
+          const validateBotChatImageAccess = () => {
+            const allowed = new Set(getHost().imagesForRunningTask(task.id).map(file => file.id))
+            if (admittedImageFileIds.some(id => !allowed.has(id)))
+              throw new BotError("CONFLICT", "图片授权已发生变化")
+          }
+          const localImages = !task.mockSource && !work?.source && !checkpointId && !continueBotTaskCheckpointId &&
+            files.some(isBotImageInput)
           if (hasInputFiles)
             await verifyInputFiles(task.origin.kind === "work" ? files : files.filter(file => file.blockHash), signal)
           const projectedInput = projectSkillWorkInput(task, files)
@@ -1729,6 +1742,17 @@ export function createLocalBotRunPort(
               }),
               {
                 source: "bot",
+                ...(localImages ? {
+                  validateBotChatImageAccess,
+                  prepareBotChatImages: async (body: string, activeSignal: AbortSignal) => {
+                    const current = getHost().imagesForRunningTask(task.id)
+                    admittedImageFileIds = retainedInputFileIds(current.filter(isBotImageInput), body, task)
+                    const result = await prepareBotInputImages(task, previewThreadId ?? task.threadId,
+                      body, current, activeSignal)
+                    validateBotChatImageAccess()
+                    return result
+                  }
+                } : {}),
                 persistedUserInputProjections: inputProjection || (ids => getHost().inputProjections(bot.id, task.threadId, ids)),
                 ...(tracksPreparedInput ? {
                   onUserPromptPrepared: (body: string, receipt?: { internalGoalInput: true }) => {

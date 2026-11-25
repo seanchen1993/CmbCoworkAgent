@@ -1,3 +1,5 @@
+import { toModelRef } from "../models/registry"
+import { eligibleChatImageModels } from "../models/image-candidates"
 import { resolve } from "node:path"
 import { SelectedModelUnavailableError } from "../models/selection-error"
 import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
@@ -753,6 +755,7 @@ export async function prepareStandardUserPrompt({
 }
 
 export interface StandardTurnRoutingInput {
+  requiresImages?: boolean
   taskSource: RoutingContext["taskSource"]
   message?: string
   threadId: string
@@ -773,6 +776,20 @@ export async function resolveStandardTurnRouting(
   input: StandardTurnRoutingInput
 ): Promise<PreparedStandardTurnRouting> {
   const managedModelId = getManagedRunModelOverride(input.threadId, input.managedExecution)
+  if (input.requiresImages) {
+    const pinned = Boolean(managedModelId) || (input.routingMode ?? getGlobalRoutingMode()) === "pinned"
+    const eligible = eligibleChatImageModels(managedModelId || input.requestedModelId, pinned)
+    const first = eligible[0]
+    if (!first) throw new Error("当前没有可用的视觉模型，请切换到支持图片输入的模型")
+    const effectiveModelId = toModelRef(first)
+    const primaryTier = first.tier ?? "premium"
+    const orderedModelIds = [...new Set(eligible.flatMap(config =>
+      config && (config === first || config.tier !== "economy") ? [toModelRef(config)] : []))]
+    return { effectiveModelId, primaryTier, orderedModelIds, result: {
+      resolvedModelId: effectiveModelId, resolvedTier: primaryTier, routeReason: "image-input",
+      fallbackChain: orderedModelIds.slice(1), layer: pinned ? "pinned" : "layer1"
+    } }
+  }
   if (managedModelId) {
     return {
       result: {
@@ -945,6 +962,11 @@ export function prepareStandardThreadRuntimeFactory(
         input.remotePolicy
       ),
       ...(botContextBudget !== undefined ? { contextBudgetTokens: botContextBudget } : {}),
+      // Only the foreground desktop caller or the Bot Host can grant media access.
+      chatImageMessageScope: input.source === "desktop" && callerOptions.chatImageMessageScope === "desktop"
+        ? "desktop"
+        : input.source === "bot" && typeof callerOptions.chatImageMessageScope === "object"
+          ? callerOptions.chatImageMessageScope : undefined,
       // Keep ordinary commands attached to the transport's cancellation and permit.
       ...(input.runLease.owner !== "desktop" && { autoBackgroundHandoff: false }),
       modelId

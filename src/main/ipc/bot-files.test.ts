@@ -26,6 +26,7 @@ const fixture = vi.hoisted(() => ({
   parse: vi.fn(),
   snapshot: vi.fn(),
   retainInputFile: vi.fn(),
+  retainGroupImage: vi.fn(),
   cancelParser: vi.fn()
 }))
 vi.mock("electron", () => ({
@@ -63,16 +64,20 @@ vi.mock("../file-attachment-parser/client", () => ({
 }))
 import { registerBotFileHandlers } from "./bot-files"
 
-function register() {
+function register(source: "desktop" | "subframe" | "secondary" = "desktop") {
+  const frame = {}
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once: vi.fn() }
+  const mainWindow = { webContents: source === "secondary" ? {} : sender, isDestroyed: () => false }
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
   registerBotFileHandlers(
     { handle: (name, handler) => handlers.set(name, handler) } as unknown as IpcMain,
     (id) => {
       if (id !== "local") throw new Error("Wrong host")
       return fixture as unknown as LocalBotHost
-    }
+    },
+    () => mainWindow as unknown as import("electron").BrowserWindow
   )
-  const event = { sender: { id: 1, once: vi.fn() } }
+  const event = { sender, senderFrame: source === "subframe" ? {} : frame }
   return async (operation: string, ...args: unknown[]) =>
     handlers.get(`bots:files:${operation}`)!(event, "local", ...args)
 }
@@ -108,6 +113,36 @@ beforeEach(() => {
     size: 12,
     truncated: false
   })
+})
+
+it.each(["private", "group"] as const)("issues an image receipt only to its %s owner", async scope => {
+  const groupId = scope === "group" ? "g" : undefined
+  const root = groupId ? "/group" : "/private/a"
+  const bytes = new Uint8Array([1, 2, 3]).buffer
+  fixture.destination.mockResolvedValue({ id: "shared/photo.png", path: root + "/shared/photo.png" })
+  fixture.stableOpen.mockResolvedValue({ size: 3, handle: { close: fixture.stableClose } })
+  fixture.retainGroupImage.mockImplementation((_group, _bot, attachment) => ({
+    ...attachment, botInputId: "input-22222222-2222-2222-2222-222222222222"
+  }))
+  await expect(register()("attach-bytes", "a", [{ fileName: "photo.png", bytes }], 500, groupId))
+    .resolves.toEqual([expect.objectContaining({ mimeType: "image/png", botInputId: expect.any(String) })])
+  const image = expect.objectContaining({ filename: "photo.png", mimeType: "image/png" })
+  const path = root + "/.bot-deliveries/hash/photo.png"
+  if (groupId) {
+    expect(fixture.retainGroupImage).toHaveBeenCalledWith(groupId, "a", image, path)
+    expect(fixture.retainInputFile).not.toHaveBeenCalled()
+  } else {
+    expect(fixture.retainInputFile).toHaveBeenCalledWith("a", image, path)
+    expect(fixture.retainGroupImage).not.toHaveBeenCalled()
+  }
+  expect(fixture.parse).not.toHaveBeenCalled()
+})
+
+it.each(["subframe", "secondary"] as const)("rejects image attachments from a %s sender before copying", async source => {
+  const files = [{ fileName: "photo.png", bytes: new Uint8Array([1]).buffer }]
+  await expect(register(source)("attach-bytes", "a", files, 500, "g")).rejects.toThrow("主窗口")
+  expect(fixture.copyBytes).not.toHaveBeenCalled()
+  expect(fixture.retainGroupImage).not.toHaveBeenCalled()
 })
 
 it.each(["private", "group", "im", "work"])("preserves a result's logical save name without changing %s file ownership", async (scope) => {

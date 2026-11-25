@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import React from "react"
+import { chatUploadLabel, MAX_ATTACHMENT_PICKER_FILES, MAX_ATTACHMENT_TOTAL_CHARS } from "../../../shared/file-attachment"
 import { renderToStaticMarkup } from "react-dom/server"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
@@ -26,6 +27,9 @@ const source = ts.createSourceFile(
 function renderComposer(overrides: Record<string, unknown> = {}): string {
   const bindings: Record<string, unknown> = {
     React,
+    chatUploadLabel,
+    MAX_ATTACHMENT_PICKER_FILES,
+    MAX_ATTACHMENT_TOTAL_CHARS,
     IconPopoverButton,
     Plus: () => null,
     useHarnessNotifications: () => [],

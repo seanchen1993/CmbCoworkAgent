@@ -350,6 +350,7 @@ export type BotMessageMention = Omit<BotGroupMention, "botId"> &
     | { kind: "group"; groupId: string; groupSource?: "app" | "zhaohu"; botId?: never }
   )
 export interface SendBotGroupMessageInput {
+  inputImageIds?: string[]
   groupId: string
   requestId: string
   text: string

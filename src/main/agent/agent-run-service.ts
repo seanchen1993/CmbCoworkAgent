@@ -217,6 +217,11 @@ export interface AgentRunExecutionContext {
     memoryUserText?: string
     extraSystemPrompt?: string
   } | undefined
+  /** Main-process Bot admission only. Resolve the Hook-approved submission against its input receipts. */
+  prepareBotChatImages?: (submittedBody: string, signal: AbortSignal) =>
+    Promise<import("../../shared/file-attachment").SubmittedChatImage[]>
+  /** Revalidate live ownership immediately before a provider request uses a prepared Bot image. */
+  validateBotChatImageAccess?: () => void
   /** Trusted Bot history only. Missing ids stay unchanged; null excludes an unaccepted input. */
   persistedUserInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>
   /** Trusted Bot inbox only: the exact active main-model round can be superseded.

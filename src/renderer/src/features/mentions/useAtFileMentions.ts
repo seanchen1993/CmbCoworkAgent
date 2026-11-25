@@ -2,7 +2,6 @@
  * 是“输入时”的逻辑。它负责在用户输入框里识别 @ 文件语法，计算当前光标是不是在 mention 里，给 popover 提供候选文件列表，并处理选择状态、关闭状态这些交互。
  */
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { isBinaryFile } from "@/lib/file-types"
 import type { FileInfo } from "@/types"
 import {
   searchWorkspaceMentionFilesProgressively,
@@ -11,6 +10,7 @@ import {
 } from "./at-file-mention-index"
 
 export type { AtFileSuggestion } from "./at-file-mention-index"
+export { isSupportedWorkspaceMentionFilePath } from "./at-file-mention-index"
 
 export type AtFilePopoverMode =
   | { kind: "closed" }
@@ -59,17 +59,6 @@ function waitForProgressiveSearchIntent(signal: AbortSignal): Promise<void> {
     }
     signal.addEventListener("abort", onAbort, { once: true })
   })
-}
-
-// @文件统一复用共享的文本/二进制文件识别，避免和预览侧扩展名列表漂移。
-export function isSupportedWorkspaceMentionFilePath(filePath: string): boolean {
-  return !isBinaryFile(basename(filePath.replace(/\\/g, "/")))
-}
-
-// 提取最后一级文件名，用于排序和模糊匹配时优先对齐文件名而不是整条路径。
-function basename(displayPath: string): string {
-  const parts = displayPath.split("/")
-  return parts[parts.length - 1] || displayPath
 }
 
 // 从当前光标位置向前回溯，判断是否正处在 @文件 片段中，
@@ -177,6 +166,7 @@ export function removeAtFileTokenFromInput(
 }
 
 export function useAtFileMentions(params: {
+  allowImages?: boolean
   input: string
   cursorOffset: number
   workspaceFiles: FileInfo[]
@@ -186,6 +176,7 @@ export function useAtFileMentions(params: {
   disabled?: boolean
 }) {
   const {
+    allowImages = false,
     input,
     cursorOffset,
     workspaceFiles,
@@ -225,6 +216,7 @@ export function useAtFileMentions(params: {
     const controller = new AbortController()
     let delayedContinuation = true
     void searchWorkspaceMentionFilesProgressively(workspaceFiles, activeToken.query, {
+      allowImages,
       limit: MAX_SUGGESTIONS,
       signal: controller.signal,
       loadMore: loadMoreWorkspaceFiles
@@ -255,7 +247,7 @@ export function useAtFileMentions(params: {
       },
     )
     return () => controller.abort()
-  }, [activeToken, loadMoreWorkspaceFiles, workspaceFiles])
+  }, [activeToken, allowImages, loadMoreWorkspaceFiles, workspaceFiles])
 
   // 文件索引与 top-N 匹配都在可取消的分片任务中完成；输入渲染只消费结果。
   const mode = useMemo<AtFilePopoverMode>(() => {

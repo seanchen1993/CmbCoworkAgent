@@ -80,7 +80,7 @@ export async function verifyInputFiles(files: readonly BotInputFile[], signal: A
   }
 }
 
-function inputFileSnapshot(file: BotInputFile) {
+export function inputFileSnapshot(file: BotInputFile) {
   const path = file.file.filePath
   const directory = dirname(dirname(path))
   const digest = basename(dirname(path))

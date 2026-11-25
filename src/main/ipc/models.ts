@@ -48,7 +48,7 @@ import {
   type DiscoveredGitRepository,
   resolveGitOperationPath
 } from "../services/git-repository-discovery"
-import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
+import { normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../shared/workspace-path"
 import { getWorkflowWorktreeTimeoutMs } from "../../shared/agent-runtime-limits"
 import {
   isThreadMetadataHydrationWorkerUnavailable,
@@ -66,8 +66,9 @@ import { withoutGitRepositoryOverrides } from "../services/git-environment"
 import { prepareGitPanelWrite, type GitPanelWritePreparation } from "../services/git-worktree-write-gate"
 import { gitReadRequestCoordinator, type GitReadFamily } from "./git-read-request-coordinator"
 import {
-  attachmentExtensions,
-  attachmentFormatLabel,
+  chatImageExtensions,
+  chatUploadExtensions,
+  chatUploadLabel,
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_FILE_NAME_LENGTH,
   MAX_ATTACHMENT_PICKER_FILES,
@@ -77,6 +78,7 @@ import {
 } from "../../shared/file-attachment"
 import type { ParsedAttachment } from "../file-parser"
 import { getFileAttachmentParserClient } from "../file-attachment-parser/client"
+import { assertChatAttachmentWindow } from "./chat-attachment-window"
 import {
   issueExternalFileReadGrant,
   resolveExternalFileReadGrant,
@@ -3939,6 +3941,7 @@ function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number
     source: config.source,
     model: config.model,
     description: config.baseUrl,
+    inputModalities: config.inputModalities ?? ["text"],
     available: isModelAvailable(config),
     selectable: isModelSelectable(config),
     notice: config.notice,
@@ -3958,7 +3961,9 @@ function modelProvidersFromConfigs(configs: ReturnType<typeof getModelConfigs>):
   }))
 }
 
-export function registerModelHandlers(ipcMain: IpcMain): void {
+export function registerModelHandlers(
+  ipcMain: IpcMain, getMainWindow: () => BrowserWindow | null = () => null
+): void {
   const workspaceScanCleanupOwners = new Set<number>()
   // List all effective models. The first call waits for the remote manifest so
   // the renderer does not briefly show fallback entries and then replace them.
@@ -6079,7 +6084,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     })
   }
   const supportedAttachmentExtension = (fileName: string): boolean =>
-    attachmentExtensions.includes(path.extname(fileName).toLowerCase())
+    chatUploadExtensions.includes(path.extname(fileName).toLowerCase())
   const validAttachmentMaxLength = (maxLength: unknown): maxLength is number | undefined =>
     maxLength === undefined ||
     (Number.isSafeInteger(maxLength) &&
@@ -6098,6 +6103,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       error?: string
     }> => {
       try {
+        const assertSender = () => { assertChatAttachmentWindow(event, getMainWindow) }
+        assertSender()
         if (
           !request ||
           typeof request.grant !== "string" ||
@@ -6108,6 +6115,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         ) {
           return { success: false, error: "无效的附件解析请求" }
         }
+        const imageScope = chatImageExtensions.includes(path.extname(request.filePath).toLowerCase())
+          ? (await import("../workspace-chat-image")).captureOrdinaryImageDraft(request.threadId ?? "", request.workspacePath, assertSender)
+          : undefined
         const resolved = await resolveExternalFileReadGrant(
           request.grant,
           event.sender.id,
@@ -6115,7 +6125,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         )
         if ("error" in resolved) return { success: false, error: resolved.error }
         if (!supportedAttachmentExtension(resolved.filePath)) {
-          return { success: false, error: "不支持的文件类型，仅支持 " + attachmentFormatLabel }
+          return { success: false, error: "不支持的文件类型，仅支持 " + chatUploadLabel }
         }
         const opened = await openStableFileHandle(resolved.rootPath, resolved.filePath)
         try {
@@ -6129,6 +6139,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           }
           const payload = Uint8Array.from(buffer.subarray(0, bytesRead)).buffer
           attachAttachmentParserCleanup(event)
+          if (chatImageExtensions.includes(path.extname(opened.filePath).toLowerCase())) {
+            if (!imageScope) throw new Error("所选图片已变更，请重新选择。")
+            const { assertCurrent, root } = imageScope
+            assertCurrent()
+            const { stageChatImage } = await import("../chat-images")
+            const attachment = await stageChatImage(request.threadId ?? "", path.basename(opened.filePath), payload,
+              { beforePublish: assertCurrent, draftWorkspace: normalizeGitWorkspacePathKey(root ?? "") })
+            assertCurrent()
+            return { success: true, attachment }
+          }
           const attachment = await getFileAttachmentParserClient().parse(
             {
               kind: "bytes",
@@ -6139,6 +6159,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             attachmentParseLatestKey(event.sender.id)
           )
           attachment.filePath = opened.filePath
+          assertSender()
           return { success: true, attachment }
         } finally {
           await opened.handle.close().catch(() => undefined)
@@ -6160,6 +6181,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       request: AttachmentBytesParseRequest
     ): Promise<{ success: boolean; attachment?: ParsedAttachment; error?: string }> => {
       try {
+        const assertSender = () => { assertChatAttachmentWindow(event, getMainWindow) }
+        assertSender()
         if (
           !request ||
           typeof request.fileName !== "string" ||
@@ -6173,12 +6196,22 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         ) {
           return { success: false, error: "无效或过大的拖拽附件" }
         }
+        if (chatImageExtensions.includes(path.extname(request.fileName).toLowerCase())) {
+          const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
+          const { assertCurrent, root } = captureOrdinaryImageDraft(request.threadId ?? "", request.workspacePath, assertSender)
+          const { stageChatImage } = await import("../chat-images")
+          const attachment = await stageChatImage(request.threadId ?? "", path.basename(request.fileName), request.bytes,
+            { beforePublish: assertCurrent, draftWorkspace: normalizeGitWorkspacePathKey(root ?? "") })
+          assertCurrent()
+          return { success: true, attachment }
+        }
         attachAttachmentParserCleanup(event)
         const attachment = await getFileAttachmentParserClient().parse(
           { kind: "bytes", fileName: path.basename(request.fileName), bytes: request.bytes },
           request.maxLength,
           attachmentParseLatestKey(event.sender.id)
         )
+        assertSender()
         return { success: true, attachment }
       } catch (e) {
         return {
@@ -6191,13 +6224,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Open native file picker for chat attachments
   ipcMain.handle("file:select", async (event): Promise<AttachmentFileSelectionResult> => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win) return { canceled: true, files: [] }
+    const win = assertChatAttachmentWindow(event, getMainWindow)
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile", "multiSelections"],
       title: "选择附件",
-      filters: [{ name: "支持的文件", extensions: attachmentExtensions.map(ext => ext.slice(1)) }]
+      filters: [{ name: "支持的文件", extensions: chatUploadExtensions.map(ext => ext.slice(1)) }]
     })
+    assertChatAttachmentWindow(event, getMainWindow)
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true, files: [] }
     }
@@ -6224,8 +6257,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Get supported file extensions
   ipcMain.handle("file:supportedExtensions", async () => {
-    const { getSupportedExtensions } = await import("../file-parser")
-    return getSupportedExtensions()
+    return [...chatUploadExtensions]
   })
 }
 

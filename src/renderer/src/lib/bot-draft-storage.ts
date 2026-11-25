@@ -3,6 +3,17 @@ import { MAX_ATTACHMENT_PICKER_FILES } from "../../../shared/file-attachment"
 import { BOT_INPUT_FILE_ID_PATTERN } from "../../../shared/bots/input-files"
 
 export const BOT_CONVERSATION_DRAFT_PREFIX = "cmb-bot-conversation-draft-v1:"
+export const ORDINARY_IMAGE_DRAFT_PREFIX = "cmb-ordinary-image-draft-v1:"
+
+export function clearOrdinaryImageDrafts(threadId: string): void {
+  const storage = globalThis.localStorage
+  if (!storage) return
+  const prefix = ORDINARY_IMAGE_DRAFT_PREFIX + JSON.stringify([threadId]).slice(0, -1) + ","
+  for (let i = storage.length - 1; i >= 0; i--) {
+    const key = storage.key(i)
+    if (key?.startsWith(prefix)) storage.removeItem(key)
+  }
+}
 
 export function botConversationDraftKey(hostId: string, botId: string, workId?: string): string {
   return BOT_CONVERSATION_DRAFT_PREFIX + JSON.stringify(workId ? [hostId, botId, workId] : [hostId, botId])

@@ -19,7 +19,45 @@ export const attachmentMimeTypes: Readonly<Record<string, string>> = {
 export const attachmentExtensions = Object.keys(attachmentMimeTypes)
 export const attachmentFormatLabel = attachmentExtensions.map(ext => ext.slice(1)).join("、")
 
+export const chatImageExtensions = [".png", ".jpg", ".jpeg", ".webp"]
+export function isChatImagePath(filePath: string): boolean {
+  const filename = filePath.replace(/\\/g, "/").split("/").pop() ?? ""
+  return chatImageExtensions.includes(filename.slice(filename.lastIndexOf(".")).toLowerCase())
+}
+
+export interface WorkspaceChatImageRequest {
+  threadId: string
+  workspacePath: string
+  filePath: string
+}
+
+export type ChatImageOwnerRequest = {
+  threadId: string
+  workspacePath: string | null
+} & (
+  | { action: "pin"; messageId: string; ids: string[] }
+  | { action: "unpin"; messageId: string }
+  | { action: "discard"; ids: string[] }
+)
+export const chatUploadExtensions = [...attachmentExtensions, ...chatImageExtensions]
+export const chatUploadLabel = chatUploadExtensions.map(ext => ext.slice(1)).join("、")
+
+export interface SubmittedChatImage {
+  id: string
+  filename: string
+  slot: number
+}
+
+export interface ChatImageRef {
+  draftWorkspace?: string
+  id: string
+  filename: string
+  width: number
+  height: number
+}
+
 export const MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
+export const MAX_ATTACHMENT_TOTAL_CHARS = 24_000
 export const MAX_ATTACHMENT_PICKER_FILES = 3
 export const MAX_ATTACHMENT_FILE_NAME_LENGTH = 512
 
@@ -35,12 +73,16 @@ export interface AttachmentFileSelectionResult {
 }
 
 export interface AttachmentGrantParseRequest {
+  threadId?: string
+  workspacePath?: string | null
   grant: string
   filePath: string
   maxLength?: number
 }
 
 export interface AttachmentBytesParseRequest {
+  threadId?: string
+  workspacePath?: string | null
   fileName: string
   bytes: ArrayBuffer
   maxLength?: number
@@ -48,6 +90,7 @@ export interface AttachmentBytesParseRequest {
 
 /** Text extraction plus the retained original file's identity. */
 export interface FileAttachment {
+  image?: ChatImageRef
   /** Bot picker receipt; ordinary attachments and message text cannot mint this identity. */
   botInputId?: string
   /** A linked ordinary draft retained the extracted text without an original file version. */

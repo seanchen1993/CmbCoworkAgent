@@ -275,6 +275,25 @@ describe("desktop-selected Bot skill in the original submit chain", () => {
 })
 
 describe("prepareStandardThreadRuntimeFactory shell policy", () => {
+  it("grants image access only to the matching foreground transport", () => {
+    const mediaScope = (
+      source: "desktop" | "bot" | "im" | "scheduler" | "heartbeat",
+      scope?: "desktop" | { messageId: string }
+    ) => prepareStandardThreadRuntimeFactory({
+      source, runLease: { owner: "desktop", runId: "test-run" },
+      baseOptions: { threadId: "test-thread", workspacePath: process.cwd(), chatImageMessageScope: scope }
+    }).optionsForModel().chatImageMessageScope
+
+    expect(mediaScope("desktop")).toBeUndefined()
+    expect(mediaScope("desktop", "desktop")).toBe("desktop")
+    expect(mediaScope("bot", "desktop")).toBeUndefined()
+    expect(mediaScope("bot", { messageId: "task" })).toEqual({ messageId: "task" })
+    for (const source of ["im", "scheduler", "heartbeat"] as const) {
+      expect(mediaScope(source, "desktop")).toBeUndefined()
+      expect(mediaScope(source, { messageId: "task" })).toBeUndefined()
+    }
+  })
+
   it.each(["desktop", "im", "scheduler"] as const)(
     "applies the confirmed %s lease policy to the initial runtime and model fallback",
     async (owner) => {

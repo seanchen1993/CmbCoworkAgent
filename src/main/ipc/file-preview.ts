@@ -1,5 +1,7 @@
 import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
 import path from "node:path"
+import { assertChatAttachmentWindow } from "./chat-attachment-window"
+import type { ChatImageOwnerRequest } from "../../shared/file-attachment"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   WORKSPACE_FILE_PREVIEW_MAX_LANE_LENGTH,
@@ -301,7 +303,30 @@ function inlineMediaPolicy(mimeType: string, size: number): { allowed: boolean; 
   return { allowed: false, reason: "该二进制格式不支持应用内预览" }
 }
 
-export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
+export function registerWorkspaceFilePreviewHandlers(
+  ipcMain: IpcMain, getMainWindow: () => BrowserWindow | null = () => null
+): void {
+  ipcMain.handle("workspace:attachChatImage", async (event, request) => {
+    const { stageWorkspaceChatImage } = await import("../workspace-chat-image")
+    return stageWorkspaceChatImage(request, () => { assertChatAttachmentWindow(event, getMainWindow) })
+  })
+  ipcMain.handle("workspace:updateChatImageOwners", async (event, request: ChatImageOwnerRequest) => {
+    const assertWindow = () => { assertChatAttachmentWindow(event, getMainWindow) }
+    assertWindow()
+    if (!request || !(request.workspacePath === null || typeof request.workspacePath === "string"))
+      throw new Error("图片草稿所属工作区无效")
+    const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
+    const { discardChatDraftImage, pinQueuedChatImages, unpinQueuedChatImages } = await import("../chat-images")
+    const { root, assertCurrent } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
+    if (request.action === "pin") return pinQueuedChatImages(request.threadId, root, request.messageId, request.ids)
+    if (request.action === "unpin") return unpinQueuedChatImages(request.threadId, request.messageId, root)
+    if (request.action !== "discard" || !Array.isArray(request.ids) || request.ids.length > 3)
+      throw new Error("图片草稿请求无效")
+    for (const id of request.ids) {
+      assertCurrent()
+      await discardChatDraftImage(request.threadId, root, id)
+    }
+  })
   ipcMain.handle(
     "workspace:authorizeToolFilePreview",
     async (event, request: ToolFilePreviewGrantRequest): Promise<ToolFilePreviewGrantResult> => {

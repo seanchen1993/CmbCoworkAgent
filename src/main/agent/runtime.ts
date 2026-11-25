@@ -1,3 +1,5 @@
+import { createChatImageMiddleware, type ChatImageMessageScope } from "./chat-image-middleware"
+import { imageRequestRejection } from "../models/image-request"
 import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
 import { createBotDispatchFeedbackMiddleware } from "./bot-dispatch-feedback"
 import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
@@ -2493,6 +2495,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     checkFinalDelivery,
     openingReplyReminder = false,
     onBotDispatchFeedback,
+    chatImageMessageScope,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
     toolStrategy = "standard",
@@ -2504,6 +2507,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
     checkFinalDelivery?: TurnFinalDeliveryCheck
+    chatImageMessageScope?: ChatImageMessageScope
     onBotDispatchFeedback?: (feedback: BotDispatchFeedback | undefined) => void
     openingReplyReminder?: boolean
     botResultReport?: boolean
@@ -2618,6 +2622,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     })
   }
   const mainSummarizationOptions = {
+    chatImageMessageScope,
     ...summarizationBaseOptions,
     model: configureContextCompactionModel(summarizationModel, onContextCompaction),
     ...(summarizationOverflowModel && {
@@ -3350,6 +3355,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ),
       ...(onBotDispatchFeedback ? [createBotDispatchFeedbackMiddleware(onBotDispatchFeedback)] : []),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
+      ...(threadId ? [createChatImageMiddleware(threadId, chatImageMessageScope)] : []),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
       // invalid_tool_calls into normalized tool_calls (the guard middleware above
@@ -4303,12 +4309,16 @@ function normalizeLailasInputOverflow(response: Response, rawBody: string): Resp
 function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
-  capture?: { threadId?: string },
+  capture?: { threadId?: string; allowImages?: boolean; validateImageAccess?: () => void },
   beforeAttempt?: () => Response | undefined
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
   return async (input, init) => {
+    const imageError = imageRequestRejection(init?.body, capture?.allowImages === true)
+    if (imageError) return imageError
+    const validateAccess = typeof init?.body === "string" && init.body.includes('"image_url"')
+      ? capture?.validateImageAccess : undefined
     const parentSignal = (init?.signal ?? undefined) as AbortSignal | undefined
     let lastError: unknown = undefined
 
@@ -4318,11 +4328,16 @@ function createRetryingFetch(
     // the real reason survives. Called both for non-retryable statuses and when
     // the retry budget is exhausted on a retryable status (432/433/429/5xx).
     const prepareErrorResponse = async (res: Response): Promise<Response> => {
-      if (res.status !== 485 && !hooks?.onFetchError) return res
+      const imageRequest = typeof init?.body === "string" && init.body.includes('"image_url"')
+      if (res.status !== 485 && !hooks?.onFetchError && !imageRequest) return res
       const requestId = res.headers.get("x-request-id") ?? undefined
       let rawBody: string | undefined
       try {
         rawBody = await res.clone().text()
+        if (/data:image\//i.test(rawBody)) {
+          rawBody = "[image request error]"
+          res = Response.json({ error: { message: rawBody } }, { status: res.status })
+        }
       } catch {
         // The SDK still receives the original response when its body cannot be read.
       }
@@ -4332,6 +4347,11 @@ function createRetryingFetch(
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+      try {
+        validateAccess?.()
+      } catch {
+        return Response.json({ error: { message: "当前任务的图片读取权限已失效" } }, { status: 403 })
+      }
       // Backoff can cross the closing boundary even on an already created model.
       const rejection = beforeAttempt?.()
       if (rejection) {
@@ -4663,6 +4683,7 @@ function configureLocalCompactionTokenEstimation(model: ChatOpenAI): ChatOpenAI 
 /** @internal Exported for protocol-level tests. */
 export function getModelInstance(
   customConfig: {
+    inputModalities?: ("text" | "image")[]
     id: string
     model: string
     baseUrl: string
@@ -4681,7 +4702,8 @@ export function getModelInstance(
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
   purpose: ModelInstancePurpose = "agent",
-  captureThreadId?: string
+  captureThreadId?: string,
+  validateImageAccess?: () => void
 ): ChatOpenAI {
   const apiKey = customConfig.apiKey
   if (!apiKey) {
@@ -4712,7 +4734,8 @@ export function getModelInstance(
   const modelFetch = createRetryingFetch(
     retryHooks,
     maxRetryAttempts,
-    { threadId: captureThreadId },
+    { threadId: captureThreadId, validateImageAccess, allowImages: purpose === "agent" &&
+      customConfig.inputModalities?.includes("image") === true },
     customConfig.transport === "idle-gateway"
       ? () => getIdleModelServiceHoursRejection(customConfig)
       : undefined
@@ -4847,6 +4870,7 @@ export interface CreateAgentRuntimeOptions {
   /** Trusted main-turn delivery only; not forwarded to leaf agents. */
   checkFinalDelivery?: TurnFinalDeliveryCheck
   /** Host opt-in for a user-facing main turn; never inherited by workers or subagents. */
+  chatImageMessageScope?: ChatImageMessageScope
   onBotDispatchFeedback?: (feedback: BotDispatchFeedback | undefined) => void
   openingReplyReminder?: boolean
   /** Ordinary-path todo completion gate. Defaults to enabled. */
@@ -5275,7 +5299,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // DeepSeek thinking mode rejects named tool_choice; workers keep their configured thinking.
   const modelPurpose = options.botCommunication && options.botSkillDispatch && !options.botResultReport
     ? "bot-skill-dispatch" : "agent"
-  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId)
+  const activeImageScope = options.chatImageMessageScope
+  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId,
+    typeof activeImageScope === "object" ? activeImageScope.validateAccess : undefined)
   const contextCompactionModel = getModelInstance(
     customConfig,
     retryHooks,
@@ -7454,6 +7480,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     checkFinalDelivery: options.checkFinalDelivery,
     openingReplyReminder: options.openingReplyReminder,
     onBotDispatchFeedback: options.onBotDispatchFeedback,
+    chatImageMessageScope: options.chatImageMessageScope,
     turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,
     actionStationarityTurnId,

@@ -31,6 +31,7 @@ export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
 // Agent IPC
 export interface AgentInvokeParams {
+  chatImages?: import("../shared/file-attachment").SubmittedChatImage[]
   threadId: string
   streamRequestId?: string
   message: string
@@ -145,6 +146,7 @@ export interface Provider {
 
 // Model configuration
 export interface ModelConfig {
+  inputModalities?: ("text" | "image")[]
   id: string
   name: string
   provider: ProviderId

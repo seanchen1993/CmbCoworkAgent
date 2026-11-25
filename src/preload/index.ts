@@ -164,7 +164,8 @@ import type {
 import type {
   AttachmentBytesParseRequest,
   AttachmentFileSelectionResult,
-  AttachmentGrantParseRequest
+  AttachmentGrantParseRequest,
+  WorkspaceChatImageRequest, ChatImageOwnerRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
@@ -788,7 +789,8 @@ const api = {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      chatImages?: import("../shared/file-attachment").SubmittedChatImage[]
     ): (() => void) => {
       const ambientChannel = command
         ? `agent:stream:${threadId}`
@@ -821,7 +823,8 @@ const api = {
           modelId,
           agentMode,
           coordinatorInternalNotification,
-          userMessageId
+          userMessageId,
+          chatImages
         })
       }
 
@@ -1680,6 +1683,7 @@ const api = {
       return ipcRenderer.invoke("models:setCustomConfig", config) as Promise<void>
     },
     upsertCustomConfig: (config: {
+      inputModalities?: ("text" | "image")[]
       id?: string
       name: string
       baseUrl: string
@@ -2407,6 +2411,10 @@ const api = {
     }
   },
   file: {
+    updateImageOwners: (request: ChatImageOwnerRequest): Promise<void> =>
+      ipcRenderer.invoke("workspace:updateChatImageOwners", request),
+    attachWorkspaceImage: (request: WorkspaceChatImageRequest): Promise<ParsedAttachment> =>
+      ipcRenderer.invoke("workspace:attachChatImage", request),
     parseSelected: (
       request: AttachmentGrantParseRequest
     ): Promise<{

@@ -8,8 +8,11 @@ import { MAX_ATTACHMENT_PICKER_FILES } from "../../../shared/file-attachment"
 import type { useThreadContext } from "./thread-context"
 import { isThreadRetired } from "./store"
 import type { Thread } from "../types"
+import { normalizeGitWorkspacePathKey } from "../../../shared/workspace-path"
+import { threadIncarnationKey } from "../../../shared/thread-incarnation"
 import {
   BOT_CONVERSATION_DRAFT_PREFIX,
+  ORDINARY_IMAGE_DRAFT_PREFIX,
   botConversationDraftKey,
   botThreadDraftKey,
   botDraftContentSchema,
@@ -22,7 +25,7 @@ type DraftContext = Pick<
   ReturnType<typeof useThreadContext>,
   "initializeThread" | "getThreadState" | "getThreadActions" | "subscribeToThreadState"
 >
-const schema = botDraftContentSchema.extend({
+const draftFields = botDraftContentSchema.extend({
   version: z.union([z.literal(1), z.literal(2)]),
   mentions: z.array(z.custom<BotMessageMention>()).optional(),
   skill: z.object({
@@ -44,7 +47,8 @@ const schema = botDraftContentSchema.extend({
     .custom<import("../../../shared/bots/contracts").BotMessageReply>(isBotMessageReply)
     .nullable()
     .optional()
-}).superRefine((draft, ctx) => {
+})
+const schema = draftFields.superRefine((draft, ctx) => {
   if (draft.version !== 2) return
   try { parseBotMessageMentions(draft.text, draft.mentions) }
   catch { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "提及草稿无效" }) }
@@ -53,6 +57,50 @@ const threadSchema = z.object({
   incarnation: z.object({ token: z.string().min(1).nullable(), legacyCreatedAt: z.number().int() }),
   draft: schema
 })
+
+const ordinaryImageFile = z.object({
+  image: z.object({
+    id: z.string().uuid(), filename: z.string().min(1).max(512),
+    width: z.number().int().positive().max(8192), height: z.number().int().positive().max(8192),
+    draftWorkspace: z.string().max(32_768)
+  }),
+  filename: z.string().min(1).max(512), filePath: z.literal(""), content: z.literal(""),
+  mimeType: z.literal("image/webp"), size: z.number().int().nonnegative(), truncated: z.literal(false)
+})
+const ordinaryImageDraft = draftFields.extend({
+  attachments: z.array(z.union([ordinaryImageFile, botDraftContentSchema.shape.attachments.element]))
+    .max(MAX_ATTACHMENT_PICKER_FILES)
+})
+
+/** Restore only user-selected image descriptors for this incarnation and workspace. */
+export function bindOrdinaryImageDraft(context: DraftContext, row: Thread, workspace: string | null,
+  onError: (error: string | null) => void): () => void {
+  const id = row.thread_id
+  const root = normalizeGitWorkspacePathKey(workspace ?? "")
+  const incarnation = threadIncarnationKey(threadDraftIncarnation(row))
+  const key = ORDINARY_IMAGE_DRAFT_PREFIX + JSON.stringify([id, incarnation, root])
+  let saved = false
+  const state = context.getThreadState(id)
+  if (state.draftAttachments.some(file => file.image && file.image.draftWorkspace !== root)) {
+    context.getThreadActions(id).setDraftAttachments(state.draftAttachments.filter(
+      file => !file.image || file.image.draftWorkspace === root))
+  }
+  return bindDraft(context, id, () => restoreDraft(context, id, () => {
+    const record = loadBotDraftRecord(key, ordinaryImageDraft)
+    saved = Boolean(record.draft)
+    return record
+  }), () => {
+    if (isThreadRetired(id) || normalizeGitWorkspacePathKey(context.getThreadState(id).workspacePath ?? "") !== root)
+      return null
+    const { draft } = composerDraft(context, id)
+    const hasImage = draft.attachments.some(file => file.image && file.image.draftWorkspace === root)
+    if (!hasImage && !saved) return null
+    const error = saveBotDraftRecord<unknown>(key, hasImage ? draft : { version: 2, text: "", attachments: [] },
+      ordinaryImageDraft, !hasImage)
+    if (!error) saved = hasImage
+    return error
+  }, onError)
+}
 
 function sameIncarnation(a: BotOrdinaryThreadRef["incarnation"], b: BotOrdinaryThreadRef["incarnation"]): boolean {
   return a.token !== null || b.token !== null

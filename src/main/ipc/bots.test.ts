@@ -133,7 +133,8 @@ import { registerBotHandlers } from "./bots"
 function register(
   deleteThread?: Parameters<typeof registerBotHandlers>[1],
   event: unknown = {},
-  im?: Parameters<typeof registerBotHandlers>[2]
+  im?: Parameters<typeof registerBotHandlers>[2],
+  getMainWindow?: Parameters<typeof registerBotHandlers>[3]
 ) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
   registerBotHandlers(
@@ -141,7 +142,8 @@ function register(
       handle: (channel, listener) => handlers.set(channel, listener)
     } as unknown as IpcMain,
     deleteThread,
-    im
+    im,
+    getMainWindow
   )
   return (channel: string, ...args: unknown[]) => handlers.get(channel)!(event, ...args)
 }
@@ -343,6 +345,22 @@ it("revalidates only the original detached native user quote against its Bot inp
   }
 })
 describe("Bot IPC boundaries", () => {
+  it("requires the main application window for private, work and group image submissions", () => {
+    const frame = {}
+    const sender = { mainFrame: frame, isDestroyed: () => false }
+    const event = { senderFrame: frame, sender }
+    const getWindow = () => ({ webContents: {}, isDestroyed: () => false } as unknown as import("electron").BrowserWindow)
+    const call = register(undefined, event, undefined, getWindow)
+    const ids = ["input-11111111-1111-1111-1111-111111111111"]
+    const privateRequest = { botId: "bot", requestId: "request", message: "inspect", inputFileIds: ids }
+    const task = { botId: "bot", operationId: "start", title: "Inspect", goal: "inspect", inputFileIds: ids }
+    const group = { groupId: "group", requestId: "request", text: "inspect", targetBotIds: ["bot"], inputImageIds: ids }
+    expect(() => call("bots:send", "local", privateRequest)).toThrow("主窗口")
+    expect(() => call("bots:work:create", "local", task)).toThrow("主窗口")
+    expect(() => call("bots:group:send", "local", group)).toThrow("主窗口")
+    expect(fixture.sendDesktopMessage).not.toHaveBeenCalled()
+    expect(fixture.createWork).not.toHaveBeenCalled()
+  })
   it("allows reading and answering an exact work question only from the desktop main frame", () => {
     const frame = {}
     const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })

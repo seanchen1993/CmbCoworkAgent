@@ -1,5 +1,11 @@
 import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE, IDLE_MODEL_SERVICE_HOURS } from "./idle-model-service-window"
 
+export type ModelInputModality = "text" | "image"
+
+export function modelInputModalities(value: unknown): ModelInputModality[] {
+  return Array.isArray(value) && value.includes("image") ? ["text", "image"] : ["text"]
+}
+
 export type ModelTier = "premium" | "economy"
 export type ModelThinkingEffort = "low" | "high" | "max"
 export type ModelTransport = "idle-gateway"
@@ -45,6 +51,7 @@ export function isModelSelectable(
  * client-side preset for that model.
  */
 export interface RemoteModelCatalogItem {
+  inputModalities?: ModelInputModality[]
   id?: string
   enabled?: boolean
   name?: string

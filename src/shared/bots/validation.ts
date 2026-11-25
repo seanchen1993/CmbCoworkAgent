@@ -77,6 +77,7 @@ export function parseGroupMessage(input: unknown): SendBotGroupMessageInput {
       throw new BotError("INVALID_INPUT", "收件人与已选择的群提及不一致")
   }
   return {
+    ...(item.inputImageIds !== undefined ? { inputImageIds: parseBotInputFileIds(item.inputImageIds) } : {}),
     groupId: botIdentifier(item.groupId),
     requestId: botIdentifier(item.requestId),
     text,

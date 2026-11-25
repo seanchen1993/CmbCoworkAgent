@@ -107,6 +107,7 @@ const fixture = vi.hoisted(() => ({
   publishImFiles: vi.fn(),
   inputProjections: vi.fn(() => new Map<string, string | null>()),
   inputFilesForTask: vi.fn<() => BotInputFile[]>(() => []),
+  imagesForRunningTask: vi.fn<(taskId: string) => BotInputFile[]>(() => []),
   check: vi.fn(),
   restore: vi.fn(),
   hasNotifications: vi.fn(),
@@ -419,6 +420,7 @@ function port(
         commitWorkResultReview: fixture.commitResult,
         inputProjections: fixture.inputProjections,
         inputFilesForTask: fixture.inputFilesForTask,
+        imagesForRunningTask: fixture.imagesForRunningTask,
         hasDirectUserRequest: fixture.hasDirectUserRequest,
         setBotMessageReaction: fixture.setBotMessageReaction,
         getWork: () => linked,
@@ -837,6 +839,38 @@ describe("Bot Runtime integration", () => {
     } finally {
       lease.release()
       vi.unstubAllEnvs()
+    }
+  })
+
+  it("checks live group image access and honors attachment removal by the prompt hook", async () => {
+    const file = {
+      filename: "image.png", filePath: "shared/image.png", content: "selected",
+      size: 3, mimeType: "image/png", truncated: false,
+      botInputId: "input-11111111-1111-1111-1111-111111111111"
+    }
+    const receipt = { id: file.botInputId, botId: "", attachment: file, blockHash: inputAttachmentHash(file), file }
+    const input: BotTask = { ...task, threadId: "group-g-a",
+      message: "Look" + buildAttachmentMessageParts([file]).attachmentModelBlocks,
+      origin: { kind: "group", groupId: "g", messageId: "current" } }
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    fixture.inputFilesForTask.mockReturnValueOnce([receipt])
+    fixture.imagesForRunningTask.mockReturnValueOnce([receipt]).mockReturnValueOnce([receipt])
+    let checked = false
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context: AgentRunExecutionContext) => {
+      expect(await context.prepareBotChatImages?.("Hook removed this block", new AbortController().signal))
+        .toEqual([])
+      fixture.imagesForRunningTask.mockImplementationOnce(() => { throw new Error("recipient removed") })
+      expect(context.validateBotChatImageAccess).toThrow("recipient removed")
+      checked = true
+      return { completion: Promise.resolve() }
+    })
+    const lease = port().acquire(bot, input)!
+    try {
+      await lease.execute(new AbortController().signal, vi.fn())
+      expect(checked).toBe(true)
+      expect(fixture.imagesForRunningTask).toHaveBeenCalledWith(input.id)
+    } finally {
+      lease.release()
     }
   })
 

@@ -1,4 +1,5 @@
 import { isBinaryFile } from "@/lib/file-types"
+import { isChatImagePath } from "../../../../shared/file-attachment"
 import type { FileInfo } from "@/types"
 
 export interface AtFileSuggestion {
@@ -21,6 +22,7 @@ export interface ProgressiveWorkspaceMentionSearchResult {
 }
 
 interface IndexedSuggestion {
+  image: boolean
   suggestion: AtFileSuggestion
   lowerPath: string
   lowerName: string
@@ -62,8 +64,9 @@ function basename(displayPath: string): string {
   return parts[parts.length - 1] || displayPath
 }
 
-function supported(filePath: string): boolean {
-  return !isBinaryFile(basename(filePath.replace(/\\/g, "/")))
+export function isSupportedWorkspaceMentionFilePath(filePath: string, allowImages = false): boolean {
+  return (allowImages && isChatImagePath(filePath)) ||
+    !isBinaryFile(basename(filePath.replace(/\\/g, "/")))
 }
 
 async function buildIndex(files: FileInfo[]): Promise<IndexedSuggestion[]> {
@@ -72,10 +75,11 @@ async function buildIndex(files: FileInfo[]): Promise<IndexedSuggestion[]> {
     const end = Math.min(files.length, offset + INDEX_BATCH_SIZE)
     for (let index = offset; index < end; index += 1) {
       const file = files[index]
-      if (file.is_dir || !supported(file.path)) continue
+      if (file.is_dir || !isSupportedWorkspaceMentionFilePath(file.path, true)) continue
       const displayPath = normalizeDisplayPath(file.path)
       const filename = basename(displayPath)
       indexed.push({
+        image: isChatImagePath(filename),
         suggestion: {
           id: file.path,
           displayPath,
@@ -159,7 +163,7 @@ function throwIfAborted(signal?: AbortSignal): void {
 export async function searchWorkspaceMentionFiles(
   files: FileInfo[],
   rawQuery: string,
-  options: { limit?: number; signal?: AbortSignal } = {}
+  options: { limit?: number; signal?: AbortSignal; allowImages?: boolean } = {}
 ): Promise<AtFileSuggestion[]> {
   const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 15)))
   const query = rawQuery.toLowerCase()
@@ -171,6 +175,7 @@ export async function searchWorkspaceMentionFiles(
     const end = Math.min(indexed.length, offset + SEARCH_BATCH_SIZE)
     for (let index = offset; index < end; index += 1) {
       const candidate = indexed[index]
+      if (candidate.image && !options.allowImages) continue
       const score = scoreSuggestion(candidate, query)
       if (!Number.isFinite(score)) continue
       insertTopSuggestion(top, { suggestion: candidate.suggestion, score }, limit)
@@ -196,6 +201,7 @@ export async function searchWorkspaceMentionFilesProgressively(
     signal?: AbortSignal
     loadMore?: (signal: AbortSignal) => Promise<WorkspaceMentionSearchPage | null>
     maxAdditionalLoads?: number
+    allowImages?: boolean
     maxFileCount?: number
     onUpdate?: (result: ProgressiveWorkspaceMentionSearchResult) => void
   } = {}
@@ -219,7 +225,8 @@ export async function searchWorkspaceMentionFilesProgressively(
   const signal = options.signal ?? fallbackController.signal
   let files = initialFiles
   let continuationAvailable = options.loadMore !== undefined
-  let suggestions = await searchWorkspaceMentionFiles(files, rawQuery, { limit, signal })
+  const searchOptions = { limit, signal, allowImages: options.allowImages }
+  let suggestions = await searchWorkspaceMentionFiles(files, rawQuery, searchOptions)
   let result: ProgressiveWorkspaceMentionSearchResult = {
     files,
     suggestions,
@@ -250,7 +257,7 @@ export async function searchWorkspaceMentionFilesProgressively(
     // A shared loader may return its current cache while another consumer is
     // settling. Do not spin on the same immutable array.
     if (files === previousFiles) break
-    suggestions = await searchWorkspaceMentionFiles(files, rawQuery, { limit, signal })
+    suggestions = await searchWorkspaceMentionFiles(files, rawQuery, searchOptions)
     result = { files, suggestions, continuationAvailable }
     options.onUpdate?.(result)
   }

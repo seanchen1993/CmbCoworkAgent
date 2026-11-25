@@ -1,3 +1,7 @@
+import { checkpointHasChatImages } from "../../shared/checkpoint-transcript"
+import { chatImageMarker } from "../../shared/attachment-message-parts"
+import type { SubmittedChatImage } from "../../shared/file-attachment"
+import type { ChatImageAdmission } from "../chat-images"
 import { botSkillDispatchInput } from "../agent/bot-skill-dispatch"
 import {
   COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
@@ -516,6 +520,7 @@ import {
   botWorkflowNotificationClaim
 } from "../agent/bot-checkpoint-resume"
 import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
+import { chatAttachmentBudgetError } from "../../shared/attachment-message-parts"
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -4755,6 +4760,14 @@ export function persistAndForwardPhysicalRunStreamChunk(
   return messageId
 }
 
+function durableTailRequiresImages(tail: DurableRuntimeTail): boolean {
+  return checkpointHasChatImages(tail.checkpointTuple?.checkpoint) || tail.messages.some(message => {
+    const images = message.additional_kwargs?.cmb_chat_images
+    return HumanMessage.isInstance(message) && message.additional_kwargs?.cmb_chat_images_source !== "bot" &&
+      Array.isArray(images) && images.length > 0
+  })
+}
+
 function persistVisibleUserTranscriptMessage(
   threadId: string,
   content: string,
@@ -5846,6 +5859,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const botCanDispatch = request.owner === "bot" && !peerFeedback ? message.botCanDispatch : undefined
     const messageId = message.id
     const messageContent = message.content
+    const attachmentError = request.owner === "desktop" && chatAttachmentBudgetError(messageContent)
+    if (attachmentError) return { queued: false, reason: "invalid_payload", message: attachmentError }
     const messageDisplayContent = message.trustedExplicitSkill
       ? [message.displayContent || message.content, formatComposerSkillUseBlock(message.trustedExplicitSkill)].join("\n\n")
       : message.displayContent
@@ -6361,6 +6376,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     // holds: a managed caller has no stream to fall back on, so an unreported
     // run reaches it as an unexplained "no reply".
     let terminalReported = false
+    let imageAdmission: ChatImageAdmission | undefined
     const runExecutionContext: AgentRunExecutionContext = {
       ...incomingRunExecutionContext,
       onRunTerminated: (terminal) => {
@@ -6511,6 +6527,38 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         )
       ) {
         return
+      }
+      const attachmentBudgetError = runExecutionContext.source === "desktop" &&
+        chatAttachmentBudgetError(message, request.chatImages?.length)
+      if (attachmentBudgetError) {
+        safeSendToWindow(window, channel, { type: "error", error: attachmentBudgetError })
+        runExecutionContext.onRunTerminated?.({ outcome: "error", code: "attachment_budget", message: attachmentBudgetError })
+        return
+      }
+      if (request.chatImages?.length && (runExecutionContext.source !== "desktop" ||
+        initialInvokeMetadata.botHostId === "local" || isManagedTransportWindow(window))) {
+        safeSendToWindow(window, channel, { type: "error", error: "当前入口无法提交桌面图片" })
+        return
+      }
+      if (initialInvokeThread && runExecutionContext.source === "desktop" &&
+        (userMessageId || request.chatImages?.length)) {
+        try {
+          const { beginChatImageSubmission } = await import("../chat-images")
+          const submission = beginChatImageSubmission(request)
+          if (submission && "replay" in submission) {
+            if (!await submission.replay) throw new Error("原图片消息未接纳，请重试")
+            acknowledgePrompt(initialInvokeWorkspacePath)
+            safeSendToWindow(window, channel, { type: "done" })
+            runExecutionContext.onRunTerminated?.({ outcome: "success", code: "already_accepted" })
+            return
+          }
+          imageAdmission = submission?.owner
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "图片消息校验失败"
+          safeSendToWindow(window, channel, { type: "error", error: reason })
+          runExecutionContext.onRunTerminated?.({ outcome: "error", code: "image_submission", message: reason })
+          return
+        }
       }
       let modelInputMessage = message
       let routingMessage = message
@@ -7951,6 +7999,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // marker message, not user input — they must NOT run explicit-skill
           // activation or the UserPromptSubmit hook, or a plugin could block /
           // rewrite / halt the result-report turn.
+          let submittedImagePrompt: string | undefined
           if (!isInternalNotificationTurn) {
             const preparedPrompt = await prepareUserPromptForCurrentRun(message, modelInputMessage)
             throwIfInvokeAborted()
@@ -8000,6 +8049,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return
             }
             effectiveMessage = preparedPrompt.content
+            if (imageAdmission || (runExecutionContext.source === "bot" && runExecutionContext.prepareBotChatImages &&
+              !runGoalId && !botSkillDispatch)) submittedImagePrompt = preparedPrompt.submissionContent
             if (onBotUserPromptPrepared) {
               const approvedRequest = runGoalId ? "" : preparedPrompt.submissionContent
               const approved = onBotUserPromptPrepared(
@@ -8392,6 +8443,40 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
 
+          const { approveChatImages, bindBotChatImages } = await import("../chat-images")
+          let approvedImages: SubmittedChatImage[] = []
+          if (imageAdmission) {
+            approvedImages = await approveChatImages(threadId, message, submittedImagePrompt ?? "", request.chatImages, userMessageId)
+            if (approvedImages.some(ref => effectiveMessage.split(chatImageMarker(ref)).length !== 2))
+              throw new Error("获准的图片标记丢失或重复，请重新添加")
+          } else if (submittedImagePrompt !== undefined && runExecutionContext.prepareBotChatImages) {
+            approvedImages = await runExecutionContext.prepareBotChatImages(submittedImagePrompt, abortController.signal)
+            for (const ref of approvedImages) {
+              const marker = chatImageMarker(ref)
+              if (effectiveMessage.includes(marker)) throw new Error("图片标记不唯一，请重新添加")
+              effectiveMessage += "\n\n" + marker
+            }
+          }
+          const allowDesktopImages = runExecutionContext.source === "desktop" && metadata.botHostId !== "local" &&
+            !isManagedTransportWindow(window) && !isInternalNotificationTurn
+          const hasHistoryImages = allowDesktopImages && durableTailRequiresImages(durableRuntimeTail)
+          if (request.chatImages?.length && !approvedImages.length &&
+            !effectiveMessage.replace(/<attachment\b[^>]*media="image"[^>]*\/>/g, "").trim()) {
+            throw new Error("输入处理后没有可提交的内容")
+          }
+          const imageRouting = approvedImages.length || hasHistoryImages ? await resolveStandardTurnRouting({
+            taskSource: "chat", threadId, requiresImages: true, managedExecution,
+            requestedModelId: modelId || parsedThreadMetadata.modelId,
+            routingMode: runExecutionContext.modelRoutingMode ?? getGlobalRoutingMode()
+          }) : undefined
+          throwIfInvokeAborted()
+          imageAdmission?.accept(effectiveMessage, approvedImages)
+          if (runExecutionContext.source === "bot" && approvedImages.length) {
+            if (!userMessageId) throw new Error("Bot 图片消息缺少任务标识")
+            const receipt = bindBotChatImages(threadId, userMessageId, message, effectiveMessage, approvedImages)
+            effectiveMessage = receipt.preparedText ?? effectiveMessage
+            approvedImages = receipt.images
+          }
           // A request-specific receipt distinguishes an admitted prompt from a hook or lease rejection.
           if (!isInternalNotificationTurn) acknowledgePrompt(workspacePath)
 
@@ -8617,7 +8702,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
             .filter((part): part is string => typeof part === "string" && part.length > 0)
             .join("\n\n")
-          const preparedRouting = await resolveStandardTurnRouting({
+          const preparedRouting = imageRouting ?? await resolveStandardTurnRouting({
             taskSource: "chat",
             message: routingDecisionMessage || effectiveMessage,
             threadId,
@@ -8727,6 +8812,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   }
                 })
 
+          if (approvedImages.length && userHumanMessage) {
+            userHumanMessage.additional_kwargs.cmb_chat_images = approvedImages
+            if (runExecutionContext.source === "bot")
+              userHumanMessage.additional_kwargs.cmb_chat_images_source = "bot"
+          }
+
           const notificationOccurrenceBoundary = isInternalNotificationTurn
             ? captureThreadMessageProviderOccurrenceBoundary(threadId)
             : undefined
@@ -8802,6 +8893,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             baseOptions: () => ({
               subagentLifecycle: subagentLifecycle.callbacks,
               threadId,
+              chatImageMessageScope: allowDesktopImages ? "desktop" :
+                runExecutionContext.source === "bot" && approvedImages.length ? {
+                  messageId: userMessageId, validateAccess: runExecutionContext.validateBotChatImageAccess
+                } : undefined,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               onPrimaryModelRequestState:
@@ -10987,6 +11082,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard = undefined
       }
     }).finally(() => {
+      imageAdmission?.release()
       // Nothing classified this run: an early return, or a throw before the
       // main body ever started. Reporting `unknown` lets a managed caller tell
       // "ended without a reply" from "never reported".
@@ -11716,7 +11812,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard = undefined
         try {
           const requestedModelIdResume = modelId || (metadata.model as string | undefined)
+          const resumeRow = getThreadCore(threadId)
+          const resumeDurableRuntimeTail = await getDurableRuntimeTail(threadId, {
+            userInputProjections: resumeRow ? botHistoryInputProjection(threadId, resumeRow) : undefined
+          })
           const preparedResumeRouting = await resolveStandardTurnRouting({
+            requiresImages: metadata.botHostId !== "local" && durableTailRequiresImages(resumeDurableRuntimeTail),
             taskSource: "chat",
             threadId,
             continuation: "resume",
@@ -11744,10 +11845,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const decisions = Array.from({ length: pendingCount }, () => ({ type: decisionType }))
           const resumeValue = { decisions }
           flushPendingStreamTranscriptMessages(threadId, runToken)
-          const resumeRow = getThreadCore(threadId)
-          const resumeDurableRuntimeTail = await getDurableRuntimeTail(threadId, {
-            userInputProjections: resumeRow ? botHistoryInputProjection(threadId, resumeRow) : undefined
-          })
           throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
           if (resumeDurableRuntimeTail.persistedMessages.length > 0) {
             throw new Error(
@@ -11778,6 +11875,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
               subagentLifecycle: resumeSubagentLifecycle.callbacks,
+              chatImageMessageScope: metadata.botHostId === "local" ? undefined : "desktop",
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
               onTurnCompletionRecovery: (input, writeToStream) => {
@@ -12892,7 +12990,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       physicalStreamRunSetupGuard.handoff()
       pendingPhysicalStreamRunSetupGuard = undefined
       try {
+        const interruptTail = await getDurableRuntimeTail(threadId)
         const preparedInterruptRouting = await resolveStandardTurnRouting({
+          requiresImages: metadata.botHostId !== "local" && durableTailRequiresImages(interruptTail),
           taskSource: "chat",
           threadId,
           continuation: "interrupt",
@@ -12934,6 +13034,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
               subagentLifecycle: interruptSubagentLifecycle.callbacks,
+              chatImageMessageScope: metadata.botHostId === "local" ? undefined : "desktop",
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,

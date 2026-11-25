@@ -26,6 +26,7 @@ interface GroupDraft {
     id: string
     text: string
     targets: string
+    inputImageIds?: string[]
     mentions?: string
     replyToId?: string
     revision: number
@@ -150,6 +151,7 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
         requestId: request.id,
         text: request.text,
         targetBotIds: JSON.parse(request.targets),
+        ...(request.inputImageIds?.length ? { inputImageIds: request.inputImageIds } : {}),
         ...(request.replyToId ? { replyToId: request.replyToId } : {}),
         // Pre-upgrade requests omitted mention metadata; preserve that wire contract too.
         ...(request.mentions !== undefined ? { mentions: JSON.parse(request.mentions) } : {})
@@ -194,7 +196,9 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
       start: mention.start - leading,
       end: mention.end - leading
     }))
+    const inputImageIds = draft.attachments.flatMap(file => file.botInputId ? [file.botInputId] : [])
     request = {
+      ...(inputImageIds.length ? { inputImageIds } : {}),
       id: crypto.randomUUID(),
       text,
       targets: JSON.stringify(targetBotIds),
@@ -205,6 +209,7 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
     input = {
       groupId: group.id,
       requestId: request.id,
+      ...(inputImageIds.length ? { inputImageIds } : {}),
       text,
       targetBotIds,
       ...(request.replyToId ? { replyToId: request.replyToId } : {}),
