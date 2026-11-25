@@ -184,6 +184,8 @@ import type {
   HarnessRunArtifactGrantRefreshInput,
   HarnessRunArtifactGrantRefreshResult,
   HarnessRunArtifactRevealInput,
+  HarnessArchiveArtifactsInput,
+  HarnessArchiveArtifactsOptions,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
   HarnessDeployUnitConfig,
@@ -3244,6 +3246,11 @@ interface CustomAPI {
     ) => Promise<Record<string, HarnessProjectDetailViewModel>>
     stopWatchRefs: (scopeKey?: string) => Promise<void>
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    getArchiveArtifactsOptions: (
+      projectId: string,
+      slug: string
+    ) => Promise<HarnessArchiveArtifactsOptions>
+    archiveArtifacts: (input: HarnessArchiveArtifactsInput) => Promise<{ writePath: string }>
     refreshRunArtifactGrant: (
       input: HarnessRunArtifactGrantRefreshInput
     ) => Promise<HarnessRunArtifactGrantRefreshResult>

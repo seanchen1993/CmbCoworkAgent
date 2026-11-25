@@ -106,6 +106,7 @@ import { useKnowledgeBases } from "@/components/harness-board/useKnowledgeBases"
 import { useKnowledgePreviews } from "@/components/harness-board/useKnowledgePreviews"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
+import { ArtifactArchiveDialog } from "./ArtifactArchiveDialog"
 import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { ManagedRunHistory } from "@/components/harness-board/ManagedRunHistory"
 import { ManagedRunScheduleBadge } from "./ManagedRunScheduleBadge"
@@ -118,7 +119,7 @@ import {
   createBoundedLatestTaskQueue,
   type BoundedTaskContext
 } from "@/components/harness-board/bounded-latest-task-queue"
-import { buildFeatureDeployUnitRows } from "@/lib/harness-feature-deploy-units"
+import { buildFeatureDeployUnitRows } from "../../../../shared/harness-feature-deploy-units"
 import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
@@ -5930,7 +5931,7 @@ function ProjectDetailPage({
               onProjectList={onBackToList}
             />
           </div>
-          <div className={cn(harnessPageHeaderActionsClassName, "mt-0")}>
+          <div className={harnessPageHeaderActionsClassName}>
             {detail?.systemConstraintUpdate && (
               <TooltipProvider delayDuration={80}>
                 <Tooltip>
@@ -5976,17 +5977,18 @@ function ProjectDetailPage({
             )}
             <Button
               variant="ghost"
-              size="sm"
-              className={harnessDetailSecondaryButtonClassName}
+              size="icon-sm"
+              aria-label="编辑项目配置"
+              title="编辑项目配置"
               onClick={() => onEditProject(project)}
             >
               <Pencil className="size-4" />
-              编辑项目配置
             </Button>
             <Button
               variant="ghost"
-              size="sm"
-              className={harnessDetailRefreshButtonClassName}
+              size="icon-sm"
+              aria-label="刷新"
+              title="刷新"
               onClick={() => onRefresh(project.projectId)}
             >
               {loading ? (
@@ -5994,9 +5996,10 @@ function ProjectDetailPage({
               ) : (
                 <RefreshCw className="size-4" />
               )}
-              刷新
             </Button>
-            {!archived && (
+            {archived ? (
+              <span aria-hidden="true" className={harnessDetailPrimaryButtonClassName} />
+            ) : (
               <Button
                 size="sm"
                 className={cn(harnessDetailPrimaryButtonClassName, harnessActionButtonClassName)}
@@ -6413,6 +6416,7 @@ function FeatureDetailPage({
   onBackToList,
   onBackToProject,
   onEditDeployUnits,
+  knowledgeBases,
   onRefresh,
   managedScheduleRefreshRevision,
   onFeatureImManagementSaved,
@@ -6434,6 +6438,7 @@ function FeatureDetailPage({
   onBackToList: () => void
   onBackToProject: () => void
   onEditDeployUnits: () => void
+  knowledgeBases: KnowledgeBaseListResult | null
   onRefresh: () => void | Promise<void>
   managedScheduleRefreshRevision: number
   onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
@@ -7228,18 +7233,14 @@ function FeatureDetailPage({
             />
           </div>
           {effectiveActiveDetailTab === "feature" && (
-            <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
+            <div className={harnessPageHeaderActionsClassName}>
               <TooltipProvider delayDuration={150}>
                 <div className="flex shrink-0 items-center gap-px">
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className={cn(
-                      harnessDetailSecondaryButtonClassName,
-                      "w-[160px]",
-                      managedRunIsRunning ? "text-status-critical" : "text-status-info"
-                    )}
+                    className={managedRunIsRunning ? "text-status-critical" : "text-status-info"}
                     onClick={() => {
                       if (managedRunIsRunning) {
                         void handleManagedRunChange(false)
@@ -7264,7 +7265,7 @@ function FeatureDetailPage({
                     ) : (
                       <ManagedRunIcon />
                     )}
-                    {managedRunIsRunning ? "停止托管运行" : "托管运行当前特性"}
+                    {managedRunIsRunning ? "停止托管运行" : "托管运行"}
                   </Button>
                   {!managedRunIsRunning && (
                     <Tooltip>
@@ -7284,6 +7285,18 @@ function FeatureDetailPage({
                   )}
                 </div>
               </TooltipProvider>
+              {detail && (
+                <ArtifactArchiveDialog
+                  key={detailKey}
+                  projectId={detail.project.projectId}
+                  slug={detail.run.slug}
+                  knowledgeBases={knowledgeBases?.knowledgeBases ?? []}
+                  formatError={cleanIpcError}
+                  disabled={
+                    loading || projectInteractionDisabled || !detail.artifactArchiveAvailable
+                  }
+                />
+              )}
               {detail?.artifactAccumulation && (
                 <ArtifactAccumulationButton
                   disabled={loading || projectInteractionDisabled}
@@ -7296,19 +7309,20 @@ function FeatureDetailPage({
               <Button
                 type="button"
                 variant="ghost"
-                size="sm"
-                className={cn(harnessDetailSecondaryButtonClassName, "w-[176px]")}
+                size="icon-sm"
+                aria-label="编辑特性配置"
+                title="编辑特性配置"
                 onClick={onEditDeployUnits}
                 disabled={loading || !detail || projectInteractionDisabled}
               >
                 <Pencil className="size-4" />
-                编辑特性配置
               </Button>
               <Button
                 type="button"
                 variant="ghost"
-                size="sm"
-                className={harnessDetailRefreshButtonClassName}
+                size="icon-sm"
+                aria-label="刷新"
+                title="刷新"
                 onClick={onRefresh}
                 disabled={loading || !detail || projectInteractionDisabled}
               >
@@ -7317,7 +7331,6 @@ function FeatureDetailPage({
                 ) : (
                   <RefreshCw className="size-4" />
                 )}
-                刷新
               </Button>
               <Button
                 type="button"
@@ -8531,7 +8544,8 @@ export function HarnessBoardView({
     projectModeTab === "constraint-sync" ||
       dialogOpen ||
       editingProject !== null ||
-      selectedProjectId !== null,
+      selectedProjectId !== null ||
+      runDetail?.artifactArchiveAvailable === true,
     cleanIpcError
   )
   const [syncingKnowledgeBaseIds, setSyncingKnowledgeBaseIds] = useState<Set<string>>(new Set())
@@ -11845,6 +11859,7 @@ export function HarnessBoardView({
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
+          knowledgeBases={knowledgeBaseResult}
           onRefresh={refreshSelectedRunDetail}
           managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onFeatureImManagementSaved={handleFeatureImManagementSaved}

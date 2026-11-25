@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { HarnessDeployUnitMapping, HarnessRunNode } from "../../shared/harness-board-types"
 
 const state = vi.hoisted(() => ({
   root: `/tmp/harness-binding-review-${process.pid}-${Date.now()}`,
@@ -10,6 +11,10 @@ const state = vi.hoisted(() => ({
   partialCatalog: false,
   projectExists: true,
   artifactConfig: undefined as unknown,
+  archiveCommand: undefined as string | undefined,
+  sapId: "001234" as string | undefined,
+  selectedDeployUnits: [] as HarnessDeployUnitMapping[],
+  runNodes: [] as HarnessRunNode[],
   sessionContextCommand: "",
   supportedDeployUnits: ["legacy-unit"],
   knowledgeBaseIds: ["bound-knowledge"],
@@ -18,7 +23,10 @@ const state = vi.hoisted(() => ({
   transferRunInput: false,
   runInputs: [] as string[]
 }))
-vi.mock("../storage", () => ({ getOpenworkDir: () => state.root }))
+vi.mock("../storage", () => ({
+  getOpenworkDir: () => state.root,
+  getUserInfo: () => ({ sapId: state.sapId })
+}))
 vi.mock("./notifications", () => ({ harnessNotifications: {} }))
 vi.mock("./managed-run-store", () => ({ managedRunStore: { getLatestRun: () => undefined } }))
 vi.mock("./catalog-client", () => ({
@@ -40,7 +48,7 @@ vi.mock("./catalog-client", () => ({
             plugin: { id: "plugin", name: "plugin", path: state.root },
             leanToken: "test-token",
             projectDirectoryExists: true,
-            selectedDeployUnits: [],
+            selectedDeployUnits: state.selectedDeployUnits,
             sessionContextInjectionSource: state.sessionContextCommand ? "plugin" : "cmbdevclaw",
             configSnapshot: {
               error: null,
@@ -52,6 +60,7 @@ vi.mock("./catalog-client", () => ({
                   [process.platform]: {
                     project_status: `${process.execPath} --version`,
                     feature_status: state.featureCommand ?? `${process.execPath} --version`,
+                    archive_artifacts: state.archiveCommand,
                     system_prompt_inject: "workspace=${sessionWorkspacePath}",
                     session_context_inject: state.sessionContextCommand
                   }
@@ -77,7 +86,7 @@ vi.mock("./adapter-detail-client", () => ({
     }
     return {
       workflow: { nodes: [], states: [] },
-      run: { slug: "f", title: "Feature", nodes: [], watchRefs: [], hookLogRefs: [] }
+      run: { slug: "f", title: "Feature", nodes: state.runNodes, watchRefs: [], hookLogRefs: [] }
     }
   },
   parseHarnessAdapterDetailBatchInWorker: async () => {
@@ -98,6 +107,8 @@ import {
   updateHarnessFeatureDeployUnits,
   buildHarnessFeatureAgentContext,
   archiveHarnessProject,
+  archiveHarnessArtifacts,
+  getHarnessArchiveArtifactsOptions,
   getHarnessProjectDetail,
   prepareHarnessKnowledgeDeposition,
   getHarnessProjectPublicAgentmdDeployUnits,
@@ -134,6 +145,10 @@ beforeEach(async () => {
   state.partialCatalog = false
   state.projectExists = true
   state.artifactConfig = undefined
+  state.archiveCommand = undefined
+  state.sapId = "001234"
+  state.runNodes = []
+  state.selectedDeployUnits = []
   state.sessionContextCommand = ""
   state.supportedDeployUnits = ["legacy-unit"]
   state.knowledgeBaseIds = ["bound-knowledge"]
@@ -199,6 +214,125 @@ describe("public system constraint indicators", () => {
     }
     await writeKnowledgeState(saved)
   }
+
+  it("passes confirmed archive selections to the plugin and reports its specific errors", async () => {
+    await saveLibraries([{ id: "unbound" }])
+    const project = join(state.root, "project")
+    await mkdir(project, { recursive: true })
+    const path = "产物 说明.md"
+    await writeFile(join(project, path), "spec")
+    state.runNodes = [
+      {
+        id: "draft",
+        label: "Draft",
+        nodeStatus: "unknown",
+        status: { label: "Draft", uiKind: "unknown" },
+        hooks: [],
+        artifacts: [
+          {
+            id: "spec",
+            artifactLabel: "需求说明",
+            artifactType: "file",
+            artifactStatus: "generated",
+            path,
+            paths: [path, "missing.md"],
+            required: false,
+            status: { label: "已生成", uiKind: "done" }
+          }
+        ]
+      }
+    ]
+    expect((await getHarnessRunDetail("p", "f")).artifactArchiveAvailable).toBeUndefined()
+    const bound = {
+      deployUnitIdMapping: "bound",
+      deployUnitId: "bound",
+      localRepoPath: join(state.root, "saved")
+    }
+    state.selectedDeployUnits = [bound]
+    const added = {
+      deployUnitIdMapping: "added",
+      deployUnitId: "added",
+      localRepoPath: join(state.root, "first"),
+      description: "额外发布单元"
+    }
+    await writeFile(
+      join(state.root, DEPLOY_UNIT_V2_FILE),
+      JSON.stringify({
+        version: 2,
+        mappings: [
+          { ...bound, repositoryPaths: [{ pathId: "first", localRepoPath: project }] },
+          {
+            ...added,
+            repositoryPaths: [
+              { pathId: "first", localRepoPath: added.localRepoPath },
+              { pathId: "second", localRepoPath: project }
+            ]
+          }
+        ]
+      })
+    )
+    await writeFile(
+      join(state.root, "archive.cjs"),
+      `
+      const fs = require("node:fs");
+      if (fs.existsSync("archive-args.json")) {
+        console.log(JSON.stringify({ success: false, error: "该特性已归档" }));
+        process.exitCode = 1;
+      } else {
+        fs.writeFileSync("archive-args.json", JSON.stringify(process.argv.slice(2)));
+        console.log(JSON.stringify({ success: true }));
+      }
+    `
+    )
+    await rm(join(state.root, "archive-args.json"), { force: true })
+    state.archiveCommand = [
+      `"${process.execPath}"`,
+      '"${pluginPath}/archive.cjs"',
+      "${artifactPaths}",
+      "${knowledgeWritePath}",
+      "${projectName}",
+      "${sapId}",
+      "${feature}",
+      "--selected-deployUnit",
+      "${selectedDeployUnits}"
+    ].join(" ")
+    expect(await getHarnessArchiveArtifactsOptions("p", "f")).toEqual({
+      artifacts: [{ path, label: "需求说明" }],
+      deployUnits: [bound, added],
+      defaultDeployUnitIds: ["bound"]
+    })
+    const input = {
+      projectId: "p",
+      slug: "f",
+      knowledgeBaseId: "unbound",
+      artifactPaths: [path],
+      deployUnitIds: ["bound", "added"]
+    }
+    await expect(
+      archiveHarnessArtifacts({ ...input, artifactPaths: ["other.md"] })
+    ).rejects.toThrow("所选产物已变化")
+    const writePath = knowledgeDirectory("unbound", "write")
+    await expect(archiveHarnessArtifacts(input)).resolves.toEqual({ writePath })
+    const cli: string[] = JSON.parse(await readFile(join(state.root, "archive-args.json"), "utf8"))
+    expect(JSON.parse(cli[0])).toEqual([await realpath(join(project, path))])
+    expect(cli.slice(1, 6)).toEqual([writePath, "project", "001234", "f", "--selected-deployUnit"])
+    expect(JSON.parse(cli[6])).toEqual([bound, added])
+    await expect(archiveHarnessArtifacts(input)).rejects.toThrow("该特性已归档")
+    await rm(join(state.root, "archive-args.json"))
+
+    state.sapId = undefined
+    vi.stubEnv("DEV", false)
+    await expect(archiveHarnessArtifacts(input)).rejects.toThrow("无法获取当前用户的 sapId")
+    vi.stubEnv("DEV", true)
+    await expect(archiveHarnessArtifacts({ ...input, deployUnitIds: [] })).resolves.toEqual({
+      writePath
+    })
+    const emptyCli: string[] = JSON.parse(
+      await readFile(join(state.root, "archive-args.json"), "utf8")
+    )
+    expect(emptyCli[3]).toBe("800000")
+    expect(JSON.parse(emptyCli[6])).toEqual([])
+  })
 
   it("keeps the configured deploy units for legacy injection commands", async () => {
     state.sessionContextCommand = "inject"

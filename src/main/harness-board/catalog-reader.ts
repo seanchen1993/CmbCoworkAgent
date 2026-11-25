@@ -56,6 +56,7 @@ const MAX_LEAN_TOKEN_CHARS = 8 * 1024
 const PROJECT_CONTEXT_COMMAND_KEYS = [
   "project_status",
   "feature_status",
+  "archive_artifacts",
   "skip_node",
   "session_context_inject",
   "system_prompt_inject",

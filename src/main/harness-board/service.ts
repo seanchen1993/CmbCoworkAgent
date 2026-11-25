@@ -33,7 +33,8 @@ import type { KnowledgeDepositionWorkspace } from "../../shared/knowledge-base-t
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
-import { access, mkdir, readFile, stat } from "node:fs/promises"
+import { access, mkdir, readFile, realpath, stat } from "node:fs/promises"
+import { buildFeatureDeployUnitRows } from "../../shared/harness-feature-deploy-units"
 import { assertEmptyProjectDirectory } from "./project-workspace"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
@@ -98,6 +99,8 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessAdapterSnapshot,
   HarnessAdapterType,
+  HarnessArchiveArtifactsInput,
+  HarnessArchiveArtifactsOptions,
   HarnessArtifactType,
   HarnessBoardCompatibility,
   HarnessDynamicWorkflowConfig,
@@ -191,6 +194,7 @@ type HarnessInspectCommandName =
   | "run"
   | "createProject"
   | "createFeature"
+  | "archiveArtifacts"
   | "dynamicWorkflow"
   | "skipNode"
   | "sessionContext"
@@ -199,6 +203,7 @@ type HarnessInspectCommandConfigKey =
   | "feature_status"
   | "create_project"
   | "create_feature"
+  | "archive_artifacts"
   | "dynamic_workflow"
   | "skip_node"
   | "session_context_inject"
@@ -217,6 +222,7 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   run: "feature_status",
   createProject: "create_project",
   createFeature: "create_feature",
+  archiveArtifacts: "archive_artifacts",
   dynamicWorkflow: "dynamic_workflow",
   skipNode: "skip_node",
   sessionContext: "session_context_inject"
@@ -297,6 +303,10 @@ interface HarnessCommandParseOptions {
   nodeId?: string
   eventJson?: string
   knowledgePathJson?: string
+  artifactPathsJson?: string
+  knowledgeWritePath?: string
+  projectName?: string
+  sapId?: string
   preserveMissingPlaceholders?: boolean
 }
 
@@ -777,6 +787,16 @@ function formatAdapterError(error: unknown, label = "Harness adapter"): string {
   return `${label} ${exitInfo}: ${suffix}`
 }
 
+function parseArchiveArtifactsResult(output: unknown): Record<string, unknown> | null {
+  if (!Buffer.isBuffer(output)) return null
+  try {
+    const result: unknown = JSON.parse(output.toString("utf8").replace(/^\uFEFF/, ""))
+    return isObject(result) ? result : null
+  } catch {
+    return null
+  }
+}
+
 function formatHarnessCommandToken(value: string): string {
   if (!value) return '""'
   return /^[A-Za-z0-9_/:=.,@%+-]+$/.test(value) ? value : (JSON.stringify(value) ?? '""')
@@ -950,10 +970,14 @@ function replaceHarnessConfigPlaceholders(
     workflowNodes: options.workflowNodes ?? "",
     nodeId: options.nodeId ?? "",
     eventJson: options.eventJson ?? "",
-    knowledgePath: options.knowledgePathJson ?? "[]"
+    knowledgePath: options.knowledgePathJson ?? "[]",
+    artifactPaths: options.artifactPathsJson,
+    knowledgeWritePath: options.knowledgeWritePath,
+    projectName: options.projectName,
+    sapId: options.sapId
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson|knowledgePath)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson|knowledgePath|artifactPaths|knowledgeWritePath|projectName|sapId)\}/g,
     (placeholder: string, key: string) => {
       const replacement = replacements[key]
       if (replacement) return replacement
@@ -1429,7 +1453,15 @@ async function runHarnessInvocationAsync(
       configured.configKey === "create_project" && (await isPythonCommandNotFound(error))
         ? "请安装最新版 Python 3"
         : undefined
-    throw new HarnessPluginCommandError(configured, formatAdapterError(error), message)
+    const archiveFailure =
+      configured.configKey === "archive_artifacts"
+        ? parseArchiveArtifactsResult((error as { stdout?: unknown }).stdout)
+        : null
+    throw new HarnessPluginCommandError(
+      configured,
+      formatAdapterError(error),
+      archiveFailure?.success === false ? normalizeText(archiveFailure.error) || message : message
+    )
   } finally {
     release()
   }
@@ -4120,6 +4152,142 @@ export async function getHarnessRunDetail(
   }
 }
 
+async function requireArchiveRunDetail(
+  projectId: string,
+  slug: string
+): Promise<HarnessRunDetailViewModel> {
+  if (typeof projectId !== "string" || !projectId || typeof slug !== "string" || !slug) {
+    throw new Error("缺少归档项目或特性")
+  }
+  const detail = await getHarnessRunDetail(projectId, slug)
+  if (!detail.artifactArchiveAvailable) throw new Error("当前插件未配置产物归档")
+  if (detail.run.slug !== slug) throw new Error("产物所属特性已变化，请刷新后重试")
+  return detail
+}
+
+function collectArchiveArtifactLabels(detail: HarnessRunDetailViewModel): Map<string, string> {
+  const labels = new Map<string, string>()
+  for (const node of detail.run.nodes) {
+    for (const artifact of node.artifacts) {
+      if (
+        artifact.artifactStatus !== "generated" ||
+        artifact.artifactType === "external" ||
+        artifact.artifactType === "virtual"
+      )
+        continue
+      const paths = artifact.paths?.length ? artifact.paths : artifact.path ? [artifact.path] : []
+      for (const path of paths) {
+        if (!labels.has(path)) labels.set(path, artifact.artifactLabel)
+      }
+    }
+  }
+  return labels
+}
+
+async function resolveArchiveArtifactPath(root: string, path: string): Promise<string | null> {
+  const candidate = resolve(root, path)
+  if (candidate === root || !isInsideDirectory(root, candidate)) return null
+  try {
+    const resolved = await realpath(candidate)
+    if (resolved === root || !isInsideDirectory(root, resolved)) return null
+    const info = await stat(resolved)
+    return info.isFile() || info.isDirectory() ? resolved : null
+  } catch {
+    return null
+  }
+}
+
+export async function getHarnessArchiveArtifactsOptions(
+  projectId: string,
+  slug: string
+): Promise<HarnessArchiveArtifactsOptions> {
+  const detail = await requireArchiveRunDetail(projectId, slug)
+  const root = await realpath(detail.project.projectRootPath)
+  const labels = [...collectArchiveArtifactLabels(detail)]
+  const artifacts: HarnessArchiveArtifactsOptions["artifacts"] = []
+  for (let offset = 0; offset < labels.length; offset += 32) {
+    const batch = await Promise.all(
+      labels
+        .slice(offset, offset + 32)
+        .map(async ([path, label]) =>
+          (await resolveArchiveArtifactPath(root, path)) ? { path, label } : null
+        )
+    )
+    for (const artifact of batch) {
+      if (artifact) artifacts.push(artifact)
+    }
+  }
+  const snapshots = detail.run.selectedDeployUnits
+  const deployUnits = buildFeatureDeployUnitRows(await listHarnessDeployUnitMappings(), snapshots)
+  return {
+    artifacts,
+    deployUnits,
+    defaultDeployUnitIds: snapshots.map((unit) => unit.deployUnitId)
+  }
+}
+
+export async function archiveHarnessArtifacts(
+  input: HarnessArchiveArtifactsInput
+): Promise<{ writePath: string }> {
+  if (
+    !input ||
+    typeof input.knowledgeBaseId !== "string" ||
+    !input.knowledgeBaseId.trim() ||
+    !Array.isArray(input.artifactPaths) ||
+    !input.artifactPaths.length ||
+    !Array.isArray(input.deployUnitIds)
+  )
+    throw new Error("请选择知识库和至少一个产物")
+
+  const detail = await requireArchiveRunDetail(input.projectId, input.slug)
+  const workerContext = await requireProjectContext(input.projectId)
+  const project = workerContext.project
+  if (project.lifecycle.status === "archived") throw new Error("项目已归档")
+  const sapId = getUserInfo()?.sapId?.trim() || (import.meta.env.DEV ? "800000" : "")
+  if (!sapId) throw new Error("无法获取当前用户的 sapId")
+  const [knowledgeBaseId] = await assertSelectableKnowledgeBaseIds([input.knowledgeBaseId])
+  const root = await realpath(detail.project.projectRootPath)
+  const labels = collectArchiveArtifactLabels(detail)
+  const paths: string[] = []
+  for (const path of new Set(input.artifactPaths)) {
+    if (!labels.has(path)) throw new Error("所选产物已变化，请重新选择")
+    const resolved = await resolveArchiveArtifactPath(root, path)
+    if (!resolved) throw new Error(`产物文件或目录不可用：${path}`)
+    paths.push(resolved)
+  }
+  const units = new Map(
+    buildFeatureDeployUnitRows(
+      await listHarnessDeployUnitMappings(),
+      detail.run.selectedDeployUnits
+    ).map((unit) => [unit.deployUnitId, unit])
+  )
+  const selectedDeployUnits = [...new Set(input.deployUnitIds)].map((id) => {
+    const unit = units.get(id)
+    if (!unit) throw new Error("所选发布单元已变化，请重新选择")
+    return unit
+  })
+  const writePath = await resolveKnowledgeDepositionPath([knowledgeBaseId], knowledgeBaseId)
+  const invocation = buildConfiguredHarnessInvocationFromContext(
+    project,
+    projectConfigContextFromWorker(workerContext),
+    "archiveArtifacts",
+    {
+      feature: detail.run.slug,
+      projectName: project.name,
+      sapId,
+      selectedDeployUnitsJson: JSON.stringify(selectedDeployUnits),
+      artifactPathsJson: JSON.stringify([...new Set(paths)]),
+      knowledgeWritePath: writePath
+    }
+  )
+  const output = await runHarnessInvocationAsync(invocation, undefined, HARNESS_ADAPTER_TIMEOUT_MS)
+  const result = parseArchiveArtifactsResult(output)
+  if (result?.success !== true) {
+    throw new Error(normalizeText(result?.error) || "插件未返回有效的产物归档结果")
+  }
+  return { writePath }
+}
+
 async function loadHarnessRunDetail(
   projectId: string,
   slug: string,
@@ -4179,6 +4347,9 @@ async function loadHarnessRunDetail(
     resolveFeatureWorkspace(featureBinding?.sessionWorkspace, selectedDeployUnits)
   )
   const detail: HarnessRunDetailViewModel = {
+    ...(hasConfiguredHarnessInvocationInContext(context, "archiveArtifacts")
+      ? { artifactArchiveAvailable: true }
+      : {}),
     ...(artifactAccumulation ? { artifactAccumulation } : {}),
     project: {
       projectId: project.projectId,

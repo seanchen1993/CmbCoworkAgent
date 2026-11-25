@@ -158,10 +158,18 @@ describe("Harness catalog reader", () => {
         sync_type: "invoke_session",
         nextAction: { slashSkill: "knowledge-sync" }
       }
+      const archiveCommand = "python3 archive.py --artifact-paths ${artifactPaths}"
       writeFileSync(
         configPath,
         JSON.stringify({
           ...config,
+          inspectCommands: {
+            ...config.inspectCommands,
+            [process.platform]: {
+              ...config.inspectCommands[process.platform],
+              archive_artifacts: archiveCommand
+            }
+          },
           ...(protectedContent ? { padding: "x".repeat(800_000) } : {}),
           artifact_sync: artifactConfig,
           knowledge_config: knowledgeConfig
@@ -170,6 +178,7 @@ describe("Harness catalog reader", () => {
       if (protectedContent) protectMarketDirectory(join(paths.plugins, "..", "plugin"))
       const result = readHarnessProjectContexts(paths.projects, paths.plugins, ["project-0"])
       expect(result.projects["project-0"]?.configSnapshot?.value).toMatchObject({
+        inspectCommands: { [process.platform]: { archive_artifacts: archiveCommand } },
         artifact_sync: artifactConfig,
         knowledge_config: knowledgeConfig
       })

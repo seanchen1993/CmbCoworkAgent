@@ -214,6 +214,8 @@ import type {
   HarnessRunArtifactGrantRefreshInput,
   HarnessRunArtifactGrantRefreshResult,
   HarnessRunArtifactRevealInput,
+  HarnessArchiveArtifactsInput,
+  HarnessArchiveArtifactsOptions,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
   HarnessDeployUnitConfig,
@@ -4855,6 +4857,13 @@ const api = {
         projectId,
         slug
       }) as Promise<HarnessRunDetailViewModel>,
+    getArchiveArtifactsOptions: (
+      projectId: string,
+      slug: string
+    ): Promise<HarnessArchiveArtifactsOptions> =>
+      ipcRenderer.invoke("harnessBoard:getArchiveArtifactsOptions", projectId, slug),
+    archiveArtifacts: (input: HarnessArchiveArtifactsInput): Promise<{ writePath: string }> =>
+      ipcRenderer.invoke("harnessBoard:archiveArtifacts", input),
     refreshRunArtifactGrant: (
       input: HarnessRunArtifactGrantRefreshInput
     ): Promise<HarnessRunArtifactGrantRefreshResult> =>

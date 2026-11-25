@@ -16,6 +16,7 @@ export function KnowledgeBaseSelector({
   supportsKnowledgeBaseContext,
   disabled,
   portalContainer,
+  placeholder = "请选择要使用的公共系统约束",
   onOpenSystemConstraints,
   onChange
 }: {
@@ -24,11 +25,13 @@ export function KnowledgeBaseSelector({
   supportsKnowledgeBaseContext: boolean
   disabled?: boolean
   portalContainer?: HTMLElement | null
-  onOpenSystemConstraints: () => void
+  placeholder?: string
+  onOpenSystemConstraints?: () => void
   onChange: (ids: string[]) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const optionsRef = useRef<HTMLDivElement>(null)
+  const label = onOpenSystemConstraints ? "系统约束" : "归档目标知识库"
   const selectable = items.filter(
     (item) =>
       item.visibility === "visible" &&
@@ -45,41 +48,48 @@ export function KnowledgeBaseSelector({
         : ""
 
   return (
-    <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
-      <div className="flex items-center justify-between gap-3">
-        <span>系统约束</span>
-        <div className="flex items-center gap-3">
-          <SystemConstraintsGuideButton disabled={disabled} />
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            className="h-auto px-0 py-0 text-xs"
-            disabled={disabled}
-            onClick={onOpenSystemConstraints}
-          >
-            查看系统约束
-          </Button>
+    <div
+      className={cn(
+        "grid gap-1.5 text-xs font-medium text-muted-foreground",
+        onOpenSystemConstraints && "mt-3"
+      )}
+    >
+      {onOpenSystemConstraints && (
+        <div className="flex items-center justify-between gap-3">
+          <span>系统约束</span>
+          <div className="flex items-center gap-3">
+            <SystemConstraintsGuideButton disabled={disabled} />
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="h-auto px-0 py-0 text-xs"
+              disabled={disabled}
+              onClick={onOpenSystemConstraints}
+            >
+              查看系统约束
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <Button
             type="button"
             variant="outline"
             disabled={disabled}
-            aria-label={selectedLabel ? `选择系统约束，当前：${selectedLabel}` : "选择系统约束"}
+            aria-label={selectedLabel ? `选择${label}，当前：${selectedLabel}` : `选择${label}`}
             className="h-9 w-full min-w-0 justify-between gap-2 bg-background px-3 font-normal text-foreground"
           >
             <span className={cn("min-w-0 truncate", !selectedLabel && "text-muted-foreground/45")}>
-              {selectedLabel || "请选择要使用的公共系统约束"}
+              {selectedLabel || placeholder}
             </span>
             <ChevronDown className="size-4 shrink-0 opacity-50" />
           </Button>
         </PopoverTrigger>
         <PopoverContent
           portalContainer={portalContainer}
-          aria-label="选择系统约束"
+          aria-label={`选择${label}`}
           align="start"
           side="bottom"
           sideOffset={4}
@@ -117,7 +127,7 @@ export function KnowledgeBaseSelector({
             ref={optionsRef}
             role="listbox"
             tabIndex={-1}
-            aria-label="系统约束"
+            aria-label={label}
             className="min-h-0 overflow-y-auto overscroll-y-contain p-1 outline-none"
           >
             {selectable.map((item) => (
@@ -144,18 +154,22 @@ export function KnowledgeBaseSelector({
           </div>
           {selectable.length === 0 && (
             <div role="status" className="px-3 py-6 text-center">
-              <Button
-                type="button"
-                variant="link"
-                className="h-auto whitespace-normal p-0 text-sm"
-                disabled={disabled}
-                onClick={() => {
-                  setOpen(false)
-                  onOpenSystemConstraints()
-                }}
-              >
-                暂无可用系统约束，请联系你所在组织的管理员。
-              </Button>
+              {onOpenSystemConstraints ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  className="h-auto whitespace-normal p-0 text-sm"
+                  disabled={disabled}
+                  onClick={() => {
+                    setOpen(false)
+                    onOpenSystemConstraints()
+                  }}
+                >
+                  暂无可用系统约束，请联系你所在组织的管理员。
+                </Button>
+              ) : (
+                <span className="text-sm text-muted-foreground">暂无可用知识库</span>
+              )}
             </div>
           )}
           <div className="border-t p-1">

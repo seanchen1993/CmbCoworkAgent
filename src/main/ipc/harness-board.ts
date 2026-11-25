@@ -11,6 +11,7 @@ import {
 import { createHash } from "node:crypto"
 import path from "node:path"
 import {
+  archiveHarnessArtifacts,
   archiveHarnessProject,
   cancelHarnessDetailRequestScope,
   createHarnessFeature,
@@ -26,6 +27,7 @@ import {
   getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessProjectRootPath,
   getHarnessRunDetail,
+  getHarnessArchiveArtifactsOptions,
   listHarnessDeployUnitMappings,
   getHarnessLeanTokenConfig,
   saveHarnessDeployUnitMappings,
@@ -113,6 +115,7 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessKnowledgePreviewResult,
+  HarnessArchiveArtifactsInput,
   HarnessRunArtifactGrantRefreshInput,
   HarnessRunArtifactGrantRefreshResult,
   HarnessRunArtifactRevealInput,
@@ -753,6 +756,14 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     cancelHarnessCatalogScope(`harness-dialog-tips:${event.sender.id}`)
     cancelEnterpriseSenderScopes(event.sender.id)
   })
+
+  ipcMain.handle(
+    "harnessBoard:getArchiveArtifactsOptions",
+    (_event, projectId: string, slug: string) => getHarnessArchiveArtifactsOptions(projectId, slug)
+  )
+  ipcMain.handle("harnessBoard:archiveArtifacts", (_event, input: HarnessArchiveArtifactsInput) =>
+    archiveHarnessArtifacts(input)
+  )
 
   ipcMain.handle(
     "harnessBoard:getRunDetail",

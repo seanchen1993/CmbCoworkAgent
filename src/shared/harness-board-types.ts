@@ -1029,7 +1029,22 @@ export interface HarnessRunNode {
   hooks: HarnessHookLogView[]
 }
 
+export interface HarnessArchiveArtifactsOptions {
+  artifacts: Array<{ path: string; label: string }>
+  deployUnits: HarnessDeployUnitMapping[]
+  defaultDeployUnitIds: string[]
+}
+
+export interface HarnessArchiveArtifactsInput {
+  projectId: string
+  slug: string
+  knowledgeBaseId: string
+  artifactPaths: string[]
+  deployUnitIds: string[]
+}
+
 export interface HarnessRunDetailViewModel {
+  artifactArchiveAvailable?: boolean
   artifactAccumulation?: {
     syncType: "invoke_session"
     nextAction: HarnessWorkflowNextAction

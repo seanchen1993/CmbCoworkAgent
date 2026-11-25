@@ -1,7 +1,4 @@
-import type {
-  HarnessDeployUnitConfig,
-  HarnessDeployUnitMapping
-} from "../../../shared/harness-board-types"
+import type { HarnessDeployUnitConfig, HarnessDeployUnitMapping } from "./harness-board-types"
 
 /** Preserve catalog order while feature drafts own their IDs and values. */
 export function buildFeatureDeployUnitRows(
