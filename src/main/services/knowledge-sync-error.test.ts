@@ -33,6 +33,8 @@ describe("friendly knowledge synchronization errors", () => {
     [branch.message, "配置的知识库分支不存在"],
     ["DevOps账号或密码不正确, 亦或是密码过期", "仓库认证失败"],
     ["fatal: could not read Username: terminal prompts disabled", "仓库认证失败"],
+    ["fatal: Cannot prompt because user interactivity has been disabled.", "仓库认证失败"],
+    ["Logon failed, use ctrl+c to cancel basic credential prompt.", "仓库认证失败"],
     ["remote: HTTP 403 Forbidden", "当前账号无权访问"],
     ["remote: Access deined", "当前账号无权访问"],
     ["git@example.test: Permission denied (publickey).", "仓库认证失败"],

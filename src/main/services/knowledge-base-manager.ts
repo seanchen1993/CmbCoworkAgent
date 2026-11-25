@@ -34,7 +34,7 @@ import {
 } from "./knowledge-repository"
 
 const BACKGROUND_REFRESH_DELAY_MS = 30 * 60 * 1_000
-const MIN_REFRESH_INTERVAL_MS = 225 * 60 * 1_000
+const MIN_REFRESH_INTERVAL_MS = 465 * 60 * 1_000
 const REFRESH_INTERVAL_JITTER_MS = 30 * 60 * 1_000
 const QUERY_PATH = "/devclaw/knowledge-config/query"
 const QUERY_TIMEOUT_MS = 5_000
