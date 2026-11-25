@@ -4,7 +4,7 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { afterEach, describe, expect, it } from "vitest"
 import { DEFAULT_IM_CHANNEL_ID } from "../../shared/im-gateway-contract"
-import { readThreadSummaryPage } from "./reader"
+import { readThreadGroupIds, readThreadHydrationProjection, readThreadSummaryPage } from "./reader"
 
 /**
  * UAT regression: the bounded thread-list page projects metadata to an
@@ -86,6 +86,64 @@ const imThreadMetadata = {
 }
 
 describe("thread list metadata projection", () => {
+  it("returns only the settings needed to create a side conversation from a large parent", () => {
+    const database = new DatabaseSync(":memory:")
+    try {
+      createThreadsTable(database)
+      const settings = {
+        workspacePath: "/tmp/project", model: "custom:test", subagentsEnabled: false,
+        memoryEnabled: true, outputStyle: "concise", conciseModeEnabled: false
+      }
+      const insert = database.prepare("INSERT OR REPLACE INTO threads (thread_id, created_at, updated_at, metadata) VALUES ('parent', 1, 1, ?)")
+      const read = () => readThreadHydrationProjection(database, {
+        type: "read-thread", threadId: "parent", sideParent: true, requestId: 1, databasePath: ":memory:",
+        cancellationBuffer: new SharedArrayBuffer(4)
+      }).thread
+      insert.run(JSON.stringify({
+        ...settings, llmFileHistory: { "big.ts": [{ content: "x".repeat(255 * 1024) }] },
+        otherMetadata: "y".repeat(100_000)
+      }))
+      expect(read()?.metadata).toEqual(settings)
+      for (const blocked of [
+        { botId: "bot" }, { remoteReadOnly: true }, { remoteState: "active" },
+        { targetKind: "inbox", imDeliveryContext: {} },
+        { harnessFeature: { projectId: "project", slug: "feature" } },
+        { harnessProjectSession: { projectId: "project", kind: "session" } }
+      ]) {
+        insert.run(JSON.stringify({ ...settings, ...blocked }))
+        expect(read()).toBeNull()
+      }
+    } finally {
+      database.close()
+    }
+  })
+
+  it("keeps a child out of the directory and available for direct hydration", () => {
+    const database = new DatabaseSync(":memory:")
+    try {
+      createThreadsTable(database)
+      const parentId = "00000000-0000-4000-8000-000000000001"
+      const childId = `btw-${parentId}-00000000-0000-4000-8000-000000000002`
+      const workspacePath = "/tmp/shared-workspace"
+      const insert = database.prepare("INSERT INTO threads (thread_id, created_at, updated_at, metadata) VALUES (?, ?, ?, ?)")
+      insert.run(parentId, 1, 1, JSON.stringify({ workspacePath }))
+      insert.run(childId, 2, 2, JSON.stringify({ workspacePath, btwParentId: parentId }))
+      const request = { requestId: 1, databasePath: ":memory:", cancellationBuffer: new SharedArrayBuffer(4) }
+
+      expect(readThreadSummaryPage(database, { ...request, type: "read-list-page", limit: 1, byteBudget: 65_536 })
+        .threads.map(thread => thread.thread_id)).toEqual([parentId])
+      expect(readThreadGroupIds(database, { ...request, type: "read-group-ids", selector: { type: "workspace", workspacePath } })
+        .entries.map(entry => entry.threadId)).toEqual([parentId])
+      expect(readThreadHydrationProjection(database, { ...request, type: "read-thread", threadId: childId })
+        .thread?.metadata).toEqual({ workspacePath, btwParentId: parentId })
+      insert.run("btw-notes", 3, 3, JSON.stringify({ workspacePath }))
+      expect(readThreadSummaryPage(database, { ...request, type: "read-list-page", limit: 2, byteBudget: 65_536 })
+        .threads.map(thread => thread.thread_id)).toEqual(["btw-notes", parentId])
+    } finally {
+      database.close()
+    }
+  })
+
   it("keeps IM session identity fields in the bounded list page", () => {
     const database = new DatabaseSync(temporaryDatabasePath("im-list.sqlite"))
     try {

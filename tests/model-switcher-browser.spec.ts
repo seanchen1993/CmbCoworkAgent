@@ -85,18 +85,20 @@ async function main(): Promise<void> {
       metadata: Record<string, unknown>,
       ready = true,
       initialModel = "",
-      routingMode: "auto" | "pinned" = "pinned"
+      routingMode: "auto" | "pinned" = "pinned",
+      threadId = "imported"
     ) => {
       await page.evaluate(
-        ({ metadata, ready, initialModel, routingMode }) => {
+        ({ metadata, ready, initialModel, routingMode, threadId }) => {
           ;(window as unknown as FixtureWindow).modelSwitcherFixture.mount(
             metadata,
             ready,
             initialModel,
-            routingMode
+            routingMode,
+            threadId
           )
         },
-        { metadata, ready, initialModel, routingMode }
+        { metadata, ready, initialModel, routingMode, threadId }
       )
       return settle()
     }
@@ -197,6 +199,23 @@ async function main(): Promise<void> {
       "custom:local-b",
       "new persisted selection is restored"
     )
+
+    const sideThreadId = "btw-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002"
+    assert.deepEqual(
+      await mount({
+        model: "custom:local-b",
+        routingState: { lastResolvedModelId: "custom:local-a", lastResolvedTier: "economy" }
+      }, true, "", "auto", sideThreadId),
+      { currentModel: "custom:local-b", writes: [] },
+      "the auxiliary conversation restores its selected model with global auto routing enabled"
+    )
+    await page.getByRole("button", { name: "Local B", exact: true }).click()
+    assert.equal(await page.getByRole("switch", { name: "智能路由（全局）" }).count(), 0)
+    await page.getByRole("button", { name: /Local A/ }).click()
+    assert.deepEqual(await settle(), { currentModel: "custom:local-a", writes: ["custom:local-a"] })
+    assert.deepEqual(await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.routingWrites()
+    ), [])
 
     assert.deepEqual(
       await mount({ model: "custom:other-machine" }, false),

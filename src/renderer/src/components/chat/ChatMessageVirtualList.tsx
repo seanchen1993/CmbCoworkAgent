@@ -57,10 +57,13 @@ export function getChatHistoryAnchorTop(row: HTMLElement): number {
 export type ChatMessageVirtualInitialLocation = FlatIndexLocationWithAlign | number
 
 // eslint-disable-next-line react-refresh/only-export-components
-export const shouldVirtualizeChatMessageList = (visibleMessageCount: number): boolean => {
+export const shouldVirtualizeChatMessageList = (
+  visibleMessageCount: number,
+  mountWhenEmpty = false
+): boolean => {
   // Keep one list implementation for the whole lifetime of a non-empty conversation. Switching
   // from plain DOM to Virtuoso at message 101 loses the user's anchor while streaming or paging.
-  return visibleMessageCount > 0
+  return visibleMessageCount > 0 || mountWhenEmpty
 }
 
 function clampVirtualItemIndex(index: number, itemCount: number): number {
@@ -111,6 +114,8 @@ export function resolveChatScrollVirtualRangeSnapshot(
 export interface ChatMessageVirtualListProps {
   /** Bot-only entry presentation. Ordinary workbench rows retain their existing rendering. */
   historyReady?: boolean
+  /** Mount the virtual list on a confirmed empty workbench thread before the first send. */
+  mountWhenEmpty?: boolean
   canAnimateMessages?: boolean
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
@@ -393,6 +398,7 @@ const chatVirtualListComponents = {
 
 export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList({
   historyReady = true,
+  mountWhenEmpty = false,
   canAnimateMessages = true,
   messageAttempts,
   messages,
@@ -458,7 +464,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     entranceIds,
     presentation === "bot" && historyReady && canAnimateMessages
   )
-  const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
+  const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length, mountWhenEmpty)
   const reasoningExpansion = useMemo<{
     threadId: string
     choices: NonNullable<React.ContextType<typeof ReasoningExpansionContext>>
@@ -499,7 +505,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   )
 
   const handleItemsRendered = (): void => {
-    if (initialVirtualItemsRenderedThreadRef.current === threadId) return
+    if (!visibleMessageIndexes.length || initialVirtualItemsRenderedThreadRef.current === threadId) return
     initialVirtualItemsRenderedThreadRef.current = threadId
     onInitialVirtualItemsRendered()
   }

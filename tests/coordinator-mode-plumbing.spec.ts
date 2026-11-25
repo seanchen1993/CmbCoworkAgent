@@ -315,9 +315,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "isProjectModeAgentTeamSelectionDisabled(",
     "project mode keeps an already-persisted plugin Team task aligned with main-process execution"
   )
-  assertIncludes(
+  assertMatches(
     chat,
-    "isWorkflowModeMetadata(currentThread?.metadata)",
+    /const initialThreadMetadata = currentThread\?\.metadata[\s\S]*const metadataDerivedMode: ChatAgentMode[\s\S]*isWorkflowModeMetadata\(initialThreadMetadata\)\s*\? "workflow"/,
     "ChatContainer re-derivation covers workflow mode alongside coordinator"
   )
   assertIncludes(

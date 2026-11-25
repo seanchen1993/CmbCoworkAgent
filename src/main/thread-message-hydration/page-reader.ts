@@ -34,6 +34,8 @@ import {
   type ToolOwnershipMessage,
   type VerifiedToolOutcome
 } from "../../shared/tool-result-ownership"
+import { coordinatorTranscriptContentToText } from "../../shared/internal-notification-turn"
+import { isVisibleTranscriptMessage } from "../../shared/transcript-visibility"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -89,6 +91,7 @@ interface CandidateRow {
 interface FragmentSummary {
   prefix: string
   length: number
+  tail?: { parts: string[]; first: number; length: number }
 }
 
 interface LegacyCheckpointMigrationBoundary {
@@ -244,6 +247,54 @@ function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value))
 }
 
+function projectSideContextMessage(
+  row: ThreadMessageRow,
+  fragment: FragmentSummary | undefined,
+  cancellation: Int32Array,
+  byteBudget: number,
+  textByteBudget: number
+): { message: Message; truncated: boolean; bytes: number } {
+  const message: Message = {
+    id: row.message_id,
+    ordinal: row.ordinal,
+    role: row.role,
+    content: "",
+    created_at: dateFromTimestamp(row.created_at) ?? new Date(),
+    ...(row.role === "tool" && row.name ? { name: row.name } : {})
+  }
+  const overhead = jsonBytes(message)
+  if (row.role !== "user" && row.role !== "assistant" && row.role !== "tool") {
+    return { message, truncated: false, bytes: overhead }
+  }
+  const content = parseJsonValue(row.content_json, cancellation)
+  const visibilityText = typeof content === "string" && fragment
+    ? content + fragment.prefix
+    : coordinatorTranscriptContentToText(content)
+  // Identify internal prompts while their opening marker is still present.
+  if (!visibilityText || !isVisibleTranscriptMessage(row.role, visibilityText)) {
+    return { message, truncated: false, bytes: overhead }
+  }
+  const available = Math.min(textByteBudget, Math.max(0, byteBudget - overhead))
+  if (available <= 0) return { message, truncated: true, bytes: overhead }
+  let text = visibilityText
+  if (typeof content === "string" && fragment?.tail) {
+    const { parts, first } = fragment.tail
+    const tail = parts.slice(first).join("").slice(-(available + 1))
+    text = fragment.length === tail.length ? content + tail : tail
+  }
+  const size = Buffer.byteLength(text)
+  if (size <= available) {
+    message.content = text
+    return { message, truncated: false, bytes: overhead + size }
+  }
+  // One extra UTF-16 code unit lets the UTF-8 boundary check handle pairs.
+  const tail = Buffer.from(text.slice(-(available + 1)))
+  let start = tail.length - available
+  while (start < tail.length && (tail[start] & 0xc0) === 0x80) start++
+  message.content = tail.subarray(start).toString("utf8")
+  return { message, truncated: true, bytes: overhead + tail.length - start }
+}
+
 function safeSliceEnd(value: string, end: number): number {
   if (end <= 0 || end >= value.length) return Math.max(0, Math.min(value.length, end))
   const previous = value.charCodeAt(end - 1)
@@ -347,6 +398,32 @@ function projectMessageToByteBudget(
   return { message: projected, truncated: true, bytes: projectedBytes }
 }
 
+export function getBackwardThreadMessageCandidatesSql(
+  userScan: boolean,
+  createdAtBoundarySql = ""
+): string {
+  // Without SQLite statistics, the general ordinal index can scan all roles in this range.
+  const userIndex = userScan ? " INDEXED BY idx_thread_messages_role_order" : ""
+  return `SELECT m.message_id, m.ordinal,
+                1024 +
+                CASE
+                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
+                  ELSE length(CAST(m.content_json AS BLOB))
+                END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
+                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
+         FROM thread_messages AS m${userIndex}
+         LEFT JOIN thread_message_fragment_states AS fragments
+           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+         WHERE m.thread_id = ?
+           ${userScan
+             ? "AND m.role = 'user' AND m.ordinal > ? AND (m.ordinal, m.message_id) < (?, ?)"
+             : THREAD_MESSAGE_BEFORE_CURSOR_SQL}
+           ${createdAtBoundarySql}
+         ORDER BY m.ordinal DESC, m.message_id DESC
+         LIMIT ?`
+}
+
 function readCandidates(
   database: DatabaseSync,
   request: ThreadMessageHydrationReadRequest,
@@ -358,6 +435,7 @@ function readCandidates(
   const beforeMessageId = request.options.beforeMessageId?.trim() ?? ""
   const targetMessageId = request.options.targetMessageId?.trim() ?? ""
   const anchorMessageId = request.options.anchorMessageId?.trim() ?? ""
+  const userOrdinalFloor = request.options.userOrdinalFloor
   const hasBeforeOrdinal = Number.isSafeInteger(beforeOrdinal) && (beforeOrdinal ?? -1) >= 0
   const hasBeforeMessageId = beforeMessageId.length > 0
   const hasTargetMessageId = targetMessageId.length > 0
@@ -402,6 +480,9 @@ function readCandidates(
     throw new Error(
       "Thread message page cursor requires beforeOrdinal and beforeMessageId together"
     )
+  }
+  if (userOrdinalFloor !== undefined && !hasBeforeOrdinal) {
+    throw new Error("Thread message user scan requires a backward cursor")
   }
   if (hasAnchorMessageId && hasBeforeOrdinal) {
     throw new Error(
@@ -523,22 +604,7 @@ function readCandidates(
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
         : hasBeforeOrdinal
-      ? `SELECT m.message_id, m.ordinal,
-                1024 +
-                CASE
-                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
-                  ELSE length(CAST(m.content_json AS BLOB))
-                END +
-                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
-                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
-         FROM thread_messages AS m
-         LEFT JOIN thread_message_fragment_states AS fragments
-           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
-         WHERE m.thread_id = ?
-           ${THREAD_MESSAGE_BEFORE_CURSOR_SQL}
-           ${createdAtBoundarySql}
-         ORDER BY m.ordinal DESC, m.message_id DESC
-         LIMIT ?`
+      ? getBackwardThreadMessageCandidatesSql(userOrdinalFloor !== undefined, createdAtBoundarySql)
       : `SELECT m.message_id, m.ordinal,
                 1024 +
                 CASE
@@ -576,7 +642,9 @@ function readCandidates(
       : hasBeforeOrdinal
         ? [
             request.threadId,
-            ...threadMessageBeforeCursorBindings(request.threadId, beforeMessageId, beforeOrdinal as number),
+            ...(userOrdinalFloor === undefined
+              ? threadMessageBeforeCursorBindings(request.threadId, beforeMessageId, beforeOrdinal as number)
+              : [userOrdinalFloor, beforeOrdinal as number, beforeMessageId]),
             ...boundaryBindings,
             limit + 1
           ]
@@ -647,7 +715,8 @@ function readFragmentSummaries(
   threadId: string,
   messageIds: readonly string[],
   cancellation: Int32Array,
-  onFragment?: (messageId: string, text: string) => void
+  onFragment?: (messageId: string, text: string) => void,
+  tailLimit?: number
 ): Map<string, FragmentSummary> {
   const fragments = new Map<string, FragmentSummary>()
   const uniqueIds = [...new Set(messageIds.filter(Boolean))]
@@ -665,18 +734,38 @@ function readFragmentSummaries(
       throwIfCancelled(cancellation)
       if (typeof raw.message_id !== "string" || typeof raw.content_text !== "string") continue
       onFragment?.(raw.message_id, raw.content_text)
-      const existing = fragments.get(raw.message_id) ?? { prefix: "", length: 0 }
-      const remainingPrefix = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - existing.prefix.length)
-      fragments.set(raw.message_id, {
-        prefix:
-          remainingPrefix > 0
-            ? `${existing.prefix}${raw.content_text.slice(0, remainingPrefix)}`
-            : existing.prefix,
-        length: existing.length + raw.content_text.length
-      })
+      const summary = fragments.get(raw.message_id) ?? { prefix: "", length: 0 }
+      const length = summary.length + raw.content_text.length
+      if (tailLimit !== undefined && length > THREAD_MESSAGE_TEXT_LIMIT && raw.content_text) {
+        appendFragmentTail(summary, raw.content_text, tailLimit)
+      }
+      const remainingPrefix = THREAD_MESSAGE_TEXT_LIMIT - summary.prefix.length
+      if (remainingPrefix > 0) summary.prefix += raw.content_text.slice(0, remainingPrefix)
+      summary.length = length
+      fragments.set(raw.message_id, summary)
     }
   }
   return fragments
+}
+
+function appendFragmentTail(summary: FragmentSummary, text: string, limit: number): void {
+  // Fragments are read in order. Keep a sliding list of whole chunks to
+  // avoid copying the accumulated suffix for each new fragment.
+  if (!summary.tail) {
+    const initial = summary.prefix.slice(-limit)
+    summary.tail = { parts: initial ? [initial] : [], first: 0, length: initial.length }
+  }
+  const tail = summary.tail
+  const chunk = text.slice(-limit)
+  tail.parts.push(chunk)
+  tail.length += chunk.length
+  while (tail.length - tail.parts[tail.first].length >= limit) {
+    tail.length -= tail.parts[tail.first++].length
+  }
+  if (tail.first * 2 >= tail.parts.length) {
+    tail.parts = tail.parts.slice(tail.first)
+    tail.first = 0
+  }
 }
 
 function hasVisibleThreadConversation(
@@ -897,6 +986,11 @@ export function readThreadMessagesPage(
   const cancellation = new Int32Array(request.cancellationBuffer)
   const limit = normalizePageLimit(request.options.limit)
   const byteBudget = normalizeByteBudget(request.options.byteBudget)
+  const requestedSideTextBytes = request.options.sideContextTextByteBudget
+  const sideContextTextByteBudget = requestedSideTextBytes !== undefined &&
+    Number.isSafeInteger(requestedSideTextBytes) && requestedSideTextBytes > 0
+    ? Math.min(requestedSideTextBytes, byteBudget)
+    : undefined
   const isForwardPage = Boolean(request.options.anchorMessageId?.trim())
   throwIfCancelled(cancellation)
 
@@ -998,7 +1092,8 @@ export function readThreadMessagesPage(
       request.threadId,
       physicalIds,
       cancellation,
-      contentHashes.size ? (id, fragment) => contentHashes.get(id)?.update(fragment, "utf16le") : undefined
+      contentHashes.size ? (id, fragment) => contentHashes.get(id)?.update(fragment, "utf16le") : undefined,
+      sideContextTextByteBudget === undefined ? undefined : sideContextTextByteBudget + 1
     )
     const matchesCheckpointContent = !legacyCheckpointMigration?.requiresContentProof ||
       (selected.length === rowsById.size && rowsById.size === contentHashes.size &&
@@ -1013,16 +1108,25 @@ export function readThreadMessagesPage(
       if (candidate.missingSourceRow) continue
       const row = rowsById.get(candidate.message_id)
       if (!row) continue
-      const hydrated = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
-      const logicalId = logicalIds.get(candidate.message_id)
-      if (logicalId !== undefined && logicalId !== hydrated.message.id) hydrated.message.id = logicalId
       const remaining = Math.max(1, byteBudget - responseBytes)
-      const projected = projectMessageToByteBudget(hydrated.message, remaining)
-      if (orderedMessages.length > 0 && projected.truncated) break
+      let projected
+      let hydratedTruncated = false
+      if (sideContextTextByteBudget !== undefined) {
+        projected = projectSideContextMessage(
+          row, fragments.get(candidate.message_id), cancellation, remaining, sideContextTextByteBudget
+        )
+      } else {
+        const hydrated = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
+        const logicalId = logicalIds.get(candidate.message_id)
+        if (logicalId !== undefined && logicalId !== hydrated.message.id) hydrated.message.id = logicalId
+        projected = projectMessageToByteBudget(hydrated.message, remaining)
+        if (orderedMessages.length > 0 && projected.truncated) break
+        hydratedTruncated = hydrated.truncated
+      }
       orderedMessages.push(projected.message)
       returnedCandidates.push(candidate)
       responseBytes += projected.bytes + 1
-      if (projected.truncated || hydrated.truncated) {
+      if (projected.truncated || hydratedTruncated) {
         truncatedMessageIds.push(candidate.message_id)
       }
     }

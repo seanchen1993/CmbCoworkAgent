@@ -53,6 +53,7 @@ interface PendingWorkspaceWatcherStart {
 // normalized path and attach thread subscribers to it.
 const activeWatchersByPath = new Map<string, ActiveWorkspaceWatcher>()
 const watcherPathByThread = new Map<string, string>()
+let nextWatchStartGeneration = 0
 const watchStartGenerationsByThread = new Map<string, number>()
 const pendingWatcherStartsByThread = new Map<string, PendingWorkspaceWatcherStart>()
 
@@ -668,31 +669,31 @@ export async function startWatching(
   if (previousWorkspaceKey && previousWorkspaceKey !== workspaceKey) {
     stopWatching(threadId)
   }
-  const startGeneration = (watchStartGenerationsByThread.get(threadId) ?? 0) + 1
+  const startGeneration = ++nextWatchStartGeneration
   watchStartGenerationsByThread.set(threadId, startGeneration)
 
-  const shared = activeWatchersByPath.get(workspaceKey)
-  if (shared) {
-    attachThreadToWorkspaceWatcher(workspaceKey, shared, threadId, workspacePath)
-    touchWatcher(workspaceKey)
-    return "existing"
-  }
-
-  // Directory validation and the native watch install both happen inside the
-  // dedicated worker. Probing a disconnected UNC path in Electron main would
-  // otherwise occupy the global libuv filesystem pool before this request is
-  // covered by the bounded pending-worker registry below.
-  await Promise.resolve()
-  if (watchStartGenerationsByThread.get(threadId) !== startGeneration) return "superseded"
-
-  const sharedAfterProbe = activeWatchersByPath.get(workspaceKey)
-  if (sharedAfterProbe) {
-    attachThreadToWorkspaceWatcher(workspaceKey, sharedAfterProbe, threadId, workspacePath)
-    touchWatcher(workspaceKey)
-    return "existing"
-  }
-
   try {
+    const shared = activeWatchersByPath.get(workspaceKey)
+    if (shared) {
+      attachThreadToWorkspaceWatcher(workspaceKey, shared, threadId, workspacePath)
+      touchWatcher(workspaceKey)
+      return "existing"
+    }
+
+    // Directory validation and the native watch install both happen inside the
+    // dedicated worker. Probing a disconnected UNC path in Electron main would
+    // otherwise occupy the global libuv filesystem pool before this request is
+    // covered by the bounded pending-worker registry below.
+    await Promise.resolve()
+    if (watchStartGenerationsByThread.get(threadId) !== startGeneration) return "superseded"
+
+    const sharedAfterProbe = activeWatchersByPath.get(workspaceKey)
+    if (sharedAfterProbe) {
+      attachThreadToWorkspaceWatcher(workspaceKey, sharedAfterProbe, threadId, workspacePath)
+      touchWatcher(workspaceKey)
+      return "existing"
+    }
+
     const threadPaths = new Map([[threadId, workspacePath]])
     const entry: ActiveWorkspaceWatcher = {
       watcher: undefined as unknown as WorkspaceWatcherWorkerClient,
@@ -759,6 +760,10 @@ export async function startWatching(
     }
     console.error(`[WorkspaceWatcher] Failed to start watching ${workspacePath}:`, e)
     return "failed"
+  } finally {
+    if (watchStartGenerationsByThread.get(threadId) === startGeneration) {
+      watchStartGenerationsByThread.delete(threadId)
+    }
   }
 }
 
@@ -779,7 +784,7 @@ export function recordWorkspaceDirectorySnapshotSet(
  * Stop watching the workspace for a specific thread.
  */
 export function stopWatching(threadId: string): void {
-  watchStartGenerationsByThread.set(threadId, (watchStartGenerationsByThread.get(threadId) ?? 0) + 1)
+  watchStartGenerationsByThread.delete(threadId)
   const pending = pendingWatcherStartsByThread.get(threadId)
   if (pending) {
     pendingWatcherStartsByThread.delete(threadId)

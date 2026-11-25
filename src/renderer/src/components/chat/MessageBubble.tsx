@@ -1,3 +1,6 @@
+import { isBtwThreadId } from "../../../../shared/btw-chat"
+import { readBtwReferences } from "../../../../shared/btw-references"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { formatTransferredBotReplyEdit, parseBotMessageReply, verifiedBotMessageReply } from "../../../../shared/bots/message-reply"
 import { parseBotHistoryFileDelivery } from "../../../../shared/bots/file-delivery"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
@@ -12,6 +15,7 @@ import { ToolCallRenderer } from "./ToolCallRenderer"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
+import { formatBtwMessageForCopy } from "@/lib/btw-references"
 import { getSystemNoticePresentation, parseGoalNoticeText, systemNoticeBlockText } from "../../../../shared/goal-notice-presentation"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
 import {
@@ -436,21 +440,28 @@ function MessageBubbleImpl({
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
+  const sideInlineReasoning = useMemo(
+    () => message.role === "assistant" && isBtwThreadId(threadId) && typeof message.content === "string"
+      ? splitBotInlineReasoning(message.content)
+      : null,
+    [message.content, message.role, threadId]
+  )
   const reasoningText = useMemo(
     () =>
       !isUser
-        ? normalizeVisibleReasoningText(message.reasoning) ||
+        ? normalizeVisibleReasoningText(message.reasoning) || sideInlineReasoning?.reasoning ||
           (presentation === "bot" && typeof message.content === "string"
             ? splitBotInlineReasoning(message.content).reasoning
             : "")
         : "",
-    [isUser, message.reasoning, message.content, presentation]
+    [isUser, message.reasoning, message.content, presentation, sideInlineReasoning]
   )
   const displayMessageContent = useMemo<Message["content"]>(() => {
     if (isUser && quotedReply && typeof message.content === "string") {
       const parsed = parseBotMessageReply(message.content)
       if (parsed?.reply.id === quotedReply.id) return parsed.message
     }
+    if (sideInlineReasoning && sideInlineReasoning.body !== message.content) return sideInlineReasoning.body
     if (isUser || !reasoningText) return message.content
     if (typeof message.content === "string") {
       return stripThinkBlocksForDisplay(message.content)
@@ -465,7 +476,22 @@ function MessageBubbleImpl({
       return { ...block, text }
     })
     return changed ? projected : message.content
-  }, [isUser, message.content, reasoningText, quotedReply])
+  }, [isUser, message.content, reasoningText, quotedReply, sideInlineReasoning])
+  const userText = useMemo(() => {
+    if (!isUser || typeof displayMessageContent !== "string") return null
+    const skill = parseUserVisibleSkillContent(displayMessageContent)
+    const { browserSelected, visibleText } = parseUserVisibleBuiltinBrowserContent(skill.visibleText)
+    const { body, quotes } = isBtwThreadId(threadId)
+      ? readBtwReferences(visibleText)
+      : { body: visibleText, quotes: [] }
+    return {
+      body,
+      quotes,
+      browserSelected,
+      skillName: skill.skillName,
+      copyText: quotes.length ? formatBtwMessageForCopy(body, quotes) : null
+    }
+  }, [displayMessageContent, isUser, threadId])
   const editUserMessage = () => {
     if (!onEditUserMessage || replyActions?.editReady === false) return
     const transferredQuote = staticReply ?? (activeReply?.sourceThreadId ? activeReply : undefined)
@@ -516,9 +542,12 @@ function MessageBubbleImpl({
     const measure = (): void => {
       setUserContentOverflow(el.scrollHeight > USER_MESSAGE_COLLAPSED_MAX_PX + 8)
     }
-    measure()
-    if (typeof ResizeObserver === "undefined") return
-    const observer = new ResizeObserver(() => measure())
+    if (typeof ResizeObserver === "undefined") {
+      measure()
+      return
+    }
+    // The initial observer delivery runs after layout and also measures new content.
+    const observer = new ResizeObserver(measure)
     observer.observe(el)
     return () => observer.disconnect()
   }, [message.role, message.content])
@@ -615,12 +644,13 @@ function MessageBubbleImpl({
 
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(displayMessageContent, {
+  const plainTextForCopy = userText?.copyText ?? extractMessagePlainText(displayMessageContent, {
     stripSkillUse: isUser,
     stripBuiltinBrowser: isUser
   })
-  const goalUserSetMessage = isUser ? parseGoalUserSetMessage(plainTextForCopy) : null
-  const goalUserControlMessage = isUser ? parseGoalUserControlMessage(plainTextForCopy) : null
+  const canShowGoal = isUser && !isBtwThreadId(threadId)
+  const goalUserSetMessage = canShowGoal ? parseGoalUserSetMessage(plainTextForCopy) : null
+  const goalUserControlMessage = canShowGoal ? parseGoalUserControlMessage(plainTextForCopy) : null
 
   const renderGoalUserSetContent = (
     goalMessage: NonNullable<typeof goalUserSetMessage>
@@ -686,29 +716,42 @@ function MessageBubbleImpl({
       }
 
       // Use streaming markdown for assistant messages, plain text for user messages
-      if (isUser) {
-        // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
-        // rest of the message as plain text. Handles skill-only sends (no text)
-        // by still rendering the chip with an empty tail.
-        const skillContent = parseUserVisibleSkillContent(displayContent)
-        const skillName = historicalSkillName ?? skillContent.skillName
-        const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
+      if (userText) {
+        const { body, quotes, browserSelected } = userText
+        const skillName = historicalSkillName ?? userText.skillName
         return (
           <div
             data-user-message-text
             className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
           >
+            {quotes.length > 0 && (
+              <div className="mb-1">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button type="button" className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+                      <Reply className="size-3" aria-hidden="true" />
+                      {quotes.length} 条注释
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" aria-label="注释原文" className="max-h-64 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto p-3">
+                    {quotes.map((text, index) => (
+                      <p key={index} className="whitespace-pre-wrap break-words text-sm leading-relaxed [&+p]:mt-2">{text}</p>
+                    ))}
+                  </PopoverContent>
+                </Popover>
+              </div>
+            )}
             {skillName && (
               <SkillChip label={skillName} compact className="mr-2" />
             )}
-            {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
+            {browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
             <span
               data-chat-search-text
               data-chat-search-block-index={0}
               data-chat-search-source-start={0}
               data-chat-search-source-end={displayContent.length}
             >
-              {presentUserText?.(message, browserContent.visibleText) ?? browserContent.visibleText}
+              {presentUserText?.(message, body) ?? body}
             </span>
           </div>
         )
@@ -1048,16 +1091,18 @@ function MessageBubbleImpl({
                     <Copy className="size-3" />
                   )}
                 </button>
-                <button
-                  type="button"
-                  onClick={editUserMessage}
-                  disabled={replyActions?.editReady === false}
-                  className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                  title="编辑后重新发送"
-                  aria-label="编辑后重新发送"
-                >
-                  <PencilLine className="size-3" />
-                </button>
+                {onEditUserMessage && (
+                  <button
+                    type="button"
+                    onClick={editUserMessage}
+                    disabled={replyActions?.editReady === false}
+                    className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                    title="编辑后重新发送"
+                    aria-label="编辑后重新发送"
+                  >
+                    <PencilLine className="size-3" />
+                  </button>
+                )}
                 {canSetGoalFromMessage && (
                   <button
                     type="button"

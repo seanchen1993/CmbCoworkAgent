@@ -6,6 +6,7 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "../bots/store"
 import { LocalBotHost, type BotRunPort } from "../bots/host"
 import { createBotNotificationDispatcher } from "../bots/notification-dispatch"
+import * as sideConversations from "../ipc/btw-chat"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { PendingNotificationScheduler } from "./pending-notification-scheduler"
 import { coordinatorWorkerManager } from "./coordinator-worker-manager"
@@ -13,6 +14,7 @@ import { workflowRunManager } from "./workflow/run-manager"
 import {
   onLocalThreadRunLeaseReleased,
   claimLocalThreadRunLease,
+  getLocalThreadRunLease,
   releaseLocalThreadRunLease
 } from "./thread-run-lease"
 import type { AgentRunExecutionContext, AgentRunTerminal } from "./agent-run-service"
@@ -286,6 +288,34 @@ afterEach(() => {
 })
 
 describe("pending notification scheduler", () => {
+  it("skips a closed side conversation before reading pending notifications", async () => {
+    const { scheduler, startRun, timers } = createHarness({ agentMode: "coordinator" })
+    const read = vi.spyOn(coordinatorWorkerManager, "hasAutoRunnableNotifications")
+    const threadId = "btw-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002"
+
+    await expect(scheduler.check(threadId)).resolves.toEqual({ started: false, reason: "thread-missing" })
+    expect(read).not.toHaveBeenCalled()
+    expect(startRun).not.toHaveBeenCalled()
+    expect(timers.pending()).toBe(0)
+  })
+
+  it("rechecks the side lifetime if it closes during a workflow notification read", async () => {
+    const { scheduler, startRun, timers } = createHarness({ agentMode: "workflow" })
+    const lifetime = new AbortController()
+    vi.spyOn(sideConversations, "getSideThreadLifetimeSignal").mockReturnValue(lifetime.signal)
+    const pending = Promise.withResolvers<PersistedWorkflowRun>()
+    vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockReturnValueOnce(pending.promise)
+
+    const check = scheduler.check(THREAD)
+    lifetime.abort()
+    pending.resolve(persistedRun())
+
+    await expect(check).resolves.toEqual({ started: false, reason: "thread-missing" })
+    expect(startRun).not.toHaveBeenCalled()
+    expect(getLocalThreadRunLease(THREAD)).toBeUndefined()
+    expect(timers.pending()).toBe(0)
+  })
+
   it("dispatches durable managed work without claiming or running a desktop summary", async () => {
     const run = persistedRun({ notificationOwner: "desktop" })
     const runs = pendingRuns(run)

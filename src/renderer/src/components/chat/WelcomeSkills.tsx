@@ -666,7 +666,7 @@ export interface WelcomeSkillsProps {
   onOpenMarketBySkill: (skillName: string) => void
 }
 
-export function WelcomeSkills({
+export const WelcomeSkills = React.memo(function WelcomeSkills({
   skills,
   skillsLoading,
   enabledSkillsForSlash,
@@ -1124,4 +1124,4 @@ export function WelcomeSkills({
       )}
     </div>
   )
-}
+})

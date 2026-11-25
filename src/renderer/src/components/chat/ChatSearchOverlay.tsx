@@ -71,6 +71,7 @@ export type RevealDurableMessage = (
 ) => Promise<string | void> | string | void
 
 interface ChatSearchOverlayProps {
+  sideConversation?: boolean
   externalNavigation?: DurableSearchNavigation
   onExternalNavigationFinished?: (id: number, outcome: boolean | "cancelled") => void
   searchLocalCorpus?: (corpus: ChatSearchCorpus, query: string) => Promise<ChatSearchMatch[]>
@@ -101,25 +102,43 @@ interface ChatSearchOverlayProps {
 export function useChatSearchShortcut(
   chatRoot: RefObject<HTMLElement | null>,
   canOpen: () => boolean,
-  setOpen: (open: boolean) => void
+  setOpen: (open: boolean) => void,
+  focusRequired = false
 ): void {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.shiftKey || event.altKey || event.isComposing) return
+      if (event.defaultPrevented || event.shiftKey || event.altKey || event.isComposing) return
       if (!((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f")) return
       const root = chatRoot.current
       if (!root || root.offsetParent === null || !canOpen()) return
+      const path = event.composedPath()
+      // Radix renders popovers outside their chat. Its trigger keeps the content ID in aria-controls.
+      const popover = path.find(node => node instanceof HTMLElement && node.dataset.slot === "popover-content")
+      const targetChat = path.find(node => node instanceof HTMLElement && node.hasAttribute("data-chat-thread-id")) ??
+        (popover instanceof HTMLElement && popover.id
+          ? document.querySelector(`[aria-controls="${CSS.escape(popover.id)}"]`)?.closest("[data-chat-thread-id]")
+          : null)
+      const targetSidePane = path.find(node =>
+        node instanceof HTMLElement && node.hasAttribute("data-btw-pane"))
+      if (targetChat) {
+        if (targetChat !== root) return
+      } else if (targetSidePane instanceof HTMLElement) {
+        if (!focusRequired || !targetSidePane.contains(root)) return
+      } else if (focusRequired || path.some(node =>
+        node instanceof HTMLElement && node.hasAttribute("data-btw-tab-owner"))) return
       event.preventDefault()
       if (!hasOpenModalDialog()) setOpen(true)
     }
     // Capture the shortcut even when clicking the transcript moved focus to <body>.
     window.addEventListener("keydown", handleKeyDown, true)
     return () => window.removeEventListener("keydown", handleKeyDown, true)
-  }, [canOpen, chatRoot, setOpen])
+  }, [canOpen, chatRoot, focusRequired, setOpen])
 }
 
 const HIGHLIGHT_NAME = "chat-search"
 const ACTIVE_HIGHLIGHT_NAME = "chat-search-active"
+const SIDE_HIGHLIGHT_NAME = "side-chat-search"
+const SIDE_ACTIVE_HIGHLIGHT_NAME = "side-chat-search-active"
 const STYLE_ELEMENT_ID = "chat-search-highlight-style"
 const SEARCH_THROTTLE_MS = 120
 const SEARCH_THROTTLE_MAX_WAIT_MS = 480
@@ -543,23 +562,16 @@ function ensureHighlightStyle(): void {
   const style = document.createElement("style")
   style.id = STYLE_ELEMENT_ID
   style.textContent = `
-    ::highlight(${HIGHLIGHT_NAME}) {
+    ::highlight(${HIGHLIGHT_NAME}), ::highlight(${SIDE_HIGHLIGHT_NAME}) {
       background-color: rgba(250, 204, 21, 0.45);
       color: inherit;
     }
-    ::highlight(${ACTIVE_HIGHLIGHT_NAME}) {
+    ::highlight(${ACTIVE_HIGHLIGHT_NAME}), ::highlight(${SIDE_ACTIVE_HIGHLIGHT_NAME}) {
       background-color: #f97316;
       color: #ffffff;
     }
   `
   document.head.appendChild(style)
-}
-
-function clearHighlights(): void {
-  const registry = getHighlightRegistry()
-  if (!registry) return
-  registry.delete(HIGHLIGHT_NAME)
-  registry.delete(ACTIVE_HIGHLIGHT_NAME)
 }
 
 /** Keep the DOM Range corpus identical to the text projection used by the data index. */
@@ -599,6 +611,7 @@ export function formatChatSearchStatus(
 }
 
 export function ChatSearchOverlay({
+  sideConversation,
   externalNavigation,
   onExternalNavigationFinished,
   searchLocalCorpus,
@@ -617,6 +630,13 @@ export function ChatSearchOverlay({
   onCancelDurableReveal,
   recomputeKey
 }: ChatSearchOverlayProps): React.JSX.Element | null {
+  const highlightName = sideConversation ? SIDE_HIGHLIGHT_NAME : HIGHLIGHT_NAME
+  const activeHighlightName = sideConversation ? SIDE_ACTIVE_HIGHLIGHT_NAME : ACTIVE_HIGHLIGHT_NAME
+  const clearHighlights = useCallback(() => {
+    const registry = getHighlightRegistry()
+    registry?.delete(highlightName)
+    registry?.delete(activeHighlightName)
+  }, [highlightName, activeHighlightName])
   const [query, setQuery] = useState("")
   const [matchCount, setMatchCount] = useState(0)
   const [activeIndex, setActiveIndex] = useState(0)
@@ -749,18 +769,18 @@ export function ChatSearchOverlay({
     }
 
     ensureHighlightStyle()
-    registry.set(HIGHLIGHT_NAME, new HighlightImpl(...ranges))
+    registry.set(highlightName, new HighlightImpl(...ranges))
 
     const activeRange = ranges[active]
     if (activeRange) {
       const activeHighlight = new HighlightImpl(activeRange)
       // Paint the active match on top of the base highlight.
       activeHighlight.priority = 1
-      registry.set(ACTIVE_HIGHLIGHT_NAME, activeHighlight)
+      registry.set(activeHighlightName, activeHighlight)
     } else {
-      registry.delete(ACTIVE_HIGHLIGHT_NAME)
+      registry.delete(activeHighlightName)
     }
-  }, [])
+  }, [highlightName, activeHighlightName, clearHighlights])
 
   const revealAndHighlight = useCallback(
     (match: OverlayChatSearchMatch, rawQuery: string, scroll: boolean): void => {
@@ -987,7 +1007,7 @@ export function ChatSearchOverlay({
       }
       revealMountedRow()
     },
-    [apiSupported, applyHighlights, displayIdFor, getViewport]
+    [apiSupported, applyHighlights, clearHighlights, displayIdFor, getViewport]
   )
 
   const publishMatches = useCallback(
@@ -1102,7 +1122,7 @@ export function ChatSearchOverlay({
         revealAndHighlight(activeMatch, rawQuery, false)
       }
     },
-    [displayIdFor, revealAndHighlight, setActive]
+    [clearHighlights, displayIdFor, revealAndHighlight, setActive]
   )
 
   useEffect(() => {
@@ -1278,7 +1298,7 @@ export function ChatSearchOverlay({
       window.clearTimeout(timer)
       externalMatchValidation.current?.abort()
     }
-  }, [displayIdFor, normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
+  }, [clearHighlights, displayIdFor, normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
 
   // Leading/trailing max-wait throttling guarantees progress during an
   // uninterrupted token stream while still coalescing the hot path.
@@ -1344,7 +1364,7 @@ export function ChatSearchOverlay({
       highlightFrameRef.current = null
     }
     clearHighlights()
-  }, [open])
+  }, [clearHighlights, open])
 
   useEffect(() => {
     return () => {
@@ -1358,7 +1378,7 @@ export function ChatSearchOverlay({
       }
       clearHighlights()
     }
-  }, [])
+  }, [clearHighlights])
 
   const goToMatch = useCallback(
     (direction: 1 | -1): void => {
@@ -1379,9 +1399,9 @@ export function ChatSearchOverlay({
   )
 
   const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    (event: React.KeyboardEvent<HTMLDivElement>): void => {
       if (event.nativeEvent.isComposing) return
-      if (event.key === "Enter") {
+      if (event.key === "Enter" && event.target === inputRef.current) {
         event.preventDefault()
         goToMatch(event.shiftKey ? -1 : 1)
       } else if (event.key === "Escape") {
@@ -1409,10 +1429,16 @@ export function ChatSearchOverlay({
   return (
     <div
       data-chat-search-overlay
-      className="absolute right-4 top-3 z-30 flex max-w-[34rem] flex-col rounded-xl border border-border/70 bg-background/95 px-2 py-1.5 shadow-lg shadow-black/10 backdrop-blur-sm"
+      onKeyDown={handleKeyDown}
+      className={cn(
+        "absolute top-3 z-30 flex flex-col rounded-xl border border-border/70 bg-background/95 px-2 py-1.5 shadow-lg shadow-black/10 backdrop-blur-sm",
+        sideConversation ? "right-3 w-[calc(100%-1.5rem)] max-w-[26rem]" : "right-4 max-w-[34rem]"
+      )}
     >
-      <div className="flex items-center gap-1.5">
-        <Search className="ml-1 size-4 shrink-0 text-muted-foreground" />
+      <div className={sideConversation
+        ? "grid grid-cols-[minmax(0,1fr)_repeat(3,auto)] items-center gap-x-0.5"
+        : "flex items-center gap-1.5"}>
+        {!sideConversation && <Search className="ml-1 size-4 shrink-0 text-muted-foreground" />}
         <input
           ref={inputRef}
           value={query}
@@ -1420,14 +1446,19 @@ export function ChatSearchOverlay({
             if (externalRef.current) externalCallback.current?.(externalRef.current.id, "cancelled")
             setQuery(event.target.value)
           }}
-          onKeyDown={handleKeyDown}
           placeholder="在当前会话中搜索"
-          className="w-44 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+          className={cn(
+            "bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground",
+            sideConversation ? "min-w-0 w-full" : "w-44"
+          )}
           spellCheck={false}
         />
         <span
           aria-live="polite"
-          className="min-w-[5rem] shrink-0 text-center text-xs tabular-nums text-muted-foreground"
+          className={cn(
+            "text-xs tabular-nums text-muted-foreground",
+            sideConversation ? "order-last col-span-full break-words" : "min-w-[5rem] shrink-0 text-center"
+          )}
         >
           {statusText}
         </span>

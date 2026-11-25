@@ -1,13 +1,18 @@
 import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
 import { createBotDispatchFeedbackMiddleware } from "./bot-dispatch-feedback"
 import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
+import { getSideThreadContext, getSideThreadLifetimeSignal } from "../ipc/btw-chat"
+import { createSideConversationMiddleware } from "./side-conversation-context"
 import { BOT_COMMUNICATION_PROMPT } from "./bot-communication-prompt"
 import { createForegroundWorkBudgetMiddleware, type ForegroundWorkBudget } from "./foreground-work-budget"
 import {
   withCoordinatorNotificationDelivery,
   type CoordinatorNotificationDelivery
 } from "./coordinator-notification-delivery"
-import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import {
+  INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
 import { pinForegroundCheckpointOpen, preemptBackgroundThreadMutation } from "../ipc/thread-run-mutation-lock"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import { createOpeningReplyReminderMiddleware } from "./opening-reply-reminder"
@@ -336,6 +341,7 @@ export function createPhysicalScopedGateRecoveryMessage(
       ? parent.id
       : parent.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
   if (typeof durableParentId !== "string" || !durableParentId) return new HumanMessage(prompt)
+  const initialNotificationId = parent.additional_kwargs[INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]
 
   return new HumanMessage({
     content: prompt,
@@ -343,6 +349,9 @@ export function createPhysicalScopedGateRecoveryMessage(
     additional_kwargs: {
       ...(goalBoundary && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
       ...(notificationBoundary && { [NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: true }),
+      ...(notificationBoundary && typeof initialNotificationId === "string" && {
+        [INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: initialNotificationId
+      }),
       [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
     }
   })
@@ -2418,6 +2427,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     tools = [],
     systemPrompt,
     middleware: customMiddleware = [],
+    sideConversationMiddleware,
     subagents = [],
     responseFormat,
     contextSchema,
@@ -3371,7 +3381,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...systemPromptPreviewCaptureMiddleware,
       ...(mainAllowedToolNames !== undefined
         ? [createRuntimeToolAllowlistMiddleware(mainAllowedToolNames)]
-        : [])
+        : []),
+      ...(sideConversationMiddleware ? [sideConversationMiddleware] : [])
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
@@ -6028,6 +6039,7 @@ The workspace root is: ${fileRoot}`
     func?: unknown
     invoke?: unknown
   }
+  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
   const extraTools: RuntimeTool[] = []
   if (options.enableRequestUserInput) {
     extraTools.push(
@@ -6052,7 +6064,10 @@ The workspace root is: ${fileRoot}`
     )
   }
   if (!options.noSkillEvolutionTool) {
-    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
+    const abortSignal = sideConversationLifetime && options.abortSignal
+      ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
+      : sideConversationLifetime
+    extraTools.push(createSkillEvolutionTool({ threadId, abortSignal }))
   }
 
   // Conditionally inject Java LSP tool
@@ -7113,6 +7128,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             selectedSkill: input.selectedSkill,
             runner: coordinatorWorkerRunner,
             notificationOwner: backgroundNotificationOwner,
+            admissionSignal: sideConversationLifetime,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           }),
@@ -7140,6 +7156,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             // started it changes hands: the summary is owed to whoever is
             // driving now, not to whoever launched the first turn.
             notificationOwner: backgroundNotificationOwner,
+            admissionSignal: sideConversationLifetime,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           })
@@ -7348,8 +7365,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     ? resolvedProjectContextPrompt
     : combinedAgentsPrompt
 
+  const inherited = getSideThreadContext(threadId)
   const agent = createDeepAgent({
     middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
+    sideConversationMiddleware: inherited?.length
+      ? createSideConversationMiddleware(inherited, mainModelInputBudget)
+      : undefined,
     subagentLifecycleMiddleware: options.subagentLifecycle
       ? createSubagentLifecycleMiddleware(options.subagentLifecycle)
       : undefined,

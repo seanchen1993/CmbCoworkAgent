@@ -1,4 +1,5 @@
 import { existsSync, statSync, type BigIntStats } from "node:fs"
+import { lstat } from "node:fs/promises"
 import { basename } from "node:path"
 
 export const SQLITE_RECOVERY_SUFFIXES = ["", ".flush.tmp", ".tmp", ".bak", ".bak.tmp"]
@@ -12,6 +13,20 @@ function sqliteRecoveryFileIdentity(file: BigIntStats | undefined, wal: boolean)
 
 export function hasSqliteRecoverySidecar(path: string): boolean {
   return SQLITE_RECOVERY_SUFFIXES.some((suffix) => suffix && existsSync(path + suffix))
+}
+
+/** Treat any recovery file (including a dangling symlink) as evidence to keep. */
+export async function isSqliteRecoveryFamilyAbsent(path: string): Promise<boolean> {
+  const absent = await Promise.all(SQLITE_RECOVERY_FILES.map(async (suffix) => {
+    try {
+      await lstat(path + suffix)
+      return false
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true
+      throw error
+    }
+  }))
+  return absent.every(Boolean)
 }
 
 /** A bounded file-family snapshot. Empty WAL files can be created by readers. */

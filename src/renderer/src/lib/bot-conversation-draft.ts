@@ -127,7 +127,7 @@ export function matchesBotThreadDraftRef(row: Thread | null, ref: BotOrdinaryThr
     sameIncarnation(ref.incarnation, threadDraftIncarnation(row)))
 }
 
-export function threadDraftIncarnation(row: Thread): BotOrdinaryThreadRef["incarnation"] {
+export function threadDraftIncarnation(row: Pick<Thread, "created_at" | "metadata">): BotOrdinaryThreadRef["incarnation"] {
   const token = row.metadata?.cmb_thread_incarnation
   return {
     token: typeof token === "string" && token.length ? token : null,

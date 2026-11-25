@@ -11,16 +11,18 @@ export const CHAT_SEARCH_BLOCK_LIMIT = 128
 export function createChatSearchPlan(
   role: string,
   content: unknown,
-  options: { stripThink?: boolean } = {}
+  options: { stripThink?: boolean; sideConversation?: boolean } = {}
 ): ChatSearchPlan {
   const segments: ChatSearchSourceSegment[] = []
   const middles: Array<{ text: string; blockIndex: number; start: number; end: number }> = []
-  const semanticBlocks = new Set<number>()
   const legacyProjectionTruncated =
     Array.isArray(content) && hasLegacyStructuredTranscriptNotice(content)
   let remaining = CHAT_SEARCH_INPUT_LIMIT
   let truncated = false
-  const append = (text: string, blockIndex: number, start: number, end: number): void => {
+  const append = (
+    text: string, blockIndex: number, start: number, end: number,
+    stripThink?: ChatSearchSourceSegment["stripThink"]
+  ): void => {
     const available = Math.max(0, remaining - (segments.length ? 1 : 0))
     const length = Math.min(end - start, available)
     if (length < end - start) truncated = true
@@ -32,23 +34,36 @@ export function createChatSearchPlan(
       end: start + length,
       sourceLength: text.length,
       raw: text.slice(start, start + length),
-      ...(semanticBlocks.has(blockIndex) ? { stripThink: true } : {})
+      ...(stripThink ? { stripThink } : {})
     })
     remaining -= length + (segments.length > 1 ? 1 : 0)
   }
   const select = (text: string, blockIndex: number): void => {
+    let stripThink: ChatSearchSourceSegment["stripThink"]
+    if (role === "assistant" && options.sideConversation && typeof content === "string") {
+      const firstContent = text.slice(0, CHAT_SEARCH_INPUT_LIMIT).search(/\S/)
+      if (firstContent === -1 && text.length > CHAT_SEARCH_INPUT_LIMIT) {
+        // The first visible character is outside the budget. A tail alone
+        // cannot tell whether the omitted prefix opens a reasoning block.
+        truncated = true
+        return
+      }
+      if (firstContent !== -1 && /^<think>/i.test(text.slice(firstContent, firstContent + "<think>".length))) {
+        stripThink = "leading"
+      }
+    }
     const markerProbe = options.stripThink
       ? `${text.slice(0, 64)}${text.slice(-64)}`.toLowerCase()
       : ""
     if (markerProbe.includes("<think") || markerProbe.includes("</think>"))
-      semanticBlocks.add(blockIndex)
+      stripThink ??= true
     // User/system controls have semantic wrappers. Never parse a severed wrapper as body text.
-    if (role === "user" || role === "system" || semanticBlocks.has(blockIndex)) {
+    if (role === "user" || role === "system" || stripThink) {
       if (text.length > remaining) {
         truncated = true
         return
       }
-      append(text, blockIndex, 0, text.length)
+      append(text, blockIndex, 0, text.length, stripThink)
       return
     }
     const preview = buildStreamingMarkdownPreview(text)
@@ -95,6 +110,7 @@ export function createChatSearchPlan(
   segments.sort((a, b) => a.blockIndex - b.blockIndex || a.start - b.start)
   return {
     role,
+    ...(role === "user" && options.sideConversation ? { sideUserContent: typeof content === "string" ? "text" as const : "blocks" as const } : {}),
     segments,
     truncated: truncated || legacyProjectionTruncated,
     ...(options.stripThink ? { stripThink: true } : {}),

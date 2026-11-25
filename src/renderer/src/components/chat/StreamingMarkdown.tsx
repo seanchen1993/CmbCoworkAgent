@@ -1,6 +1,5 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import type { PluggableList } from "unified"
-import rehypeHighlight from "rehype-highlight"
 import remarkWindowsFileLinks from "@/lib/remark-windows-file-links"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
 import { CHAT_MARKDOWN_REMARK_PLUGINS, markChatMarkdownSearchNavigation } from "../../../../shared/markdown-visible-text"
@@ -32,6 +31,7 @@ import { BotInlineMentionsContext } from "../bots/BotInlineMentionsContext"
 import { remarkBotMentions } from "@/lib/bot-mention-remark"
 import { rehypeBotTranscript } from "@/lib/bot-transcript-rehype"
 import { remarkBotAutolinks } from "@/lib/bot-autolink-remark"
+import { rehypeChatHighlight } from "@/lib/markdown-highlight"
 
 interface StreamingMarkdownProps {
   children: string
@@ -91,7 +91,11 @@ function MarkdownCodeBlock({
 // Hoisted to module scope so the prop identities stay stable across renders
 // (recreating these every render makes react-markdown redo work and churns GC).
 const REMARK_PLUGINS = [...CHAT_MARKDOWN_REMARK_PLUGINS, remarkWindowsFileLinks]
-const REHYPE_PLUGINS = [rehypeHighlight, markChatMarkdownSearchNavigation]
+function shouldHighlightCode(text: string, streaming: boolean): boolean {
+  return !streaming && (text.includes("```") || text.includes("~~~"))
+}
+
+const REHYPE_PLUGINS = [rehypeChatHighlight, markChatMarkdownSearchNavigation]
 // Streaming skips the expensive syntax-highlighting pass.
 const STREAMING_REHYPE_PLUGINS = [markChatMarkdownSearchNavigation]
 const BOT_REMARK_PLUGINS = [...REMARK_PLUGINS, remarkBotFileLinks]
@@ -197,13 +201,13 @@ const MARKDOWN_COMPONENTS: Components = {
 
 const MarkdownFragment = memo(function MarkdownFragment({
   text,
-  isStreaming,
+  highlightCode,
   threadId,
   botTranscript = false,
   start = 0
 }: {
   text: string
-  isStreaming: boolean
+  highlightCode: boolean
   threadId?: string
   botTranscript?: boolean
   start?: number
@@ -286,12 +290,12 @@ const MarkdownFragment = memo(function MarkdownFragment({
         remarkPlugins={remarkPlugins}
         rehypePlugins={
           botTranscript
-            ? isStreaming
-              ? BOT_STREAM_REHYPE_PLUGINS
-              : BOT_TRANSCRIPT_REHYPE_PLUGINS
-            : isStreaming
-              ? STREAMING_REHYPE_PLUGINS
-              : REHYPE_PLUGINS
+            ? highlightCode
+              ? BOT_TRANSCRIPT_REHYPE_PLUGINS
+              : BOT_STREAM_REHYPE_PLUGINS
+            : highlightCode
+              ? REHYPE_PLUGINS
+              : STREAMING_REHYPE_PLUGINS
         }
         components={mentionComponents}
         urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}
@@ -336,7 +340,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
           )}
           <MarkdownFragment
             text={plan.head}
-            isStreaming={isStreaming}
+            highlightCode={shouldHighlightCode(plan.head, isStreaming)}
             threadId={threadId}
             botTranscript={botTranscript}
           />
@@ -348,7 +352,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
       <>
         <MarkdownFragment
           text={plan.head}
-          isStreaming={isStreaming}
+          highlightCode={shouldHighlightCode(plan.head, isStreaming)}
           threadId={threadId}
           botTranscript={botTranscript}
         />
@@ -375,7 +379,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
         <MarkdownFragment
           text={plan.tail}
           start={text.length - plan.tail.length}
-          isStreaming={isStreaming}
+          highlightCode={shouldHighlightCode(plan.tail, isStreaming)}
           threadId={threadId}
           botTranscript={botTranscript}
         />

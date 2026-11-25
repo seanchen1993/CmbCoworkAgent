@@ -370,9 +370,10 @@ export interface ThreadDeleteOptions {
   groupGuard?: ThreadGroupDeleteGuard
 }
 
-/** The ordinary delete path returns no value. Work draft cleanup requires its exact committed owner. */
 export type ThreadDeleteResult = void | {
-  deletedWork: NonNullable<import("../shared/bots/conversation").BotConversationDeletionOutcome["deletedWork"]>
+  deletedWork?: NonNullable<import("../shared/bots/conversation").BotConversationDeletionOutcome["deletedWork"]>
+  deletedSideThreadIds?: string[]
+  deletionError?: string
 }
 
 export interface ThreadMessagesPage {

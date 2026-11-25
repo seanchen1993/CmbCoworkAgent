@@ -1,3 +1,4 @@
+import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
 import type { GitGraphPage } from "../shared/git-graph"
 import type {
   GitBranchKind,
@@ -1472,6 +1473,11 @@ const api = {
         ipcRenderer.removeListener("threads:changed", handler)
       }
     }
+  },
+  btw: {
+    create: (request: BtwRequest): Promise<{ id: string; ordinal: number; thread: Thread }> =>
+      ipcRenderer.invoke("btw:create", request),
+    close: (id: string): Promise<void> => ipcRenderer.invoke("btw:close", id)
   },
   models: {
     getCatalog: (): Promise<{
@@ -3141,8 +3147,8 @@ const api = {
         ipcRenderer.removeListener("skill:intentRequest", handler)
       }
     },
-    intentResponse: (requestId: string, accepted: boolean): Promise<void> =>
-      ipcRenderer.invoke("skill:intentResponse", { requestId, accepted }) as Promise<void>,
+    intentResponse: (requestId: string, accepted: boolean): Promise<boolean> =>
+      ipcRenderer.invoke("skill:intentResponse", { requestId, accepted }) as Promise<boolean>,
     retryGeneration: (
       threadId: string,
       retryContext: { context: unknown; intentMode: string }
@@ -3158,6 +3164,7 @@ const api = {
       callback: (req: {
         threadId?: string
         requestId: string
+        source?: "proposal"
         skillId: string
         name: string
         description: string
@@ -3169,6 +3176,7 @@ const api = {
         req: {
           threadId?: string
           requestId: string
+          source?: "proposal"
           skillId: string
           name: string
           description: string
@@ -3188,12 +3196,17 @@ const api = {
         approved,
         content
       }) as Promise<void>,
+    onBtwRequestClosed: (callback: (request: BtwSkillRequestClosed) => void): (() => void) => {
+      const handler = (_event: unknown, request: BtwSkillRequestClosed): void => callback(request)
+      ipcRenderer.on("skill:btwRequestClosed", handler)
+      return () => ipcRenderer.removeListener("skill:btwRequestClosed", handler)
+    },
 
     // ── Streaming generation progress ──────────────────────────
     onGenerating: (
       callback: (event: {
         threadId?: string
-        phase: "start" | "token" | "done" | "error"
+        phase: "start" | "token" | "done" | "error" | "settled"
         text: string
       }) => void
     ): (() => void) => {
@@ -3201,7 +3214,7 @@ const api = {
         _: unknown,
         evt: {
           threadId?: string
-          phase: "start" | "token" | "done" | "error"
+          phase: "start" | "token" | "done" | "error" | "settled"
           text: string
         }
       ): void => {

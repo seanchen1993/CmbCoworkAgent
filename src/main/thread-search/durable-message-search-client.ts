@@ -1,9 +1,10 @@
 import type { Worker } from "node:worker_threads"
+import { isBtwThreadId } from "../../shared/btw-chat"
 import { getDbPath } from "../storage"
 import type { ThreadMessageSearchOptions, ThreadMessageSearchPage } from "../types"
 
 export interface DurableSearchRequest {
-  owner: number
+  owner: string
   id: number
   threadId: string
   query: string
@@ -22,11 +23,11 @@ interface PendingSearch {
   reject: (error: Error) => void
 }
 
-const pending = new Map<number, PendingSearch>()
+const pending = new Map<string, PendingSearch>()
 let nextId = 0
 let worker: Promise<Worker> | undefined
 
-function finish(owner: number, request: PendingSearch) {
+function finish(owner: string, request: PendingSearch) {
   if (pending.get(owner) === request) pending.delete(owner)
   clearTimeout(request.timer)
 }
@@ -71,8 +72,10 @@ function getWorker(): Promise<Worker> {
 }
 
 export async function searchDurableThreadMessagesInWorker(
-  owner: number, threadId: string, query: string, options?: ThreadMessageSearchOptions
+  windowId: number, threadId: string, query: string, options?: ThreadMessageSearchOptions
 ): Promise<ThreadMessageSearchPage> {
+  // A window can search its main conversation and selected side tab simultaneously.
+  const owner = `${windowId}:${isBtwThreadId(threadId) ? "side" : "main"}`
   const previous = pending.get(owner)
   if (previous) {
     Atomics.store(previous.flag, 0, 1)

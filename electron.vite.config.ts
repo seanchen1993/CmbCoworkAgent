@@ -5,6 +5,7 @@ import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
+import { collectMarkdownHighlightGrammars } from "./src/renderer/src/lib/markdown-highlight"
 import { virtuosoResizeAnchor } from "./scripts/vite-virtuoso-resize-anchor"
 // import {app} from "electron"
 
@@ -133,7 +134,8 @@ export default defineConfig({
     // Run the same Virtuoso transform in dev instead of pre-bundling past it.
     optimizeDeps: { exclude: ["react-virtuoso"] },
     define: {
-      __APP_VERSION__: JSON.stringify(pkg.version)
+      __APP_VERSION__: JSON.stringify(pkg.version),
+      __CHAT_HIGHLIGHT_GRAMMARS__: JSON.stringify(collectMarkdownHighlightGrammars())
       // __APP_VERSION__: app.getVersion(),
     },
     resolve: {

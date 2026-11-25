@@ -2,6 +2,12 @@ export type SubmitInFlightLockRef = {
   current: Set<string>
 }
 
+// Composer, queue and view-independent submissions share a lock per thread.
+export const submitInFlightLockStore: SubmitInFlightLockRef = { current: new Set<string>() }
+
+// A pending attachment read can overlap an active run while preparing its next queued message.
+export const queuedDraftPreparationLock: SubmitInFlightLockRef = { current: new Set<string>() }
+
 type SubmitInFlightReleaseStore = {
   listenersByKey: Map<string, Set<() => void>>
   versionsByKey: Map<string, number>

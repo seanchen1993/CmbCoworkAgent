@@ -6,6 +6,7 @@ import {
   isProjectModeAgentTeamEnabled
 } from "../../shared/project-mode-agent-team"
 import { getThread } from "../db"
+import { getSideThreadLifetimeSignal } from "../ipc/btw-chat"
 import { isCoordinatorModeForcedByEnvironment } from "./coordinator-mode"
 import { parseStandardThreadMetadata } from "./standard-thread-turn"
 import { startAgentRun, type AgentRunDelivery, type AgentRunTerminal } from "./agent-run-service"
@@ -267,6 +268,7 @@ export class PendingNotificationScheduler {
    * the hold explicitly through the existing suppression IPC.
    */
   suppressAfterStop(threadId: string, suppressed = true): void {
+    if (this.clearClosedSideThreadState(threadId)) return
     if (!suppressed) {
       const wasHeld = this.suppressedThreads.delete(threadId)
       this.cancelWake(threadId)
@@ -357,6 +359,17 @@ export class PendingNotificationScheduler {
     this.wakeTimers.delete(threadId)
   }
 
+  clearClosedSideThreadState(threadId: string): boolean {
+    if (!getSideThreadLifetimeSignal(threadId)?.aborted) return false
+    this.cancelWake(threadId)
+    this.waitingForIdle.delete(threadId)
+    this.recheckRequested.delete(threadId)
+    this.suppressedThreads.delete(threadId)
+    this.clearFailureBudget(threadId)
+    this.managedRetryNotBefore.delete(threadId)
+    return true
+  }
+
   /**
    * Records a failed summary and says whether to try again.
    *
@@ -365,6 +378,7 @@ export class PendingNotificationScheduler {
    * again now or leave it to the next hydrate.
    */
   private noteFailure(threadId: string, kind: "workflow" | "coordinator"): void {
+    if (this.clearClosedSideThreadState(threadId)) return
     const attempts = (this.failedAttempts.get(threadId) ?? 0) + 1
     this.failedAttempts.set(threadId, attempts)
     if (attempts >= MAX_SUMMARY_ATTEMPTS) {
@@ -430,6 +444,7 @@ export class PendingNotificationScheduler {
           .update(JSON.stringify(coordinatorWorkerManager.peekNotifications(threadId)))
           .digest("hex")
       })
+    if (this.clearClosedSideThreadState(threadId)) return { started: false, reason: "thread-missing" }
     if (managed) return managed
 
     const existingLease = getLocalThreadRunLease(threadId)
@@ -495,6 +510,7 @@ export class PendingNotificationScheduler {
     notificationRunId: string,
     terminal: AgentRunTerminal
   ): PendingNotificationOutcome {
+    if (this.clearClosedSideThreadState(threadId)) return { started: false, reason: "thread-missing" }
     if (terminal.outcome === "success") {
       this.clearFailureBudget(threadId)
       return { started: true }
@@ -599,6 +615,7 @@ export class PendingNotificationScheduler {
   }
 
   private async checkOnce(threadId: string): Promise<PendingNotificationOutcome> {
+    if (this.clearClosedSideThreadState(threadId)) return { started: false, reason: "thread-missing" }
     if (this.suppressedThreads.has(threadId)) {
       return { started: false, reason: "suppressed-after-stop" }
     }
@@ -628,6 +645,7 @@ export class PendingNotificationScheduler {
     })
     // Stop may arrive while disk discovery is pending. Recheck before claiming
     // a lease, otherwise this already-admitted check can bypass the hold.
+    if (this.clearClosedSideThreadState(threadId)) return { started: false, reason: "thread-missing" }
     if (this.suppressedThreads.has(threadId)) {
       return { started: false, reason: "suppressed-after-stop" }
     }
@@ -645,6 +663,7 @@ export class PendingNotificationScheduler {
         key: run.runId,
         runStartedAt: run.startedAt
       })
+    if (this.clearClosedSideThreadState(threadId)) return { started: false, reason: "thread-missing" }
     if (managed) return managed
 
     const existingLease = getLocalThreadRunLease(threadId)
