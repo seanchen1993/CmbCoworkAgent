@@ -66,6 +66,8 @@ import { withoutGitRepositoryOverrides } from "../services/git-environment"
 import { prepareGitPanelWrite, type GitPanelWritePreparation } from "../services/git-worktree-write-gate"
 import { gitReadRequestCoordinator, type GitReadFamily } from "./git-read-request-coordinator"
 import {
+  attachmentExtensions,
+  attachmentFormatLabel,
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_FILE_NAME_LENGTH,
   MAX_ATTACHMENT_PICKER_FILES,
@@ -6077,7 +6079,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     })
   }
   const supportedAttachmentExtension = (fileName: string): boolean =>
-    [".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"].includes(path.extname(fileName).toLowerCase())
+    attachmentExtensions.includes(path.extname(fileName).toLowerCase())
   const validAttachmentMaxLength = (maxLength: unknown): maxLength is number | undefined =>
     maxLength === undefined ||
     (Number.isSafeInteger(maxLength) &&
@@ -6113,7 +6115,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         )
         if ("error" in resolved) return { success: false, error: resolved.error }
         if (!supportedAttachmentExtension(resolved.filePath)) {
-          return { success: false, error: "不支持的文件类型，仅支持 txt、md、csv、docx、xlsx、xls" }
+          return { success: false, error: "不支持的文件类型，仅支持 " + attachmentFormatLabel }
         }
         const opened = await openStableFileHandle(resolved.rootPath, resolved.filePath)
         try {
@@ -6194,7 +6196,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile", "multiSelections"],
       title: "选择附件",
-      filters: [{ name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }]
+      filters: [{ name: "支持的文件", extensions: attachmentExtensions.map(ext => ext.slice(1)) }]
     })
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true, files: [] }

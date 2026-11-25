@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest"
+import { encode } from "iconv-lite"
 import AdmZip from "adm-zip"
 import {
   MAX_ATTACHMENT_ARCHIVE_TOTAL_BYTES,
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_TEXT_LENGTH,
+  getSupportedExtensions,
   parseFileBytes
 } from "./file-parser"
 
@@ -60,5 +62,32 @@ describe("bounded attachment byte parser", () => {
         Uint8Array.from(payload).buffer
       )
     ).rejects.toThrow(/解压|条目/)
+  })
+})
+
+describe("chat document uploads", () => {
+  it("extracts declared GBK HTML tables without script or template contents", async () => {
+    const html = '<meta charset="gbk"><title>报告</title><script>hidden</script>' +
+      '<table><tr><th>部门</th><th>金额</th></tr><tr><td>研发</td><td>42</td></tr></table>' +
+      '<template>hidden</template><img src="https://example.invalid/">'
+    const result = await parseFileBytes("report.HTM", Uint8Array.from(encode(html, "gbk")).buffer)
+    expect(result.content).toContain("研发\t42")
+    expect(result.content).toContain("报告")
+    expect(result.content).not.toContain("hidden")
+    expect(result.mimeType).toBe("text/html")
+  })
+
+  it.each(["json", "jsonl", "yaml", "yml", "xml", "log", "tsv"])(
+    "accepts %s and enforces the remaining character budget", async ext => {
+      expect(getSupportedExtensions()).toContain("." + ext)
+      const result = await parseFileBytes("input." + ext, bytes("abcdef"), 3)
+      expect(result.content).toBe("abc")
+      expect(result.truncated).toBe(true)
+    }
+  )
+
+  it("explains an empty dynamic document", async () => {
+    await expect(parseFileBytes("empty.html", bytes("<script>go()</script>")))
+      .rejects.toThrow("静态正文")
   })
 })

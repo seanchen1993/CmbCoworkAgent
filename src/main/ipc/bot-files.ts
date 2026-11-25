@@ -85,6 +85,11 @@ async function publishWorkAttachmentBatch(
   return attachments.map(retain)
 }
 
+// Existing composer formats reject an oversized picker copy before publication.
+function hasLegacyParserCopyLimit(filename: string): boolean {
+  return /\.(?:txt|md|csv|docx|xlsx?)$/i.test(filename)
+}
+
 type AttachmentText = Pick<FileAttachment, "content" | "mimeType" | "truncated">
 
 /** Picker, drop and workspace selection use the same reference and text budget. */
@@ -105,7 +110,8 @@ async function retainedAttachment(input: {
     size: input.size,
     truncated: false
   }
-  if (input.maxChars > reference.length + 2 && ("readText" in input || isSupportedFile(input.filename))) {
+  if (input.maxChars > reference.length + 2 && ("readText" in input ||
+    (input.size <= MAX_ATTACHMENT_FILE_BYTES && isSupportedFile(input.filename)))) {
     const budget = input.maxChars - reference.length - 2
     const parsed = "readText" in input
       ? await input.readText(budget)
@@ -317,7 +323,7 @@ export function registerBotFileHandlers(
         if (validate().archived) throw new BotError("CONFLICT", "Bot 已归档")
         const managedSnapshot = batch
           ? await snapshotBotDeliveryFile(batch.staging, source, new AbortController().signal, dirname(source),
-              isSupportedFile(basename(source)) && remainingChars >
+              hasLegacyParserCopyLimit(source) && remainingChars >
                 retainedAttachmentReference(join(batch.storage, ".bot-deliveries", "0".repeat(64), basename(source)), true).length + 2
                 ? MAX_ATTACHMENT_FILE_BYTES : MAX_BOT_IMPORT_FILE_BYTES)
           : undefined
@@ -328,7 +334,7 @@ export function registerBotFileHandlers(
         // Reject files the existing parser cannot read before writing either
         // the editable import or its retained version. Reference-only imports
         // keep their original limit; the parser still verifies the final bytes.
-        const parsesContent = asAttachments && isSupportedFile(basename(source)) &&
+        const parsesContent = asAttachments && hasLegacyParserCopyLimit(source) &&
           remainingChars > retainedAttachmentReference(target.id).length + 2
         if (!managedSnapshot && parsesContent)
           await copyBotFile(dirname(source), source, target.path, undefined, MAX_ATTACHMENT_FILE_BYTES)

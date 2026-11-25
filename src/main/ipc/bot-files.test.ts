@@ -531,7 +531,10 @@ describe("Bot file IPC group scope", () => {
       size: number
     }>
     expect(fixture.copyBytes).toHaveBeenCalledWith("/private/a/shared/raw.json", bytes)
-    expect(fixture.parse).not.toHaveBeenCalled()
+    expect(fixture.parse).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "bytes", fileName: "raw.json" }),
+      expect.any(Number), "bot-attachment:1"
+    )
     expect(result[0]).toMatchObject({
       filename: "raw.json",
       filePath: "shared/raw.json",

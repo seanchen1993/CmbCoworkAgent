@@ -1,17 +1,11 @@
-/**
- * File parser module – extracts text content from various file formats.
- *
- * Supported formats:
- *   .txt / .csv  – read with auto-detected encoding (GBK, Shift_JIS, UTF-8, etc.)
- *   .docx        – extract via mammoth → markdown
- *   .xlsx / .xls – extract via xlsx → CSV text
- */
-
 import * as path from "path"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import AdmZip from "adm-zip"
 import {
+  attachmentExtensions,
+  attachmentFormatLabel,
+  attachmentMimeTypes,
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_FILE_NAME_LENGTH
 } from "../shared/file-attachment"
@@ -28,7 +22,7 @@ export const MAX_ATTACHMENT_ARCHIVE_ENTRIES = 4_096
 export const MAX_ATTACHMENT_ARCHIVE_ENTRY_BYTES = 32 * 1024 * 1024
 export const MAX_ATTACHMENT_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 
-const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
+const SUPPORTED_EXTENSIONS = new Set(attachmentExtensions)
 
 export function isSupportedFile(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase()
@@ -52,41 +46,12 @@ function truncateContent(
     return { content, truncated: false }
   }
 
-  const totalChars = content.length
-  const lines = content.split("\n")
-  const totalLines = lines.length
-
-  if (isLineBased) {
-    // Truncate at line boundary to avoid cutting a row in half
-    let charCount = 0
-    let keepLines = 0
-    for (const line of lines) {
-      if (charCount + line.length + 1 > maxLen) break
-      charCount += line.length + 1
-      keepLines++
-    }
-    const kept = lines.slice(0, keepLines).join("\n")
-    const droppedLines = totalLines - keepLines
-    return {
-      content: kept + `\n\n... [内容已截取：显示前 ${keepLines} 行（共 ${totalLines} 行），省略了 ${droppedLines} 行、${(totalChars - kept.length).toLocaleString()} 个字符]`,
-      truncated: true
-    }
-  }
-
-  // For prose (txt, docx): truncate at last paragraph/sentence boundary
-  const sliced = content.slice(0, maxLen)
-  const lastParagraph = sliced.lastIndexOf("\n\n")
-  const lastNewline = sliced.lastIndexOf("\n")
-  const cutPoint = lastParagraph > maxLen * 0.8
-    ? lastParagraph
-    : lastNewline > maxLen * 0.8
-      ? lastNewline
-      : maxLen
-  const kept = content.slice(0, cutPoint)
-  const droppedChars = totalChars - kept.length
-
+  const prefix = content.slice(0, maxLen)
+  const boundary = prefix.lastIndexOf("\n")
   return {
-    content: kept + `\n\n... [内容已截取：显示前 ${kept.length.toLocaleString()} 个字符（共 ${totalChars.toLocaleString()} 个字符），省略了 ${droppedChars.toLocaleString()} 个字符]`,
+    content: boundary > 0 && (isLineBased || boundary > maxLen * 0.8)
+      ? prefix.slice(0, boundary)
+      : prefix,
     truncated: true
   }
 }
@@ -129,43 +94,39 @@ async function parseAttachmentBuffer(
   }
   const ext = path.extname(filename).toLowerCase()
   if (!SUPPORTED_EXTENSIONS.has(ext)) {
-    throw new Error(`不支持的文件类型: ${ext}，仅支持 txt、md、csv、docx、xlsx、xls`)
+    throw new Error(`不支持的文件类型: ${ext}，仅支持 ${attachmentFormatLabel}`)
   }
   if (ext === ".docx" || ext === ".xlsx") assertBoundedOfficeArchive(buffer)
 
   let content: string
-  let mimeType: string
-  let isLineBased = false
-
+  const mimeType = attachmentMimeTypes[ext]
+  const isLineBased = [".csv", ".xls", ".xlsx", ".jsonl", ".log", ".tsv"].includes(ext)
   switch (ext) {
-    case ".txt":
-    case ".md": {
-      content = decodeTextFileAutoEncoding(buffer)
-      mimeType = ext === ".md" ? "text/markdown" : "text/plain"
+    case ".html":
+    case ".htm": {
+      const { extractHtmlText } = await import("./html-attachment")
+      const bom = buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
+        ? "utf8"
+        : undefined
+      const declared = /<meta\b[^>]*?\bcharset\s*=\s*["']?([\w-]+)/i
+        .exec(buffer.toString("latin1", 0, 4096))?.[1]
+      const encoding = typeof bom === "string" ? bom :
+        buffer[0] === 0xff && buffer[1] === 0xfe ? "utf16le" :
+        buffer[0] === 0xfe && buffer[1] === 0xff ? "utf16be" :
+        declared && iconv.encodingExists(declared) ? declared : detectEncoding(buffer)
+      content = extractHtmlText(iconv.decode(buffer, encoding))
+      if (!content.trim()) throw new Error("HTML 缺少静态正文，可用 @文件 分析源码")
       break
     }
-    case ".csv": {
-      content = decodeTextFileAutoEncoding(buffer)
-      mimeType = "text/csv"
-      isLineBased = true
-      break
-    }
-    case ".docx": {
+    case ".docx":
       content = await parseDocx(buffer)
-      mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       break
-    }
     case ".xlsx":
-    case ".xls": {
+    case ".xls":
       content = await parseExcel(buffer)
-      mimeType = ext === ".xlsx"
-        ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        : "application/vnd.ms-excel"
-      isLineBased = true
       break
-    }
     default:
-      throw new Error(`Unsupported file type: ${ext}`)
+      content = decodeTextFileAutoEncoding(buffer)
   }
 
   const limit =

@@ -69,6 +69,14 @@ describe("file attachment parser worker", () => {
     })
   })
 
+  it("extracts HTML table cells through the bundled worker", async () => {
+    const result = await createClient().parse({
+      kind: "bytes", fileName: "report.html",
+      bytes: textBytes("<table><tr><td>研发</td><td>42</td></tr></table>")
+    }, 1000, "sender:html")
+    expect(result.content).toBe("研发\t42")
+  })
+
   it("parses a near-limit dropped CSV while the main-thread ticker advances", async () => {
     const content = "row,value\n".repeat(450_000)
     const payload = textBytes(content)
