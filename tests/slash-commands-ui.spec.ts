@@ -25,6 +25,10 @@ import {
   setBuiltinBrowserScreenshotEnabled
 } from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
+import {
+  REQUIREMENT_WORKBENCH_COMMAND_ID,
+  REQUIREMENT_WORKBENCH_DISPLAY_NAME
+} from "../src/renderer/src/features/requirement-workbench/requirement-workbench.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected)
@@ -65,7 +69,26 @@ function testRootSlashShowsGoalAboveSkills(): void {
     BUILTIN_BROWSER_COMMAND_ID,
     "built-in browser should be listed after goal"
   )
+  assertEqual(
+    mode.commands[2]?.id,
+    REQUIREMENT_WORKBENCH_COMMAND_ID,
+    "requirement workbench should be listed after browser"
+  )
   assertEqual(mode.skills.length, 2, "skills should still be shown")
+}
+
+function testRequirementFilterShowsChineseMappedCommand(): void {
+  const mode = buildSlashPopoverMode({ input: "/requirement", skills, skillSelected: false })
+  assertEqual(mode.kind, "slash", "requirement filter should keep popover open")
+  if (mode.kind !== "slash") return
+
+  assertEqual(mode.commands.length, 1, "requirement filter should match one command")
+  assertEqual(mode.commands[0]?.id, REQUIREMENT_WORKBENCH_COMMAND_ID, "command id should match")
+  assertEqual(
+    mode.commands[0]?.title,
+    REQUIREMENT_WORKBENCH_DISPLAY_NAME,
+    "command should use the Chinese mapping"
+  )
 }
 
 function testPlainTextKeepsPopoverClosed(): void {
@@ -569,6 +592,7 @@ function testRuntimeComposerStateKeepsHistoryLoadingLocked(): void {
 function main(): void {
   const tests = [
     testRootSlashShowsGoalAboveSkills,
+    testRequirementFilterShowsChineseMappedCommand,
     testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands,
     testPlainTextKeepsPopoverClosed,
     testGoalFilterShowsGoalCommand,

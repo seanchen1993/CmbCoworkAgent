@@ -13,6 +13,7 @@ import { basename, extname, isAbsolute, join, posix, relative, resolve, win32 } 
 import { pathToFileURL } from "url"
 import {
   BUILTIN_BROWSER_LOG_PREFIX,
+  BROWSER_PANEL_CLOSE_REQUEST_CHANNEL,
   BROWSER_PANEL_REQUEST_CHANNEL,
   BROWSER_DOWNLOADS_CHANGED_CHANNEL,
   BROWSER_SESSION_ID
@@ -1045,6 +1046,10 @@ export class BrowserService {
       restoreDefaultPanelWidth
     })
     if (this.activeSession) this.emitState()
+  }
+
+  requestPanelClose(): void {
+    this.getUsableWindow().webContents.send(BROWSER_PANEL_CLOSE_REQUEST_CHANNEL)
   }
 
   getState(): BrowserState {

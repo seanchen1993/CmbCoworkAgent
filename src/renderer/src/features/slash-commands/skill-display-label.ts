@@ -2,6 +2,16 @@
 // the bare `tsx` test runner, which doesn't resolve TS path aliases.
 import type { SkillMetadata } from "../../types"
 import { normalizeSkillId } from "../../lib/skill-ids"
+import {
+  REQUIREMENT_WORKBENCH_DISPLAY_NAME,
+  REQUIREMENT_WORKBENCH_SKILL_NAME
+} from "../requirement-workbench/requirement-workbench"
+
+export function getSkillDisplayLabel(skillName: string): string {
+  return normalizeSkillId(skillName) === normalizeSkillId(REQUIREMENT_WORKBENCH_SKILL_NAME)
+    ? REQUIREMENT_WORKBENCH_DISPLAY_NAME
+    : skillName
+}
 
 /**
  * Compact label for the right-aligned source badge in the slash popover.

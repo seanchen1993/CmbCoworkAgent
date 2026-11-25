@@ -35,8 +35,7 @@ import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities,
   REQUIREMENT_BOUND_EXPERTS,
-  REQUIREMENT_BOUND_SKILLS,
-  type RequirementSessionCapabilities
+  REQUIREMENT_BOUND_SKILLS
 } from "./requirement-session-capabilities"
 import type { DesignSystemInfo } from "../design/types"
 import { RequirementWorkDirPicker } from "./RequirementWorkDirPicker"
@@ -215,7 +214,7 @@ export function NewRequirementDialog({
   initialSource?: UploadSource
   onStartConversation: (
     requirement: RequirementRecord,
-    options?: { autoGeneratePrd?: boolean } & Partial<RequirementSessionCapabilities>
+    options?: { autoGeneratePrd?: boolean }
   ) => void | Promise<void>
 }): React.JSX.Element {
   const [source, setSource] = useState<UploadSource>(initialSource)
@@ -382,8 +381,8 @@ export function NewRequirementDialog({
       const capabilities = getRequirementSessionCapabilities()
       await Promise.all([
         ensureRequirementSkills(updateSkillStatus),
-        enableRequirementSessionExperts(capabilities.allowedExperts).then(() =>
-          setEnabledExperts(new Set(capabilities.allowedExperts))
+        enableRequirementSessionExperts(capabilities.experts).then(() =>
+          setEnabledExperts(new Set(capabilities.experts))
         )
       ])
       setPreparingSkill(false)
@@ -435,7 +434,7 @@ export function NewRequirementDialog({
       // Text requirements use the prompt to begin discovery from the user's
       // initial description.
       // conversation; uploaded/link sources additionally point to `source/`.
-      await onStartConversation(requirement, { autoGeneratePrd: true, ...capabilities })
+      await onStartConversation(requirement, { autoGeneratePrd: true })
     } catch (error) {
       setPreparingSkill(false)
       setSkillStatuses((current) =>

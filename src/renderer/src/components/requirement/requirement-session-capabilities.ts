@@ -22,37 +22,27 @@ export const REQUIREMENT_BOUND_SKILLS: RequirementSessionCapabilityItem[] = [
   }
 ]
 
-const REQUIREMENT_BUILTIN_SKILL_IDS = [
-  "generate-feature",
-  "publish-feature",
-  "devclaw-in-app-browser"
-]
+export const REQUIREMENT_WORKBENCH_SKILL_ID = "requirement-workbench"
 
 export type RequirementSessionCapabilities = {
-  allowedExperts: string[]
-  allowedSkills: string[]
+  experts: string[]
+  skills: string[]
 }
 
 export function getRequirementSessionCapabilities(): RequirementSessionCapabilities {
   return {
-    allowedExperts: REQUIREMENT_BOUND_EXPERTS.map((item) => item.id),
-    allowedSkills: [
+    experts: REQUIREMENT_BOUND_EXPERTS.map((item) => item.id),
+    skills: [
       ...REQUIREMENT_BOUND_SKILLS.map((item) => item.id),
-      ...REQUIREMENT_BUILTIN_SKILL_IDS
+      REQUIREMENT_WORKBENCH_SKILL_ID
     ]
   }
 }
 
-export async function enableRequirementSessionExperts(
-  allowedExperts: readonly string[]
-): Promise<void> {
-  await Promise.all(allowedExperts.map((name) => window.api.expertAgents.setEnabled(name, true)))
+export async function enableRequirementSessionExperts(experts: readonly string[]): Promise<void> {
+  await Promise.all(experts.map((name) => window.api.expertAgents.setEnabled(name, true)))
 }
 
-export async function enableRequirementSessionSkills(
-  allowedSkills: readonly string[]
-): Promise<void> {
-  await Promise.all(
-    allowedSkills.map((skillId) => window.api.skills.setDisabledState(skillId, false))
-  )
+export async function enableRequirementSessionSkills(skills: readonly string[]): Promise<void> {
+  await Promise.all(skills.map((skillId) => window.api.skills.setDisabledState(skillId, false)))
 }

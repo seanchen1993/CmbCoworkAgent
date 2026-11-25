@@ -177,7 +177,6 @@ import {
   getHookLoggingConfig
 } from "../storage"
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
-import { getRequirementRuntimeOptions } from "../agent/library/requirement-mode"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
@@ -8847,7 +8846,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               capabilityService: runExecutionContext.capabilityService,
               agentMode: effectiveAgentMode,
               disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
-              ...getRequirementRuntimeOptions(metadata),
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -11784,7 +11782,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal,
               ...foregroundToolPolicy(resumeAgentMode, metadata),
               agentMode: resumeAgentMode,
-              ...getRequirementRuntimeOptions(metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -12942,7 +12939,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal,
               ...foregroundToolPolicy(interruptAgentMode, metadata),
               agentMode: interruptAgentMode,
-              ...getRequirementRuntimeOptions(metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),

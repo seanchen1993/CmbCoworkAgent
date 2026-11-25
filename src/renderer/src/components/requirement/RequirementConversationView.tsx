@@ -12,6 +12,7 @@ import { useAppStore } from "@/lib/store"
 import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
+import { formatSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview
@@ -43,7 +44,8 @@ import {
 import {
   enableRequirementSessionExperts,
   enableRequirementSessionSkills,
-  getRequirementSessionCapabilities
+  getRequirementSessionCapabilities,
+  REQUIREMENT_WORKBENCH_SKILL_ID
 } from "./requirement-session-capabilities"
 import { RequirementDetailsPanel } from "./RequirementDetailsPanel"
 import { getSelectedRequirementSystem } from "./requirement-store"
@@ -136,18 +138,14 @@ function isRequirementPrdGenerationCompleted(
 }
 
 function buildRequirementInitializationMessage(requirement: RequirementRecord): string {
-  const primarySourceInstruction =
+  const source =
     requirement.sourceType === "text"
-      ? "阅读并理解用户的初始需求描述。"
+      ? `文本需求\n需求信息：${requirement.initialDescription.trim() || "未提供"}`
       : requirement.sourceType === "link"
-        ? `使用内置浏览器完整阅读主需求链接：\n${requirement.link}`
-        : "阅读并理解 source-preview.md 中的原始需求内容。"
-  const initialDescription = requirement.initialDescription.trim()
-  const initialDescriptionSection = initialDescription
-    ? `\n\n用户的初始需求描述：\n${initialDescription}`
-    : ""
+        ? `链接需求\n需求链接：${requirement.link}`
+        : `文件需求\n需求文件：${requirement.sourceName || "未命名文件"}`
 
-  return `请为「${requirement.title}」撰写一份产品需求文档。\n 1. 读取原始需求\n${primarySourceInstruction}${initialDescriptionSection}\n\n 2. 补充背景\n阅读 source 文件夹中的补充材料；如含链接，使用内置浏览器访问总结页面内容作为背景资料，失败则跳过。\n\n 3. 分析与澄清\n完成信息收集后，综合分析需求，整理需求目标、使用场景、范围和关键疑问，再通过对话与用户逐项澄清。\n\n 4. 生成 PRD\n待关键疑问确认后，系统梳理目标用户、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准，并生成正式 PRD。`
+  return `需求名称：${requirement.title}\n需求来源：${source}`
 }
 
 function RequirementConversationSession({
@@ -955,8 +953,8 @@ function RequirementConversationSession({
       onCreateConversation: async (item, initialPrompt) => {
         const capabilities = getRequirementSessionCapabilities()
         await Promise.all([
-          enableRequirementSessionExperts(capabilities.allowedExperts),
-          enableRequirementSessionSkills(capabilities.allowedSkills)
+          enableRequirementSessionExperts(capabilities.experts),
+          enableRequirementSessionSkills(capabilities.skills)
         ])
         const conversationNumber = String(item.threadIds.length + 1).padStart(3, "0")
         const thread = await createThread(
@@ -967,8 +965,6 @@ function RequirementConversationSession({
             requirementSystem: item.system,
             requirementSourceType: item.sourceType,
             requirementSourceName: item.sourceName,
-            allowedSkills: capabilities.allowedSkills,
-            allowedExperts: capabilities.allowedExperts,
             workspacePath: item.requirementPath
           },
           { preserveView: true }
@@ -1242,14 +1238,50 @@ function RequirementConversationSession({
     }
 
     autoQueuedPrdGenerationThreadIdsRef.current.add(threadId)
-    threadState.addQueuedMessage({
-      id: crypto.randomUUID(),
-      text: buildRequirementInitializationMessage(requirement),
-      contextLabel: "requirement-workbench",
-      builtinBrowser: requirement.sourceType === "link",
-      created_at: new Date(),
-      updated_at: new Date()
-    })
+    let cancelled = false
+    void window.api.skills
+      .list()
+      .then((skills) => {
+        if (cancelled) {
+          autoQueuedPrdGenerationThreadIdsRef.current.delete(threadId)
+          return
+        }
+        const skill = skills.find(
+          (item) => item.name.trim().toLowerCase() === REQUIREMENT_WORKBENCH_SKILL_ID
+        )
+        if (!skill) {
+          autoQueuedPrdGenerationThreadIdsRef.current.delete(threadId)
+          toast.error("需求工作台 Skill 不可用")
+          return
+        }
+        const now = new Date()
+        threadState.addQueuedMessage({
+          id: crypto.randomUUID(),
+          text: buildRequirementInitializationMessage(requirement),
+          contextLabel: "requirement-workbench",
+          skillBlock: formatSkillUseBlock({
+            name: skill.name,
+            path: skill.path,
+            description: skill.description,
+            metadata: skill.metadata,
+            allowedTools: skill.allowedTools
+          }),
+          skillName: skill.name,
+          skillDescription: skill.description,
+          builtinBrowser: requirement.sourceType === "link",
+          created_at: now,
+          updated_at: now
+        })
+      })
+      .catch((error) => {
+        autoQueuedPrdGenerationThreadIdsRef.current.delete(threadId)
+        console.warn("[Requirement] 读取需求工作台 Skill 失败：", error)
+        toast.error("需求工作台 Skill 不可用")
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [
     autoGeneratePrd,
     requirement,

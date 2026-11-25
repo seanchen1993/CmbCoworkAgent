@@ -16,6 +16,7 @@ interface PlaywrightBrowserTargetService {
   getState(): BrowserState
   prepareTarget(options?: BrowserAttachOptions): Promise<BrowserState>
   requestPanel(threadId?: string): void
+  requestPanelClose?(): void
 }
 
 // Auto-opening the Browser tab now includes renderer tab switching, BrowserPanel mount,
@@ -174,7 +175,13 @@ export async function invokeMcpToolWithPlaywrightInAppBrowserSupport(options: {
     })
   }
 
-  return options.invoke()
+  const result = await options.invoke()
+  if (options.tool.toolName === "browser_close" && !result.isError) {
+    const service =
+      options.browserService === undefined ? getGlobalBrowserService() : options.browserService
+    service?.requestPanelClose?.()
+  }
+  return result
 }
 
 export async function autoSelectPlaywrightInAppBrowserTab(options: {

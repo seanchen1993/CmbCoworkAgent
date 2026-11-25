@@ -1399,10 +1399,6 @@ function buildForkMetadata(input: {
     const value = sourceMetadata[key]
     if (typeof value === "string" && value.trim()) next[key] = value
   }
-  for (const key of ["allowedSkills", "allowedExperts"]) {
-    const value = sourceMetadata[key]
-    if (Array.isArray(value)) next[key] = value.filter((item) => typeof item === "string")
-  }
   if (input.sourceTitleHidden && !overrides?.title?.trim() && !title?.trim())
     Object.assign(next, protectedBotHistoryTitle(nextTitle))
   next.forkedFromThreadId = sourceThreadId

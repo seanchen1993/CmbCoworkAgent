@@ -55,8 +55,7 @@ import {
   Flag,
   PlayCircle,
   GitFork,
-  Loader2,
-  Sparkles
+  Loader2
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -65,6 +64,7 @@ import { MessageFeedbackDialog, type DislikeFeedbackPayload } from "./MessageFee
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { getSkillDisplayLabel } from "@/features/slash-commands/skill-display-label"
 import {
   parseUserVisibleBuiltinBrowserContent,
   stripBuiltinBrowserPrompt
@@ -418,17 +418,6 @@ function MessageBubbleImpl({
   const presentTool = useContext(ChatToolPresentationContext)
   const presentMessage = useContext(ChatMessagePresentationContext)
   const presentUserText = useContext(ChatUserTextPresentationContext)
-  const isRequirementWorkbenchMessage =
-    message.role === "user" &&
-    (message.contextLabel === "requirement-workbench" ||
-      (typeof message.content === "string" &&
-        /^为「[^」]+」撰写一份产品需求文档。/.test(message.content.trim())))
-  const requirementWorkbenchBadge = isRequirementWorkbenchMessage ? (
-    <span className="mr-2 inline-flex items-center gap-1 rounded-full border border-status-info/20 bg-status-info/10 px-1.5 py-0.5 align-middle text-[10px] font-medium leading-none text-status-info">
-      <Sparkles className="size-3" />
-      需求工作台
-    </span>
-  ) : null
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
   const [copySuccess, setCopySuccess] = useState(false)
@@ -710,9 +699,8 @@ function MessageBubbleImpl({
             data-user-message-text
             className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
           >
-            {requirementWorkbenchBadge}
             {skillName && (
-              <SkillChip label={skillName} compact className="mr-2" />
+              <SkillChip label={getSkillDisplayLabel(skillName)} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
             <span
@@ -754,9 +742,12 @@ function MessageBubbleImpl({
                 data-user-message-text
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
-                {requirementWorkbenchBadge}
                 {skillContent.skillName && (
-                  <SkillChip label={skillContent.skillName} compact className="mr-2" />
+                  <SkillChip
+                    label={getSkillDisplayLabel(skillContent.skillName)}
+                    compact
+                    className="mr-2"
+                  />
                 )}
                 {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
                 <span

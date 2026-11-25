@@ -9,6 +9,7 @@ import type { PopoverMode, SlashCommandItem } from "./useSlashCommands"
 import {
   computeDuplicateSkillNames,
   getDisambiguationLabel,
+  getSkillDisplayLabel,
   getSourceLabel
 } from "./skill-display-label"
 
@@ -167,7 +168,9 @@ export function SlashCommandPopover({
                   <Package2 className="size-4 text-muted-foreground shrink-0 mt-0.5" />
                   <div className="min-w-0 flex-1 flex flex-col">
                     <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-sm font-medium text-foreground shrink-0">{s.name}</span>
+                      <span className="text-sm font-medium text-foreground shrink-0">
+                        {getSkillDisplayLabel(s.name)}
+                      </span>
                       <span className="text-sm text-muted-foreground truncate flex-1">
                         {s.description}
                       </span>

@@ -184,6 +184,12 @@ import { insertLog } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import { BUILTIN_BROWSER_COMMAND } from "@/features/builtin-browser/builtin-browser"
+import {
+  isRequirementWorkbenchSlashCommand,
+  REQUIREMENT_WORKBENCH_COMMAND,
+  REQUIREMENT_WORKBENCH_SKILL_NAME
+} from "@/features/requirement-workbench/requirement-workbench"
+import { getSkillDisplayLabel } from "@/features/slash-commands/skill-display-label"
 import { formatHookClockTime, HOOK_TIME_ZONE_LABEL } from "../../../../shared/hook-time"
 import {
   getBuiltinBrowserTitleSource,
@@ -5705,7 +5711,7 @@ export function ChatContainer({
     generalCommands: managedTurn?.textOnlyReason
       ? []
       : managedTurn
-        ? [BUILTIN_BROWSER_COMMAND]
+        ? [BUILTIN_BROWSER_COMMAND, REQUIREMENT_WORKBENCH_COMMAND]
         : undefined
   })
   const loadMoreWorkspaceMentionFiles = useCallback(
@@ -5874,6 +5880,21 @@ export function ChatContainer({
         return
       }
 
+      if (isRequirementWorkbenchSlashCommand(command)) {
+        const skill = enabledSkillsForSlash.find(
+          (item) => item.name.trim().toLowerCase() === REQUIREMENT_WORKBENCH_SKILL_NAME
+        )
+        if (!skill) {
+          setError("需求工作台 Skill 不可用")
+          return
+        }
+        setSelectedSkill(skill)
+        setSelectedBuiltinBrowser(false)
+        setInput("")
+        slashResetSelection()
+        return
+      }
+
       const nextInput = command.insertText
       setInput(nextInput)
       slashResetSelection()
@@ -5884,7 +5905,14 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
+    [
+      enabledSkillsForSlash,
+      setError,
+      setInput,
+      setSelectedBuiltinBrowser,
+      setSelectedSkill,
+      slashResetSelection
+    ]
   )
 
   const applyAtFileMention = useCallback(
@@ -10060,7 +10088,7 @@ export function ChatContainer({
                           )}
                         >
                           <SkillChip
-                            label={selectedSkill.name}
+                            label={getSkillDisplayLabel(selectedSkill.name)}
                             onRemove={() => setSelectedSkill(null)}
                           />
                           {restoredSkillUnavailable && (

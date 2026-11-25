@@ -1,6 +1,7 @@
 import { ipcRenderer } from "electron"
 import {
   BROWSER_DOWNLOADS_CHANGED_CHANNEL,
+  BROWSER_PANEL_CLOSE_REQUEST_CHANNEL,
   BROWSER_PANEL_REQUEST_CHANNEL,
   BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL,
   BROWSER_SCRIPT_RECORDING_STATE_CHANNEL,
@@ -140,6 +141,13 @@ export function createBrowserApi() {
       ipcRenderer.on(BROWSER_PANEL_REQUEST_CHANNEL, handler)
       return () => {
         ipcRenderer.removeListener(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      }
+    },
+    onPanelCloseRequest: (callback: () => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on(BROWSER_PANEL_CLOSE_REQUEST_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_PANEL_CLOSE_REQUEST_CHANNEL, handler)
       }
     },
     onScriptExecutionState: (callback: (state: BrowserScriptExecutionState) => void) => {

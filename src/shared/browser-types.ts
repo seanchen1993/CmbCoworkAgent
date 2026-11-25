@@ -59,6 +59,7 @@ export interface BrowserState {
 export const BUILTIN_BROWSER_LOG_PREFIX = "[内置浏览器]"
 export const BROWSER_SESSION_ID = "app-browser"
 export const BROWSER_PANEL_REQUEST_CHANNEL = "browser:panel-request"
+export const BROWSER_PANEL_CLOSE_REQUEST_CHANNEL = "browser:panel-close-request"
 export const BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL = "browser:script-execution-state"
 export const BROWSER_SCRIPT_RECORDING_STATE_CHANNEL = "browser:script-recording-state"
 export const BROWSER_DOWNLOADS_CHANGED_CHANNEL = "browser:downloads-changed"

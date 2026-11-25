@@ -47,6 +47,13 @@ const inAppBrowserTabsTool: McpCapabilityTool = {
   toolName: "browser_tabs"
 }
 
+const inAppBrowserCloseTool: McpCapabilityTool = {
+  ...inAppBrowserTool,
+  capabilityId: "connector:inAppBrowser:browser_close",
+  toolId: "mcp__inAppBrowser__browser_close",
+  toolName: "browser_close"
+}
+
 function browserState(visible: boolean, created = true): BrowserState {
   return {
     sessionId: BROWSER_SESSION_ID,
@@ -84,6 +91,45 @@ describe("Playwright MCP in-app browser bridge", () => {
 
   it("matches in-app browser tools by default (CDP enabled)", () => {
     expect(shouldPreparePlaywrightInAppBrowser(inAppBrowserTool)).toBe(true)
+  })
+
+  it("requests closing the Browser drawer after browser_close succeeds", async () => {
+    const requestPanelClose = vi.fn()
+    const invoke = vi.fn().mockResolvedValue(mcpResult("closed"))
+
+    await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+      tool: inAppBrowserCloseTool,
+      workspacePath: "/workspace",
+      invoke,
+      prepareBeforeInvoke: false,
+      browserService: {
+        getState: vi.fn(),
+        prepareTarget: vi.fn(),
+        requestPanel: vi.fn(),
+        requestPanelClose
+      }
+    })
+
+    expect(requestPanelClose).toHaveBeenCalledOnce()
+  })
+
+  it("keeps the Browser drawer open when browser_close fails", async () => {
+    const requestPanelClose = vi.fn()
+
+    await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+      tool: inAppBrowserCloseTool,
+      workspacePath: "/workspace",
+      invoke: vi.fn().mockResolvedValue(mcpResult("failed", true)),
+      prepareBeforeInvoke: false,
+      browserService: {
+        getState: vi.fn(),
+        prepareTarget: vi.fn(),
+        requestPanel: vi.fn(),
+        requestPanelClose
+      }
+    })
+
+    expect(requestPanelClose).not.toHaveBeenCalled()
   })
 
   it("matches in-app browser tools with custom CDP port", () => {

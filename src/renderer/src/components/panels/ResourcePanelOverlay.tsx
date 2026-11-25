@@ -90,6 +90,14 @@ export function ResourcePanelOverlay({
 
   useEffect(
     () =>
+      window.api.browser.onPanelCloseRequest(() => {
+        if (open && mode === "browser") close()
+      }),
+    [close, mode, open]
+  )
+
+  useEffect(
+    () =>
       onDestroyOpenBrowserResourcePanel(() => {
         if (!open || mode !== "browser") return
         getBrowserPageConfirmation()?.onCancel()
