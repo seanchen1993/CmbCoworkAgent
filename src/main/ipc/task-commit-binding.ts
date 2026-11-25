@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import type { TaskCommitBindingEditor } from "../../shared/task-commit-binding"
 import { getAgentAutoCommitWorkspaceCard } from "../storage"
+import { isTrustedRendererUrl } from "../main-log-forwarding"
 import {
   onFeatureRepositoryMappingChange,
   onHarnessFeatureCatalogChange
@@ -25,6 +26,27 @@ interface Editor {
   state: ReturnType<typeof beginTaskCommitBindingEdit>
   allowed: Map<string, string>
   mapped: Map<string, { id: string; sourcePath: string }>
+}
+
+/** A hosted desktop document may use fragment-based routes. Its HTTPS origin,
+ * path and query must match the build's configured renderer entry. */
+export function isTaskCommitRendererUrl(
+  actual: string | undefined,
+  bundled: string,
+  configured: string | undefined
+): boolean {
+  if (isTrustedRendererUrl(actual, bundled) || isTrustedRendererUrl(actual, configured)) return true
+  if (!actual || !configured) return false
+  try {
+    const expected = new URL(configured)
+    const current = new URL(actual)
+    if (expected.protocol !== "https:" || expected.username || expected.password) return false
+    expected.hash = ""
+    current.hash = ""
+    return current.href === expected.href
+  } catch {
+    return false
+  }
 }
 
 /** Only the app's top-level desktop UI can create or change a task authorization. */
@@ -114,7 +136,9 @@ export function registerTaskCommitBindingHandlers(
       const repositories = Array.from(session.allowed.keys())
       const defaults = session.mapped.size
         ? Array.from(session.mapped.keys())
-        : repositories.length === 1 ? repositories : []
+        : repositories.length === 1
+          ? repositories
+          : []
       const selected = state.binding
         ? repositories.filter((item) => state.binding!.repositoryPaths.includes(item))
         : defaults

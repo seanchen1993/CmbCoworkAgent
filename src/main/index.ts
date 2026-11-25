@@ -388,7 +388,7 @@ import {
 } from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
-import { registerTaskCommitBindingHandlers } from "./ipc/task-commit-binding"
+import { isTaskCommitRendererUrl, registerTaskCommitBindingHandlers } from "./ipc/task-commit-binding"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { registerManagedLinkHandlers } from "./ipc/managed-links"
@@ -1216,13 +1216,15 @@ if (browserNativeMessagingHostLaunch) {
     registerAutoCommitHandlers(ipcMain)
     // A locally built desktop can load the bundled file without a dev server.
     const bundledRendererUrl = pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    const configuredRenderer = isDev && process.env["ELECTRON_RENDERER_URL"]
+      ? trustedMainRendererUrl
+      : import.meta.env.VITE_RENDER_URL
     registerTaskCommitBindingHandlers(ipcMain, (event) => {
       if (!mainWindow || mainWindow.isDestroyed()) return false
       const contents = mainWindow.webContents
-      const expectedUrl = trustedMainRendererUrl ?? bundledRendererUrl
       return event.sender === contents && event.senderFrame === contents.mainFrame &&
-        isTrustedRendererUrl(contents.getURL(), expectedUrl) &&
-        isTrustedRendererUrl(event.senderFrame?.url, expectedUrl)
+        isTaskCommitRendererUrl(contents.getURL(), bundledRendererUrl, configuredRenderer) &&
+        isTaskCommitRendererUrl(event.senderFrame?.url, bundledRendererUrl, configuredRenderer)
     })
     registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)

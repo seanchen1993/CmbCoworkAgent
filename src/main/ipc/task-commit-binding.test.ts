@@ -33,7 +33,7 @@ import {
   publishFeatureRepositoryMappings
 } from "../harness-board/feature-catalog-lifecycle"
 import { readTaskCommitBinding } from "../services/task-commit-binding"
-import { registerTaskCommitBindingHandlers } from "./task-commit-binding"
+import { isTaskCommitRendererUrl, registerTaskCommitBindingHandlers } from "./task-commit-binding"
 
 type Handler = (...args: unknown[]) => unknown
 const handlers = new Map<string, Handler>()
@@ -50,6 +50,24 @@ function invoke<K extends keyof TaskCommitBindingApi>(
 let workspace: string
 let repo: string
 let otherRepo: string
+
+it("accepts the bundled window and the configured HTTPS desktop document", () => {
+  const bundled = "file:///app/renderer/index.html"
+  const hosted = "https://desktop.example.test/app/index.html?tenant=qa"
+  expect(isTaskCommitRendererUrl(bundled, bundled, undefined)).toBe(true)
+  expect(isTaskCommitRendererUrl(hosted + "#/thread", bundled, hosted)).toBe(true)
+  for (const actual of [
+    "https://desktop.example.test/login.html",
+    "https://desktop.example.test/app/index.html?tenant=other",
+    "https://other.example.test/app/index.html?tenant=qa",
+    hosted.replace("https:", "http:"),
+    "file:///app/renderer/login.html"
+  ]) {
+    expect(isTaskCommitRendererUrl(actual, bundled, hosted)).toBe(false)
+  }
+  const insecure = "http://desktop.example.test/app/index.html"
+  expect(isTaskCommitRendererUrl(insecure, bundled, insecure)).toBe(false)
+})
 
 beforeAll(async () => {
   state.dir = realpathSync.native(mkdtempSync(join(tmpdir(), "task-commit-binding-")))
