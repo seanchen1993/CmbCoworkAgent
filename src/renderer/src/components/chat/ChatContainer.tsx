@@ -5966,11 +5966,20 @@ export function ChatContainer({
   const imageDraftBinding = imageDraftIdentity?.token ?? imageDraftIdentity?.legacyCreatedAt
   const imageIncarnation = imageDraftIdentity && threadIncarnationKey(imageDraftIdentity)
   const parentImagePresentation = useContext(ChatUserImagePresentationContext)
-  const presentOrdinaryImages = useCallback((message: Message) => {
-    if (!imageIncarnation || !message.hasChatImages) return null
+  const linkedImageHistory = surface === "bot" && Boolean(desktopWorkId) &&
+    currentThread?.metadata?.botLocalConversation === true
+  const presentUserImages = useCallback((message: Message) => {
+    // A re-linked thread may contain inputs owned by an earlier work of the same Bot.
+    if (!(linkedImageHistory && message.botHistoryInputOrigin?.hasInputImages) &&
+        (surface !== "default" || managedUpload)) {
+      const managedImages = parentImagePresentation?.(message)
+      if (managedImages != null || surface !== "bot" || !desktopWorkId) return managedImages
+    }
+    if (!imageIncarnation || !(message.hasChatImages || message.botHistoryInputOrigin?.hasInputImages)) return null
     const request = { threadId, messageId: message.id, incarnation: imageIncarnation, workspacePath: workspacePath ?? null }
-    return <MessageImageGallery sourceKey={JSON.stringify(request)} read={() => window.api.file.readMessageChatImages(request)} />
-  }, [threadId, imageIncarnation, workspacePath])
+    return <MessageImageGallery sourceKey={JSON.stringify([request, desktopWorkId])}
+      read={() => window.api.file.readMessageChatImages(request)} />
+  }, [threadId, imageIncarnation, workspacePath, surface, managedUpload, desktopWorkId, linkedImageHistory, parentImagePresentation])
   useEffect(() => {
     if (!allowWorkspaceImages || historyOnly || restoredBotDraft || historyLoading || !currentThread ||
         currentThread.metadata?.botId || currentThread.metadata?.botWorkId ||
@@ -10114,7 +10123,7 @@ export function ChatContainer({
                     value={showExecutionDetails || searchExpandsExecutionDetails}
                   >
                     <ChatFoldedToolCallsContext.Provider value={foldedTools}>
-                    <ChatUserImagePresentationContext.Provider value={surface === "default" && !managedTurn ? presentOrdinaryImages : parentImagePresentation}>
+                    <ChatUserImagePresentationContext.Provider value={presentUserImages}>
                     <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
                       <ChatMessageVirtualList
                         historyWindowRevision={historyWindowRevision}

@@ -10,7 +10,7 @@ import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { openNativeSqliteDatabase, NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { BotTelemetryReporter } from "./telemetry-reporter"
-import { buildEvent, getEventReporter } from "../services/event-reporter"
+import { buildEventContext, getEventReporter } from "../services/event-reporter"
 import { LocalBotHost } from "./host"
 import { verifyWorkConversationThread } from "./conversation-link-authority"
 import { createLocalBotRunPort, prepareBotThread } from "./runtime-adapter"
@@ -309,17 +309,7 @@ export function getLocalBotHost(): LocalBotHost {
               : []
           )
         },
-        () => {
-          const {
-            eventId: _id,
-            eventName: _name,
-            eventTime: _time,
-            eventCategory: _category,
-            properties: _properties,
-            ...context
-          } = buildEvent("bot.context", "bot")
-          return context
-        }
+        buildEventContext
       )
     const reclaimImageInputs = () => sweepBotImageInputs(root => store.managedImageSnapshotPaths(root))
       .catch(error => console.warn("[Bots] Image selection cleanup failed", error?.code))
@@ -404,6 +394,7 @@ export function getLocalBotHost(): LocalBotHost {
     setWorkConversationLookup((threadId) => host?.conversationLinks.forThread(threadId) ?? null)
     setBotHistoryInputSource({
       forkInputs: readForkInputProjections,
+      imageInput: (bot, work, message, id) => getLocalBotHost().desktopAttachmentPreviewInput(bot, id, undefined, work, message),
       legacyRequests: (...args) => host?.legacyHistoryRequests(...args) ?? [],
       origins: (threadId, incarnation, ids, row) => host?.historicalMessageOrigins(threadId, incarnation, ids, true, row) ?? [],
       works: threadId => host?.desktopDeliveryWorks(threadId) ?? [],

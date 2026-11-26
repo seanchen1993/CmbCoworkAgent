@@ -45,6 +45,8 @@ jobs:
           src/main/ipc/bot-attachment-storage.test.ts
           src/main/ipc/bot-files.test.ts
           src/main/ipc/attachment-security.test.ts
+          src/main/bots/input-file-deletion.test.ts
+          src/main/bots/history-input-projection.test.ts
           src/main/bots/input-files.test.ts
           src/main/bots/input-images.test.ts
           src/main/bots/delivery-receipt-path.test.ts
@@ -57,6 +59,8 @@ jobs:
           src/shared/agent-runtime-settings-integration.test.ts
           src/renderer/src/features/mentions/atFileAttachments.test.ts
           src/renderer/src/lib/image-outbox.test.ts
+          src/renderer/src/components/chat/chat-message-virtual-list-initial-position.test.ts
+          src/renderer/src/components/chat/chat-scroll-runtime-harness.test.ts
           src/renderer/src/lib/load-visible-message-images.test.ts
           src/renderer/src/lib/bot-work-client.test.ts
           src/renderer/src/lib/chat-composer-guard.test.ts

@@ -4,7 +4,7 @@ import type { ParsedDocument } from "./file-parser"
 import { documentImageLabel } from "./document-attachment-images"
 import type { ChatImageRef, FileAttachment } from "../shared/file-attachment"
 import { getThreadCore } from "./db"
-import { findBotWorkThreadOwner } from "./bots/conversation-link-authority"
+import { findBotWorkThreadOwner, verifyWorkConversationThread } from "./bots/conversation-link-authority"
 import { hasOrdinaryBotConversationShape } from "./bots/ordinary-thread-policy"
 import { discardChatDraftImage, stageChatImage } from "./chat-images"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "./services/thread-incarnation"
@@ -17,6 +17,18 @@ import { isSameGitWorkspacePath, normalizeGitWorkspacePathKey } from "../shared/
 export function captureOrdinaryImageDraft(
   threadId: string, workspacePath: string | null | undefined, assertSender: () => void
 ) {
+  return captureDesktopImageScope(threadId, workspacePath, assertSender, false)
+}
+
+/** A bound local desktop work keeps its ordinary prefix in the same native thread. */
+export function captureMessageImageHistory(
+  threadId: string, workspacePath: string | null, assertSender: () => void
+) {
+  return captureDesktopImageScope(threadId, workspacePath, assertSender, true)
+}
+
+function captureDesktopImageScope(threadId: string, workspacePath: string | null | undefined,
+  assertSender: () => void, history: boolean) {
   if (typeof threadId !== "string" || !threadId || threadId.length > 256)
     throw new Error("图片所属会话无效")
   function readScope() {
@@ -24,17 +36,27 @@ export function captureOrdinaryImageDraft(
     const row = getThreadCore(threadId)
     const metadata = row?.metadata && JSON.parse(row.metadata)
     const root = typeof metadata?.workspacePath === "string" ? metadata.workspacePath : null
-    if (!row || !metadata || !hasOrdinaryBotConversationShape(metadata) ||
-        findBotWorkThreadOwner(threadId) || (workspacePath !== undefined &&
-          !(root === workspacePath || isSameGitWorkspacePath(root, workspacePath))))
+    const work = findBotWorkThreadOwner(threadId)
+    if (!row || !metadata || (workspacePath !== undefined &&
+        !(root === workspacePath || isSameGitWorkspacePath(root, workspacePath))))
       throw new Error("@图片所属会话或工作区已变更，请重新选择。")
-    return { row, root }
+    if (work || !hasOrdinaryBotConversationShape(metadata)) {
+      if (!history || !work || work.source || work.audienceKey !== "desktop" ||
+          work.threadId !== threadId || work.conversation?.ref.kind !== "local_thread" ||
+          work.conversation.ref.threadId !== threadId || work.conversation.state !== "bound" ||
+          ["remoteState", "remoteReadOnly", "remoteThread", "remoteImContext", "imDeliveryContext", "targetKind"]
+            .some(key => metadata[key] != null))
+        throw new Error("@图片所属会话或工作区已变更，请重新选择。")
+      verifyWorkConversationThread(work, row, metadata)
+    }
+    return { row, root, ownerId: work?.id }
   }
-  const { row, root } = readScope()
+  const { row, root, ownerId } = readScope()
   const identity = captureThreadIncarnation(row)
   const assertCurrent = () => {
     const current = readScope()
-    if (current.root !== root || !matchesThreadIncarnation(current.row, identity)) throw new Error("@图片所属会话已变更")
+    if (current.root !== root || current.ownerId !== ownerId || !matchesThreadIncarnation(current.row, identity)) throw new Error("@图片所属会话已变更")
+    return current.row
   }
   return { root, assertCurrent, identity }
 }

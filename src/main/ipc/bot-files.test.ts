@@ -17,6 +17,7 @@ const groupWorkspace = join("/test-data", "bots", "workspaces", "group-g")
 const imWorkspace = join("/test-data", "bots", "workspaces", "mock-im-binding")
 
 const fixture = vi.hoisted(() => ({
+  sendImageGate: vi.fn<() => SharedArrayBuffer | undefined>(),
   dataRoot: vi.fn(() => "/test-data"),
   retainImageSelection: vi.fn(),
   groupMessageImageInputs: vi.fn(),
@@ -97,9 +98,16 @@ vi.mock("../chat-image-worker?nodeWorker", () => ({
     const file = fileURLToPath(new URL("../chat-image-worker.ts", import.meta.url))
     const code = transformSync(readFileSync(file, "utf8"), { loader: "ts", format: "cjs" }).code
     const load = 'require("module").createRequire(' + JSON.stringify(file) + ')'
-    return new Worker("(function(require) {" + code + "})(" + load + ")", { ...options, eval: true })
+    const gate = !options.workerData.includeData && fixture.sendImageGate()
+    const waitForSend = gate
+      ? 'Atomics.wait(new Int32Array(require("node:worker_threads").workerData.gate), 0, 0, 10000);'
+      : ""
+    return new Worker(waitForSend + "(function(require) {" + code + "})(" + load + ")", {
+      ...options, workerData: { ...options.workerData, gate }, eval: true
+    })
   }
 }))
+import { decodeChatImage } from "../chat-image-decoder"
 import { registerBotFileHandlers } from "./bot-files"
 
 async function pngBytes(): Promise<ArrayBuffer> {
@@ -187,6 +195,39 @@ it("checks the desktop window and revalidates group ownership before returning m
   expect(fixture.groupMessageImageInputs).toHaveBeenCalledWith("g", "msg")
   fixture.groupMessageImageInputs.mockReturnValueOnce([receipt]).mockReturnValueOnce([])
   await expect(invoke("read-group-message-images", "g", "msg")).rejects.toThrow("已变更")
+})
+
+it("queues history reads before opening snapshots without taking an image send slot", async () => {
+  const png = await pngBytes()
+  const bytes = Buffer.from(png)
+  const digest = createHash("sha256").update(bytes).digest("hex")
+  const file = { filename: "sent.png", size: bytes.length, mimeType: "image/png",
+    filePath: join(tmpdir(), ".bot-deliveries", digest, "sent.png") }
+  fixture.groupMessageImageInputs.mockReturnValue([{ id: "input-1", file, attachment: file, blockHash: "selected" }])
+  const firstRead = Promise.withResolvers<Buffer>()
+  fixture.stableRead.mockReturnValueOnce(firstRead.promise).mockResolvedValue(bytes)
+  const gate = new Int32Array(new SharedArrayBuffer(4))
+  fixture.sendImageGate.mockReturnValue(gate.buffer)
+  const invoke = register()
+  const previews = Promise.all([1, 2, 3, 4].map(id => invoke("read-group-message-images", "g", "msg" + id)))
+  const sends: Array<ReturnType<typeof decodeChatImage>> = []
+  try {
+    await vi.waitFor(() => expect(fixture.stableRead).toHaveBeenCalledTimes(1))
+    for (let i = 0; i < 3; i++) {
+      sends.push(decodeChatImage("upload.png", png.slice(0)))
+      await vi.waitFor(() => expect(fixture.sendImageGate).toHaveBeenCalledTimes(i + 1))
+    }
+    await expect(decodeChatImage("fourth.png", png.slice(0))).rejects.toThrow("其他图片正在处理")
+    firstRead.resolve(bytes)
+    for (const result of await previews)
+      expect(result).toEqual([{ filename: file.filename, url: expect.stringMatching(/^data:image\/webp;base64,/) }])
+  } finally {
+    firstRead.resolve(bytes)
+    Atomics.store(gate, 0, 1)
+    Atomics.notify(gate, 0)
+    await Promise.allSettled([...sends, previews])
+  }
+  expect(await Promise.all(sends)).toHaveLength(3)
 })
 
 it.each(["private", "group"] as const)("issues an image receipt only to its %s owner", async scope => {

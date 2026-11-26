@@ -194,15 +194,19 @@ export class FileAttachmentParserClient {
   }
 }
 
-let defaultClient: FileAttachmentParserClient | null = null
+const clients = new Map<"upload" | "preview", FileAttachmentParserClient>()
 
-export function getFileAttachmentParserClient(): FileAttachmentParserClient {
-  if (!defaultClient) defaultClient = new FileAttachmentParserClient()
-  return defaultClient
+export function getFileAttachmentParserClient(purpose: "upload" | "preview" = "upload"): FileAttachmentParserClient {
+  let client = clients.get(purpose)
+  if (!client) {
+    client = new FileAttachmentParserClient()
+    clients.set(purpose, client)
+  }
+  return client
 }
 
 export async function closeFileAttachmentParserWorker(): Promise<void> {
-  const client = defaultClient
-  defaultClient = null
-  await client?.close()
+  const active = [...clients.values()]
+  clients.clear()
+  await Promise.all(active.map(client => client.close()))
 }

@@ -804,6 +804,7 @@ export class LocalBotHost {
       if (work.source || work.audienceKey !== "desktop")
         throw new BotError("CONFLICT", "此工作不能预览桌面输入附件")
     }
+    if (!workId) this.getBot(botId)
     if (messageId) return this.store.desktopMessageImageInput(botId, inputId, messageId, workId)
     return this.store.desktopInputFiles(botId, [inputId], workId)[0]
   }

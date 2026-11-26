@@ -26,7 +26,7 @@ import { BotWorkConversationJournal, OMIT_DERIVED_WORK_TITLE } from "./conversat
 import { localWorkConversationRef, readWorkConversationRecord } from "./conversation-link-validation"
 import { verifyWorkConversationThread, verifyWorkDeletionThread } from "./conversation-link-authority"
 import { matchesThreadIncarnation, type ThreadIncarnationRow } from "../services/thread-incarnation"
-import { clearBotWorkInputHistory, deleteBotThreadHistory, tracksBotInputPreparation, type BotHistoryOwner } from "./history-input-projection"
+import { clearBotWorkInputHistory, deleteBotThreadHistory, tracksBotInputPreparation, type BotHistoryOwner, type HistoricalBotMessageOrigin } from "./history-input-projection"
 import { upgradeWorkConversationSchema } from "./conversation-link-schema"
 import type {
   BotWorkItem,
@@ -3869,6 +3869,7 @@ export class BotStore {
     const row = this.rows(`SELECT origin_json FROM bot_exchange_records WHERE bot_id=? AND thread_id=?
       AND work_id IS ? AND request_id=? AND audience_key='desktop'
       AND json_extract(origin_json,'$.kind')='user'
+      AND COALESCE(json_extract(origin_json,'$.imageAdmission'),'')!='withdrawn'
       AND EXISTS (SELECT 1 FROM json_each(origin_json,'$.inputFileIds') WHERE value=?)`,
       [botId, threadId, workId ?? null, messageId, inputId])[0]
     if (!row) throw new BotError("NOT_FOUND", "此消息没有该附件")
@@ -5064,7 +5065,7 @@ export class BotStore {
     messageIds: readonly string[],
     includeBound = false,
     nativeRow?: ThreadIncarnationRow
-  ): BotMessageOrigin[] {
+  ): HistoricalBotMessageOrigin[] {
     if (!messageIds.length) return []
     if (messageIds.length > 100) throw new BotError("INVALID_INPUT", "消息来源查询过多")
     const owners = this.desktopDeliveryWorks(threadId).filter(owner => {
@@ -5079,7 +5080,7 @@ export class BotStore {
         ? incarnation.token !== null && incarnation.token === prior.token : incarnation.legacyCreatedAt === prior.legacyCreatedAt
     }).map(owner => [owner.botId, owner.id])
     if (!owners.length) return []
-    return this.rows(`SELECT r.id,r.request_id,r.origin_json,r.state FROM bot_exchange_records r
+    return this.rows(`SELECT r.id,r.request_id,r.origin_json,r.state,r.bot_id,r.work_id FROM bot_exchange_records r
       LEFT JOIN bot_tasks live ON live.id=r.id
       WHERE r.thread_id=? AND r.audience_key='desktop' AND live.mock_source_json IS NULL
       AND r.request_id IN (SELECT value FROM json_each(?))
@@ -5087,8 +5088,11 @@ export class BotStore {
       AND json_extract(r.origin_json,'$.kind')='user'`, [threadId, JSON.stringify(messageIds), JSON.stringify(owners)])
       .flatMap(row => {
         const origin = JSON.parse(String(row.origin_json)) as Extract<BotTaskOrigin, { kind: "user" }>
-        if (!origin.explicitSkill && !origin.replyTo) return []
+        const ids = origin.imageAdmission === "withdrawn" ? undefined :
+          origin.inputFileIds?.filter(id => !origin.visualInputFileIds || origin.visualInputFileIds.includes(id))
+        if (!origin.explicitSkill && !origin.replyTo && !ids?.length) return []
         return [{ id: String(row.id), requestId: String(row.request_id), state: String(row.state) as BotTaskState,
+          ...(ids?.length ? { imageSelection: { botId: String(row.bot_id), workId: String(row.work_id), ids } } : {}),
           origin: { kind: "user" as const, ...(origin.explicitSkill ? { explicitSkill: origin.explicitSkill } : {}),
             ...(origin.replyTo ? { replyTo: origin.replyTo } : {}) } }]
       })

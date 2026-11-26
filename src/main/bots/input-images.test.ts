@@ -215,6 +215,8 @@ it("acknowledges and withdraws an exact visual request while another private tur
     expect(host.cancelQueuedImageInput(bot.id, check)).toBe(true)
     expect(host.cancelQueuedImageInput(bot.id, check)).toBe(true)
     expect(receipt()).toBe("withdrawn")
+    expect(() => host.desktopAttachmentPreviewInput(bot.id, file.botInputId!, undefined, undefined, request.requestId))
+      .toThrow("此消息没有该附件")
     expect(store.getTask(first.id).state).toBe("running")
     expect(() => host.sendDesktopMessage(request)).toThrow("图片消息已取消发送")
     finish()

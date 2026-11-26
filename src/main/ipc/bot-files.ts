@@ -1,4 +1,4 @@
-import { BotImageImportBatch, readBotAttachmentImages, readBotImageSelection } from "../bots/image-import"
+import { BotImageImportBatch, readBotAttachmentImages, readBotImageSelection, withBotImagePreview } from "../bots/image-import"
 import { decodeChatImage } from "../chat-image-decoder"
 import { assertChatAttachmentWindow } from "./chat-attachment-window"
 import { botImageMime } from "../../shared/bots/input-files"
@@ -680,10 +680,18 @@ export function registerBotFileHandlers(
   }
   const imageWindow = (event: IpcMainInvokeEvent) =>
     getMainWindow ? assertChatAttachmentWindow(event, getMainWindow) : desktopWindow(event)
+  const readImagePreview = (event: IpcMainInvokeEvent, read: () => Promise<DraftAttachmentImage[]>) => {
+    imageWindow(event)
+    return withBotImagePreview(async () => {
+      imageWindow(event)
+      const images = await read()
+      imageWindow(event)
+      return images
+    })
+  }
   ipcMain.handle("bots:files:read-group-message-images", async (
     event, hostId: unknown, group: unknown, message: unknown
-  ) => {
-    imageWindow(event)
+  ) => readImagePreview(event, async () => {
     const host = hostFor(hostId)
     const groupId = botIdentifier(group), messageId = botIdentifier(message)
     const lookup = () => host.groupMessageImageInputs(groupId, messageId)
@@ -691,17 +699,15 @@ export function registerBotFileHandlers(
     const images: DraftAttachmentImage[] = []
     for (const file of files)
       images.push(...await readBotAttachmentImages(file, "bot-group-preview:" + file.id))
-    imageWindow(event)
     const current = lookup()
     if (current.length !== files.length || current.some((file, i) =>
       file.id !== files[i].id || file.file.filePath !== files[i].file.filePath))
       throw new BotError("CONFLICT", "群消息附件已变更")
     return images
-  })
+  }))
   ipcMain.handle("bots:files:read-attachment-images", async (
     event, hostId: unknown, botId: unknown, input: unknown, groupId?: unknown, workId?: unknown, messageId?: unknown
-  ) => {
-    imageWindow(event)
+  ) => readImagePreview(event, async () => {
     const host = hostFor(hostId)
     const bot = botIdentifier(botId), inputId = botIdentifier(input)
     const group = groupId === undefined ? undefined : botIdentifier(groupId)
@@ -712,11 +718,10 @@ export function registerBotFileHandlers(
     const lookup = () => host.desktopAttachmentPreviewInput(bot, inputId, group, work, message)
     const file = lookup()
     const images = await readBotAttachmentImages(file, "bot-attachment-preview:" + inputId)
-    imageWindow(event)
     if (lookup().file.filePath !== file.file.filePath)
       throw new BotError("CONFLICT", "附件已变更，请重新添加")
     return images
-  })
+  }))
   ipcMain.handle("bots:files:authorize-delivery", async (event, hostId: unknown, input: unknown) => {
     desktopWindow(event)
     const host = hostFor(hostId)

@@ -124,7 +124,7 @@ try {
 }
 
 async function verifyBotAttachmentPreviews(page, bytes, docx) {
-  const { direct, embedded, groupImages, wrongBot, wrongGroup } = await page.evaluate(async ({ png, document }) => {
+  const { direct, embedded, groupImages, wrongBot, wrongGroup, neighboringCounts, nextUpload } = await page.evaluate(async ({ png, document }) => {
     const api = window.api.bots
     const settings = { instructions: "Fixture for local image previews", color: "#168bea",
       modelRef: null, memoryMode: "disabled" }
@@ -135,14 +135,25 @@ async function verifyBotAttachmentPreviews(page, bytes, docx) {
     const [photo, word] = await api.attachFileBytes(bot.id,
       [upload("bot-photo.png", png), upload("bot-document.docx", document)], 500)
     const [groupPhoto] = await api.attachFileBytes(bot.id, [upload("group-photo.png", png)], 500, group.id)
+    const neighbors = await api.attachFileBytes(bot.id, ["one.png", "two.png", "three.png"]
+      .map(name => upload(name, png)), 500)
+    // A scroll can mount several message galleries while the user attaches their next image.
+    const previews = [photo, ...neighbors, word, word].map(file =>
+      api.readAttachmentImages(bot.id, file.botInputId))
+    const [visible, next] = await Promise.all([Promise.all(previews),
+      api.attachFileBytes(bot.id, [upload("next.png", png)], 500)])
     return {
-      direct: await api.readAttachmentImages(bot.id, photo.botInputId),
+      direct: visible[0],
+      neighboringCounts: visible.map(images => images.length),
+      nextUpload: next[0]?.filename,
       embedded: await api.readAttachmentImages(bot.id, word.botInputId),
       groupImages: await api.readAttachmentImages(other.id, groupPhoto.botInputId, group.id),
       wrongBot: await api.readAttachmentImages(other.id, photo.botInputId).then(() => false, () => true),
       wrongGroup: await api.readAttachmentImages(bot.id, groupPhoto.botInputId).then(() => false, () => true)
     }
   }, { png: Array.from(bytes), document: Array.from(docx) })
+  assert.deepEqual(neighboringCounts, [1, 1, 1, 1, 2, 2])
+  assert.equal(nextUpload, "next.png")
   assert.deepEqual(direct.map(image => image.filename), ["bot-photo.png"])
   assert.equal(embedded.length, 2)
   assert.deepEqual(groupImages.map(image => image.filename), ["group-photo.png"])
@@ -226,6 +237,9 @@ async function verifySentImageHistory(page, workspacePath, bytes) {
     await verifyInlineImage(page, docMessage, docName + " · 图 2", [5, 8])
 
     const botName = "Attachment Preview Bot"
+    await chat.getByText(answer, { exact: true }).nth(1).waitFor({ timeout: 90_000 })
+    await verifyLinkedImageHistory(page, { chat, threadId, workspacePath, botName, bytes, message, filename })
+
     const openBot = async () => {
       await page.getByText("Bots", { exact: true }).first().click()
       await page.getByText(botName, { exact: true }).first().click()
@@ -259,11 +273,95 @@ async function verifySentImageHistory(page, workspacePath, bytes) {
     console.log("Sent image pixels, lightbox and restored history passed in ordinary, private Bot and group chats")
   } catch (error) {
     console.error("Image history fixture UI at failure:", (await page.locator("body").innerText()).slice(-3600))
+    const history = await page.evaluate(async () => {
+      const chat = document.querySelector("[data-chat-thread-id]")
+      const threadId = chat?.getAttribute("data-chat-thread-id")
+      if (!threadId) return { threadId }
+      const thread = await window.api.threads.get(threadId)
+      const token = thread.metadata?.cmb_thread_incarnation
+      const incarnation = token ? "uuid:" + token : "legacy:" + new Date(thread.created_at).getTime()
+      const rows = [...chat.querySelectorAll('[data-chat-message-row][data-message-role="user"]')].map(row => ({
+        id: row.getAttribute("data-chat-message-id"), galleries: row.querySelectorAll('[data-testid="message-image-gallery"]').length,
+        images: row.querySelectorAll('button[aria-label^="预览图片 "] img').length
+      }))
+      const { messages } = await window.api.threads.getMessagesPage(threadId)
+      const receipts = await Promise.all(messages.filter(m => m.role === "user").slice(-8).map(async m => ({
+        id: m.id, hasChatImages: m.hasChatImages ?? false, hasBotInputImages: m.botHistoryInputOrigin?.hasInputImages ?? false,
+        imageCount: await window.api.file.readMessageChatImages({
+          threadId, messageId: m.id, workspacePath: thread.metadata?.workspacePath ?? null, incarnation
+        }).then(images => images.length, error => String(error))
+      })))
+      return { threadId, rows, receipts }
+    }).catch(cause => String(cause))
+    console.error("Image history fixture rows and receipts:", JSON.stringify(history))
     throw error
   } finally {
     server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
   }
+}
+
+async function verifyLinkedImageHistory(page, { chat, threadId, workspacePath, botName, bytes, message, filename }) {
+  const waitForIdle = () => page.waitForFunction(async id =>
+    (await window.api.threads.get(id)).status === "idle", threadId, { timeout: 90_000 })
+  const link = page.getByRole("button", { name: "关联为 Bot 任务", exact: true })
+  const more = page.getByRole("button", { name: "更多任务操作", exact: true })
+  const associate = async title => {
+    await waitForIdle()
+    await link.click()
+    const dialog = page.getByRole("dialog")
+    await dialog.getByRole("combobox").selectOption({ label: botName })
+    await dialog.getByLabel("任务名称").fill(title)
+    await dialog.getByLabel("任务目标").fill("Keep the figures visible throughout this conversation.")
+    await dialog.getByRole("button", { name: "关联此会话", exact: true }).click()
+    await more.waitFor()
+  }
+  await associate("Image history work")
+  await verifyInlineImage(page, message, filename)
+
+  await page.getByRole("button", { name: "获取控制权", exact: true }).click()
+  const editor = chat.locator('[data-bot-owner-composer]').locator('textarea, [role="textbox"][contenteditable="true"]').last()
+  const workFilename = "linked-work-figure.png"
+  const workQuestion = "Inspect the linked work figure."
+  await submitImage(page, chat.getByRole("button", { name: "添加文件", exact: true }),
+    editor, workFilename, bytes, workQuestion)
+  const workMessage = chat.locator('[data-chat-message-row][data-message-role="user"]').filter({ hasText: workQuestion })
+  await verifyInlineImage(page, workMessage, workFilename)
+  await page.waitForFunction(async id => {
+    const snapshot = await window.api.bots.snapshot()
+    const tasks = snapshot.tasks.filter(task => task.threadId === id)
+    return tasks.length > 0 && tasks.every(task => !["queued", "running", "waiting_user"].includes(task.state))
+  }, threadId, { timeout: 90_000 })
+  await waitForIdle()
+  await more.click()
+  await page.getByRole("button", { name: "解除任务关联", exact: true }).click()
+  await page.getByRole("button", { name: "确认解除", exact: true }).click()
+  await link.waitFor()
+  await verifyInlineImage(page, workMessage, workFilename)
+  await page.reload({ waitUntil: "domcontentloaded" })
+  const saved = await page.evaluate(id => window.api.threads.get(id), threadId)
+  await page.getByText(saved.title, { exact: true }).first().click()
+  await verifyInlineImage(page, message, filename)
+  await verifyInlineImage(page, workMessage, workFilename)
+  const ids = await Promise.all([message, workMessage].map(row => row.getAttribute("data-chat-message-id")))
+  assert.ok(ids.every(Boolean))
+  const foreignResults = await page.evaluate(async ({ ids, workspacePath }) => {
+    const api = window.api
+    const other = await api.threads.create({ title: "Unrelated image history", workspacePath })
+    const token = other.metadata?.cmb_thread_incarnation
+    const incarnation = token ? "uuid:" + token : "legacy:" + new Date(other.created_at).getTime()
+    return Promise.all(ids.map(async messageId => {
+      const images = await api.file.readMessageChatImages({
+        threadId: other.thread_id, messageId, workspacePath, incarnation
+      })
+      return images.length
+    }))
+  }, { ids, workspacePath })
+  assert.deepEqual(foreignResults, [0, 0], "another thread cannot read these messages' image receipts")
+  await associate("New work on the same conversation")
+  await verifyInlineImage(page, message, filename)
+  await verifyInlineImage(page, workMessage, workFilename)
+  console.log("Ordinary and work images survived link, unlink, reload and reassociation with cross-thread isolation")
 }
 
 async function submitImage(page, drop, composer, filename, bytes, question, previewName = filename) {
@@ -284,7 +382,26 @@ async function submitImage(page, drop, composer, filename, bytes, question, prev
 
 async function verifyInlineImage(page, message, filename, dimensions = [12, 6]) {
   const preview = message.getByRole("button", { name: `预览图片 ${filename}`, exact: true })
-  const pixels = await preview.locator("img").evaluate(async img => {
+  const thumbnail = preview.locator("img")
+  // Use the wheel to bring a historical gallery into view and trigger its lazy image read.
+  const scroll = await message.getByTestId("message-image-gallery").evaluate(gallery => {
+    const viewport = gallery.closest("[data-radix-scroll-area-viewport]") ??
+      gallery.closest("[data-virtuoso-scroller]")
+    if (!viewport) return null
+    const target = gallery.getBoundingClientRect()
+    const box = viewport.getBoundingClientRect()
+    if (target.bottom > box.top && target.top < box.bottom) return null
+    return {
+      x: box.left + box.width / 2,
+      y: box.top + box.height / 2,
+      delta: target.top + target.height / 2 - box.top - box.height / 2
+    }
+  })
+  if (scroll) {
+    await page.mouse.move(scroll.x, scroll.y)
+    await page.mouse.wheel(0, scroll.delta)
+  }
+  const pixels = await thumbnail.evaluate(async img => {
     await img.decode()
     return [img.naturalWidth, img.naturalHeight]
   }, undefined, { timeout: 60_000 })

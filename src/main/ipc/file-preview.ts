@@ -1,7 +1,7 @@
 import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
 import path from "node:path"
 import { assertChatAttachmentWindow } from "./chat-attachment-window"
-import type { ChatImageOwnerRequest, ChatImageStatusRequest, DraftChatImageRequest } from "../../shared/file-attachment"
+import type { ChatImageOwnerRequest, ChatImageStatusRequest, DraftChatImageRequest, DraftAttachmentImage } from "../../shared/file-attachment"
 import { threadIncarnationKey } from "../../shared/thread-incarnation"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
@@ -328,9 +328,27 @@ export function registerWorkspaceFilePreviewHandlers(
     if (!request || !validBoundedString(request.messageId, 1024) ||
         !(request.workspacePath === null || typeof request.workspacePath === "string"))
       throw new Error("图片消息身份无效")
-    const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
-    const { assertCurrent, identity } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
+    const { captureMessageImageHistory } = await import("../workspace-chat-image")
+    const { assertCurrent, identity } = captureMessageImageHistory(request.threadId, request.workspacePath, assertWindow)
     if (threadIncarnationKey(identity) !== request.incarnation) throw new Error("图片所属会话已变更")
+    const { historicalMessageImageInputs } = await import("../bots/history-input-projection")
+    const selection = () => historicalMessageImageInputs(request.threadId, assertCurrent(), request.messageId)
+    const files = selection()
+    if (files.length) {
+      const { readBotAttachmentImages, withBotImagePreview } = await import("../bots/image-import")
+      const assertSelection = () => {
+        if (JSON.stringify(files) !== JSON.stringify(selection())) throw new Error("图片消息已变更")
+      }
+      return withBotImagePreview(async () => {
+        assertSelection()
+        const images: DraftAttachmentImage[] = []
+        for (const file of files) {
+          images.push(...await readBotAttachmentImages(file, "chat-history:" + file.id))
+        }
+        assertSelection()
+        return images
+      })
+    }
     const { readMessageChatImages } = await import("../chat-images")
     return readMessageChatImages(request.threadId, request.messageId, assertCurrent)
   })

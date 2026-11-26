@@ -6,7 +6,7 @@ import { Worker } from "node:worker_threads"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import { MAX_ATTACHMENT_FILE_BYTES } from "../../shared/file-attachment"
-import { FileAttachmentParserClient } from "./client"
+import { closeFileAttachmentParserWorker, FileAttachmentParserClient, getFileAttachmentParserClient } from "./client"
 import { FILE_ATTACHMENT_PARSE_CANCELLED } from "./protocol"
 import { FILE_ATTACHMENT_PARSE_TIMEOUT } from "./protocol"
 
@@ -52,6 +52,17 @@ function textBytes(value: string): ArrayBuffer {
 }
 
 describe("file attachment parser worker", () => {
+  it("isolates history preview parsing from upload worker cancellations and shutdown", async () => {
+    const upload = getFileAttachmentParserClient()
+    const preview = getFileAttachmentParserClient("preview")
+    expect(preview).not.toBe(upload)
+    expect(getFileAttachmentParserClient("preview")).toBe(preview)
+    await closeFileAttachmentParserWorker()
+    const source = { kind: "bytes" as const, fileName: "a.txt", bytes: textBytes("test") }
+    for (const client of [upload, preview])
+      await expect(client.parse(source, 100, "same")).rejects.toThrow("closing")
+  })
+
   it("parses picker bytes outside the Electron main thread without reopening a path", async () => {
     const attachment = await createClient().parse(
       {
