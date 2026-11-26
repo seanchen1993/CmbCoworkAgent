@@ -43,7 +43,7 @@ vi.mock("../thread-message-hydration/client", () => ({
 }))
 vi.mock("../thread-metadata-hydration/client", () => ({ readSideParentInWorker: readParent }))
 vi.mock("../bots/conversation-link-authority", () => ({ findBotWorkThreadOwner: () => undefined }))
-vi.mock("../models/registry", () => ({ getAvailableModelConfigOrDefault: resolveModel }))
+vi.mock("../models/registry", () => ({ getSelectableModelConfigOrDefault: resolveModel }))
 vi.mock("../workspace-file-preview/client", () => ({ getWorkspaceFilePreviewClient: () => ({ inspect: inspectFile }) }))
 const request = { modelId: "custom:test", parentId: randomUUID() }
 

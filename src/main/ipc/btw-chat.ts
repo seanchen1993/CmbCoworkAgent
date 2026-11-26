@@ -16,7 +16,7 @@ import { isThreadMessageHydrationWorkerUnavailable, readThreadMessagesPageInWork
 import type { ThreadMessageHydrationPageOptions } from "../thread-message-hydration/protocol"
 import { readSideParentInWorker } from "../thread-metadata-hydration/client"
 import type { Message } from "../types"
-import { getAvailableModelConfigOrDefault } from "../models/registry"
+import { getSelectableModelConfigOrDefault } from "../models/registry"
 import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOKENS, getDbPath, getThreadCheckpointPath } from "../storage"
 import { getWorkspaceFilePreviewClient } from "../workspace-file-preview/client"
 import { classifyWorkspaceFilePreviewError } from "../workspace-file-preview/errors"
@@ -397,7 +397,7 @@ export async function createSideThread(
     // worker reads pages within the captured boundary.
     await checkSideQuestionFiles(parentId, workspacePath, fileCandidates, assertReadCurrent)
     const requestedModelId = modelId || parentModel
-    const model = getAvailableModelConfigOrDefault(requestedModelId)
+    const model = getSelectableModelConfigOrDefault(requestedModelId)
     const capturedModelId = model?.ref ?? requestedModelId
     const { keepTokens } = calculateContextCompactionBudget(
       model?.maxTokens ?? DEFAULT_MAX_TOKENS,

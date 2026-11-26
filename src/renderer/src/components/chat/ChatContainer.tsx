@@ -6012,19 +6012,23 @@ export function ChatContainer({
   // the hook returns a fresh literal every render, which would re-create
   // applySkillSelection each keystroke and cascade into popover rerenders.
   const slashResetSelection = slash.resetSelection
-  const afterCapabilitySelection = sideSlash ? input.slice(0, sideSlash.start) + input.slice(sideSlash.end) : ""
-  const capabilityCaret = sideSlash?.start
+  const sideCommandInput = sideSlash ? input : ""
   const clearCapabilityQuery = useCallback(() => {
-    setInput(afterCapabilitySelection)
-    if (capabilityCaret === undefined) return
-    const caret = capabilityCaret
-    inputRef.current?.focus({ preventScroll: true })
-    setSideSelectionEnd(caret)
-    requestAnimationFrame(() => {
-      const editor = inputRef.current
-      if (editor?.value === afterCapabilitySelection) editor.setSelectionRange(caret, caret)
-    })
-  }, [afterCapabilitySelection, capabilityCaret, setInput])
+    if (!sideSlash) {
+      setInput("")
+      return
+    }
+    const { start, end } = sideSlash
+    const nextInput = sideCommandInput.slice(0, start) + sideCommandInput.slice(end)
+    const editor = inputRef.current
+    if (editor?.value === sideCommandInput) {
+      editor.focus({ preventScroll: true })
+      editor.value = nextInput
+      editor.setSelectionRange(start, start)
+    }
+    setSideSelectionEnd(start)
+    setInput(nextInput)
+  }, [sideCommandInput, sideSlash, setInput])
   const applySkillSelection = useCallback(
     (s: SkillMetadata) => {
       setSelectedSkill(s)

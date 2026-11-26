@@ -542,11 +542,9 @@ function MessageBubbleImpl({
     const measure = (): void => {
       setUserContentOverflow(el.scrollHeight > USER_MESSAGE_COLLAPSED_MAX_PX + 8)
     }
-    if (typeof ResizeObserver === "undefined") {
-      measure()
-      return
-    }
-    // The initial observer delivery runs after layout and also measures new content.
+    // Collapse the row before Virtuoso measures it for the initial scroll position.
+    measure()
+    if (typeof ResizeObserver === "undefined") return
     const observer = new ResizeObserver(measure)
     observer.observe(el)
     return () => observer.disconnect()

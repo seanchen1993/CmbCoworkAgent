@@ -1,4 +1,5 @@
 import { createHash } from "crypto"
+import { setTimeout as delay } from "node:timers/promises"
 import { join } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
 import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser-mcp-tools"
@@ -174,16 +175,19 @@ function shouldRetryMcpInvocationError(error: unknown): boolean {
 async function invokeToolWithRetry(
   callTool: (request: { name: string; arguments: Record<string, unknown> }) => Promise<unknown>,
   request: { name: string; arguments: Record<string, unknown> },
+  signal?: AbortSignal,
   retries = 1
 ): Promise<unknown> {
+  signal?.throwIfAborted()
   try {
     return await callTool(request)
   } catch (error) {
+    signal?.throwIfAborted()
     if (retries <= 0 || !shouldRetryMcpInvocationError(error)) {
       throw error
     }
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    return invokeToolWithRetry(callTool, request, retries - 1)
+    await delay(500, undefined, { signal })
+    return invokeToolWithRetry(callTool, request, signal, retries - 1)
   }
 }
 
@@ -233,8 +237,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     return this.resolveTool(idOrAlias)
   }
 
-  async invoke(idOrAlias: string, args: Record<string, unknown>): Promise<McpInvocationResult> {
+  async invoke(
+    idOrAlias: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<McpInvocationResult> {
+    signal?.throwIfAborted()
     await this.ensureInitialized()
+    signal?.throwIfAborted()
 
     const tool = this.resolveTool(idOrAlias)
     if (!tool) {
@@ -252,16 +262,26 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     }
 
     const raw = await invokeToolWithRetry(
-      (serverClient as {
-        callTool(
-          request: { name: string; arguments: Record<string, unknown> }
-        ): Promise<unknown>
-      }).callTool.bind(serverClient),
+      async (request) => {
+        if (!signal) return serverClient.callTool(request)
+        // The SDK retains its abort listener after a request settles. Give
+        // each attempt its own signal and disconnect it from the side at settlement.
+        const requestController = new AbortController()
+        const abortRequest = () => requestController.abort(signal.reason)
+        signal.addEventListener("abort", abortRequest, { once: true })
+        try {
+          return await serverClient.callTool(request, undefined, { signal: requestController.signal })
+        } finally {
+          signal.removeEventListener("abort", abortRequest)
+        }
+      },
       {
         name: tool.toolName,
         arguments: args
-      }
+      },
+      signal
     )
+    signal?.throwIfAborted()
 
     const result = normalizeMcpInvocationResult(tool.capabilityId, raw)
 

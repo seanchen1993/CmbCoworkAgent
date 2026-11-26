@@ -24,7 +24,10 @@ import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "./order-sql"
 import { readPriorToolReplayIds } from "./tool-replay-evidence"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
-import { readLegacyImportedCheckpointReplayEvidence } from "../../shared/tool-transcript-replay"
+import {
+  readHistoricalToolReplayId,
+  readLegacyImportedCheckpointReplayEvidence
+} from "../../shared/tool-transcript-replay"
 import {
   getRawWorkerToolCallId,
   getWorkerToolResultKey,
@@ -252,7 +255,8 @@ function projectSideContextMessage(
   fragment: FragmentSummary | undefined,
   cancellation: Int32Array,
   byteBudget: number,
-  textByteBudget: number
+  textByteBudget: number,
+  historicalReplayOf?: string
 ): { message: Message; truncated: boolean; bytes: number } {
   const message: Message = {
     id: row.message_id,
@@ -264,6 +268,16 @@ function projectSideContextMessage(
   }
   const overhead = jsonBytes(message)
   if (row.role !== "user" && row.role !== "assistant" && row.role !== "tool") {
+    return { message, truncated: false, bytes: overhead }
+  }
+  // Omit replay text while keeping the physical row available for pagination.
+  if (historicalReplayOf && readHistoricalToolReplayId({
+    ...message,
+    provider_source_id: row.provider_source_id ?? undefined,
+    provider_occurrence: row.provider_occurrence ?? undefined,
+    tool_call_id: row.tool_call_id ?? undefined,
+    historical_tool_replay_id: historicalReplayOf
+  })) {
     return { message, truncated: false, bytes: overhead }
   }
   const content = parseJsonValue(row.content_json, cancellation)
@@ -1099,6 +1113,14 @@ export function readThreadMessagesPage(
       (selected.length === rowsById.size && rowsById.size === contentHashes.size &&
         Array.from(contentHashes).every(([id, hash]) =>
         hash.digest("hex") === expectedHashes.get(id)))
+    const queryToolReplayIds: Parameters<typeof readPriorToolReplayIds>[2] = (sql, threadId, ids, cutoff) =>
+      database.prepare(sql).all(threadId, ids, cutoff).map(({ message_id, earlier_id }) => [message_id, earlier_id])
+    const sideContextReplayIds = sideContextTextByteBudget !== undefined && !request.options.recoveryCheckpointId
+      ? readPriorToolReplayIds(request.threadId, Array.from(rowsById.values(), (row) => ({
+        id: row.message_id, ordinal: row.ordinal, role: row.role,
+        provider_occurrence: row.provider_occurrence ?? undefined
+      })), queryToolReplayIds, { includeInPage: true })
+      : undefined
     const orderedMessages: Message[] = []
     const returnedCandidates: CandidateRow[] = []
     const truncatedMessageIds: string[] = []
@@ -1113,7 +1135,8 @@ export function readThreadMessagesPage(
       let hydratedTruncated = false
       if (sideContextTextByteBudget !== undefined) {
         projected = projectSideContextMessage(
-          row, fragments.get(candidate.message_id), cancellation, remaining, sideContextTextByteBudget
+          row, fragments.get(candidate.message_id), cancellation, remaining, sideContextTextByteBudget,
+          sideContextReplayIds?.get(candidate.message_id)
         )
       } else {
         const hydrated = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
@@ -1134,10 +1157,8 @@ export function readThreadMessagesPage(
     const hasNewerMessages = head && Boolean(database.prepare(`SELECT 1 FROM thread_messages
       WHERE thread_id = ? AND (ordinal, message_id) > (?, ?) LIMIT 1`)
       .get(request.threadId, head.ordinal, head.message_id))
-    if (!request.options.recoveryCheckpointId) {
-      const priorResults = readPriorToolReplayIds(request.threadId, orderedMessages,
-        (sql, threadId, ids, oldest) => database.prepare(sql).all(threadId, ids, oldest)
-          .map(({ message_id, earlier_id }) => [message_id, earlier_id]))
+    if (!request.options.recoveryCheckpointId && sideContextTextByteBudget === undefined) {
+      const priorResults = readPriorToolReplayIds(request.threadId, orderedMessages, queryToolReplayIds)
       for (const message of orderedMessages) {
         const earlier = priorResults.get(message.id)
         if (!earlier || message.content_preview_notice) continue

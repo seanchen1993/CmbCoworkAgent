@@ -411,7 +411,8 @@ import {
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import {
   autoSelectPlaywrightInAppBrowserTab,
-  invokeMcpToolWithPlaywrightInAppBrowserSupport
+  invokeMcpToolWithPlaywrightInAppBrowserSupport,
+  shouldPreparePlaywrightInAppBrowser
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   DeepSeekChatOpenAICompletions,
@@ -1323,7 +1324,7 @@ Use concise, high-information bullets. Preserve exact user corrections, file pat
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
   tools: McpCapabilityTool[],
-  context: { workspacePath: string; threadId?: string }
+  context: { workspacePath: string; threadId?: string; inAppBrowserSignal?: AbortSignal }
 ): DynamicStructuredTool[] {
   return tools.map((tool) =>
     createEagerMcpTool(
@@ -1336,6 +1337,7 @@ function createEagerMcpTools(
             tool,
             workspacePath: context.workspacePath,
             threadId: context.threadId,
+            signal: context.inAppBrowserSignal,
             args,
             invoke: () => capabilityService.invoke(tool.capabilityId, args)
           }),
@@ -1398,6 +1400,7 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
+    inAppBrowserSignal?: AbortSignal
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1691,7 +1694,8 @@ export function createScopedMcpCapabilityService(
         tabsTool,
         capabilityService: service,
         workspacePath: baseContext.workspacePath,
-        threadId: baseContext.threadId
+        threadId: baseContext.threadId,
+        signal: baseContext.inAppBrowserSignal
       })
 
       if (pluginId) hookScope.activatePlugin(pluginId)
@@ -1699,21 +1703,28 @@ export function createScopedMcpCapabilityService(
         tool,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
+        signal: baseContext.inAppBrowserSignal,
         args: effectiveArgs,
         prepareBeforeInvoke: false,
-        invoke: async () => {
+        invoke: async (signal) => {
+          const invokeTool = async (target: McpCapabilityTool) => {
+            const dispatchSignal = signal ?? (shouldPreparePlaywrightInAppBrowser(target)
+              ? baseContext.inAppBrowserSignal
+              : undefined)
+            if (!dispatchSignal) return service.invoke(target.capabilityId, effectiveArgs)
+            dispatchSignal.throwIfAborted()
+            const invocation = await service.invoke(target.capabilityId, effectiveArgs, dispatchSignal)
+            dispatchSignal.throwIfAborted()
+            return invocation
+          }
           try {
-            return await service.invoke(tool.capabilityId, effectiveArgs)
+            return await invokeTool(tool)
           } catch (error) {
             const fallbackTool = shouldFallbackMcpError(error)
               ? findFallbackTool(tool, snapshot.tools)
               : null
             if (!fallbackTool) throw error
-            return appendFallbackNotice(
-              await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-              tool,
-              fallbackTool
-            )
+            return appendFallbackNotice(await invokeTool(fallbackTool), tool, fallbackTool)
           }
         }
       })
@@ -5914,6 +5925,10 @@ The workspace root is: ${fileRoot}`
     console.log("[Runtime] Memory disabled for this session")
   }
 
+  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
+  const sideConversationSignal = sideConversationLifetime && options.abortSignal
+    ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
+    : sideConversationLifetime
   const capabilityService = createScopedMcpCapabilityService(
     options.capabilityService ??
       (disableMcpTools
@@ -5934,6 +5949,7 @@ The workspace root is: ${fileRoot}`
     {
       workspacePath,
       threadId,
+      inAppBrowserSignal: sideConversationSignal,
       agentId,
       pluginOutputDir,
       systemId,
@@ -5994,7 +6010,8 @@ The workspace root is: ${fileRoot}`
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
       workspacePath,
-      threadId: options.threadId
+      threadId: options.threadId,
+      inAppBrowserSignal: sideConversationSignal
     })
     console.log(
       "[Runtime] Constrained coordinator worker: keeping",
@@ -6011,7 +6028,8 @@ The workspace root is: ${fileRoot}`
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
       workspacePath,
-      threadId: options.threadId
+      threadId: options.threadId,
+      inAppBrowserSignal: sideConversationSignal
     })
     toolSearchTools = await createToolSearchTools(
       capabilityService,
@@ -6039,7 +6057,6 @@ The workspace root is: ${fileRoot}`
     func?: unknown
     invoke?: unknown
   }
-  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
   const extraTools: RuntimeTool[] = []
   if (options.enableRequestUserInput) {
     extraTools.push(
@@ -6064,10 +6081,7 @@ The workspace root is: ${fileRoot}`
     )
   }
   if (!options.noSkillEvolutionTool) {
-    const abortSignal = sideConversationLifetime && options.abortSignal
-      ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
-      : sideConversationLifetime
-    extraTools.push(createSkillEvolutionTool({ threadId, abortSignal }))
+    extraTools.push(createSkillEvolutionTool({ threadId, abortSignal: sideConversationSignal }))
   }
 
   // Conditionally inject Java LSP tool
@@ -6087,7 +6101,7 @@ The workspace root is: ${fileRoot}`
       ...(await createInAppBrowserTools(allMcpTools, {
         workspacePath,
         threadId: options.threadId,
-        abortSignal: options.abortSignal
+        abortSignal: sideConversationSignal ?? options.abortSignal
       }))
     )
   }

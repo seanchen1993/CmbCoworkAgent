@@ -306,6 +306,45 @@ describe("thread message hydration worker", () => {
     expect(older.messages.map(({ id, content }) => ({ id, content }))).toEqual([{ id: "hidden", content: "" }])
   })
 
+  it("omits proven replay text across page boundaries and retains other tool executions and output versions", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(`INSERT INTO thread_messages
+      (thread_id, message_id, provider_source_id, provider_occurrence, role, content_json, tool_call_id,
+       name, status, created_at, ordinal) VALUES ('side-replay', ?, ?, ?, 'tool', ?, 'shared-call',
+       'read_file', 'success', 0, ?)`)
+    const original = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    const otherExecution = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    const revised = `${original}::cmb-same-role-duplicate:tool:2`
+    const revisedReplay = `${original}::cmb-same-role-duplicate:tool:3`
+    const replay = `${original}::cmb-same-role-duplicate:tool:4`
+    const ambiguous = "provider-result"
+    const ambiguousCopy = `${ambiguous}::cmb-same-role-duplicate:tool:2`
+    insert.run(original, null, null, '"Same output"', 0)
+    insert.run(otherExecution, null, null, '"Same output"', 1)
+    insert.run(ambiguous, null, null, '"Unverified output"', 2)
+    insert.run(ambiguousCopy, ambiguous, 2, '"Unverified output"', 3)
+    insert.run(revised, original, 2, '"Changed output"', 4)
+    insert.run(revisedReplay, original, 3, '"Changed output"', 4)
+    insert.run(replay, original, 4, '"Same output"', 5)
+    database.prepare("INSERT INTO thread_message_buckets VALUES ('side-replay', 7, 6, 0)").run()
+    const client = createWorkerClient(path)
+    const options = { beforeOrdinal: 6, beforeMessageId: "\u0001", sideContextTextByteBudget: 20 }
+    const latest = await client.readPage("side-replay", { ...options, limit: 2 })
+    expect(latest.messages.map(({ id, content }) => [id, content])).toEqual([[revisedReplay, ""], [replay, ""]])
+    expect(latest.beforeMessageId).toBe(revisedReplay)
+    expect(latest.hasMore).toBe(true)
+    expect(latest.truncatedMessageIds).toBeUndefined()
+    const prior = await client.readPage("side-replay", {
+      ...options, limit: 8, beforeOrdinal: latest.beforeOrdinal!, beforeMessageId: latest.beforeMessageId!
+    })
+    expect(prior.messages.map(({ id, content }) => [id, content])).toEqual([
+      [original, "Same output"], [otherExecution, "Same output"], [ambiguous, "Unverified output"],
+      [ambiguousCopy, "Unverified output"], [revised, "Changed output"]
+    ])
+    const combined = await client.readPage("side-replay", { ...options, limit: 8 })
+    expect(combined.messages).toEqual([...prior.messages, ...latest.messages])
+  })
+
   it("uses the persisted tail of a fragmented side-context row and filters from its opening text", async () => {
     const { database, path } = createDatabase()
     const insert = database.prepare(`INSERT INTO thread_messages
