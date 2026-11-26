@@ -259,18 +259,21 @@ function testDisplayAttachmentAndSkill(): void {
   )
 }
 
-function testRequirementWorkbenchInstructionIsModelOnly(): void {
-  const instruction = "请使用 `requirement-workbench` 技能处理上述需求。"
+function testRequirementWorkbenchSkillTagIsModelOnly(): void {
+  const skillBlock = formatSkillUseBlock({
+    name: "requirement-workbench",
+    path: "/skills/requirement-workbench/SKILL.md"
+  })
   const draft = qm({
     text: "需求名称：示例",
     contextLabel: "requirement-workbench",
-    skillBlock: instruction,
+    skillBlock,
     skillName: "requirement-workbench"
   })
-  assertEqual(getQueuedModelContent(draft), `需求名称：示例\n\n${instruction}`,
-    "requirement workbench instruction reaches the model")
+  assertEqual(getQueuedModelContent(draft), `需求名称：示例\n\n${skillBlock}`,
+    "requirement workbench skill tag reaches the model")
   assertEqual(getQueuedDisplayContent(draft), "需求名称：示例",
-    "requirement workbench instruction stays hidden from the user bubble")
+    "requirement workbench skill tag stays hidden from the user bubble")
 }
 
 // ── getQueuedPreview (single-line list preview) ─────────────────────────────────
@@ -326,7 +329,7 @@ async function main(): Promise<void> {
     testDisplayWithAttachmentPrefix,
     testDisplaySkillOnly,
     testDisplayAttachmentAndSkill,
-    testRequirementWorkbenchInstructionIsModelOnly,
+    testRequirementWorkbenchSkillTagIsModelOnly,
     testPreviewCollapsesWhitespace,
     testPreviewStripsSkillBlock,
     testPreviewEmptyFallback,

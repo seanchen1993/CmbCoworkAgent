@@ -2,10 +2,9 @@
 // the bare `tsx` test runner, which doesn't resolve TS path aliases.
 import type { SkillMetadata } from "../../types"
 import { normalizeSkillId } from "../../lib/skill-ids"
-import {
-  REQUIREMENT_WORKBENCH_DISPLAY_NAME,
-  REQUIREMENT_WORKBENCH_SKILL_NAME
-} from "../requirement-workbench/requirement-workbench"
+
+const REQUIREMENT_WORKBENCH_SKILL_NAME = "requirement-workbench"
+const REQUIREMENT_WORKBENCH_DISPLAY_NAME = "需求工作台"
 
 export function getSkillDisplayLabel(skillName: string): string {
   return normalizeSkillId(skillName) === normalizeSkillId(REQUIREMENT_WORKBENCH_SKILL_NAME)

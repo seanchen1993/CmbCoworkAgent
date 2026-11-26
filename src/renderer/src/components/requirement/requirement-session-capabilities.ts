@@ -1,4 +1,5 @@
 import { BadgeCheck, FileText, type LucideIcon } from "lucide-react"
+import { invalidateSkillCatalog } from "@/lib/app-catalog-cache"
 
 export type RequirementSessionCapabilityItem = {
   id: string
@@ -45,4 +46,5 @@ export async function enableRequirementSessionExperts(experts: readonly string[]
 
 export async function enableRequirementSessionSkills(skills: readonly string[]): Promise<void> {
   await Promise.all(skills.map((skillId) => window.api.skills.setDisabledState(skillId, false)))
+  invalidateSkillCatalog()
 }

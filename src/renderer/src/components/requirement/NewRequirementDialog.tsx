@@ -429,11 +429,9 @@ export function NewRequirementDialog({
 
       const requirement = fromPersistedRequirement(result.requirement, system.name)
       onOpenChange(false)
-      toast.success("需求草稿已归档")
       // Every new requirement starts with a visible workbench prompt. For a
-      // Text requirements use the prompt to begin discovery from the user's
-      // initial description.
-      // conversation; uploaded/link sources additionally point to `source/`.
+      // text requirement, use the prompt to begin discovery from the user's
+      // initial description; uploaded/link sources additionally point to `source/`.
       await onStartConversation(requirement, { autoGeneratePrd: true })
     } catch (error) {
       setPreparingSkill(false)

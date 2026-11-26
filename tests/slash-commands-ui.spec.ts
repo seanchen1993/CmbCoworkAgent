@@ -25,10 +25,7 @@ import {
   setBuiltinBrowserScreenshotEnabled
 } from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
-import {
-  REQUIREMENT_WORKBENCH_COMMAND_ID,
-  REQUIREMENT_WORKBENCH_DISPLAY_NAME
-} from "../src/renderer/src/features/requirement-workbench/requirement-workbench.ts"
+import { getSkillDisplayLabel } from "../src/renderer/src/features/slash-commands/skill-display-label.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected)
@@ -54,6 +51,12 @@ const skills: SkillMetadata[] = [
     description: "Create and edit document files",
     path: "/skills/documents/SKILL.md",
     source: "project"
+  },
+  {
+    name: "requirement-workbench",
+    description: "Analyze requirements and produce a PRD",
+    path: "/skills/requirement-workbench/SKILL.md",
+    source: "project"
   }
 ]
 
@@ -69,25 +72,21 @@ function testRootSlashShowsGoalAboveSkills(): void {
     BUILTIN_BROWSER_COMMAND_ID,
     "built-in browser should be listed after goal"
   )
-  assertEqual(
-    mode.commands[2]?.id,
-    REQUIREMENT_WORKBENCH_COMMAND_ID,
-    "requirement workbench should be listed after browser"
-  )
-  assertEqual(mode.skills.length, 2, "skills should still be shown")
+  assertEqual(mode.commands.length, 2, "only goal and browser should be general commands")
+  assertEqual(mode.skills.length, 3, "skills should still be shown")
 }
 
-function testRequirementFilterShowsChineseMappedCommand(): void {
+function testRequirementFilterShowsChineseMappedSkill(): void {
   const mode = buildSlashPopoverMode({ input: "/requirement", skills, skillSelected: false })
   assertEqual(mode.kind, "slash", "requirement filter should keep popover open")
   if (mode.kind !== "slash") return
 
-  assertEqual(mode.commands.length, 1, "requirement filter should match one command")
-  assertEqual(mode.commands[0]?.id, REQUIREMENT_WORKBENCH_COMMAND_ID, "command id should match")
+  assertEqual(mode.commands.length, 0, "requirement should not be a special command")
+  assertEqual(mode.skills.length, 1, "requirement filter should match one skill")
   assertEqual(
-    mode.commands[0]?.title,
-    REQUIREMENT_WORKBENCH_DISPLAY_NAME,
-    "command should use the Chinese mapping"
+    getSkillDisplayLabel(mode.skills[0]?.name ?? ""),
+    "需求工作台",
+    "skill should use the Chinese mapping"
   )
 }
 
@@ -110,7 +109,7 @@ function testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands(): void {
     [BUILTIN_BROWSER_COMMAND_ID],
     "managed commands must not expose the desktop Goal control plane"
   )
-  assertEqual(mode.skills.length, 2, "managed composer retains available skills")
+  assertEqual(mode.skills.length, 3, "managed composer retains available skills")
 }
 
 function testGoalFilterShowsGoalCommand(): void {
@@ -592,7 +591,7 @@ function testRuntimeComposerStateKeepsHistoryLoadingLocked(): void {
 function main(): void {
   const tests = [
     testRootSlashShowsGoalAboveSkills,
-    testRequirementFilterShowsChineseMappedCommand,
+    testRequirementFilterShowsChineseMappedSkill,
     testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands,
     testPlainTextKeepsPopoverClosed,
     testGoalFilterShowsGoalCommand,

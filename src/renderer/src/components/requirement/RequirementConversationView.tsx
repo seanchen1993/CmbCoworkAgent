@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Bot, Loader2, PanelRightOpen } from "lucide-react"
+import { Bot, PanelRightOpen } from "lucide-react"
 import { toast } from "sonner"
 import { ChatContainer } from "@/components/chat/ChatContainer"
 import {
@@ -9,9 +9,17 @@ import {
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
+import {
+  projectChatSkillCatalog,
+  readSkillCatalogCache,
+  revalidateSkillCatalog
+} from "@/lib/app-catalog-cache"
 import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
+import { formatSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
+import type { SkillMetadata } from "@/types"
 import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview
@@ -60,13 +68,50 @@ import {
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
-const REQUIREMENT_WORKBENCH_SKILL_INSTRUCTION = "请使用 `requirement-workbench` 技能处理上述需求。"
+const LEGACY_REQUIREMENT_WORKBENCH_SKILL_INSTRUCTION =
+  "请使用 `requirement-workbench` 技能处理上述需求。"
 // RequirementConversationView is keyed by the selected thread and remounts when a
 // new conversation opens. Keep the one-shot draft outside the component so it
 // survives that remount, then delete it as soon as the target thread consumes it.
 const pendingNewConversationPrompts = new Map<string, string>()
 type PreviewTab = "expert-process" | "source" | "prd"
 type PrototypeRoute = "design" | "skip" | null
+
+async function resolveRequirementWorkbenchSlashSkill(): Promise<SkillMetadata> {
+  const select = (catalog: NonNullable<ReturnType<typeof readSkillCatalogCache>>) =>
+    selectSkillForSlashName(
+      projectChatSkillCatalog(catalog).skills,
+      REQUIREMENT_WORKBENCH_SKILL_ID
+    )
+  const cached = readSkillCatalogCache()
+  const cachedSkill = cached ? select(cached) : null
+  if (cachedSkill) return cachedSkill
+
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const skill = select(
+        await revalidateSkillCatalog(useAppStore.getState().pluginVersion)
+      )
+      if (skill) return skill
+      lastError = new Error("需求工作台 Skill 未出现在 Slash 列表中")
+    } catch (error) {
+      lastError = error
+      if (!(error instanceof Error) || !error.message.includes("superseded")) break
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("需求工作台 Skill 加载失败")
+}
+
+function formatRequirementWorkbenchSlashSkill(skill: SkillMetadata): string {
+  return formatSkillUseBlock({
+    name: skill.name,
+    path: skill.path,
+    description: skill.description,
+    metadata: skill.metadata,
+    allowedTools: skill.allowedTools
+  })
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -1222,6 +1267,33 @@ function RequirementConversationSession({
   }, [threadId, threadState, threadState?.historyLoading])
 
   useEffect(() => {
+    if (!threadState) return
+    const legacyDrafts = threadState.queuedMessages.filter(
+      (message) =>
+        message.contextLabel === "requirement-workbench" &&
+        message.skillName === REQUIREMENT_WORKBENCH_SKILL_ID &&
+        message.skillBlock?.trim() === LEGACY_REQUIREMENT_WORKBENCH_SKILL_INSTRUCTION
+    )
+    if (legacyDrafts.length === 0) return
+
+    void resolveRequirementWorkbenchSlashSkill()
+      .then((skill) => {
+        const skillBlock = formatRequirementWorkbenchSlashSkill(skill)
+        for (const draft of legacyDrafts) {
+          threadState.updateQueuedMessage(draft.id, {
+            skillBlock,
+            skillName: skill.name,
+            skillDescription: skill.description
+          })
+        }
+      })
+      .catch((error) => {
+        console.error("[RequirementConversationView] Failed to repair legacy draft:", error)
+        toast.error("需求工作台初始化失败，请重试")
+      })
+  }, [threadState, threadState?.queuedMessages])
+
+  useEffect(() => {
     if (
       !autoGeneratePrd ||
       !threadId ||
@@ -1236,16 +1308,25 @@ function RequirementConversationSession({
     }
 
     autoQueuedPrdGenerationThreadIdsRef.current.add(threadId)
-    const now = new Date()
-    threadState.addQueuedMessage({
-      id: crypto.randomUUID(),
-      text: buildRequirementInitializationMessage(requirement),
-      contextLabel: "requirement-workbench",
-      skillBlock: REQUIREMENT_WORKBENCH_SKILL_INSTRUCTION,
-      skillName: REQUIREMENT_WORKBENCH_SKILL_ID,
-      created_at: now,
-      updated_at: now
-    })
+    void resolveRequirementWorkbenchSlashSkill()
+      .then((skill) => {
+        const now = new Date()
+        threadState.addQueuedMessage({
+          id: crypto.randomUUID(),
+          text: buildRequirementInitializationMessage(requirement),
+          contextLabel: "requirement-workbench",
+          skillBlock: formatRequirementWorkbenchSlashSkill(skill),
+          skillName: skill.name,
+          skillDescription: skill.description,
+          created_at: now,
+          updated_at: now
+        })
+      })
+      .catch((error) => {
+        autoQueuedPrdGenerationThreadIdsRef.current.delete(threadId)
+        console.error("[RequirementConversationView] Failed to initialize builtin skill:", error)
+        toast.error("需求工作台初始化失败，请重试")
+      })
   }, [
     autoGeneratePrd,
     requirement,
@@ -1318,13 +1399,6 @@ function RequirementConversationSession({
     threadState
   ])
 
-  const autoPromptWaiting =
-    autoGeneratePrd &&
-    Boolean(threadId) &&
-    !isRequirementGenerated(requirement) &&
-    !isRequirementPublished(requirement) &&
-    (threadState?.messages.length ?? 0) === 0
-
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-grid-subtle">
       <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-grid-subtle">
@@ -1385,24 +1459,6 @@ function RequirementConversationSession({
             </div>
             {threadId ? (
               <div className="relative flex min-h-0 flex-1 flex-col">
-                {autoPromptWaiting ? (
-                  <div
-                    className="pointer-events-none absolute left-1/2 top-3 z-20 flex w-[min(30rem,calc(100%-2rem))] -translate-x-1/2 items-start gap-2.5 rounded-lg border border-primary/20 bg-background/95 px-3 py-2.5 shadow-sm backdrop-blur"
-                    aria-live="polite"
-                  >
-                    <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" />
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-foreground">
-                        {(threadState?.queuedMessages.length ?? 0) > 0
-                          ? "需求工作台提示词已加入发送队列"
-                          : "正在准备需求工作台提示词"}
-                      </div>
-                      <div className="mt-1 whitespace-pre-line text-[11px] leading-4 text-muted-foreground">
-                        {buildRequirementInitializationMessage(requirement)}
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
                 <ChatContainer key={threadId} threadId={threadId} surface="requirement-session" />
               </div>
             ) : (

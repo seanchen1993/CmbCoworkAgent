@@ -2,7 +2,6 @@ import { useCallback, useMemo, useState } from "react"
 import type { SkillMetadata } from "@/types"
 import { isGoalClearAlias, splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { BUILTIN_BROWSER_COMMAND } from "../builtin-browser/builtin-browser"
-import { REQUIREMENT_WORKBENCH_COMMAND } from "../requirement-workbench/requirement-workbench"
 
 export type SlashCommandItem = {
   id: string
@@ -33,8 +32,7 @@ const GENERAL_SLASH_COMMANDS: SlashCommandItem[] = [
     insertText: "/goal ",
     keywords: ["goal", "目标", "长期任务", "自动续跑", "完成条件"]
   },
-  BUILTIN_BROWSER_COMMAND,
-  REQUIREMENT_WORKBENCH_COMMAND
+  BUILTIN_BROWSER_COMMAND
 ]
 
 export function isGoalSlashCommandInput(input: string): boolean {
