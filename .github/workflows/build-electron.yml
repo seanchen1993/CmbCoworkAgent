@@ -123,12 +123,14 @@ jobs:
       #   - electron-winstaller: install 是给 Windows installer 选 7z 架构,
       #     Linux 打 deb 用不到这个工具。
       #   - node-pty: 正是我们故意要跳过的对象,由 manylinux artifact 替代。
+      #   - sharp: @img optional packages supply the native module and libvips.
+      #     The build matrix verifies WebP decoding with the installed binary.
       - name: Audit packages with install/postinstall scripts
         shell: bash
         run: |
           set -euxo pipefail
           # 已确认 --ignore-scripts 跳过这些包是安全的(理由见上方注释)
-          EXPECTED="electron electron-winstaller esbuild node-pty"
+          EXPECTED="electron electron-winstaller esbuild node-pty sharp"
 
           actual=$(node -e "
             const fs = require('fs'), path = require('path');
@@ -367,6 +369,21 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: npm ci --ignore-scripts --include=optional
+
+      - name: Verify sharp image codec
+        shell: bash
+        run: |
+          node <<'NODE'
+          const sharp = require("sharp")
+          const assert = require("node:assert/strict")
+          async function verify() {
+            const pixel = Buffer.from([12, 34, 56])
+            const webp = await sharp(pixel, { raw: { width: 1, height: 1, channels: 3 } })
+              .webp({ lossless: true }).toBuffer()
+            assert.deepEqual(await sharp(webp).raw().toBuffer(), pixel)
+          }
+          verify().catch(error => { console.error(error); process.exitCode = 1 })
+          NODE
 
       # Windows 侧仅校验 prebuild 已存在,不重新编译。
       # node-pty 自带 prebuilds/win32-x64/pty.node 可直接用,rebuild 反而需要
