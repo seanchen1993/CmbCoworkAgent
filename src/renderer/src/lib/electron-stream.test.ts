@@ -74,6 +74,27 @@ describe("Electron stream snapshot regression", () => {
     if (accepted) expect(receipt).toHaveBeenCalledWith("/project")
   })
 
+  it("lets a submission reconcile its own stream error before reporting it globally", async () => {
+    const onError = vi.fn()
+    const onSubmitError = vi.fn()
+    const stream = createElectronStream({
+      threadId: "test",
+      onError,
+      transport: {
+        async stream() {
+          return (async function* () {
+            yield { event: "error", data: { error: "connection closed" } }
+          })()
+        }
+      }
+    })
+    await stream.submit(null, { onSubmitError })
+    expect(onSubmitError).toHaveBeenCalledOnce()
+    expect(onError).not.toHaveBeenCalled()
+    await stream.submit(null)
+    expect(onError).toHaveBeenCalledOnce()
+  })
+
   it("revises authoritative interior order while leaving token deltas at the same order revision", async () => {
     const revisions: number[] = []
     const first = [ai("start", ""), ai("a", "A"), ai("b", "B"), ai("end", "")]

@@ -4933,9 +4933,34 @@ export class BotStore {
                 .digest("hex") === messageHash
       })
       if (!ownsAll || !sameMessage) return { requestId, state: "conflict" }
+      if (matches.some(row => row.origin_json && JSON.parse(String(row.origin_json)).imageAdmission === "withdrawn"))
+        return { requestId, state: "withdrawn" }
       const preparing = matches.find(row => row.origin_json && JSON.parse(String(row.origin_json)).imageAdmission === "pending")
-      if (preparing) return { requestId, state: ["queued", "running", "waiting_user"].includes(String(preparing.state)) ? "absent" : "rejected" }
+      if (preparing) return {
+        requestId,
+        state: preparing.state === "queued" ? "queued"
+          : preparing.state === "running" || preparing.state === "waiting_user" ? "admitting" : "rejected"
+      }
       return { requestId, state: "accepted" }
+    })
+  }
+
+  /** A durable tombstone rejects late retries without disturbing the active task. */
+  cancelQueuedImageInput(botId: string, check: BotRequestCheck, workId?: string): boolean {
+    return this.transaction(() => {
+      const [receipt] = this.requestReceipts(botId, [check], workId)
+      if (receipt.state === "withdrawn") return true
+      if (receipt.state !== "queued") return false
+      const row = this.rows(`SELECT id FROM bot_tasks
+        WHERE request_id=? AND bot_id=? AND work_id IS ?
+          AND state='queued' AND mock_source_json IS NULL AND injected_into IS NULL
+          AND json_extract(origin_json,'$.kind')='user'
+          AND json_extract(origin_json,'$.imageAdmission')='pending'`,
+        [check.requestId, botId, workId ?? null])[0]
+      if (!row || this.taskCheckpoint(String(row.id))) return false
+      this.transition(String(row.id), "cancelled")
+      this.db.run("UPDATE bot_tasks SET origin_json=json_set(origin_json,'$.imageAdmission','withdrawn') WHERE id=?", [row.id])
+      return true
     })
   }
 

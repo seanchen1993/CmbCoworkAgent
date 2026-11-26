@@ -208,6 +208,8 @@ function writeThreadComposerDraft(ref: BotOrdinaryThreadRef, draft: z.infer<type
 export function preserveLinkComposerDraft(context: DraftContext, ref: BotOrdinaryThreadRef): (() => void) | undefined {
   const { draft, empty } = composerDraft(context, ref.threadId)
   if (empty) return
+  if (context.getThreadState(ref.threadId).draftAttachments.some(file => attachmentImages(file).length))
+    throw new Error("普通聊天草稿包含图片，请先发送或移除，再关联 Bot。")
   const key = botThreadDraftKey(ref.threadId)
   const previous = loadBotDraftRecord(key, threadSchema)
   if (previous.error) throw new Error(previous.error)

@@ -40,7 +40,7 @@ vi.mock("../storage", () => ({
 }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: () => fixtures.workspace }))
 vi.mock("../bots/local-service", () => ({ getLocalBotHost: () => fixtures.mediaHost }))
-vi.mock("../file-parser", () => ({ isSupportedFile: (name: string) => name.endsWith(".txt") }))
+vi.mock("../file-parser", () => ({ isSupportedFile: (name: string) => /\.(txt|docx)$/.test(name) }))
 vi.mock("../file-attachment-parser/client", () => ({
   getFileAttachmentParserClient: () => ({
     cancelLatest: vi.fn(),
@@ -256,6 +256,34 @@ it.each(["attach-workspace", "attach", "attach-bytes"] as const)(
   }
 )
 
+it.each([false, true])("leaves no version after a zero-budget text-only @document (managed=%s)", async managed => {
+  fixtures.workspace = join(fixtures.root, `mention-text-only-${managed}`)
+  await mkdir(fixtures.workspace)
+  const filename = "text-only.docx"
+  await writeFile(join(fixtures.workspace, filename), "document body")
+  const row = db.createThread(`mention-text-only-${managed}`, { workspacePath: fixtures.workspace })
+  const work = managed ? {
+    id: "work", botId: "bot", threadId: row.thread_id, audienceKey: "desktop",
+    workspace: { kind: "directory", path: fixtures.workspace }
+  } as BotWorkItem : undefined
+  const retainInputFile = vi.fn()
+  const host = {
+    getWork: () => work, getBot: () => ({ id: "bot", archived: false, threadId: row.thread_id }),
+    initializeWorkThread: vi.fn(), retainInputFile
+  } as unknown as LocalBotHost
+  const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
+  registerBotFileHandlers({
+    handle: (name: string, handler: Parameters<IpcMain["handle"]>[1]) => handlers.set(name, handler)
+  } as unknown as IpcMain, () => host)
+  const frame = {}, sender = { id: 12349, mainFrame: frame, once: vi.fn(), removeListener: vi.fn() }
+  const event = { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent
+  await expect(handlers.get("bots:files:attach-workspace")!(
+    event, "local", "bot", row.thread_id, filename, 0, work?.id)).rejects.toThrow("正文字数已达上限")
+  expect(await readdir(fixtures.workspace)).toEqual([filename])
+  if (managed) expect(await readdir(workAttachmentStorage(fixtures.workspace, work)!)).toEqual([])
+  expect(retainInputFile).not.toHaveBeenCalled()
+})
+
 it.each(["attach", "attach-bytes"] as const)("keeps a failed %s batch private and reuses a formal version after success", async (mode) => {
   fixtures.workspace = join(fixtures.root, mode)
   const picks = join(fixtures.root, `${mode}-picks`)
@@ -268,9 +296,11 @@ it.each(["attach", "attach-bytes"] as const)("keeps a failed %s batch private an
   } as BotWorkItem
   const retainInputFile = vi.fn((_bot: string, attachment: FileAttachment) =>
     ({ ...attachment, botInputId: `input-${attachment.filename}` }))
+  const retainImageSelection: LocalBotHost["retainImageSelection"] = (botId, _groupId, _workId, inputs) =>
+    inputs.map(({ attachment }) => retainInputFile(botId, attachment))
   const host = {
     getWork: () => work, getBot: () => ({ id: "bot", archived: false }),
-    initializeWorkThread: vi.fn(), retainInputFile
+    initializeWorkThread: vi.fn(), retainInputFile, retainImageSelection
   } as unknown as LocalBotHost
   const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
   registerBotFileHandlers({
@@ -336,9 +366,11 @@ it.each(["existing", "created"] as const)("keeps the exact project delivery afte
   } as BotWorkItem
   const retainInputFile = vi.fn<LocalBotHost["retainInputFile"]>((_bot, attachment) =>
     ({ ...attachment, botInputId: "input-id" }))
+  const retainImageSelection: LocalBotHost["retainImageSelection"] = (botId, _groupId, workId, inputs) =>
+    inputs.map(({ attachment, path }) => retainInputFile(botId, attachment, path, workId))
   const host = {
     getWork: () => work, getBot: () => ({ id: "bot", archived: false }),
-    initializeWorkThread: vi.fn(), retainInputFile, desktopDeliveryWorks: () => [work]
+    initializeWorkThread: vi.fn(), retainInputFile, retainImageSelection, desktopDeliveryWorks: () => [work]
   } as unknown as LocalBotHost
   const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
   registerBotFileHandlers({

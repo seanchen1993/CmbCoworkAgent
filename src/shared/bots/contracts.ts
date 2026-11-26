@@ -30,7 +30,7 @@ export interface BotRequestCheck {
 export interface BotRequestReceipt {
   requestId: string
   /** Acceptance is independent of execution success. No other conversation's data is returned. */
-  state: "accepted" | "conflict" | "absent" | "rejected"
+  state: "accepted" | "conflict" | "absent" | "rejected" | "queued" | "admitting" | "withdrawn"
 }
 export const BOT_AVATAR_SHAPES = [
   "circle",
@@ -187,7 +187,7 @@ export type BotTaskOrigin =
       inputFileIds?: string[]
       /** Host receipt from this submission's actual prompt preparation. */
       allowedInputFileIds?: string[]
-      imageAdmission?: "pending" | "accepted"
+      imageAdmission?: "pending" | "accepted" | "withdrawn"
       explicitSkill?: import("./skill-selection").BotSkillSelection
     }
   | { kind: "introduction" }
@@ -695,6 +695,8 @@ export interface BotClient {
   stopConversation(botId: string, groupId?: string, workId?: string, scope?: "background"): Promise<void>
   /** Stops this group's work and its peer owners, preserving members' other conversations. */
   stopGroup(groupId: string): Promise<void>
+  /** Withdraw only the matching local visual input while the Host still owns it as queued. */
+  cancelQueuedImageInput?(botId: string, check: BotRequestCheck, workId?: string): Promise<boolean>
   cancel(taskId: string): Promise<void>
   subscribe(listener: (event: BotChangeEvent) => void): () => void
 }

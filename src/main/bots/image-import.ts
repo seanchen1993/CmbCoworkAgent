@@ -3,6 +3,7 @@ import { lstat, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises
 import { basename, dirname, extname, join } from "node:path"
 import type { FileAttachment } from "../../shared/file-attachment"
 import { MAX_ATTACHMENT_FILE_BYTES } from "../../shared/file-attachment"
+import { decodeChatImage } from "../chat-image-decoder"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import { botImageMime } from "../../shared/bots/input-files"
@@ -36,6 +37,7 @@ export class BotImageImportBatch {
     const filename = basename(name).replace(/[. ]+$/, "")
     const mimeType = botImageMime(filename, bytes.byteLength)
     if (!mimeType) throw new Error("请选择非空且不超过 5 MiB 的 PNG、JPEG 或 WebP 图片")
+    await decodeChatImage(filename, bytes.slice(0))
     const dir = join(await managedRoot(true), randomUUID())
     const digest = createHash("sha256").update(Buffer.from(bytes)).digest("hex")
     const version = join(dir, ".bot-deliveries", digest)
@@ -44,18 +46,23 @@ export class BotImageImportBatch {
     await mkdir(version, { recursive: true, mode: 0o700 })
     const path = join(version, "source" + extname(filename).toLowerCase())
     await writeFile(path, Buffer.from(bytes), { flag: "wx", mode: 0o600 })
-    this.images.push({ index, input: { path, attachment: {
+    this.addRetained(index, {
       filename, filePath: "", mimeType, size: bytes.byteLength, content: "", truncated: false
-    } } })
+    }, path)
+  }
+
+  addRetained(index: number, attachment: FileAttachment, path: string) {
+    this.images.push({ index, input: { attachment, path } })
   }
 
   commit(others: FileAttachment[], retain: (inputs: PrivateImageInput[]) => FileAttachment[]) {
     if (!this.images.length) return others
-    const retained = retain(this.images.map(image => image.input))
+    const ordered = this.images.toSorted((a, b) => a.index - b.index)
+    const retained = retain(ordered.map(image => image.input))
     this.directories.forEach(dir => active.delete(dir))
     this.directories.length = 0
     const result = [...others]
-    this.images.forEach(({ index }, i) => result.splice(index, 0, retained[i]))
+    ordered.forEach(({ index }, i) => result.splice(index, 0, retained[i]))
     return result
   }
 

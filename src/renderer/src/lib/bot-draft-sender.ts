@@ -2,7 +2,8 @@ import {
   BOT_REQUEST_RECEIPT_LIMIT,
   BOT_REQUEST_RECEIPT_RETENTION_MS,
   type BotClient,
-  type BotRequestCheck
+  type BotRequestCheck,
+  type BotRequestReceipt
 } from "../../../shared/bots/contracts"
 import type { QueuedMessage } from "../types"
 import type { ThreadActions } from "./thread-context"
@@ -35,7 +36,15 @@ export async function assertCurrentBotUserQuote(
   throw new Error("无法核对原引用。草稿已保留，请重试或取消回复后发送。")
 }
 
+const ordinaryImageDraftError = "原草稿属于普通会话的图片发送，请返回原会话继续，或在 Bot 中重新添加图片。"
+const handoffTargetError = "此草稿属于此前的 Bot 任务，未确认发送不能转成新的任务请求。请先核对原任务记录；确认后可删除旧草稿并明确发送新消息。"
+
+function hasOrdinaryImageDelivery(draft: QueuedMessage): boolean {
+  return Boolean(draft.imageDelivery || draft.chatImages?.length)
+}
+
 export function validateBotDraft(draft: QueuedMessage): string | null {
+  if (hasOrdinaryImageDelivery(draft)) return ordinaryImageDraftError
   let message: string
   try {
     message = getQueuedBotMessageInput(draft).message
@@ -89,11 +98,15 @@ async function checkFor(draft: QueuedMessage): Promise<BotRequestCheck> {
 /** The original ThreadContext queue owns every draft. This class owns only in-flight calls. */
 export class BotDraftSender {
   readonly sending = new Set<string>()
+  readonly visualAdmissions = new Map<string, "queued" | "admitting">()
+  private readonly withdrawing = new Set<string>()
   private reconciling: Promise<void> | null = null
+  private reconcileAgain: QueuedMessage[] | undefined
   private dispatchEpoch = 0
   private failedDraftId: string | undefined
   constructor(
-    private readonly client: Pick<BotClient, "send" | "requestReceipts"> & Partial<Pick<BotClient, "messageReply">>,
+    private readonly client: Pick<BotClient, "send" | "requestReceipts"> &
+      Partial<Pick<BotClient, "messageReply" | "cancelQueuedImageInput">>,
     private readonly botId: string,
     private readonly queue: Queue,
     private readonly report: (message: string | null) => void,
@@ -125,15 +138,48 @@ export class BotDraftSender {
     this.report(message)
   }
 
-  /** Remove the local pending record only. An already accepted run has its own stop control. */
-  discard(expected: QueuedMessage): void {
-    if (this.sending.has(expected.id)) return
+  /** A local draft can be dropped. A Host-owned visual request must be withdrawn first. */
+  async discard(expected: QueuedMessage, hostQueued = false): Promise<void> {
+    if (this.withdrawing.has(expected.id)) return
+    const visualState = this.visualAdmissions.get(expected.id)
+    if (!hostQueued && (this.sending.has(expected.id) || visualState === "admitting")) return
     const current = this.queue.getQueuedMessage(expected.id)
     if (!current || current.updated_at.getTime() !== expected.updated_at.getTime()) return
+    if (hostQueued || visualState === "queued" || (current.handoffRequestedAt && current.botInputFileIds?.length)) {
+      this.withdrawing.add(current.id)
+      try {
+        const workId = this.receiptWorkId(current)
+        const check = await checkFor(current)
+        if (this.queue.getQueuedMessage(current.id) !== current) return
+        const state = hostQueued || visualState === "queued" ? "queued" : (await this.readReceipt(check, workId)).state
+        if (this.queue.getQueuedMessage(current.id) !== current) return
+        this.observeVisualReceipt(current.id, state)
+        if (state === "admitting" || (state === "queued" &&
+            !await this.client.cancelQueuedImageInput?.(this.botId, check, workId))) {
+          this.reportDraftError(current, "图片消息已离开队列。若已开始生成，可停止当前运行。")
+          return
+        }
+        this.observeVisualReceipt(current.id, "withdrawn")
+      } catch (error) {
+        this.reportDraftError(current, botErrorMessage(error, "未能取消排队图片消息，请重试。"))
+        return
+      } finally {
+        this.withdrawing.delete(current.id)
+      }
+      if (this.queue.getQueuedMessage(current.id) !== current) return
+    }
     this.queue.deleteQueuedMessage(current.id, (error) => {
       this.failedDraftId = undefined
       this.report(error ? "待发消息删除失败，请重试。" : null)
     })
+  }
+
+  private observeVisualReceipt(id: string, state: BotRequestReceipt["state"]): void {
+    if (state === "queued" || state === "admitting") {
+      if (this.visualAdmissions.get(id) === state) return
+      this.visualAdmissions.set(id, state)
+      this.changed()
+    } else if (this.visualAdmissions.delete(id)) this.changed()
   }
 
   private same(draft: QueuedMessage): boolean {
@@ -167,14 +213,13 @@ export class BotDraftSender {
 
   private async accepted(draft: QueuedMessage, detail?: string): Promise<boolean> {
     const check = await checkFor(draft)
-    const receipt = (await this.client.requestReceipts(this.botId, [check])).find(
-      (item) => item.requestId === draft.id
-    )
-    if (!receipt) throw new Error("未收到有效的发送回执，请稍后重试。")
-    if (receipt.state === "accepted") {
+    const receipt = await this.readReceipt(check, this.receiptWorkId(draft))
+    this.observeVisualReceipt(draft.id, receipt.state)
+    if (receipt.state === "accepted" || receipt.state === "withdrawn") {
       this.acknowledge(draft)
       return true
     }
+    if (receipt.state === "queued" || receipt.state === "admitting") return true
     if (receipt.state === "rejected") {
       this.restoreRejectedImageDraft(draft, detail)
       return true
@@ -188,9 +233,30 @@ export class BotDraftSender {
     if (draft.botHandoffTarget &&
         (draft.botHandoffTarget.botId !== this.target?.botId ||
           draft.botHandoffTarget.workId !== this.target?.workId))
-      throw new Error(
-        "此草稿属于此前的 Bot 任务，未确认发送不能转成新的任务请求。请先核对原任务记录；确认后可删除旧草稿并明确发送新消息。"
-      )
+      throw new Error(handoffTargetError)
+  }
+
+  private receiptWorkId(draft: QueuedMessage): string | undefined {
+    const destination = draft.botSkillTarget
+    const handoff = draft.botHandoffTarget
+    if (destination?.kind === "work" && destination.workId !== this.target?.workId) {
+      if (!this.target && draft.botExplicitSkill &&
+          handoff?.botId === this.botId && handoff.workId === destination.workId) return handoff.workId
+      throw new Error(handoffTargetError)
+    }
+    this.assertTarget(draft)
+    return this.target?.workId
+  }
+
+  private requestReceipts(checks: BotRequestCheck[], workId?: string) {
+    return workId ? this.client.requestReceipts(this.botId, checks, workId)
+      : this.client.requestReceipts(this.botId, checks)
+  }
+
+  private async readReceipt(check: BotRequestCheck, workId?: string): Promise<BotRequestReceipt> {
+    const receipt = (await this.requestReceipts([check], workId)).find(item => item.requestId === check.requestId)
+    if (!receipt) throw new Error("未收到有效的发送回执，请稍后重试。")
+    return receipt
   }
 
   private async canRetry(draft: QueuedMessage): Promise<boolean> {
@@ -206,6 +272,10 @@ export class BotDraftSender {
   async restoreLegacySkill(expected: QueuedMessage): Promise<QueuedMessage | undefined> {
     const draft = this.queue.getQueuedMessage(expected.id)
     if (draft !== expected || this.sending.has(expected.id)) return
+    if (hasOrdinaryImageDelivery(draft)) {
+      this.reportDraftError(draft, ordinaryImageDraftError)
+      return
+    }
     this.sending.add(draft.id)
     const epoch = this.dispatchEpoch
     this.changed()
@@ -235,7 +305,7 @@ export class BotDraftSender {
     validateSkill?: (selection: BotSkillSelection) => Promise<boolean>,
     quoteClient: Partial<Pick<BotClient, "messageReply">> = this.client
   ): Promise<void> {
-    if (this.sending.has(expected.id)) return
+    if (this.sending.has(expected.id) || this.withdrawing.has(expected.id)) return
     const draft = this.queue.getQueuedMessage(expected.id)
     if (!draft || draft.updated_at.getTime() !== expected.updated_at.getTime()) return
     this.sending.add(draft.id)
@@ -307,6 +377,11 @@ export class BotDraftSender {
             ) !== canonicalBotMessageInput(message, mentions, inputFileIds, explicitSkill))
         )
           throw new Error("收到的发送确认与原消息不一致，请核对回执。")
+        if (task.origin?.kind === "user" && task.origin.imageAdmission === "pending") {
+          if (task.state !== "queued") throw new Error("图片消息尚未收到有效的入队回执。")
+          if (this.same(draft)) this.observeVisualReceipt(draft.id, "queued")
+          return
+        }
         this.acknowledge(draft)
       } catch (error) {
         // Main may have committed before the transport failed. Do not infer absence from an exception.
@@ -328,38 +403,63 @@ export class BotDraftSender {
   }
 
   reconcile(drafts: QueuedMessage[]): Promise<void> {
+    for (const id of this.visualAdmissions.keys()) {
+      if (!this.queue.getQueuedMessage(id)) this.observeVisualReceipt(id, "absent")
+    }
     this.clearSettledError()
-    if (this.reconciling) return this.reconciling
+    if (this.reconciling) {
+      this.reconcileAgain = drafts
+      return this.reconciling
+    }
     const pending = drafts.filter(
       (draft) => draft.handoffRequestedAt && !this.sending.has(draft.id) &&
-        draft.botSkillTarget?.kind !== "create" &&
-        (draft.botSkillTarget?.kind !== "work" || draft.botSkillTarget.workId === this.target?.workId)
+        !this.withdrawing.has(draft.id) && !hasOrdinaryImageDelivery(draft) && draft.botSkillTarget?.kind !== "create"
     )
     if (!pending.length) return Promise.resolve()
     this.reconciling = (async () => {
+      const byWork = new Map<string | undefined, QueuedMessage[]>()
+      for (const draft of pending) {
+        let workId: string | undefined
+        try {
+          workId = this.receiptWorkId(draft)
+        } catch (error) {
+          this.reportDraftError(draft, botErrorMessage(error))
+          continue
+        }
+        const matching = byWork.get(workId) ?? []
+        matching.push(draft)
+        byWork.set(workId, matching)
+      }
       // Old original queues can be longer than a new Bot's limit. Read in bounded batches.
-      for (let offset = 0; offset < pending.length; offset += BOT_REQUEST_RECEIPT_LIMIT) {
-        const batch = pending.slice(offset, offset + BOT_REQUEST_RECEIPT_LIMIT)
-        const checks = await Promise.all(batch.map(checkFor))
-        const receipts = await this.client.requestReceipts(this.botId, checks)
-        for (const draft of batch) {
-          if (this.sending.has(draft.id) || !this.same(draft)) continue
-          const state = receipts.find((receipt) => receipt.requestId === draft.id)?.state
-          if (state === "accepted") this.acknowledge(draft)
-          else if (state === "rejected") this.restoreRejectedImageDraft(draft)
-          else if (state === "conflict")
-            this.reportDraftError(draft, "待确认消息与已接收记录不一致，请先核对会话记录。")
-          // Absent or unknown stays parked. Reopening a window never reruns side effects.
+      for (const [workId, scoped] of byWork) {
+        for (let offset = 0; offset < scoped.length; offset += BOT_REQUEST_RECEIPT_LIMIT) {
+          const batch = scoped.slice(offset, offset + BOT_REQUEST_RECEIPT_LIMIT)
+          try {
+            const checks = await Promise.all(batch.map(checkFor))
+            const receipts = await this.requestReceipts(checks, workId)
+            for (const draft of batch) {
+              if (this.sending.has(draft.id) || this.withdrawing.has(draft.id) || !this.same(draft)) continue
+              const state = receipts.find((receipt) => receipt.requestId === draft.id)?.state
+              if (state) this.observeVisualReceipt(draft.id, state)
+              if (state === "accepted" || state === "withdrawn") this.acknowledge(draft)
+              else if (state === "rejected") this.restoreRejectedImageDraft(draft)
+              else if (state === "conflict")
+                this.reportDraftError(draft, "待确认消息与已接收记录不一致，请先核对会话记录。")
+              // Absent or unknown stays parked. Reopening a window never reruns side effects.
+            }
+          } catch (error) {
+            const retained = batch.find((draft) => this.same(draft))
+            if (retained) this.reportDraftError(retained, `${botErrorMessage(error)} 原消息已保留。`)
+          }
         }
       }
     })()
-      .catch((error) => {
-        const retained = pending.find((draft) => this.same(draft))
-        if (retained) this.reportDraftError(retained, `${botErrorMessage(error)} 原消息已保留。`)
-      })
       .finally(() => {
         this.reconciling = null
+        const again = this.reconcileAgain
+        this.reconcileAgain = undefined
         this.clearSettledError()
+        return again?.length ? this.reconcile(again) : undefined
       })
     return this.reconciling
   }

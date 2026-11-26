@@ -278,7 +278,7 @@ describe("prepareStandardThreadRuntimeFactory shell policy", () => {
   it("grants image access only to the matching foreground transport", () => {
     const mediaScope = (
       source: "desktop" | "bot" | "im" | "scheduler" | "heartbeat",
-      scope?: "desktop" | { messageId: string }
+      scope?: "desktop" | { source?: "desktop"; messageId: string }
     ) => prepareStandardThreadRuntimeFactory({
       source, runLease: { owner: "desktop", runId: "test-run" },
       baseOptions: { threadId: "test-thread", workspacePath: process.cwd(), chatImageMessageScope: scope }
@@ -287,6 +287,9 @@ describe("prepareStandardThreadRuntimeFactory shell policy", () => {
     expect(mediaScope("desktop")).toBeUndefined()
     expect(mediaScope("desktop", "desktop")).toBe("desktop")
     expect(mediaScope("bot", "desktop")).toBeUndefined()
+    const desktop = { source: "desktop" as const, messageId: "turn" }
+    expect(mediaScope("desktop", desktop)).toEqual(desktop)
+    expect(mediaScope("bot", desktop)).toBeUndefined()
     expect(mediaScope("bot", { messageId: "task" })).toEqual({ messageId: "task" })
     for (const source of ["im", "scheduler", "heartbeat"] as const) {
       expect(mediaScope(source, "desktop")).toBeUndefined()

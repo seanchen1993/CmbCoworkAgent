@@ -318,7 +318,13 @@ export function registerWorkspaceFilePreviewHandlers(
     if (!request || !(request.workspacePath === null || typeof request.workspacePath === "string"))
       throw new Error("图片草稿所属工作区无效")
     const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
-    const { discardChatDraftImage, pinQueuedChatImages, unpinQueuedChatImages, getChatImageSubmissionStatus } = await import("../chat-images")
+    const { abandonOldWorkspaceChatImages, discardChatDraftImage, pinQueuedChatImages,
+      unpinQueuedChatImages, getChatImageSubmissionStatus } = await import("../chat-images")
+    if (request.action === "abandon") {
+      const { identity } = captureOrdinaryImageDraft(request.threadId, undefined, assertWindow)
+      if (request.incarnation !== threadIncarnationKey(identity)) throw new Error("图片所属会话已变更")
+      return abandonOldWorkspaceChatImages(request.threadId, request.workspacePath, request.incarnation, request.messageId)
+    }
     const { root, assertCurrent, identity } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
     if (request.incarnation !== undefined && request.incarnation !== threadIncarnationKey(identity))
       throw new Error("图片所属会话已变更")

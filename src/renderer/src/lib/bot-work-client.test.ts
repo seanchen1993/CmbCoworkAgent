@@ -26,6 +26,7 @@ function fixture() {
     "send",
     "open",
     "requestReceipts",
+    "cancelQueuedImageInput",
     "messageReply",
     "messageReactions",
     "setMessageReaction",
@@ -56,6 +57,14 @@ function fixture() {
   return { client, scoped: botWorkClient(client, work) }
 }
 describe("original beta client bound to a work", () => {
+  it("withdraws image requests only within the exact work composer", async () => {
+    const { client, scoped } = fixture()
+    const check = { requestId: "visual-request", messageHash: "a".repeat(64) }
+    await scoped.cancelQueuedImageInput!(work.botId, check)
+    expect(client.cancelQueuedImageInput).toHaveBeenCalledWith(work.botId, check, work.id)
+    expect(() => scoped.cancelQueuedImageInput!(work.botId, check, "another-work")).toThrow("工作会话目标不一致")
+    expect(client.cancelQueuedImageInput).toHaveBeenCalledOnce()
+  })
   it("preserves the complete frozen local client through the registry facade", async () => {
     const base = fixture().client
     let receive: ((event: BotChangeEvent) => void) | undefined

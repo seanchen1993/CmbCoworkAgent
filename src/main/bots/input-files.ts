@@ -28,7 +28,9 @@ export function projectWorkInputAttachment(file: BotInputFile, snapshotPath = fi
     (original.truncated && reference.startsWith(original.content)))
   const retainedReference = `Original file retained at ${JSON.stringify(snapshotPath)}.`
   const content = sourceReference
-    ? retainedReference + original.content.slice(sourceReference.length)
+    ? original.content.length < sourceReference.length
+      ? retainedReference.slice(0, original.content.length)
+      : retainedReference + original.content.slice(sourceReference.length)
     : original.content
   return { ...original, filePath: snapshotPath, content }
 }

@@ -42,7 +42,8 @@ parentPort.on("message", (request: FileAttachmentParserWorkerRequest) => {
         request.source.fileName,
         request.source.bytes,
         request.maxLength,
-        request.includeImageBytes
+        request.includeImageBytes,
+        request.source.allowHtmlSource
       )
       throwIfCancelled(cancellation)
       if (!isBoundedParseResponse(attachment)) {

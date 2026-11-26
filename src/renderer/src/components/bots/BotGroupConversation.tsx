@@ -74,6 +74,7 @@ import {
 import {
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_PICKER_FILES,
+  MAX_ATTACHMENT_TOTAL_CHARS,
   type FileAttachment
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
@@ -229,10 +230,11 @@ export function BotGroupConversation({
     }
     const currentDraft = useBotGroupDrafts.getState().drafts[draftKey] ?? EMPTY_GROUP_DRAFT
     const count = MAX_ATTACHMENT_PICKER_FILES - currentDraft.attachments.length
-    const chars =
-      24_000 - currentDraft.attachments.reduce((sum, file) => sum + file.content.length, 0)
-    if (count < 1 || chars < 1) {
-      setError("一次最多添加 3 个附件，提取正文合计不超过 24,000 字符。")
+    const chars = Math.max(
+      0, MAX_ATTACHMENT_TOTAL_CHARS - currentDraft.attachments.reduce((sum, file) => sum + file.content.length, 0)
+    )
+    if (count < 1) {
+      setError("一次最多添加 3 个附件。")
       return
     }
     const generation = attachmentGeneration.current

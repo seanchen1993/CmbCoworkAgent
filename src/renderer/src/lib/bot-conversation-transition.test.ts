@@ -330,6 +330,14 @@ describe("association queue transitions", () => {
     expect(f.queue[0].botHandoffTarget).toEqual({ botId: "owner", workId: "work" })
   })
 
+  it("leaves an ordinary visual draft in its original conversation when linking to a Bot", async () => {
+    const f = fixture()
+    f.queue[0].chatImages = [{ id: "asset", filename: "report.docx · 图 1", slot: 0 }]
+    await expect(parkOrdinaryConversationQueue(f.context, "original")).rejects.toThrow("待发送的图文消息")
+    expect(reconcile).not.toHaveBeenCalled()
+    expect(f.queue[0].parkedForConversationLink).toBeUndefined()
+  })
+
   it("reconciles original desktop handoff and parks the remaining queue without dispatching it", async () => {
     const f = fixture()
     reconcile.mockResolvedValue({ pendingIds: [], injectedIds: [], durableIds: ["draft-0"] })

@@ -116,6 +116,14 @@ describe("chat document uploads", () => {
 
 
 describe("document visuals", () => {
+  it("keeps static-empty HTML source available only to the workspace attachment path", async () => {
+    const source = "<html><script>document.body.append('report')</script></html>"
+    await expect(parseFileBytes("script.html", bytes(source))).rejects.toThrow("静态正文")
+    const workspace = await parseFileBytes("script.html", bytes(source), 32, true, true)
+    expect(workspace.content).toBe(source.slice(0, 32))
+    expect(workspace.truncated).toBe(true)
+  })
+
   const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJXcAAAAASUVORK5CYII=", "base64")
   const buffer = (value: Buffer) => Uint8Array.from(value).buffer
 

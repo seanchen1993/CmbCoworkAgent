@@ -1,5 +1,6 @@
 import { toModelRef } from "../models/registry"
 import { eligibleChatImageModels } from "../models/image-candidates"
+import { isDesktopChatImageScope } from "./chat-image-middleware"
 import { resolve } from "node:path"
 import { SelectedModelUnavailableError } from "../models/selection-error"
 import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
@@ -966,10 +967,9 @@ export function prepareStandardThreadRuntimeFactory(
       ),
       ...(botContextBudget !== undefined ? { contextBudgetTokens: botContextBudget } : {}),
       // Only the foreground desktop caller or the Bot Host can grant media access.
-      chatImageMessageScope: input.source === "desktop" && callerOptions.chatImageMessageScope === "desktop"
-        ? "desktop"
-        : input.source === "bot" && typeof callerOptions.chatImageMessageScope === "object"
-          ? callerOptions.chatImageMessageScope : undefined,
+      chatImageMessageScope: (input.source === "desktop" && isDesktopChatImageScope(callerOptions.chatImageMessageScope)) ||
+        (input.source === "bot" && !isDesktopChatImageScope(callerOptions.chatImageMessageScope))
+        ? callerOptions.chatImageMessageScope : undefined,
       // Keep ordinary commands attached to the transport's cancellation and permit.
       ...(input.runLease.owner !== "desktop" && { autoBackgroundHandoff: false }),
       modelId

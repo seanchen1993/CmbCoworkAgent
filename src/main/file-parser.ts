@@ -64,7 +64,8 @@ export async function parseFileBytes(
   fileName: string,
   bytes: ArrayBuffer,
   maxLength?: number,
-  includeImageBytes = false
+  includeImageBytes = false,
+  allowHtmlSource = false
 ): Promise<ParsedDocument> {
   if (
     typeof fileName !== "string" ||
@@ -76,7 +77,7 @@ export async function parseFileBytes(
   }
   if (!(bytes instanceof ArrayBuffer)) throw new Error("无效的附件内容")
   const filename = path.basename(fileName)
-  return parseAttachmentBuffer(Buffer.from(bytes), filename, filename, maxLength, includeImageBytes)
+  return parseAttachmentBuffer(Buffer.from(bytes), filename, filename, maxLength, includeImageBytes, allowHtmlSource)
 }
 
 async function parseAttachmentBuffer(
@@ -84,7 +85,8 @@ async function parseAttachmentBuffer(
   filename: string,
   filePath: string,
   maxLength?: number,
-  includeImageBytes = false
+  includeImageBytes = false,
+  allowHtmlSource = false
 ): Promise<ParsedDocument> {
   if (
     maxLength !== undefined &&
@@ -122,8 +124,12 @@ async function parseAttachmentBuffer(
         const declared = htmlEncodingDeclaration(buffer.toString("latin1", 0, 4096))
         encoding = declared && iconv.encodingExists(declared) ? declared : detectEncoding(buffer)
       }
-      content = extractHtmlText(iconv.decode(buffer, encoding), src => images.htmlSource(src))
-      if (!content.trim()) throw new Error("HTML 缺少静态正文，可用 @文件 分析源码")
+      const source = iconv.decode(buffer, encoding)
+      content = extractHtmlText(source, src => images.htmlSource(src))
+      if (!content.trim()) {
+        if (!allowHtmlSource) throw new Error("HTML 缺少静态正文，可用 @文件 分析源码")
+        content = source
+      }
       break
     }
     case ".docx":
@@ -142,8 +148,11 @@ async function parseAttachmentBuffer(
       ? Math.min(maxLength, MAX_ATTACHMENT_TEXT_LENGTH)
       : MAX_ATTACHMENT_TEXT_LENGTH
   const { content: finalContent, truncated } = truncateContent(content, isLineBased, limit)
-  if (truncated && images.images.some(image => !finalContent.includes("【图 " + (image.index + 1) + "】")))
-    images.omit("部分图片在截断的正文范围之外")
+  const hasUnmappedImages = truncated &&
+    images.images.some(image => !finalContent.includes("【图 " + (image.index + 1) + "】"))
+  const visualNotice = [
+    images.notice, hasUnmappedImages ? "正文已截断，部分图片没有对应的正文位置。" : undefined
+  ].filter(Boolean).join(" ")
 
   return {
     filename,
@@ -156,7 +165,7 @@ async function parseAttachmentBuffer(
       embeddedImageCount: images.images.length,
       ...(includeImageBytes ? { documentImages: images.images } : {})
     } : {}),
-    ...(images.notice ? { visualNotice: images.notice } : {})
+    ...(visualNotice ? { visualNotice } : {})
   }
 }
 

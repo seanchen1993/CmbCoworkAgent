@@ -12,6 +12,7 @@ import { LocalBotHost } from "./host"
 import { BotStore } from "./store"
 import { attachmentFallbackText } from "../../shared/file-attachment"
 import { botBoundImageIds, isBotImageInput, prepareBotInputImages } from "./input-images"
+import { inputAttachmentHash, projectWorkInputAttachment } from "./input-files"
 import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
 import type { FileAttachment } from "../../shared/file-attachment"
 
@@ -23,6 +24,19 @@ const png: FileAttachment = {
 it("preserves blank user text for pure Bot images and the existing fallback for documents", () => {
   expect(attachmentFallbackText([{ ...png, filePath: "", botInputId: "user-selection" }])).toBe("")
   expect(attachmentFallbackText([{ ...png, mimeType: "text/plain" }])).toBe("请分析以下文件内容。")
+})
+
+it("keeps a visual document's exhausted text budget when it moves to a work snapshot", () => {
+  const document: FileAttachment = {
+    filename: "visual.docx", filePath: "source.docx",
+    content: "", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    size: 27, truncated: true, embeddedImageCount: 1
+  }
+  const projected = projectWorkInputAttachment({
+    id: "document-receipt", botId: "bot", file: document,
+    attachment: document, blockHash: inputAttachmentHash(document)
+  }, "work-snapshot.docx")
+  expect(projected).toMatchObject({ filePath: "work-snapshot.docx", content: "", embeddedImageCount: 1 })
 })
 
 it("freezes group images by source group, request and selected member", () => {
@@ -139,7 +153,8 @@ it.each(["accept", "reject"] as const)("reports private image admission after th
     submission.then(() => { done = true }, () => { done = true })
     await running
     expect(done).toBe(false)
-    expect(receipt()).toBe("absent")
+    expect(receipt()).toBe("admitting")
+    expect(host.cancelQueuedImageInput(bot.id, { requestId: request.requestId, messageHash: hash })).toBe(false)
     finish()
     if (result === "accept") {
       const first = await submission
@@ -156,6 +171,55 @@ it.each(["accept", "reject"] as const)("reports private image admission after th
   }
 })
 
+
+it("acknowledges and withdraws an exact visual request while another private turn owns the lease", async () => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  let entered!: () => void
+  let finish!: () => void
+  const active = new Promise<void>(resolve => { entered = resolve })
+  const hold = new Promise<void>(resolve => { finish = resolve })
+  const execute = vi.fn(async () => {
+    entered()
+    await hold
+    return { state: "completed" as const }
+  })
+  const host = new LocalBotHost(store, {
+    onAvailable: () => () => {},
+    acquire: () => ({ release: vi.fn(), execute })
+  })
+  try {
+    const bot = store.create({ name: "Reader", instructions: "", color: "#112233", modelRef: null })
+    const other = store.create({ name: "Other", instructions: "", color: "#112233", modelRef: null })
+    const first = host.send({ botId: bot.id, requestId: "first", message: "working" })
+    await active
+    const file = store.retainInputFile(bot.id, png, "/host-snapshot")
+    const request = { botId: bot.id, requestId: "queued-image", inputFileIds: [file.botInputId!],
+      message: buildAttachmentMessageParts([file]).attachmentModelBlocks.trim() }
+    const hash = createHash("sha256").update(canonicalBotMessageInput(request.message, undefined, request.inputFileIds)).digest("hex")
+    const check = { requestId: request.requestId, messageHash: hash }
+    const receipt = () => host.requestReceipts(bot.id, [check])[0].state
+
+    const queued = await host.sendDesktopMessage(request)
+    expect(queued.state).toBe("queued")
+    expect(receipt()).toBe("queued")
+    expect(host.cancelQueuedImageInput(other.id, check)).toBe(false)
+    expect(host.cancelQueuedImageInput(bot.id, { ...check, messageHash: "0".repeat(64) })).toBe(false)
+    expect(host.cancelQueuedImageInput(bot.id, check)).toBe(true)
+    expect(host.cancelQueuedImageInput(bot.id, check)).toBe(true)
+    expect(receipt()).toBe("withdrawn")
+    expect(store.getTask(first.id).state).toBe("running")
+    expect(() => host.sendDesktopMessage(request)).toThrow("图片消息已取消发送")
+    finish()
+    await vi.waitFor(() => expect(store.getTask(first.id).state).toBe("completed"))
+    expect(store.getTask(queued.id).state).toBe("cancelled")
+    expect(execute).toHaveBeenCalledOnce()
+  } finally {
+    finish()
+    await host.stop()
+    db.close()
+  }
+})
 
 vi.mock("../file-attachment-parser/client", () => ({
   getFileAttachmentParserClient: () => ({

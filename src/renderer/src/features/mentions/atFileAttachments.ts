@@ -3,7 +3,7 @@
  * 同时收口这类文件专用的去重、扩展名过滤、数量/字符上限控制和路径转换。
  */
 import type { FileAttachment, FileInfo } from "@/types"
-import { isChatImagePath, isVisualDocumentPath } from "../../../../shared/file-attachment"
+import { attachmentImages, isChatImagePath, isVisualDocumentPath } from "../../../../shared/file-attachment"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
@@ -385,8 +385,12 @@ export async function resolveAtFileAttachments(
         const visualDocument = isVisualDocumentPath(mentionFile.workspaceFilePath)
         if (allowImages && readWorkspaceImage && (isChatImagePath(mentionFile.workspaceFilePath) || visualDocument)) {
           const remaining = maxTotalChars - currentAttachmentChars
-          if (visualDocument && remaining <= 0) throw new Error("附件内容已达上限，请调整附件后重试。")
-          const attachment = await readWorkspaceImage(mentionFile.workspaceFilePath, Math.max(1, remaining))
+          const parsed = await readWorkspaceImage(mentionFile.workspaceFilePath, Math.max(1, remaining))
+          if (remaining <= 0 && visualDocument && !attachmentImages(parsed).length)
+            throw new Error("附件内容已达上限，请调整附件后重试。")
+          const attachment = remaining <= 0 && parsed.content.length
+            ? { ...parsed, content: "", truncated: true }
+            : parsed
           if (!visualDocument && !attachment.image) throw new Error("@图片读取失败，请重新选择。")
           currentAttachmentChars += attachment.content.length
           if (attachment.visualNotice) warningMessage = attachment.visualNotice

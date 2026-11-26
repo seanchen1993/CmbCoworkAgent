@@ -1,6 +1,14 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises"
+import { existsSync, readFileSync } from "node:fs"
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
+import { createHash } from "node:crypto"
+import { setTimeout as delay } from "node:timers/promises"
+import { fileURLToPath } from "node:url"
+import { Worker, type WorkerOptions } from "node:worker_threads"
+import { transformSync } from "esbuild"
+import sharp from "sharp"
+import type { FileAttachment } from "../../shared/file-attachment"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { IpcMain } from "electron"
 import type { LocalBotHost } from "../bots/host"
@@ -33,6 +41,10 @@ const fixture = vi.hoisted(() => ({
   stableClose: vi.fn(),
   parse: vi.fn(),
   snapshot: vi.fn(),
+  snapshotBatch: vi.fn(),
+  stage: vi.fn(),
+  publishSnapshot: vi.fn(),
+  publishEditable: vi.fn(),
   retainInputFile: vi.fn(),
   retainGroupImage: vi.fn(),
   cancelParser: vi.fn()
@@ -52,7 +64,15 @@ vi.mock("../bots/file-copy", () => ({
   copyBotFile: fixture.copy,
   exportBotFile: fixture.exportCopy,
   copyBotFileBytes: fixture.copyBytes,
-  snapshotBotDeliveryFile: fixture.snapshot
+  snapshotBotDeliveryFile: fixture.snapshot,
+  withBotDeliverySnapshotBatch: fixture.snapshotBatch,
+  publishStagedBotDeliveryFile: fixture.publishSnapshot,
+  publishStagedBotImport: fixture.publishEditable,
+  MAX_BOT_IMPORT_FILE_BYTES: 100 * 1024 * 1024
+}))
+vi.mock("../bots/attachment-storage", async load => ({
+  ...await load<typeof import("../bots/attachment-storage")>(),
+  withStagedWorkAttachments: fixture.stage
 }))
 vi.mock("../workspace-file-scan/manager", () => ({
   openWorkspaceFileScan: fixture.scan,
@@ -70,7 +90,22 @@ vi.mock("../file-attachment-parser/client", () => ({
     cancelLatest: fixture.cancelParser
   })
 }))
+// Vitest does not run Electron Vite's worker loader. Use the same decoder entry.
+vi.mock("../chat-image-worker?nodeWorker", () => ({
+  default(options: WorkerOptions) {
+    const file = fileURLToPath(new URL("../chat-image-worker.ts", import.meta.url))
+    const code = transformSync(readFileSync(file, "utf8"), { loader: "ts", format: "cjs" }).code
+    const load = 'require("module").createRequire(' + JSON.stringify(file) + ')'
+    return new Worker("(function(require) {" + code + "})(" + load + ")", { ...options, eval: true })
+  }
+}))
 import { registerBotFileHandlers } from "./bot-files"
+
+async function pngBytes(): Promise<ArrayBuffer> {
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: "red" } })
+    .png().toBuffer()
+  return Uint8Array.from(png).buffer
+}
 
 function register(source: "desktop" | "subframe" | "secondary" = "desktop") {
   const frame = {}
@@ -112,7 +147,15 @@ beforeEach(() => {
   fixture.stableOpen.mockResolvedValue({ size: 12, handle: { close: fixture.stableClose } })
   fixture.stableRead.mockResolvedValue(Buffer.from("# synthetic"))
   fixture.snapshot.mockImplementation(async (root, source) => ({ attachmentPath: `${root}/.bot-deliveries/hash/${source.split("/").pop()}`, size: 12 }))
+  fixture.stage.mockImplementation((storage, run) => run(storage + "/.staging"))
+  fixture.snapshotBatch.mockImplementation((workspace, run) => run({ workspace }))
+  fixture.publishSnapshot.mockImplementation(async (batch, staging, source) => source.replace(staging, batch.workspace))
+  fixture.publishEditable.mockResolvedValue(async () => undefined)
   fixture.retainInputFile.mockImplementation((_bot, attachment) => ({ ...attachment, botInputId: "input-11111111-1111-1111-1111-111111111111" }))
+  fixture.retainImageSelection.mockImplementation((bot, group, work, inputs) =>
+    inputs.map(({ attachment, path }: { attachment: FileAttachment; path: string }) =>
+      group ? { ...attachment, botInputId: "input-22222222-2222-2222-2222-222222222222" }
+        : fixture.retainInputFile(bot, attachment, path, ...(work ? [work] : []))))
   fixture.stableClose.mockResolvedValue(undefined)
   fixture.parse.mockResolvedValue({
     filename: "report.md",
@@ -126,14 +169,14 @@ beforeEach(() => {
 
 it.each(["private", "group"] as const)("issues an image receipt only to its %s owner", async scope => {
   const groupId = scope === "group" ? "g" : undefined
-  const bytes = new Uint8Array([1, 2, 3]).buffer
+  const bytes = await pngBytes()
   const dir = await mkdtemp(join(tmpdir(), "bot-image-selection-"))
   fixture.dataRoot.mockReturnValue(dir)
   fixture.retainImageSelection.mockImplementation((_bot, _group, _work, inputs) =>
     inputs.map((input: { attachment: object }) => ({ ...input.attachment,
       botInputId: "input-22222222-2222-2222-2222-222222222222" })))
   try {
-    const result = await register()("attach-bytes", "a", [{ fileName: "photo.png", bytes }], 500, groupId)
+    const result = await register()("attach-bytes", "a", [{ fileName: "photo.png", bytes }], 0, groupId)
     expect(result).toEqual([expect.objectContaining({ mimeType: "image/png", filePath: "", content: "" })])
     const call = fixture.retainImageSelection.mock.calls[0]
     expect(call.slice(0, 3)).toEqual(["a", groupId, undefined])
@@ -152,7 +195,7 @@ it.each(["private", "group"] as const)("issues an image receipt only to its %s o
 it("keeps picker, mixed group selection and unreferenced original cleanup in their own scopes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "bot-mixed-image-"))
   fixture.dataRoot.mockReturnValue(dir)
-  const photo = { fileName: "photo.png", bytes: new Uint8Array([1, 2, 3]).buffer }
+  const photo = { fileName: "photo.png", bytes: await pngBytes() }
   const note = { fileName: "notes.md", bytes: new Uint8Array([35]).buffer }
   const paths: string[] = []
   fixture.retainImageSelection.mockImplementation((_bot, _group, _work, inputs) =>
@@ -166,6 +209,7 @@ it("keeps picker, mixed group selection and unreferenced original cleanup in the
     expect(mixed.map(file => file.mimeType)).toEqual(["image/png", "text/markdown", "image/png"])
     expect(fixture.copyBytes).toHaveBeenCalledTimes(1)
     fixture.open.mockResolvedValueOnce({ canceled: false, filePaths: ["/selected/photo.png"] })
+    fixture.stableRead.mockResolvedValueOnce(Buffer.from(photo.bytes))
     await invoke("attach", "a", 1, 500, "g")
     expect(fixture.copy).not.toHaveBeenCalled()
     const { sweepBotImageInputs } = await import("../bots/image-import")
@@ -175,6 +219,216 @@ it("keeps picker, mixed group selection and unreferenced original cleanup in the
     await expect(readFile(paths[2])).rejects.toMatchObject({ code: "ENOENT" })
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+it("retains group document images at zero text budget through the picker and drop", async () => {
+  const png = await pngBytes()
+  fixture.open.mockResolvedValue({ canceled: false, filePaths: ["/selected/report.docx"] })
+  fixture.destination.mockImplementation(async (root, input: string) => {
+    const name = basename(input)
+    return { id: "shared/" + name, path: root + "/shared/" + name }
+  })
+  fixture.retainImageSelection.mockImplementation((_bot, _group, _work, inputs) =>
+    inputs.map(({ attachment }: { attachment: FileAttachment }) => ({
+      ...attachment, botInputId: "input-document-test"
+    })))
+  fixture.parse.mockImplementation(async ({ fileName }: { fileName: string }) =>
+    fileName === "report.docx"
+      ? { content: "", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          truncated: true, embeddedImageCount: 1,
+          documentImages: [{ index: 0, extension: ".png", bytes: png.slice(0) }] }
+      : { content: "x".repeat(200), mimeType: "text/plain", truncated: true })
+  const call = register()
+  const document = { fileName: "report.docx", bytes: Uint8Array.from([1, 2]).buffer }
+  const text = { fileName: "report.txt", bytes: Uint8Array.from([35]).buffer }
+  for (const promise of [
+    () => call("attach", "a", 1, 0, "g"),
+    () => call("attach-bytes", "a", [document], 0, "g")
+  ]) {
+    const result = await promise() as FileAttachment[]
+    expect(result[0]).toMatchObject({ embeddedImageCount: 1, content: "", truncated: true, botInputId: "input-document-test" })
+    expect(result[0]).not.toHaveProperty("documentImages")
+  }
+  await expect(call("attach-bytes", "a", [text, document], 60, "g"))
+    .resolves.toEqual([expect.anything(), expect.objectContaining({ embeddedImageCount: 1, content: "" })])
+  expect(fixture.parse).toHaveBeenLastCalledWith(
+    expect.objectContaining({ fileName: "report.docx" }), 1, "bot-attachment:1", true)
+  expect(fixture.retainImageSelection).toHaveBeenCalledTimes(3)
+  await expect(call("attach-bytes", "a", [text], 0, "g")).rejects.toThrow("正文字数已达上限")
+  fixture.parse.mockResolvedValueOnce({ content: "", mimeType: "application/docx", truncated: false })
+  await expect(call("attach-bytes", "a", [document], 0, "g")).rejects.toThrow("正文字数已达上限")
+  expect(fixture.retainImageSelection).toHaveBeenCalledTimes(3)
+})
+
+it("checks the actual decoder before publishing any group visuals from a bad batch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bot-invalid-group-image-"))
+  const png = await pngBytes()
+  const corrupt = Uint8Array.from([1, 2, 3]).buffer
+  fixture.dataRoot.mockReturnValue(dir)
+  try {
+    const call = register()
+    await expect(call("attach-bytes", "a", [{ fileName: "corrupt.png", bytes: corrupt }], 0, "g"))
+      .rejects.toThrow()
+    expect(await readdir(dir)).toEqual([])
+    fixture.destination.mockResolvedValueOnce({
+      id: "shared/report.docx", path: "/group/shared/report.docx"
+    })
+    fixture.parse.mockResolvedValueOnce({
+      content: "excerpt", mimeType: "application/docx", truncated: false, embeddedImageCount: 1,
+      documentImages: [{ index: 0, extension: ".png", bytes: corrupt }]
+    })
+    await expect(call("attach-bytes", "a", [
+      { fileName: "valid.png", bytes: png }, { fileName: "report.docx", bytes: corrupt }
+    ], 500, "g")).rejects.toThrow("report.docx 的内嵌图片无法解码")
+    expect(fixture.retainImageSelection).not.toHaveBeenCalled()
+    expect(await readdir(join(dir, "bot-image-inputs"))).toEqual([])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+async function useRealFileStorage() {
+  const actualFiles = await vi.importActual<typeof import("../bots/file-copy")>("../bots/file-copy")
+  const actualStorage = await vi.importActual<typeof import("../bots/attachment-storage")>("../bots/attachment-storage")
+  const actualHandles = await vi.importActual<typeof import("../services/stable-file-handle")>("../services/stable-file-handle")
+  fixture.destination.mockImplementation(actualFiles.botImportDestination)
+  fixture.copy.mockImplementation(actualFiles.copyBotFile)
+  fixture.copyBytes.mockImplementation(actualFiles.copyBotFileBytes)
+  fixture.snapshot.mockImplementation(actualFiles.snapshotBotDeliveryFile)
+  fixture.snapshotBatch.mockImplementation(actualFiles.withBotDeliverySnapshotBatch)
+  fixture.stage.mockImplementation(actualStorage.withStagedWorkAttachments)
+  fixture.publishSnapshot.mockImplementation(actualFiles.publishStagedBotDeliveryFile)
+  fixture.publishEditable.mockImplementation(actualFiles.publishStagedBotImport)
+  fixture.stableOpen.mockImplementation(actualHandles.openStableFileHandle)
+  fixture.stableRead.mockImplementation(actualHandles.readStableFileHandleBounded)
+  return actualFiles
+}
+
+it.each([
+  ["private", "picker", "decode"],
+  ["private", "drop", "budget"],
+  ["group", "picker", "budget"],
+  ["group", "drop", "decode"]
+] as const)("leaves a %s workspace unchanged after %s attachment %s failure", async (scope, ingress, failure) => {
+  const actualFiles = await useRealFileStorage()
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "bot-selection-failure-")))
+  try {
+    const workspace = join(dir, "workspace")
+    await mkdir(workspace)
+    await mkdir(join(workspace, "Shared"))
+    fixture.prepare.mockReturnValue(workspace)
+    fixture.dataRoot.mockReturnValue(dir)
+    const validImage = await pngBytes()
+    const first = { fileName: "good.docx", bytes: Uint8Array.from([1, 2, 3]).buffer }
+    const second = { fileName: "invalid.docx", bytes: Uint8Array.from([4, 5, 6]).buffer }
+    const paths = [first, second].map(file => join(dir, file.fileName))
+    await Promise.all([first, second].map((file, index) => writeFile(paths[index], Buffer.from(file.bytes))))
+    fixture.open.mockResolvedValue({ canceled: false, filePaths: paths })
+    const { attachmentPath: existing } = await actualFiles.snapshotBotDeliveryFile(
+      workspace, paths[0], new AbortController().signal, dir)
+    const before = (await readdir(workspace, { recursive: true })).sort()
+    fixture.parse.mockImplementation(async ({ fileName }: { fileName: string }) => {
+      const document = { content: "sample", mimeType: "application/docx", truncated: false }
+      if (fileName === "note.txt") return { ...document, mimeType: "text/plain" }
+      if (fileName === second.fileName && failure === "budget") return document
+      return { ...document, embeddedImageCount: 1, documentImages: [{
+        index: 0, extension: ".png", bytes: fileName === first.fileName ? validImage.slice(0) : second.bytes.slice(0)
+      }] }
+    })
+    const call = register()
+    const groupId = scope === "group" ? "g" : undefined
+    const budget = failure === "budget" ? 0 : 500
+    const operation = ingress === "picker"
+      ? call("attach", "a", 2, budget, groupId)
+      : call("attach-bytes", "a", [first, second], budget, groupId)
+    await expect(operation).rejects.toThrow(failure === "budget" ? "正文字数已达上限" : "内嵌图片无法解码")
+    expect((await readdir(workspace, { recursive: true })).sort()).toEqual(before)
+    expect(await readFile(existing)).toEqual(Buffer.from(first.bytes))
+    expect(fixture.publishEditable).not.toHaveBeenCalled()
+    expect(fixture.publishSnapshot).not.toHaveBeenCalled()
+    expect(fixture.retainImageSelection).not.toHaveBeenCalled()
+
+    fixture.publishSnapshot.mockRejectedValueOnce(new Error("Version storage temporarily unavailable"))
+    await expect(call("attach-bytes", "a", [first], 0, groupId)).rejects.toThrow("Version storage")
+    expect(await readdir(join(workspace, "shared"))).toEqual([])
+    expect(await readFile(existing)).toEqual(Buffer.from(first.bytes))
+    expect(fixture.retainImageSelection).not.toHaveBeenCalled()
+
+    const [committed] = await call("attach-bytes", "a", [first], 0, groupId) as FileAttachment[]
+    expect(committed).toMatchObject({ filename: first.fileName, embeddedImageCount: 1, content: "" })
+    const editable = join(workspace, committed.filePath)
+    expect(await readFile(editable)).toEqual(Buffer.from(first.bytes))
+    await writeFile(editable, "edited after attachment")
+    expect(await readFile(existing)).toEqual(Buffer.from(first.bytes))
+    if (scope === "group" && ingress === "drop") {
+      const selected = [
+        first, { fileName: "photo.png", bytes: validImage.slice(0) },
+        { fileName: "note.txt", bytes: new TextEncoder().encode("some text").buffer }
+      ]
+      const ordered = await call("attach-bytes", "a", selected, 500, groupId) as FileAttachment[]
+      expect(ordered.map(file => file.filename)).toEqual(selected.map(file => file.fileName))
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+}, 20_000)
+
+it.each(["later publish", "receipt commit"] as const)(
+  "removes newly linked versions and keeps existing snapshots after a %s failure",
+  async failure => {
+    const files = await useRealFileStorage()
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "bot-snapshot-rollback-")))
+    const release = Promise.withResolvers<void>()
+    try {
+      const workspace = join(dir, "workspace")
+      await mkdir(join(workspace, "shared"), { recursive: true })
+      fixture.prepare.mockReturnValue(workspace)
+      const selected = ["existing.txt", "fresh.txt", "last.txt"].map(fileName => ({
+        fileName, bytes: new TextEncoder().encode(fileName).buffer
+      }))
+      const [existing, fresh] = selected
+      const signal = new AbortController().signal
+      const source = join(dir, existing.fileName)
+      await writeFile(source, Buffer.from(existing.bytes))
+      const { attachmentPath } = await files.snapshotBotDeliveryFile(workspace, source, signal, dir)
+      const before = (await readdir(workspace, { recursive: true })).sort()
+      const freshDigest = createHash("sha256").update(Buffer.from(fresh.bytes)).digest("hex")
+      const newlyLinked = join(workspace, ".bot-deliveries", freshDigest, fresh.fileName)
+      const ready = Promise.withResolvers<void>()
+      if (failure === "later publish") {
+        fixture.publishSnapshot.mockImplementationOnce(files.publishStagedBotDeliveryFile)
+          .mockImplementationOnce(files.publishStagedBotDeliveryFile)
+          .mockImplementationOnce(async () => {
+            expect(await readFile(newlyLinked)).toEqual(Buffer.from(fresh.bytes))
+            ready.resolve()
+            await release.promise
+            throw new Error("Injected later publish failure")
+          })
+      } else {
+        fixture.retainImageSelection.mockImplementationOnce(() => {
+          expect(existsSync(newlyLinked)).toBe(true)
+          throw new Error("Injected receipt commit failure")
+        })
+      }
+      const result = register()("attach-bytes", "a", selected, 500).catch((error: unknown) => error)
+      if (failure === "later publish") {
+        await Promise.race([ready.promise, result.then(error => { throw error })])
+        const existingDigest = createHash("sha256").update(Buffer.from(existing.bytes)).digest("hex")
+        const otherWriter = files.snapshotBotDeliveryFile(workspace, source, signal, dir,
+          existing.bytes.byteLength, { digest: existingDigest, size: existing.bytes.byteLength })
+        const waited = await Promise.race([otherWriter.then(() => false), delay(100, true)])
+        release.resolve()
+        expect(await otherWriter).toMatchObject({ attachmentPath })
+        expect(waited).toBe(true)
+        expect(fixture.retainImageSelection).not.toHaveBeenCalled()
+      }
+      expect(await result).toMatchObject({ message: `Injected ${failure} failure` })
+      expect((await readdir(workspace, { recursive: true })).sort()).toEqual(before)
+      expect(await readFile(attachmentPath)).toEqual(Buffer.from(existing.bytes))
+    } finally {
+      release.resolve()
+      await rm(dir, { recursive: true, force: true })
+    }
+  },
+  20_000
+)
 
 it.each(["subframe", "secondary"] as const)("rejects image attachments from a %s sender before copying", async source => {
   const files = [{ fileName: "photo.png", bytes: new Uint8Array([1]).buffer }]
@@ -449,7 +703,7 @@ describe("Bot file IPC group scope", () => {
     const call = register()
     const picked = (await call("attach", "a", 3, 500, "g")) as Array<{ filePath: string }>
     expect(picked[0].filePath).toBe("shared/copy.md")
-    expect(fixture.destination).toHaveBeenCalledWith("/group", "/selected/report.md")
+    expect(fixture.destination).toHaveBeenCalledWith("/group/.staging", "/selected/report.md")
     const bytes = new TextEncoder().encode("synthetic").buffer
     const dropped = (await call(
       "attach-bytes",
@@ -459,7 +713,7 @@ describe("Bot file IPC group scope", () => {
       "g"
     )) as Array<{ filePath: string }>
     expect(dropped[0].filePath).toBe("shared/copy.md")
-    expect(fixture.copyBytes).toHaveBeenCalledWith("/group/shared/copy.md", bytes)
+    expect(fixture.copyBytes).toHaveBeenCalledWith("/group/.staging/shared/copy.md", bytes)
     expect(fixture.snapshot).not.toHaveBeenCalled()
     expect(fixture.retainInputFile).not.toHaveBeenCalled()
     fixture.copy.mockClear()
@@ -496,11 +750,11 @@ describe("Bot file IPC group scope", () => {
     expect(fixture.copy).toHaveBeenCalledWith(
       "/selected",
       "/selected/report.md",
-      "/private/a/shared/copy.md",
+      "/private/a/.staging/shared/copy.md",
       undefined,
       5 * 1024 * 1024
     )
-    expect(fixture.stableOpen).toHaveBeenCalledWith("/private/a", "/private/a/.bot-deliveries/hash/copy.md")
+    expect(fixture.stableOpen).toHaveBeenCalledWith("/private/a/.staging", "/private/a/.staging/.bot-deliveries/hash/copy.md")
     expect(fixture.stableRead).toHaveBeenCalledWith(expect.anything(), 5 * 1024 * 1024)
     expect(fixture.parse).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -533,7 +787,7 @@ describe("Bot file IPC group scope", () => {
     await expect(call("import", "a")).resolves.toEqual(["shared/copy.md"])
     fixture.open.mockResolvedValue({ canceled: false, filePaths: ["/selected/archive.zip"] })
     await expect(call("attach", "a", 1, 500)).resolves.toHaveLength(1)
-    expect(fixture.copy).toHaveBeenLastCalledWith("/selected", "/selected/archive.zip", "/private/a/shared/copy.md")
+    expect(fixture.copy).toHaveBeenLastCalledWith("/selected", "/selected/archive.zip", "/private/a/.staging/shared/copy.md")
     expect(fixture.parse).not.toHaveBeenCalled()
   })
 
@@ -580,7 +834,7 @@ describe("Bot file IPC group scope", () => {
     expect(result[0].content).toHaveLength(100)
     expect(result[0].truncated).toBe(true)
     fixture.open.mockClear()
-    await expect(call("attach", "a", 1, 0)).rejects.toThrow("字符预算")
+    await expect(call("attach", "a", 1, -1)).rejects.toThrow("字符预算")
     expect(fixture.open).not.toHaveBeenCalled()
   })
 
@@ -588,7 +842,7 @@ describe("Bot file IPC group scope", () => {
     const call = register()
     fixture.destination.mockResolvedValueOnce({
       id: "shared/raw.json",
-      path: "/private/a/shared/raw.json"
+      path: "/private/a/.staging/shared/raw.json"
     })
     const bytes = new TextEncoder().encode('{"synthetic":true}').buffer
     fixture.stableOpen.mockResolvedValueOnce({ size: bytes.byteLength, handle: { close: fixture.stableClose } })
@@ -603,7 +857,7 @@ describe("Bot file IPC group scope", () => {
       content: string
       size: number
     }>
-    expect(fixture.copyBytes).toHaveBeenCalledWith("/private/a/shared/raw.json", bytes)
+    expect(fixture.copyBytes).toHaveBeenCalledWith("/private/a/.staging/shared/raw.json", bytes)
     expect(fixture.parse).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "bytes", fileName: "raw.json" }),
       expect.any(Number), "bot-attachment:1"
@@ -636,7 +890,7 @@ describe("Bot file IPC group scope", () => {
 
   it("keeps the existing sanitized basename for private drag extraction", async () => {
     const call = register()
-    fixture.destination.mockResolvedValueOnce({ id: "shared/report.txt", path: "/private/a/shared/report.txt" })
+    fixture.destination.mockResolvedValueOnce({ id: "shared/report.txt", path: "/private/a/.staging/shared/report.txt" })
     const result = await call("attach-bytes", "a", [{ fileName: "report.txt.", bytes: new TextEncoder().encode("text").buffer }], 500)
     expect(fixture.parse).toHaveBeenCalledWith(expect.objectContaining({ fileName: "report.txt" }), expect.any(Number), "bot-attachment:1")
     expect(result).toEqual([expect.objectContaining({ filename: "report.txt", filePath: "shared/report.txt" })])

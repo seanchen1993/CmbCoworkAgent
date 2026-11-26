@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { copyFile } from "node:fs/promises"
 import { promises as nativeFs } from "node:fs"
 import { tmpdir } from "node:os"
@@ -11,9 +11,12 @@ import { transformSync } from "esbuild"
 import { HumanMessage } from "@langchain/core/messages"
 import sharp from "sharp"
 import { buildAttachmentMessageParts } from "../shared/attachment-message-parts"
-import { checkpointHasChatImages } from "../shared/checkpoint-transcript"
+import { checkpointDesktopImageMessageIds, checkpointHasChatImages } from "../shared/checkpoint-transcript"
+import { threadIncarnationKey } from "../shared/thread-incarnation"
 import { materializeChatImages } from "./agent/chat-image-middleware"
+import { captureThreadIncarnation } from "./services/thread-incarnation"
 import {
+  abandonOldWorkspaceChatImages,
   approveChatImages,
   beginChatImageSubmission,
   bindBotChatImages,
@@ -24,7 +27,9 @@ import {
   captureDesktopImageAccess,
   getChatImageHistoryProjections,
   getChatImageSubmissionStatus,
+  hasReadableDesktopChatImages,
   settleContinuedChatImageSubmission,
+  trackContinuedChatImageSubmission,
   discardChatDraftImage,
   pinQueuedChatImages,
   readChatImage,
@@ -94,8 +99,9 @@ describe("chat image input", () => {
     expect(() => beginChatImageSubmission({ ...input, modelId: "other" })).toThrow("不同内容")
     owner.beginHook()
     owner.accept("edited text without the attachment", [])
-    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("accepted")
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("pending")
     owner.release() // No graph start or terminal marker before process exit.
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("accepted")
     const expected = { submissionId: input.userMessageId, images: [], preparedText: "edited text without the attachment" }
     expect(await concurrent.replay).toEqual(expected)
     db.upsertThreadMessages("parent", [
@@ -105,6 +111,7 @@ describe("chat image input", () => {
     const retry = beginChatImageSubmission(input)
     if (!retry || !("owner" in retry)) throw new Error("accepted input was lost")
     expect(retry.owner.recovered).toEqual(expected)
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("pending")
     expect(beginChatImageSubmission(input)).toHaveProperty("replay")
     retry.owner.start()
     expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("running")
@@ -159,6 +166,106 @@ describe("chat image input", () => {
     expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("unknown")
     settleContinuedChatImageSubmission("parent", input.userMessageId, "success")
     expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("succeeded")
+  })
+
+  it("distinguishes a suspended checkpoint from an unknown receipt and tracks its resumed run", () => {
+    const { input, owner } = makeClaim("suspended-image")
+    owner.accept("approved", input.chatImages)
+    owner.start()
+    owner.finish("awaiting")
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("running")
+    owner.release()
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("awaiting")
+    expect(beginChatImageSubmission(input)).toHaveProperty("replay")
+    expect(boundChatImages("parent", input.userMessageId)).toEqual(input.chatImages)
+    const first = trackContinuedChatImageSubmission("parent", input.userMessageId)!
+    const current = trackContinuedChatImageSubmission("parent", input.userMessageId)!
+    first()
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("running")
+    settleContinuedChatImageSubmission("parent", input.userMessageId, "awaiting")
+    current()
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("awaiting")
+    settleContinuedChatImageSubmission("parent", input.userMessageId, "success")
+    expect(getChatImageSubmissionStatus("parent", input.userMessageId)).toBe("succeeded")
+  })
+
+  it("retires an explicitly stopped receipt while preserving already admitted history", () => {
+    const pending = makeClaim("8a4fac84-238e-4ae6-9602-2ef9c76dbddf")
+    pinQueuedChatImages("parent", null, pending.input.userMessageId, [request.chatImages[0].id])
+    pending.owner.beginHook()
+    pending.owner.finish("cancelled")
+    pending.owner.release()
+    expect(getChatImageSubmissionStatus("parent", pending.input.userMessageId)).toBe("cancelled")
+    expect(beginChatImageSubmission(pending.input)).toHaveProperty("replay")
+    expect(boundChatImageReceipt("parent", pending.input.userMessageId)).toBeUndefined()
+    expect(db.getDb().exec("SELECT 1 FROM chat_image_input_owners WHERE thread_id=? AND message_id=?",
+      ["parent", pending.input.userMessageId])[0]?.values ?? []).toHaveLength(0)
+
+    const running = makeClaim("stopped-with-approved-images")
+    running.owner.accept("approved", request.chatImages)
+    running.owner.start()
+    running.owner.finish("cancelled")
+    running.owner.finish("success")
+    running.owner.release()
+    expect(getChatImageSubmissionStatus("parent", running.input.userMessageId)).toBe("cancelled")
+    expect(boundChatImages("parent", running.input.userMessageId)).toEqual(request.chatImages)
+  })
+
+  it("abandons only a stale workspace pin within the same thread incarnation", async () => {
+    const threadId = "old-workspace-pin"
+    const messageId = "5e536791-5ba3-4aa6-b342-6e50d44729ad"
+    const otherId = "ab7fe509-70c7-45a3-a320-87cb76038c1f"
+    db.createThread(threadId, { workspacePath: "/first" })
+    const incarnation = threadIncarnationKey(captureThreadIncarnation(db.getThreadCore(threadId)!))
+    const bytes = await sharp({ create: { width: 3, height: 3, channels: 3, background: "blue" } }).png().toBuffer()
+    const staged = await stageChatImage(threadId, "report.png", Uint8Array.from(bytes).buffer, { draftWorkspace: "/first" })
+    const assetId = staged.image!.id
+    const submission = { ...request, threadId, userMessageId: otherId,
+      chatImages: [{ ...request.chatImages[0], id: assetId }] }
+    pinQueuedChatImages(threadId, "/first", messageId, [assetId])
+    await discardChatDraftImage(threadId, "/first", assetId)
+    await expect(abandonOldWorkspaceChatImages(threadId, "/first", incarnation, messageId)).rejects.toThrow("当前工作区")
+
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/second" }) })
+    db.getDb().run("INSERT INTO chat_image_input_owners VALUES (?, '', ?, ?)", [threadId, assetId, "/second"])
+    pinQueuedChatImages(threadId, "/second", otherId, [assetId])
+    await discardChatDraftImage(threadId, "/second", assetId)
+    await expect(abandonOldWorkspaceChatImages(threadId, "/first", "old-incarnation", messageId))
+      .rejects.toThrow("所属会话已变更")
+    await abandonOldWorkspaceChatImages(threadId, "/first", incarnation, messageId)
+    await abandonOldWorkspaceChatImages(threadId, "/first", incarnation, messageId)
+    expect(db.getDb().exec("SELECT message_id FROM chat_image_input_owners WHERE thread_id=? AND message_id<>''",
+      [threadId])[0]?.values).toEqual([[otherId]])
+
+    const claimed = beginChatImageSubmission(submission)
+    if (!claimed || !("owner" in claimed)) throw new Error("missing image claim")
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/first" }) })
+    await expect(abandonOldWorkspaceChatImages(threadId, "/second", incarnation, otherId)).rejects.toThrow("已进入处理")
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/second" }) })
+    claimed.owner.accept("accepted before workspace moved", submission.chatImages)
+    claimed.owner.release()
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/first" }) })
+    await abandonOldWorkspaceChatImages(threadId, "/second", incarnation, otherId)
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/second" }) })
+    expect(getChatImageSubmissionStatus(threadId, otherId)).toBe("accepted")
+    expect(boundChatImages(threadId, otherId)).toEqual(submission.chatImages)
+    await expect(readChatImage(threadId, assetId)).resolves.toHaveProperty("image_url.url")
+
+    const resumed = beginChatImageSubmission(submission)
+    if (!resumed || !("owner" in resumed)) throw new Error("missing accepted claim")
+    resumed.owner.start()
+    resumed.owner.finish("awaiting")
+    resumed.owner.release()
+    const releaseContinuation = trackContinuedChatImageSubmission(threadId, otherId)
+    if (!releaseContinuation) throw new Error("missing active image continuation")
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/first" }) })
+    await expect(abandonOldWorkspaceChatImages(threadId, "/second", incarnation, otherId)).rejects.toThrow("已进入处理")
+    releaseContinuation()
+    await abandonOldWorkspaceChatImages(threadId, "/second", incarnation, otherId)
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/second" }) })
+    expect(getChatImageSubmissionStatus(threadId, otherId)).toBe("awaiting")
+    expect(boundChatImages(threadId, otherId)).toEqual(submission.chatImages)
+    await expect(readChatImage(threadId, assetId)).resolves.toHaveProperty("image_url.url")
   })
 
   it("binds recovery and graph start to the authoritative workspace and thread incarnation", () => {
@@ -268,6 +375,63 @@ describe("chat image input", () => {
     const [forked] = await materializeChatImages("child", [task], "desktop")
     expect(forked.content).toContain(file.filename)
     expect(forked.content).not.toContain("base64")
+  })
+
+  it("omits unavailable older desktop pixels while rejecting the same missing current or Bot input", async () => {
+    const threadId = "image-history-recovery"
+    db.createThread(threadId, { workspacePath: "/first" })
+    const bytes = await sharp({ create: { width: 3, height: 3, channels: 3, background: "orange" } }).png().toBuffer()
+    const file = await stageChatImage(threadId, "old.png", Uint8Array.from(bytes).buffer, { draftWorkspace: "/first" })
+    const refs = [{ id: file.image!.id, filename: file.filename, slot: 0 }]
+    const body = "Read this chart" + buildAttachmentMessageParts([file]).attachmentModelBlocks
+    const old = new HumanMessage({ id: "old-image", content: body, additional_kwargs: { cmb_chat_images: refs } })
+    const current = new HumanMessage({ id: "current-text", content: "What did I ask before?" })
+    const pending = beginChatImageSubmission({ threadId, userMessageId: old.id, message: body, chatImages: refs })
+    if (!pending || !("owner" in pending)) throw new Error("missing historical image claim")
+    pending.owner.accept(body, refs)
+    pending.owner.start()
+    pending.owner.finish("success")
+    pending.owner.release()
+
+    const scope = { source: "desktop" as const }
+    const checkpoint = { channel_values: { messages: [old, current] } }
+    const ids = checkpointDesktopImageMessageIds(checkpoint)
+    expect(ids).toEqual([old.id])
+    expect(await hasReadableDesktopChatImages(threadId, ids)).toBe(true)
+    expect((await materializeChatImages(threadId, [old, current], scope))[0].content).toEqual([
+      { type: "text", text: "Read this chart\n\nold.png" },
+      expect.objectContaining({ type: "image_url" })
+    ])
+
+    const expectUnavailable = async () => {
+      expect(await hasReadableDesktopChatImages(threadId, ids)).toBe(false)
+      const [previous, next] = await materializeChatImages(threadId, [old, current], scope)
+      expect(previous.content).toBe("Read this chart\n\nold.png（历史图片不可用）")
+      expect(next).toBe(current)
+      await expect(materializeChatImages(threadId, [old], { source: "desktop", messageId: old.id }))
+        .rejects.toThrow("无法读取")
+    }
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/second" }) })
+    await expectUnavailable()
+    db.updateThread(threadId, { metadata: JSON.stringify({ workspacePath: "/first" }) })
+
+    const root = join(directory, "chat-images")
+    const relativePath = readdirSync(root, { encoding: "utf8", recursive: true })
+      .find(path => path.endsWith(refs[0].id + ".webp"))
+    if (!relativePath) throw new Error("missing staged history image")
+    const path = join(root, relativePath)
+    writeFileSync(path, "truncated file")
+    await expectUnavailable()
+    rmSync(path)
+    await expectUnavailable()
+
+    const task = new HumanMessage({ id: "bot-image", content: body,
+      additional_kwargs: { cmb_chat_images: refs, cmb_chat_images_source: "bot" } })
+    bindBotChatImages(threadId, task.id!, body, body, refs)
+    expect(checkpointDesktopImageMessageIds({ channel_values: { messages: [task] } })).toEqual([])
+    await expect(materializeChatImages(threadId, [task], { messageId: task.id })).rejects.toThrow("无法读取")
+    const strippedTask = new HumanMessage({ id: task.id, content: "Lost attachment marker" })
+    await expect(materializeChatImages(threadId, [strippedTask], { messageId: task.id })).rejects.toThrow("图片消息已改变")
   })
 
   it("separates grant-free Bot pixels, draft, queue and accepted owners", async () => {

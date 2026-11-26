@@ -235,6 +235,8 @@ export const localBotsApi: BotClient = {
     ),
   requestReceipts: (botId, checks, workId) =>
     ipcRenderer.invoke("bots:request-receipts", LOCAL_BOT_HOST_ID, botId, checks, workId),
+  cancelQueuedImageInput: (botId, check, workId) =>
+    ipcRenderer.invoke("bots:cancel-queued-image-input", LOCAL_BOT_HOST_ID, botId, check, workId),
   exchangeHistory: (botId, taskId, groupId, before, workId, imConversationId) =>
     ipcRenderer.invoke(
       "bots:exchange-history",

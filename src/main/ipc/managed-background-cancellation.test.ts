@@ -63,11 +63,13 @@ function loadWorkerCancel(
     foreground?: boolean
     foreignOwner?: boolean
     desktopDetached?: boolean
+    pendingImages?: Map<string, Set<AbortController>>
   } = {}
 ) {
   const worker = { worker_id: "worker" }
   const cancelWorkers = vi.fn(() => Array.from({ length: options.workerCount ?? 1 }, () => worker))
-  const abortForeground = vi.fn()
+  const foreground = new AbortController()
+  const abortForeground = vi.spyOn(foreground, "abort")
   const cancelManaged = vi.fn()
   const dismissNotifications = vi.fn()
   const cancelBackgroundTasks = vi.fn()
@@ -76,7 +78,9 @@ function loadWorkerCancel(
     withThreadRunMutationLock: (_threadId: string, run: () => unknown) => run(),
     getLocalThreadRunLease: () => (options.foreignOwner ? { owner: "im" } : undefined),
     BrowserWindow: { fromWebContents: () => null },
-    activeRuns: new Map(options.foreground ? [["thread", { abort: abortForeground }]] : []),
+    activeRuns: new Map(options.foreground ? [["thread", foreground]] : []),
+    desktopImageInvokes: options.pendingImages ?? new Map(),
+    stopDesktopRun: (controller: AbortController) => controller.abort(),
     turnStates: new Map(),
     coordinatorWorkerManager: {
       cancelWorkersForThread: cancelWorkers,
@@ -148,6 +152,25 @@ describe("managed background cancellation IPC wiring", () => {
       threadRunOwner: "desktop"
     })
     expect(cancelDetachedBackgroundTasks).not.toHaveBeenCalled()
+    expect(cancelManaged).toHaveBeenCalledExactlyOnceWith("thread")
+  })
+
+  it("stops pending image sends only on foreground Stop for their thread", async () => {
+    const image = new AbortController()
+    const otherImage = new AbortController()
+    const { execute, cancelManaged } = loadWorkerCancel({
+      workerCount: 0,
+      pendingImages: new Map([
+        ["thread", new Set([image])],
+        ["other-thread", new Set([otherImage])]
+      ])
+    })
+
+    expect(await execute({ sender: {} }, { threadId: "thread", cancelWorkers: true })).toBe(false)
+    expect(image.signal.aborted).toBe(false)
+    expect(await execute({ sender: {} }, { threadId: "thread" })).toBe(true)
+    expect(image.signal.aborted).toBe(true)
+    expect(otherImage.signal.aborted).toBe(false)
     expect(cancelManaged).toHaveBeenCalledExactlyOnceWith("thread")
   })
 

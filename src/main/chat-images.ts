@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises"
-import { basename, extname, join } from "node:path"
+import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises"
+import { basename, join } from "node:path"
+import { decodeChatImage } from "./chat-image-decoder"
 import { getCmbCoworkAgentDataRoot } from "./app-data-root"
 import { getDb, getThreadCore } from "./db"
 import { captureThreadIncarnation, type ThreadIncarnationRow } from "./services/thread-incarnation"
@@ -8,11 +9,17 @@ import type { AgentInvokeParams } from "./types"
 import { chatImageMarker } from "../shared/attachment-message-parts"
 import { normalizeGitWorkspacePathKey } from "../shared/workspace-path"
 import { threadIncarnationKey } from "../shared/thread-incarnation"
-import { chatImageExtensions, type SubmittedChatImage, MAX_ATTACHMENT_FILE_BYTES, type ChatImageRef,
+import { type SubmittedChatImage, type ChatImageRef,
   type FileAttachment } from "../shared/file-attachment"
 
 const validId = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/
-let decoding = 0
+const MAX_STAGED_CHAT_IMAGE_BYTES = 2 * 1024 * 1024
+
+function isStagedChatImage(header: Buffer, size: number) {
+  return header.length >= 12 && size <= MAX_STAGED_CHAT_IMAGE_BYTES &&
+    header.toString("ascii", 0, 4) === "RIFF" && header.toString("ascii", 8, 12) === "WEBP" &&
+    header.readUInt32LE(4) + 8 === size
+}
 
 function imageDirectoryName(threadId: string, row: ThreadIncarnationRow) {
   return createHash("sha256").update(JSON.stringify([threadId, captureThreadIncarnation(row)]))
@@ -59,50 +66,31 @@ export async function stageChatImage(threadId: string, name: string, bytes: Arra
   options?: { deduplicationKey?: string; beforePublish?: () => void; draftWorkspace?: string }):
 Promise<FileAttachment> {
   const root = scope(threadId)
-  const extension = extname(name).toLowerCase()
-  if (!chatImageExtensions.includes(extension) || bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES)
-    throw new Error("图片格式或大小超限")
-  if (decoding >= 3) throw new Error("其他图片正在处理，请稍后重试")
   const id = options?.deduplicationKey ? chatImageIdForKey(options.deduplicationKey) : randomUUID()
   const tempPath = join(root, randomUUID() + ".tmp")
   const size = bytes.byteLength
-  decoding++
   try {
     await mkdir(root, { recursive: true, mode: 0o700 })
-    const { default: launch } = await import("./chat-image-worker?nodeWorker")
-    const worker = launch({ workerData: { bytes, extension, tempPath }, transferList: [bytes],
-      resourceLimits: { maxOldGenerationSizeMb: 128 } })
-    const timer = setTimeout(() => void worker.terminate(), 15_000)
-    try {
-      const result = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-        worker.once("error", reject)
-        worker.once("exit", () => reject(new Error("图片解析任务已结束或超时")))
-        worker.once("message", value => value.error ? reject(new Error(value.error)) : resolve(value))
-      })
-      if (scope(threadId) !== root) throw new Error("会话已变更")
-      options?.beforePublish?.()
-      publishingImages.add(join(root, id + ".webp"))
-      await rename(tempPath, join(root, id + ".webp"))
-      if (options?.draftWorkspace !== undefined) {
-        try {
-          options.beforePublish?.()
-          getDb().run("INSERT INTO chat_image_input_owners VALUES (?, '', ?, ?)",
-            [threadId, id, options.draftWorkspace])
-        } catch (error) {
-          await rm(join(root, id + ".webp"), { force: true })
-          throw error
-        }
+    const result = await decodeChatImage(name, bytes, tempPath)
+    if (scope(threadId) !== root) throw new Error("会话已变更")
+    options?.beforePublish?.()
+    publishingImages.add(join(root, id + ".webp"))
+    await rename(tempPath, join(root, id + ".webp"))
+    if (options?.draftWorkspace !== undefined) {
+      try {
+        options.beforePublish?.()
+        getDb().run("INSERT INTO chat_image_input_owners VALUES (?, '', ?, ?)",
+          [threadId, id, options.draftWorkspace])
+      } catch (error) {
+        await rm(join(root, id + ".webp"), { force: true })
+        throw error
       }
-      const image: ChatImageRef = { id, filename: basename(name), ...result }
-      return { image, filename: image.filename, filePath: "", content: "",
-        size, mimeType: "image/webp", truncated: false }
-    } finally {
-      clearTimeout(timer)
-      await worker.terminate()
     }
+    const image: ChatImageRef = { id, filename: basename(name), ...result }
+    return { image, filename: image.filename, filePath: "", content: "",
+      size, mimeType: "image/webp", truncated: false }
   } finally {
     publishingImages.delete(join(root, id + ".webp"))
-    decoding--
     await rm(tempPath, { force: true })
   }
 }
@@ -110,7 +98,7 @@ Promise<FileAttachment> {
 export async function readChatImage(threadId: string, id: string) {
   if (typeof id !== "string" || !validId.test(id)) throw new Error("图片引用无效")
   const data = await readFile(join(scope(threadId), id + ".webp"))
-  if (data.length > 2 * 1024 * 1024) throw new Error("图片内容超过预算")
+  if (!isStagedChatImage(data, data.length)) throw new Error("图片内容无效或超过预算")
   return { type: "image_url" as const, image_url: { url: "data:image/webp;base64," + data.toString("base64") } }
 }
 
@@ -184,7 +172,9 @@ function parseStoredReceipt(json: unknown) {
 
 function approvedHistory(record: ReturnType<typeof parseStoredReceipt>, current: SubmissionScope | undefined) {
   if ((record.phase || record.scope) && !matchesSubmissionScope(record.scope, current)) return null
-  return record.phase === "reserved" || record.phase === "rejected" ? null : record.receipt
+  if (record.phase === "reserved" || record.phase === "rejected" ||
+      (record.phase === "cancelled" && record.receipt.preparedText === undefined)) return null
+  return record.receipt
 }
 
 function storedImageSubmission(threadId: string, messageId: string, bySubmissionId = false) {
@@ -221,8 +211,9 @@ export function bindChatImages(threadId: string, messageId: string, original: st
   })
 }
 
-type SubmissionPhase = "reserved" | "accepted" | "running" | "succeeded" | "failed" | "rejected"
-export type ChatImageSubmissionStatus = Exclude<SubmissionPhase, "reserved"> | "pending" | "unknown" | "missing"
+export type ChatImageSubmissionStatus = import("../shared/file-attachment").ChatImageSubmissionStatus
+type SubmissionPhase = Exclude<ChatImageSubmissionStatus, "pending" | "unknown" | "missing"> | "reserved"
+type ImageContinuationOutcome = "success" | "error" | "awaiting" | "cancelled"
 
 type PendingImageSubmission = {
   digest: string
@@ -231,6 +222,11 @@ type PendingImageSubmission = {
   outcome: Promise<ChatImageReceipt | undefined>
 }
 const pendingImageSubmissions = new Map<string, PendingImageSubmission>()
+const continuingImageSubmissions = new Map<string, symbol>()
+
+function imageSubmissionKey(threadId: string, submissionId: string): string {
+  return JSON.stringify([threadId, submissionId])
+}
 
 function assertImageInputOwner(threadId: string, id: string, messageId?: string) {
   const row = getThreadCore(threadId)
@@ -271,6 +267,22 @@ export async function unpinQueuedChatImages(threadId: string, messageId: string,
   await Promise.all(ids.map(([id]) => removeUnownedImage(threadId, root, String(id))))
 }
 
+/** Release only the old queue pin. A workspace change grants no access to its files or receipt. */
+export async function abandonOldWorkspaceChatImages(threadId: string, workspace: string | null,
+  incarnation: string, messageId: string) {
+  if (typeof messageId !== "string" || !validId.test(messageId)) throw new Error("图片队列引用无效")
+  const current = currentSubmissionScope(threadId)
+  if (!current || current.incarnation !== incarnation)
+    throw new Error("图片所属会话已变更")
+  if (current.workspace === normalizeGitWorkspacePathKey(workspace ?? ""))
+    throw new Error("请在当前工作区取消图片发送")
+  const record = storedImageSubmission(threadId, messageId, true)
+  const key = imageSubmissionKey(threadId, record?.receipt.submissionId ?? messageId)
+  if (pendingImageSubmissions.has(key) || continuingImageSubmissions.has(key))
+    throw new Error("原图片消息已进入处理，请回到原工作区查看")
+  await unpinQueuedChatImages(threadId, messageId, workspace)
+}
+
 async function removeUnownedImage(threadId: string, root: string, id: string) {
   const db = getDb()
   const owners = db.exec("SELECT 1 FROM chat_image_input_owners WHERE thread_id=? AND asset_id=? LIMIT 1",
@@ -295,22 +307,47 @@ export function getChatImageSubmissionStatus(threadId: string, messageId: string
   const record = storedImageSubmission(threadId, messageId, true)
   if (!record) return "missing"
   if (record.phase && !matchesSubmissionScope(record.scope, currentSubmissionScope(threadId))) return "unknown"
-  const active = pendingImageSubmissions.has(JSON.stringify([threadId, record.receipt.submissionId ?? messageId]))
+  const key = imageSubmissionKey(threadId, record.receipt.submissionId ?? messageId)
+  const active = pendingImageSubmissions.has(key)
   if (record.phase === "reserved") return active ? "pending" : "unknown"
-  if (record.phase === "running") return active ? "running" : "unknown"
+  // Acceptance can precede graph startup by asynchronous runtime setup. Only a
+  // released accepted receipt is eligible for a recovery submission.
+  if (record.phase === "accepted" && active) return "pending"
+  if (record.phase === "awaiting" || record.phase === "running") {
+    if (active || continuingImageSubmissions.has(key)) return "running"
+    if (record.phase === "running") return "unknown"
+  }
   return record.phase ?? "unknown"
 }
 
 /** A continuation already owns the thread lease and proved this exact user ID in its checkpoint. */
-export function settleContinuedChatImageSubmission(threadId: string, messageId: string,
-  outcome: "success" | "error") {
+function resumableImageReceipt(threadId: string, messageId: string) {
   const record = storedImageSubmission(threadId, messageId, true)
-  if (record?.phase !== "running" || !record.receipt.submissionId ||
+  if ((record?.phase !== "running" && record?.phase !== "awaiting") || !record.receipt.submissionId ||
       !matchesSubmissionScope(record.scope, currentSubmissionScope(threadId))) return
+  return { id: record.receipt.submissionId, phase: record.phase }
+}
+
+export function trackContinuedChatImageSubmission(threadId: string, messageId: string): (() => void) | undefined {
+  const receipt = resumableImageReceipt(threadId, messageId)
+  if (!receipt) return
+  const key = imageSubmissionKey(threadId, receipt.id)
+  const lease = Symbol()
+  continuingImageSubmissions.set(key, lease)
+  return () => {
+    if (continuingImageSubmissions.get(key) === lease) continuingImageSubmissions.delete(key)
+  }
+}
+
+export function settleContinuedChatImageSubmission(threadId: string, messageId: string,
+  outcome: ImageContinuationOutcome) {
+  const receipt = resumableImageReceipt(threadId, messageId)
+  if (!receipt) return
   getDb().run(`UPDATE chat_image_messages SET images_json=json_set(images_json, '$.phase', ?)
     WHERE thread_id=? AND json_extract(images_json, '$.submissionId')=?
-    AND json_extract(images_json, '$.phase')='running'`,
-    [outcome === "success" ? "succeeded" : "failed", threadId, record.receipt.submissionId])
+    AND json_extract(images_json, '$.phase')=?`,
+    [outcome === "success" ? "succeeded" : outcome === "error" ? "failed" : outcome,
+      threadId, receipt.id, receipt.phase])
 }
 
 export interface ChatImageAdmission {
@@ -319,7 +356,7 @@ export interface ChatImageAdmission {
   reject(): void
   accept(preparedText: string, images: SubmittedChatImage[]): void
   start(): void
-  finish(outcome: "success" | "error" | "unknown"): void
+  finish(outcome: ImageContinuationOutcome | "unknown"): void
   release(): void
 }
 
@@ -335,7 +372,7 @@ export function beginChatImageSubmission(request: AgentInvokeParams):
     return
   }
   const stored = storedImageSubmission(threadId, userMessageId, true)
-  const key = JSON.stringify([threadId, userMessageId])
+  const key = imageSubmissionKey(threadId, userMessageId)
   const pending = pendingImageSubmissions.get(key)
   if (!chatImages.length && !stored && !pending) return
   const refs = chatImages.map(ref => {
@@ -430,6 +467,18 @@ export function beginChatImageSubmission(request: AgentInvokeParams):
     },
     finish(outcome) {
       if (outcome === "unknown" || !matchesSubmissionScope(sourceScope, currentSubmissionScope(threadId))) return
+      if (outcome === "awaiting") {
+        if (phase === "running") transition("awaiting")
+        return
+      }
+      if (outcome === "cancelled") {
+        if (phase === "reserved" || phase === "accepted" || phase === "running") {
+          transition("cancelled")
+          db.run("DELETE FROM chat_image_input_owners WHERE thread_id=? AND message_id=? AND workspace_key=?",
+            [threadId, userMessageId, sourceScope.workspace])
+        }
+        return
+      }
       if (phase === "reserved" && outcome === "error") transition("rejected")
       if (phase === "running" || (phase === "accepted" && outcome === "error"))
         transition(outcome === "success" ? "succeeded" : "failed")
@@ -475,6 +524,35 @@ export function getChatImageHistoryProjections(threadId: string, ids: readonly s
 
 export function boundChatImageReceipt(threadId: string, messageId: string): ChatImageReceipt | undefined {
   return chatImageHistoryProjection(threadId, messageId) ?? undefined
+}
+
+/** A stale checkpoint declaration does not require an image-capable model. */
+export async function hasReadableDesktopChatImages(threadId: string, messageIds: readonly string[]): Promise<boolean> {
+  if (!messageIds.length) return false
+  const root = scope(threadId)
+  for (const messageId of messageIds) {
+    const receipt = boundChatImageReceipt(threadId, messageId)
+    if (!receipt || receipt.source === "bot") continue
+    for (const ref of receipt.images) {
+      if (!validId.test(ref.id)) continue
+      const path = join(root, ref.id + ".webp")
+      try {
+        const file = await open(path)
+        try {
+          const info = await file.stat()
+          if (!info.isFile() || info.size < 12 || info.size > MAX_STAGED_CHAT_IMAGE_BYTES) continue
+          const header = Buffer.alloc(12)
+          const { bytesRead } = await file.read(header, 0, header.length, 0)
+          if (bytesRead === header.length && isStagedChatImage(header, info.size)) return true
+        } finally {
+          await file.close()
+        }
+      } catch {
+        // A separate history turn can still have valid image evidence.
+      }
+    }
+  }
+  return false
 }
 
 export function bindBotChatImages(threadId: string, messageId: string, original: string,

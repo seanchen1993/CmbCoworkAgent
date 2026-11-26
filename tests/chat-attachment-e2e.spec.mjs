@@ -37,6 +37,7 @@ try {
   const bytes = await sharp({ create: { width: 12, height: 6, channels: 3, background: "blue" } }).png().toBuffer()
   const docx = visualDocx([bytes, bytes])
   await writeFile(join(profile, "word.docx"), docx)
+  await writeFile(join(profile, "script.html"), "<script>document.body.append('scripted report')</script>")
   const result = await page.evaluate(async ({ profile, png, docx, xlsx, inline }) => {
     const thread = await window.api.threads.create({ title: "Attachment smoke", workspacePath: profile })
     const threadId = thread.thread_id ?? thread.id
@@ -52,6 +53,9 @@ try {
     const atFile = await window.api.file.attachWorkspaceImage({
       threadId, workspacePath: profile, filePath: "word.docx"
     })
+    const atHtml = await window.api.file.attachWorkspaceImage({
+      threadId, workspacePath: profile, filePath: "script.html"
+    })
     const bad = await upload("bad.html", new TextEncoder().encode('<img src="data:image/png;base64,AAAA">'))
     const token = thread.metadata?.cmb_thread_incarnation
     const incarnation = token ? "uuid:" + token : "legacy:" + new Date(thread.created_at).getTime()
@@ -64,7 +68,7 @@ try {
     await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "pin", messageId, ids })
     await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "pin", messageId, ids })
     await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "unpin", messageId })
-    return { document, image, word, sheet, web, atFile, bad, status, stale }
+    return { threadId, document, image, word, sheet, web, atFile, atHtml, bad, status, stale }
   }, {
     profile, png: Array.from(bytes), docx: Array.from(docx), xlsx: Array.from(visualXlsx(bytes)),
     inline: '<p>Inline test</p><img src="data:image/png;base64,' + bytes.toString("base64") +
@@ -87,14 +91,176 @@ try {
   assert.equal(result.web.attachment.embeddedImages.length, 1)
   assert.match(result.web.attachment.visualNotice, /外部/)
   assert.equal(result.atFile.embeddedImages.length, 2)
+  assert.match(result.atHtml.content, /scripted report/)
   assert.equal(result.bad.success, false)
   assert.equal(result.status, "missing")
   assert.equal(result.stale, true, "a recreated thread must reject an old image submission")
   console.log("HTML, DOCX, XLSX, PNG, workspace mentions, image validation and queue ownership passed through Electron IPC")
+  await verifyImageSendPresentation(app, page, result.threadId, profile, bytes)
+  console.log("Image send, browser option, cancellation, reload, stop and stale workspace recovery passed through the composer")
+
 } finally {
   try {
     await app?.close()
   } finally {
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
+}
+
+async function verifyImageSendPresentation(app, page, threadId, workspacePath, bytes) {
+  await page.evaluate(async ({ threadId, workspacePath }) => {
+    await window.api.models.setCustomConfig({
+      id: "attachment-queue-fixture", name: "Attachment queue fixture",
+      baseUrl: "http://127.0.0.1:9/v1", model: "fixture", apiKey: "fixture",
+      maxTokens: 64000, maxOutputTokens: 2048, inputModalities: ["text", "image"]
+    })
+    await window.api.models.setDefault("custom:attachment-queue-fixture")
+    await window.api.routing.setMode("pinned")
+    await window.api.workspace.set(threadId, workspacePath)
+    await window.api.threads.patchMetadata(threadId, { set: { model: "custom:attachment-queue-fixture" } })
+  }, { threadId, workspacePath })
+  await app.evaluate(({ ipcMain }) => {
+    const statusChannel = "workspace:chatImageSubmissionStatus"
+    const originalStatus = ipcMain._invokeHandlers.get(statusChannel)
+    const fixture = globalThis.attachmentQueueFixture = { hold: true, runs: [], cancelled: false }
+    ipcMain.removeHandler(statusChannel)
+    ipcMain.handle(statusChannel, async (event, request) => {
+      if (fixture.hold) {
+        fixture.hold = false
+        await new Promise(resolve => { fixture.releaseStatus = resolve })
+      }
+      if (fixture.runs.some(run => run.request.userMessageId === request.messageId))
+        return fixture.cancelled ? "cancelled" : "running"
+      return originalStatus(event, request)
+    })
+    const originalCancel = ipcMain._invokeHandlers.get("agent:cancel")
+    ipcMain.removeHandler("agent:cancel")
+    ipcMain.handle("agent:cancel", (event, request) => {
+      if (!fixture.runs.some(run => run.request.threadId === request.threadId)) return originalCancel(event, request)
+      fixture.cancelled = true
+    })
+    ipcMain.removeAllListeners("agent:invoke")
+    ipcMain.on("agent:invoke", (event, request) => {
+      fixture.runs.push({ request, sender: event.sender,
+        channel: "agent:stream:" + request.threadId + ":request:" + encodeURIComponent(request.streamRequestId) })
+    })
+  })
+  await page.reload({ waitUntil: "domcontentloaded" })
+  await page.getByText("Attachment smoke", { exact: true }).first().click()
+  const chat = page.locator('[data-chat-thread-id="' + threadId + '"]')
+  const composer = chat.locator("textarea.composer-textarea")
+  const queue = chat.locator("[data-chat-queued-list]")
+  const sending = chat.getByText("正在发送图片消息…", { exact: true })
+  const waitForFixture = async predicate => {
+    for (let tries = 0; tries < 200; tries++) {
+      if (await app.evaluate(predicate)) return
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    throw new Error("Timed out waiting for attachment submission fixture")
+  }
+  const sendImage = async (name, question) => {
+    const dataTransfer = await page.evaluateHandle(({ name, png }) => {
+      const data = new DataTransfer()
+      data.items.add(new File([Uint8Array.from(png)], name, { type: "image/png" }))
+      return data
+    }, { name, png: Array.from(bytes) })
+    try {
+      await composer.dispatchEvent("drop", { dataTransfer })
+      await chat.getByText(name, { exact: true }).waitFor()
+      await composer.fill(question)
+      await composer.press("Enter")
+    } finally {
+      await dataTransfer.dispose()
+    }
+  }
+
+  await sendImage("cancel-before-handoff.png", "Cancel this visual turn")
+  await waitForFixture(() => Boolean(globalThis.attachmentQueueFixture.releaseStatus))
+  await sending.waitFor()
+  assert.equal(await queue.count(), 0, "an idle first image has no queue badge")
+  await chat.getByRole("button", { name: "取消发送" }).click()
+  await sending.waitFor({ state: "hidden" })
+  await app.evaluate(() => globalThis.attachmentQueueFixture.releaseStatus())
+
+  await composer.fill("/browser")
+  await chat.getByRole("option", { name: /内置浏览器/ }).click()
+  await chat.getByRole("button", { name: "移除内置浏览器" }).waitFor()
+  await sendImage("send-now.png", "First accepted image")
+  await waitForFixture(() => globalThis.attachmentQueueFixture.runs.length > 0)
+  const accepted = await app.evaluate((_electron, workspace) => {
+    const { runs } = globalThis.attachmentQueueFixture
+    const run = runs[0]
+    run.sender.send(run.channel, { type: "custom", data: { type: "user_prompt_accepted", workspacePath: workspace } })
+    return {
+      total: runs.length, id: run.request.userMessageId,
+      files: run.request.chatImages, message: run.request.message
+    }
+  }, workspacePath)
+  assert.equal(accepted.total, 1)
+  assert.deepEqual(accepted.files.map(file => file.filename), ["send-now.png"])
+  assert.match(accepted.message, /使用内置浏览器/)
+  await chat.locator('[data-chat-message-id="' + accepted.id + '"]').waitFor()
+  await sending.waitFor({ state: "hidden" })
+  assert.equal(await queue.count(), 0, "an acknowledged image is only shown in the transcript")
+  await chat.getByRole("button", { name: "停止生成" }).waitFor()
+  await sendImage("wait-behind-turn.png", "Remove this waiting image")
+  await queue.getByText(/Remove this waiting image/).waitFor()
+  await queue.getByRole("button", { name: "删除", exact: true }).click()
+  await queue.waitFor({ state: "hidden" })
+  // Lose the renderer stream, then hold the first receipt read after reload.
+  await app.evaluate(() => {
+    const fixture = globalThis.attachmentQueueFixture
+    fixture.hold = true
+    fixture.releaseStatus = undefined
+  })
+  await page.reload({ waitUntil: "domcontentloaded" })
+  await page.getByText("Attachment smoke", { exact: true }).first().click()
+  await waitForFixture(() => Boolean(globalThis.attachmentQueueFixture.releaseStatus))
+  await composer.fill("Wait until the existing image settles")
+  await composer.press("Enter")
+  await queue.getByText(/Wait until the existing image settles/).waitFor()
+  assert.equal(await app.evaluate(() => globalThis.attachmentQueueFixture.runs.length), 1,
+    "ordinary chat cannot preempt an in-flight image during receipt recovery")
+  await app.evaluate(() => globalThis.attachmentQueueFixture.releaseStatus())
+  await chat.getByText("图片消息正在处理…", { exact: true }).waitFor()
+  await queue.getByRole("button", { name: "删除", exact: true }).click()
+  await queue.waitFor({ state: "hidden" })
+  await chat.getByRole("button", { name: "停止生成" }).click()
+  await waitForFixture(() => globalThis.attachmentQueueFixture.cancelled)
+  await chat.getByText("图片消息正在处理…", { exact: true }).waitFor({ state: "hidden" })
+  assert.equal(await queue.count(), 0, "a confirmed stop clears the outbox")
+  const total = await app.evaluate(() => globalThis.attachmentQueueFixture.runs.length)
+  assert.equal(total, 1, "cancelling the preparation or deleting the waiting image never invokes the model")
+
+  const nextWorkspace = join(workspacePath, "alternate-workspace")
+  await mkdir(nextWorkspace)
+  await page.evaluate(async ({ threadId, workspacePath, nextWorkspace, png }) => {
+    const thread = await window.api.threads.get(threadId)
+    const token = thread.metadata?.cmb_thread_incarnation
+    const incarnation = token ? "uuid:" + token : "legacy:" + new Date(thread.created_at).getTime()
+    const id = crypto.randomUUID()
+    const staged = await window.api.file.parseBytes({
+      threadId, workspacePath, fileName: "old-workspace.png", bytes: Uint8Array.from(png).buffer
+    })
+    if (!staged.attachment?.image) throw new Error(staged.error || "Image staging failed")
+    const image = { id: staged.attachment.image.id, filename: "old-workspace.png", slot: 0 }
+    await window.api.file.updateImageOwners({
+      action: "pin", threadId, workspacePath, incarnation, messageId: id, ids: [image.id]
+    })
+    const common = { created_at: new Date(), updated_at: new Date(), modelId: "custom:attachment-queue-fixture" }
+    localStorage.setItem("cmbcowork:message-queue:" + threadId, JSON.stringify([
+      { ...common, id, text: "Old workspace image", chatImages: [image],
+        attachmentModelBlocks: '\n<attachment filename="old-workspace.png" media="image" slot="0" />',
+        imageDelivery: { workspacePath, incarnation, source: "fixture" } },
+      { ...common, id: crypto.randomUUID(), text: "Successor in new workspace" }
+    ]))
+    await window.api.workspace.set(threadId, nextWorkspace)
+  }, { threadId, workspacePath, nextWorkspace, png: Array.from(bytes) })
+  await page.reload({ waitUntil: "domcontentloaded" })
+  await page.getByText("Attachment smoke", { exact: true }).first().click()
+  await chat.getByText(/图片消息属于原工作区或原会话/).waitFor()
+  await queue.getByText(/Old workspace image/).locator("..").getByRole("button", { name: "删除", exact: true }).click()
+  await waitForFixture(() => globalThis.attachmentQueueFixture.runs.length === 2)
+  assert.match(await app.evaluate(() => globalThis.attachmentQueueFixture.runs[1].request.message),
+    /Successor in new workspace/)
 }

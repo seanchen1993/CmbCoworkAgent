@@ -706,6 +706,15 @@ export function registerBotHandlers(
       )
   )
   ipcMain.handle(
+    "bots:cancel-queued-image-input",
+    (event, hostId: unknown, botId: unknown, check: unknown, workId: unknown) =>
+      desktopAttachmentHost(event, hostId).cancelQueuedImageInput(
+        botIdentifier(botId),
+        parseBotRequestChecks([check])[0],
+        workId == null ? undefined : botIdentifier(workId)
+      )
+  )
+  ipcMain.handle(
     "bots:stop-conversation",
     (_event, hostId: unknown, botId: unknown, groupId: unknown, workId: unknown, scope: unknown) => {
       if (scope !== undefined && scope !== "background") throw new BotError("INVALID_INPUT", "停止范围无效")

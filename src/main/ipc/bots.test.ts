@@ -57,6 +57,7 @@ const fixture = vi.hoisted(() => ({
   messageReactions: vi.fn(),
   setMessageReaction: vi.fn(),
   requestReceipts: vi.fn(),
+  cancelQueuedImageInput: vi.fn(),
   stopConversation: vi.fn(),
   stopWork: vi.fn(),
   stopGroup: vi.fn(),
@@ -79,7 +80,7 @@ const fixture = vi.hoisted(() => ({
   markWorksRead: vi.fn(),
   listenConversationTransitions: vi.fn(),
   finishConversationTransition: vi.fn(),
-  windowFor: vi.fn(() => ({}))
+  windowFor: vi.fn((): object | null => ({}))
 }))
 vi.mock("electron", () => ({
   BrowserWindow: { getAllWindows: () => [], fromWebContents: fixture.windowFor },
@@ -150,6 +151,16 @@ function register(
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.getHost.mockImplementation(() => fixture)
+})
+it("withdraws visual requests only from the desktop frame with a canonical request receipt", () => {
+  const frame = {}
+  const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+  const check = { requestId: "visual-request", messageHash: "a".repeat(64) }
+  expect(() => register()("bots:cancel-queued-image-input", "local", "bot-1", check)).toThrow("本机桌面")
+  expect(() => call("bots:cancel-queued-image-input", "local", "bot-1", { ...check, messageHash: "bad" })).toThrow()
+  expect(fixture.cancelQueuedImageInput).not.toHaveBeenCalled()
+  call("bots:cancel-queued-image-input", "local", "bot-1", check, "work-1")
+  expect(fixture.cancelQueuedImageInput).toHaveBeenCalledExactlyOnceWith("bot-1", check, "work-1")
 })
 it("keeps surviving historical card summaries when an unlinked work's native conversation is deleted", async () => {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
@@ -977,7 +988,7 @@ describe("Bot IPC boundaries", () => {
     expect(() =>
       register(undefined, { ...event, senderFrame: {} })("bots:im:status", "local")
     ).toThrow("桌面")
-    fixture.windowFor.mockReturnValueOnce(null as any)
+    fixture.windowFor.mockReturnValueOnce(null)
     expect(() => call("bots:im:status", "local")).toThrow("桌面")
     expect(() => call("bots:im:status", "remote")).toThrow("本机")
     expect(() => call("bots:im:conversation-history", "local", "a", "b", "x".repeat(1025))).toThrow(

@@ -19,6 +19,7 @@ export type FileAttachmentParserSource = {
   kind: "bytes"
   fileName: string
   bytes: ArrayBuffer
+  allowHtmlSource?: true
 }
 
 export interface FileAttachmentParserRequest {

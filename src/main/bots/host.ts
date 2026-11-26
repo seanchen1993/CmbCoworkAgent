@@ -2616,15 +2616,36 @@ export class LocalBotHost {
     this.store.acceptDesktopImageInput(taskId)
     this.changed()
   }
+  cancelQueuedImageInput(botId: string, check: BotRequestCheck, workId?: string): boolean {
+    this.requireRunning()
+    const before = this.store.revision()
+    const removed = this.store.cancelQueuedImageInput(botId, check, workId)
+    if (before !== this.store.revision()) {
+      this.changed()
+      this.wake()
+    }
+    return removed
+  }
+
   private waitForDesktopImageInput(task: BotTask): BotTask | Promise<BotTask> {
-    if (task.origin.kind !== "user" || task.origin.imageAdmission !== "pending") return task
-    return new Promise<BotTask>((resolve, reject) => {
+    if (task.origin.kind !== "user" || !task.origin.imageAdmission || task.origin.imageAdmission === "accepted")
+      return task
+    if (task.origin.imageAdmission === "withdrawn")
+      throw new BotError("CONFLICT", "图片消息已取消发送。")
+
+    // The scheduler's first dispatch attempt was queued by send(). On an
+    // idle thread keep the existing admission result. If still queued after
+    // that attempt, the inbox already holds the exact request.
+    return Promise.resolve().then(() => new Promise<BotTask>((resolve, reject) => {
       const check = () => {
         try {
           this.requireRunning()
           const current = this.store.getTask(task.id)
-          if (current.origin.kind === "user" && current.origin.imageAdmission === "accepted") resolve(current)
-          else if (["queued", "running", "waiting_user"].includes(current.state)) return
+          if (current.origin.kind === "user" && current.origin.imageAdmission === "withdrawn")
+            throw new BotError("CONFLICT", "图片消息已取消发送。")
+          if ((current.origin.kind === "user" && current.origin.imageAdmission === "accepted") ||
+              current.state === "queued") resolve(current)
+          else if (current.state === "running" || current.state === "waiting_user") return
           else throw new BotError("CONFLICT", current.error || "图片消息未通过接纳，草稿已保留。")
         } catch (error) { reject(error) }
         this.waitingImageInputs.delete(check)
@@ -2633,7 +2654,7 @@ export class LocalBotHost {
       const unsubscribe = this.subscribe(check)
       this.waitingImageInputs.add(check)
       check()
-    })
+    }))
   }
 
   private notifyUserMessageAccepted(task: BotTask): BotTask {

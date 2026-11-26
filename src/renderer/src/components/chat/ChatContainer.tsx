@@ -263,7 +263,16 @@ import {
 } from "@/lib/app-catalog-cache"
 import { readHarnessBoardCatalogCache } from "@/components/harness-board/harness-board-cache"
 import { bindOrdinaryImageDraft, threadDraftIncarnation } from "@/lib/bot-conversation-draft"
-import { claimImageComposer, imageComposerSource, imageDeliveryAction, parkImageOutbox, runFrozenImageOutbox } from "@/lib/image-outbox"
+import {
+  claimImageComposer,
+  imageComposerSource,
+  imageDeliveryAction,
+  imageQueuePresentation,
+  isActiveImageReceipt,
+  parkImageOutbox,
+  runFrozenImageOutbox,
+  type ImageSendPhase
+} from "@/lib/image-outbox"
 import { threadIncarnationKey } from "../../../../shared/thread-incarnation"
 import {
   getQueuedModelContent,
@@ -985,6 +994,7 @@ export interface ManagedChatTurn {
   reconcileDrafts?(drafts: QueuedMessage[]): Promise<void>
   draftReceiptRevision?: string
   sendingDraftIds?: ReadonlySet<string>
+  queuedVisualDraftIds?: ReadonlySet<string>
   maxPendingDrafts?: number
   submit: NonNullable<ReturnType<typeof useThreadStream>["stream"]>["submit"]
   cancel(): Promise<void>
@@ -1136,7 +1146,10 @@ const liveSubmitPreparingThreads = new Set<string>()
 // is active. This short-lived guard atomically claims the current composer
 // payload while @file attachments are being resolved.
 const queuedDraftPreparingThreads = new Set<string>()
-const deliveringImageIds = new Set<string>()
+const imageSendPhases = new Map<string, ImageSendPhase>()
+const imageQueueErrors = new Map<string, { id: string; message: string }>()
+const IMAGE_QUEUE_MODEL_REQUIRED_ERROR = "图文草稿的原模型不可用，请选择支持图片的模型后重试。"
+const IMAGE_QUEUE_WORKSPACE_MISMATCH = "图片消息属于原工作区或原会话。可返回原工作区，或移除草稿。"
 const editingImageIds = new Set<string>()
 const parkingImageIds = new Set<string>()
 /** Same-run corrections are acknowledged durably and rendered through the ordered
@@ -2036,6 +2049,12 @@ export function ChatContainer({
   const queuedEditRequestRef = useRef(0)
   const guidingQueuedMessageIdsRef = useRef(new Set<string>())
   const [queuePumpTick, setQueuePumpTick] = useState(0)
+  const [checkedImageReceiptKey, setCheckedImageReceiptKey] = useState("")
+  const [observedImageReceipt, setObservedImageReceipt] = useState<{
+    threadId: string
+    id: string
+    status: "pending" | "running" | "awaiting"
+  } | null>(null)
   const subscribeToSubmitRelease = useCallback(
     (listener: () => void) => subscribeSubmitInFlightRelease(submitInFlightRef, threadId, listener),
     [submitInFlightRef, threadId]
@@ -2908,7 +2927,7 @@ export function ChatContainer({
           }
 
           const remaining = MAX_TOTAL_CHARS - currentChars
-          if (remaining <= 0 && !chatImageExtensions.includes(ext)) {
+          if (remaining <= 0 && !chatImageExtensions.includes(ext) && !isVisualDocumentPath(displayIdentity)) {
             setError(`附件总内容已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
             continue
           }
@@ -2954,7 +2973,13 @@ export function ChatContainer({
               }
               continue
             }
-            const attachment = result.attachment
+            if (remaining <= 0 && !selectedImages.length) {
+              setError("附件文字已达上限，请缩减文字附件后重试。")
+              continue
+            }
+            const attachment = remaining <= 0 && result.attachment.content.length
+              ? { ...result.attachment, content: "", truncated: true }
+              : result.attachment
             if ([...snapshot, ...added, attachment].flatMap(attachmentImages).length > MAX_CHAT_IMAGES) {
               setError("每条消息最多发送 3 张图片，含文档内嵌图片")
               continue
@@ -2963,7 +2988,7 @@ export function ChatContainer({
               draftWorkspace: normalizeGitWorkspacePathKey(uploadDraft.workspacePath ?? "") } } : attachment)
             existingPaths.add(result.attachment.filePath)
             currentCount++
-            currentChars += result.attachment.content.length
+            currentChars += attachment.content.length
           } else {
             setError(result.error || "文件解析失败")
           }
@@ -3010,8 +3035,8 @@ export function ChatContainer({
         MAX_TOTAL_CHARS -
         existingAttachments.reduce((sum, item) => sum + item.content.length, 0) -
         existingMentions.reduce((sum, item) => sum + (item.contentChars ?? 0), 0)
-      if (maxFiles <= 0 || maxChars <= 0) {
-        setError(maxFiles <= 0 ? `最多只能添加 ${MAX_ATTACHMENTS} 个文件` : "附件内容已达上限")
+      if (maxFiles <= 0) {
+        setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
         return
       }
       managedAttachmentPendingRef.current = true
@@ -3019,7 +3044,7 @@ export function ChatContainer({
       clearError()
       const originalWorkspace = normalizeWorkspacePathKey(workspacePathRef.current)
       try {
-        const files = await collect(replacement ? 1 : maxFiles, maxChars)
+        const files = await collect(replacement ? 1 : maxFiles, Math.max(0, maxChars))
         if (!chatViewMountedRef.current) return
         if (replacement && (currentThreadIdRef.current !== threadId ||
           !managedTurnRef.current?.attachFiles || managedTurnRef.current.composerReadOnlyReason)) return
@@ -6262,6 +6287,32 @@ export function ChatContainer({
     ]
   )
 
+  const imageReceiptCandidates = useMemo(() => {
+    if (managedTurn || historyOnly || !currentThread) return []
+    const incarnation = threadIncarnationKey(threadDraftIncarnation(currentThread))
+    return queuedMessages.filter(({ imageDelivery, parkedForConversationLink }) =>
+      !parkedForConversationLink && imageDelivery?.frozen && imageDelivery.incarnation === incarnation &&
+      isSameGitWorkspacePath(imageDelivery.workspacePath, workspacePath))
+  }, [currentThread, historyOnly, managedTurn, queuedMessages, workspacePath])
+  const imageReceiptKey = imageReceiptCandidates.length
+    ? JSON.stringify([threadId, imageReceiptCandidates.map(message => [message.id, message.updated_at.getTime()])
+      .sort(([left], [right]) => String(left).localeCompare(String(right)))])
+    : ""
+  const imageReceiptCheckPending = imageReceiptKey !== "" && checkedImageReceiptKey !== imageReceiptKey
+  const activeImageReceipt = observedImageReceipt?.threadId === threadId &&
+    imageReceiptCandidates.some(message => message.id === observedImageReceipt.id)
+      ? observedImageReceipt : null
+  const setImageQueueError = useCallback((id: string, message: string) => {
+    imageQueueErrors.set(threadId, { id, message })
+    setError(message)
+  }, [setError, threadId])
+  const clearImageQueueError = useCallback((id: string) => {
+    const saved = imageQueueErrors.get(threadId)
+    if (saved?.id !== id) return
+    imageQueueErrors.delete(threadId)
+    if (threadContext.getThreadState(threadId).error === saved.message) clearError()
+  }, [clearError, threadContext, threadId])
+
   const handleSubmit = async (e: Pick<Event, "preventDefault">, defaultText = ""): Promise<void> => {
     e.preventDefault()
     if (ordinaryUploadPending.current === uploadDraft) {
@@ -6271,6 +6322,11 @@ export function ChatContainer({
     if (managedTurnRef.current?.composerReadOnlyReason) return
     if (restoredBotDraftError) {
       setError(restoredBotDraftError)
+      return
+    }
+    if (!managedTurn && attachments.some(file => file.botInputId &&
+      (file.embeddedImageCount || ["image/png", "image/jpeg", "image/webp"].includes(file.mimeType)))) {
+      setError("草稿里有 Bot 会话的图片。请移除这些附件，在当前聊天中重新添加后再发送。")
       return
     }
     const trimmedInput = defaultText || input.trim()
@@ -6324,7 +6380,7 @@ export function ChatContainer({
     const willEnqueueWhileBusy =
       !managedTurn &&
       !isGoalSlashInput &&
-      (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
+      (isLoading || imageReceiptCheckPending || Boolean(activeImageReceipt) || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
@@ -6723,7 +6779,8 @@ export function ChatContainer({
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
       const userText = rawMessage || (attachmentPayload && !keepImageDraft && !skill ? "请分析以下文件内容。" : "")
-      if (browser && !managedTurn?.submitDraft && !queueRestoredDraft) setSelectedBuiltinBrowser(false)
+      if (browser && !managedTurn?.submitDraft && !queueRestoredDraft && !keepImageDraft)
+        setSelectedBuiltinBrowser(false)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
       }
@@ -6843,8 +6900,12 @@ export function ChatContainer({
           if (images.length) {
             if (!currentThread || !workspacePath || !imageSource || !chatViewMountedRef.current ||
                 uploadDraftRef.current !== uploadDraft || imageComposerSource(threadContext.getThreadState(threadId)) !== imageSource) return
-            composedDraft.imageDelivery = { workspacePath, incarnation: threadIncarnationKey(threadDraftIncarnation(currentThread)),
-              source: imageSource }
+            composedDraft.imageDelivery = {
+              workspacePath, incarnation: threadIncarnationKey(threadDraftIncarnation(currentThread)),
+              source: imageSource,
+              ...(!willEnqueueWhileBusy && !queuedMessages.length && !hasActiveGoalRunning
+                ? { immediate: true as const } : {})
+            }
           }
           const persist = () => {
             let error: string | null = "消息未能保存，未发送。"
@@ -6860,7 +6921,8 @@ export function ChatContainer({
                 pin: () => window.api.file.updateImageOwners({ action: "pin", ...scope, ids: images.map(image => image.id) }),
                 unpin: () => window.api.file.updateImageOwners({ action: "unpin", ...scope }),
                 rollback: () => deleteQueuedMessage(composedDraft.id), consume: clearClaimedDraft,
-                isCurrent: () => imageComposerSource(threadContext.getThreadState(threadId)) === imageSource })
+                isCurrent: () => getQueuedMessage(composedDraft.id) === composedDraft &&
+                  imageComposerSource(threadContext.getThreadState(threadId)) === imageSource })
               if (!parked) return
             } catch (error) {
               setError(error instanceof Error ? error.message : "图片排队失败，原草稿已保留。")
@@ -7135,8 +7197,8 @@ export function ChatContainer({
     setEditingQueueText("")
 
     if (message.imageDelivery) {
-      if (parkingImageIds.has(message.id) || deliveringImageIds.has(message.id) || editingImageIds.has(message.id)) {
-        toast.message("正在核对图片消息，请稍后编辑。")
+      if (parkingImageIds.has(message.id) || imageSendPhases.has(message.id) || editingImageIds.has(message.id)) {
+        toast.message("图片消息正在发送，请稍后编辑。")
         return
       }
       const { workspacePath, incarnation } = message.imageDelivery
@@ -7159,7 +7221,7 @@ export function ChatContainer({
         if (id !== message.id)
           await window.api.file.updateImageOwners({ action: "unpin", ...scope, messageId: error ? id : message.id })
         if (error) setError(error)
-        else { clearError(); setQueueAutoDrainSuppressed(false) }
+        else { clearImageQueueError(message.id); setQueueAutoDrainSuppressed(false) }
       } catch (error) {
         setError(error instanceof Error ? error.message : "图片消息编辑失败。")
       } finally {
@@ -7243,6 +7305,7 @@ export function ChatContainer({
       }
     }
   }, [
+    clearImageQueueError,
     appendMessage,
     deleteQueuedMessage,
     editingQueueId,
@@ -7283,26 +7346,46 @@ export function ChatContainer({
         return
       }
       if (message.imageDelivery) {
-        if (parkingImageIds.has(message.id) || deliveringImageIds.has(message.id) || editingImageIds.has(message.id)) {
-          toast.message("图片消息正在提交或核对，请稍后再移除。")
+        if (editingImageIds.has(message.id)) return
+        const phase = imageSendPhases.get(message.id)
+        if (phase === "submitted" || phase === "accepted") {
+          toast.message("图片消息已开始发送，可停止生成。")
           return
         }
-        const { workspacePath, incarnation } = message.imageDelivery
-        const scope = { threadId, workspacePath, incarnation, messageId: message.id }
+        // The pin operation will see the missing record and release its ownership.
+        if (parkingImageIds.has(message.id)) {
+          if (getQueuedMessage(message.id) === message) {
+            deleteQueuedMessage(message.id, error => {
+              if (error) setError(error)
+              else clearImageQueueError(message.id)
+            })
+          }
+          return
+        }
+        const { workspacePath: savedWorkspace, incarnation } = message.imageDelivery
+        const scope = { threadId, workspacePath: savedWorkspace, incarnation, messageId: message.id }
         editingImageIds.add(message.id)
         try {
-          const status = await window.api.file.chatImageSubmissionStatus(scope)
-          if (status === "running" || status === "pending" || status === "accepted") {
-            toast.message("已开始处理的图片消息将在运行结束后从队列移除。")
-            return
+          const staleWorkspace = !isSameGitWorkspacePath(scope.workspacePath, workspacePath)
+          if (staleWorkspace) {
+            await window.api.file.updateImageOwners({ action: "abandon", ...scope })
+          } else {
+            const status = await window.api.file.chatImageSubmissionStatus(scope)
+            if (isActiveImageReceipt(status) || status === "accepted") {
+              toast.message("图片消息已开始处理，请在会话中停止或继续。")
+              return
+            }
           }
           if (getQueuedMessage(message.id) !== message) return
           let removed = false
           deleteQueuedMessage(message.id, error => {
             if (error) setError(error)
-            else removed = true
+            else {
+              removed = true
+              clearImageQueueError(message.id)
+            }
           })
-          if (removed) {
+          if (removed && !staleWorkspace) {
             await window.api.file.updateImageOwners({ action: "unpin", ...scope })
             const resident = new Set(threadContext.getThreadState(threadId).draftAttachments.flatMap(attachmentImages).map(image => image.id))
             const ids = (message.chatImages ?? []).map(ref => ref.id).filter(id => !resident.has(id))
@@ -7328,7 +7411,7 @@ export function ChatContainer({
             messageId: message.id }).catch(() => undefined)
       })
     },
-    [deleteQueuedMessage, getQueuedMessage, setError, threadContext, threadId, workspacePath, managedTurn?.submitDraft, managedTurn?.discardDraft]
+    [clearImageQueueError, deleteQueuedMessage, getQueuedMessage, setError, threadContext, threadId, workspacePath, managedTurn?.submitDraft, managedTurn?.discardDraft]
   )
 
   const handleGuideQueuedMessage = useCallback(
@@ -7458,6 +7541,7 @@ export function ChatContainer({
         return
       }
       const scope = delivery && { threadId, workspacePath: delivery.workspacePath, incarnation: delivery.incarnation, messageId: queued.id }
+      let safeToChooseModel = false
       const checkDelivery = async () => {
         if (!scope) return true
         const status = await window.api.file.chatImageSubmissionStatus(scope)
@@ -7468,19 +7552,26 @@ export function ChatContainer({
             if (status === "failed") setError("图片消息已接纳，但本次运行失败，请查看会话记录。")
             return false
           case "review":
-            setError(status === "rejected" ? "图片消息已拒收。可编辑后重新发送，或移除这条消息。" :
+            setImageQueueError(queued.id, status === "rejected" ? "图片消息已拒收。可编辑后重新发送，或移除这条消息。" :
               "图片消息的执行结果待核对。请先查看会话记录，再决定是否移除并重新发送。")
             return false
           case "wait":
-            await new Promise(resolve => setTimeout(resolve, 1000))
+            if (isActiveImageReceipt(status)) setObservedImageReceipt({ threadId, id: queued.id, status })
             return false
           case "send":
+            safeToChooseModel = status === "missing"
             if (status === "accepted" && !delivery?.frozen) {
-              setError("图片消息已接纳，但缺少原始提交内容，请先核对会话记录。")
+              setImageQueueError(queued.id, "图片消息已接纳，但缺少原始提交内容，请先核对会话记录。")
               return false
             }
             if (status === "missing" && queueImageIds?.length) {
               await window.api.file.updateImageOwners({ action: "pin", ...scope, ids: queueImageIds })
+              if (getQueuedMessage(queued.id) !== queued) {
+                if (!getQueuedMessage(queued.id))
+                  await window.api.file.updateImageOwners({ action: "unpin", ...scope })
+                return false
+              }
+              if (editingImageIds.has(queued.id)) return false
               await window.api.file.updateImageOwners({ action: "discard", ...scope, ids: queueImageIds })
             }
             return true
@@ -7488,46 +7579,98 @@ export function ChatContainer({
       }
       if (scope && (!isSameGitWorkspacePath(scope.workspacePath, workspacePath) || !currentThread ||
           scope.incarnation !== threadIncarnationKey(threadDraftIncarnation(currentThread)))) {
-        setError("图片消息属于原工作区或原会话，请切回后重试。")
+        setImageQueueError(queued.id, IMAGE_QUEUE_WORKSPACE_MISMATCH)
         return
       }
-      if (!await checkDelivery()) return
-      if (scope && delivery?.frozen) {
-        if (!canClaimQueuedMessage(queued, getQueuedMessage(queued.id)) || !chatViewMountedRef.current ||
-            currentThreadIdRef.current !== threadId || readOnlyRef.current || managedTurnRef.current) return
+      const sendFrozenImage = async (entry: QueuedMessage, imageScope: NonNullable<typeof scope>) => {
+        const canSend = () => {
+          const current = getQueuedMessage(entry.id)
+          const liveThread = useAppStore.getState().threads.find(thread => thread.thread_id === threadId)
+          return current === entry && canClaimQueuedMessage(entry, current) && !editingImageIds.has(entry.id) &&
+            chatViewMountedRef.current && currentThreadIdRef.current === threadId &&
+            !readOnlyRef.current && !managedTurnRef.current &&
+            isSameGitWorkspacePath(imageScope.workspacePath, workspacePathRef.current) &&
+            Boolean(liveThread && imageScope.incarnation === threadIncarnationKey(threadDraftIncarnation(liveThread)))
+        }
+        if (!canSend()) return
+        const setPhase = (phase: ImageSendPhase) => {
+          imageSendPhases.set(entry.id, phase)
+          setQueuePumpTick(tick => tick + 1)
+        }
         let acknowledged = false
-        setActiveTurnStartTime(Date.now())
-        clearFinishedWorkflowRun()
         try {
-          const status = await runFrozenImageOutbox(queued, {
-            status: () => window.api.file.chatImageSubmissionStatus(scope),
+          const status = await runFrozenImageOutbox(entry, {
+            status: () => window.api.file.chatImageSubmissionStatus(imageScope),
+            canSend,
             send: async (request, id) => {
+              setPhase("submitted")
+              setActiveTurnStartTime(Date.now())
+              clearFinishedWorkflowRun()
+              let transportError: Error | undefined
               await stream.submit({ messages: [{ type: "human", content: request.message }] }, {
+                onSubmitError: error => {
+                  transportError = error instanceof Error ? error : new Error(String(error))
+                },
                 onPromptAccepted: () => {
                   if (acknowledged) return
                   acknowledged = true
-                  const display = guardCoordinatorPlainText(getQueuedDisplayContent(queued, true))
+                  setPhase("accepted")
+                  const display = guardCoordinatorPlainText(getQueuedDisplayContent(entry, true))
                   void appendVisibleUserMessageWithTime(display, { id })
                   if (!threadMessages.length && currentThread?.title?.startsWith("Thread ")) {
-                    const title = queued.text.trim() || queued.skillName
-                    if (title) generateTitleForFirstMessage(threadId, title, queued.skillName, queued.skillDescription)
+                    const title = entry.text.trim() || entry.skillName
+                    if (title) generateTitleForFirstMessage(threadId, title, entry.skillName, entry.skillDescription)
                   }
                 },
-                config: { configurable: { thread_id: threadId, hook_turn_id: id, chat_images: queued.chatImages,
+                config: { configurable: { thread_id: threadId, hook_turn_id: id, chat_images: entry.chatImages,
                   model_id: request.modelId, agent_mode: request.mode } }
               })
+              if (transportError) throw transportError
             },
             finish: failed => {
-              if (getQueuedMessage(queued.id) !== queued) return
-              deleteQueuedMessage(queued.id)
+              if (getQueuedMessage(entry.id) !== entry) return
+              deleteQueuedMessage(entry.id)
               if (failed) setError("图片消息已接纳，但本次运行失败，请查看会话记录。")
             }
           })
-          if (status === "unknown" || status === "rejected" || status === "missing")
-            setError(status === "unknown" ? "图片消息的执行结果待核对，请先查看会话记录。" :
+          if (isActiveImageReceipt(status)) {
+            setObservedImageReceipt({ threadId, id: entry.id, status })
+          } else if (status === "unknown" || status === "rejected" || status === "missing") {
+            setImageQueueError(entry.id, status === "unknown" ? "图片消息的执行结果待核对，请先查看会话记录。" :
               "图片消息未获接纳，原输入已保留在队列中。")
+          }
         } finally {
           setActiveTurnStartTime(null)
+        }
+      }
+      if (!await checkDelivery()) return
+      const currentSelectedModel = models.find(model => model.id === currentModel && model.available)
+      const replacementVisionModel = currentSelectedModel?.inputModalities?.includes("image")
+        ? currentSelectedModel : undefined
+      const canUseOriginalImageModel = async (model: typeof currentSelectedModel) =>
+        Boolean(model?.available && (model.inputModalities?.includes("image") ||
+          (!replacementVisionModel && models.some(candidate => candidate.available && candidate.inputModalities?.includes("image")) &&
+            await window.api.routing.getMode() === "auto")))
+      if (scope && delivery?.frozen) {
+        const originalModel = models.find(model => model.id === delivery.frozen?.modelId && model.available)
+        const canUseOriginal = !safeToChooseModel || await canUseOriginalImageModel(originalModel)
+        if (!canUseOriginal && !replacementVisionModel) {
+          setImageQueueError(queued.id, IMAGE_QUEUE_MODEL_REQUIRED_ERROR)
+          return
+        }
+        if (!canUseOriginal && replacementVisionModel) {
+          if (getQueuedMessage(queued.id) !== queued || editingImageIds.has(queued.id)) return
+          const frozen = { ...delivery.frozen, modelId: replacementVisionModel.id }
+          let persistError: string | null = "图片消息未能保存"
+          updateQueuedMessage(queued.id, { modelId: frozen.modelId, imageDelivery: { ...delivery, frozen } },
+            error => { persistError = error })
+          if (persistError) setImageQueueError(queued.id, persistError)
+          else {
+            const saved = getQueuedMessage(queued.id)
+            if (saved?.imageDelivery?.frozen === frozen) await sendFrozenImage(saved, scope)
+          }
+        } else {
+          await sendFrozenImage(queued, scope)
         }
         return
       }
@@ -7561,15 +7704,14 @@ export function ChatContainer({
       const queuedModel = queued.modelId
         ? models.find((model) => model.id === queued.modelId)
         : undefined
-      const currentSelectedModel = currentModel
-        ? models.find((model) => model.id === currentModel)
-        : undefined
-      const selectedModel = queuedModel?.available
-        ? queuedModel
-        : !delivery && currentSelectedModel?.available
-          ? currentSelectedModel
-          : undefined
+      const selectedModel = delivery
+        ? await canUseOriginalImageModel(queuedModel) ? queuedModel : replacementVisionModel
+        : queuedModel?.available ? queuedModel : currentSelectedModel
       if (!selectedModel) {
+        if (delivery) {
+          setImageQueueError(queued.id, IMAGE_QUEUE_MODEL_REQUIRED_ERROR)
+          return
+        }
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
         } else if (queuedModel || currentSelectedModel) {
@@ -7660,11 +7802,17 @@ export function ChatContainer({
       if (draftForSubmission !== queued && (currentQueued !== queued || !chatViewMountedRef.current ||
           currentThreadIdRef.current !== threadId || readOnlyRef.current || managedTurnRef.current)) return
       const isFirstMessage = threadMessages.length === 0
-      if (delivery) {
+      if (scope && delivery) {
+        if (currentQueued !== queued || editingImageIds.has(queued.id)) return
         const frozen = { message: fullMessage, modelId: queuedModelId, mode: submitAgentMode === "multi" ? "normal" as const : submitAgentMode }
         let persistError: string | null = "图片消息未能保存"
         updateQueuedMessage(queued.id, { imageDelivery: { ...delivery, frozen } }, error => { persistError = error })
-        if (persistError) setError(persistError)
+        if (persistError) {
+          setImageQueueError(queued.id, persistError)
+          return
+        }
+        const saved = getQueuedMessage(queued.id)
+        if (saved?.imageDelivery?.frozen === frozen) await sendFrozenImage(saved, scope)
         return
       }
       deleteQueuedMessage(queued.id)
@@ -7723,6 +7871,7 @@ export function ChatContainer({
       models,
       setActiveTurnStartTime,
       setError,
+      setImageQueueError,
       stream,
       threadId,
       threadMessages.length,
@@ -7736,12 +7885,89 @@ export function ChatContainer({
   // selected model and workspace are usable, clear only those known errors so
   // the parked draft can resume; unrelated run failures still block auto-drain.
   useEffect(() => {
-    if (historyOnly || !threadError || !RECOVERABLE_QUEUE_ERRORS.has(threadError)) return
-    const selectedModel = currentModel
-      ? models.find((model) => model.id === currentModel)
-      : undefined
-    if (selectedModel?.available && workspacePath) clearError()
-  }, [clearError, currentModel, historyOnly, models, threadError, workspacePath])
+    if (historyOnly || !threadError) return
+    const head = nextOrdinaryQueuedMessage(queuedMessages)
+    if (threadError === IMAGE_QUEUE_WORKSPACE_MISMATCH) {
+      if (head?.imageDelivery && currentThread && isSameGitWorkspacePath(head.imageDelivery.workspacePath, workspacePath) &&
+          head.imageDelivery.incarnation === threadIncarnationKey(threadDraftIncarnation(currentThread)))
+        clearImageQueueError(head.id)
+      return
+    }
+    if (!workspacePath) return
+    const selectedModel = models.find(model => model.id === currentModel && model.available)
+    if (threadError === IMAGE_QUEUE_MODEL_REQUIRED_ERROR) {
+      const originalModelId = head?.imageDelivery?.frozen?.modelId ?? head?.modelId
+      if (head?.imageDelivery && models.some(model => model.available &&
+          (model.id === currentModel || model.id === originalModelId) && model.inputModalities?.includes("image")))
+        clearImageQueueError(head.id)
+    } else if (selectedModel && RECOVERABLE_QUEUE_ERRORS.has(threadError)) {
+      clearError()
+    }
+  }, [clearError, clearImageQueueError, currentModel, currentThread, historyOnly, models,
+    queuedMessages, threadError, workspacePath])
+
+  // A receipt can outlive the renderer and queue order. Keep the thread fenced
+  // until its frozen requests have been checked, even if a plain draft moves ahead.
+  useEffect(() => {
+    if (!imageReceiptKey) {
+      setCheckedImageReceiptKey("")
+      return
+    }
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const reconcile = async () => {
+      let retry = false
+      let deferred = false
+      let live: typeof observedImageReceipt = null
+      const isLocal = (id: string) => imageSendPhases.has(id) || editingImageIds.has(id)
+      for (const entry of imageReceiptCandidates) {
+        if (disposed) return
+        if (getQueuedMessage(entry.id) !== entry) continue
+        if (isLocal(entry.id)) { deferred = true; continue }
+        const delivery = entry.imageDelivery!
+        const scope = { threadId, workspacePath: delivery.workspacePath, incarnation: delivery.incarnation, messageId: entry.id }
+        try {
+          const status = await window.api.file.chatImageSubmissionStatus(scope)
+          if (disposed) return
+          if (getQueuedMessage(entry.id) !== entry) continue
+          if (isLocal(entry.id)) { deferred = true; continue }
+          if (isActiveImageReceipt(status)) {
+            live ??= { threadId, id: entry.id, status }
+            retry = true
+          } else if (imageDeliveryAction(status) === "finish") {
+            deleteQueuedMessage(entry.id, error => {
+              if (error) setImageQueueError(entry.id, error)
+              else {
+                clearImageQueueError(entry.id)
+                if (status === "failed") setError("图片消息已接纳，但本次运行失败，请查看会话记录。")
+              }
+            })
+          } else if (status === "unknown" && !threadContext.getThreadState(threadId).error &&
+            nextOrdinaryQueuedMessage(threadContext.getThreadState(threadId).queuedMessages)?.id === entry.id) {
+            setImageQueueError(entry.id, "图片消息的执行结果待核对，请先查看会话记录。")
+          }
+        } catch {
+          // A temporary read failure does not make the in-flight request retryable.
+          deferred = true
+        }
+      }
+      if (disposed) return
+      if (!deferred) {
+        setCheckedImageReceiptKey(imageReceiptKey)
+        setObservedImageReceipt(current => current?.threadId === live?.threadId &&
+          current?.id === live?.id && current?.status === live?.status ? current : live)
+      } else if (live) {
+        setObservedImageReceipt(live)
+      }
+      if (retry || deferred) timer = setTimeout(() => void reconcile(), 1000)
+    }
+    void reconcile()
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [clearImageQueueError, deleteQueuedMessage, getQueuedMessage, imageReceiptCandidates, imageReceiptKey,
+    setError, setImageQueueError, submitReleaseVersion, threadContext, threadId])
 
   // Reconcile handed-off drafts against main-process state instead of guessing
   // from an idle transition. Durable messages leave the draft queue, messages
@@ -7860,15 +8086,22 @@ export function ChatContainer({
     // only the queue head. Draining any ordinary item first could append it
     // before a previously injected guided turn whose acknowledgement is late.
     const next = nextOrdinaryQueuedMessage(queuedMessages)
-    if (!next || parkingImageIds.has(next.id) || editingImageIds.has(next.id)) return
+    if (!next || activeImageReceipt || imageReceiptCheckPending ||
+        parkingImageIds.has(next.id) || editingImageIds.has(next.id)) return
 
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
-    if (next.chatImages?.length) deliveringImageIds.add(next.id)
+    if (next.chatImages?.length) {
+      imageSendPhases.set(next.id, "preparing")
+      setQueuePumpTick(tick => tick + 1)
+    }
     submitQueuedMessage(next)
       .catch(async (err) => {
         const message = err instanceof Error ? err.message : String(err)
+        if (next.chatImages?.length) {
+          setImageQueueError(next.id, message)
+          return
+        }
         setError(message)
-        if (next.chatImages?.length) return
         let durable: boolean | undefined
         try {
           const reconciliation = await window.api.agent.reconcileCurrentRunQueuedMessages(
@@ -7908,10 +8141,12 @@ export function ChatContainer({
         })
       })
       .finally(() => {
-        deliveringImageIds.delete(next.id)
+        imageSendPhases.delete(next.id)
         releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
       })
   }, [
+    activeImageReceipt,
+    imageReceiptCheckPending,
     bizRetryPending,
     contextReminderPending,
     currentModel,
@@ -7928,6 +8163,7 @@ export function ChatContainer({
     readOnly,
     removeLocalMessage,
     setError,
+    setImageQueueError,
     stream,
     submitReleaseVersion,
     submitQueuedMessage,
@@ -9134,6 +9370,21 @@ export function ChatContainer({
     </div>
   )
 
+  const canPresentImmediateImage = !managedTurn && !queueAutoDrainSuppressed && !threadError &&
+    !pendingApproval && !readOnly && !historyLoading && !hasActiveGoalRunning && !bizRetryPending &&
+    !contextReminderPending && Boolean(stream)
+  const immediateQueueHead = canPresentImmediateImage && !isLoading
+    ? nextOrdinaryQueuedMessage(queuedMessages)
+    : undefined
+  const presentedQueue = queuedMessages.map(message => ({
+    message,
+    presentation: activeImageReceipt?.id === message.id ? "hidden" : imageQueuePresentation(message, managedTurn ? undefined : imageSendPhases.get(message.id),
+      message === immediateQueueHead)
+  }))
+  const pendingImage = presentedQueue.find(item =>
+    item.presentation === "preparing" || item.presentation === "sending")
+  const visibleQueuedMessages = presentedQueue.filter(item => item.presentation === "queued").map(item => item.message)
+
   return React.createElement(
     ChatReplyActionsContext.Provider,
     { value: botReplyActions },
@@ -9921,21 +10172,47 @@ export function ChatContainer({
                       </button>
                     </div>
                   )}
-                  {queuedMessages.length > 0 && (
+                  {activeImageReceipt && !isLoading && (
+                    <div className="flex items-center justify-between gap-2 px-1 py-1 text-xs text-muted-foreground">
+                      <span role="status">{activeImageReceipt.status === "awaiting" ? "图片消息等待继续" : "图片消息正在处理…"}</span>
+                      {activeImageReceipt.status !== "awaiting" && (
+                        <button type="button" className="shrink-0 rounded-md px-2 py-1 hover:bg-muted hover:text-foreground"
+                          onClick={handleCancel}>停止生成</button>
+                      )}
+                    </div>
+                  )}
+                  {pendingImage && (
+                    <div className="flex items-center justify-between gap-2 px-1 py-1 text-xs text-muted-foreground">
+                      <span role="status">正在发送图片消息…</span>
+                      {pendingImage.presentation === "preparing" && (
+                        <button
+                          type="button"
+                          className="shrink-0 rounded-md px-2 py-1 hover:bg-muted hover:text-foreground"
+                          onClick={() => void handleDeleteQueuedMessage(pendingImage.message)}
+                        >
+                          取消发送
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {visibleQueuedMessages.length > 0 && (
                     <div className="px-1 py-1">
                       <div className="flex items-center gap-2 pb-1 text-[11px] text-muted-foreground">
                         <ListEnd className="size-3.5" />
                         <span>
-                          {managedTurn?.submitDraft ? "待确认" : "排队中"} {queuedMessages.length}{" "}
+                          {managedTurn?.submitDraft && !visibleQueuedMessages.every(message =>
+                            managedTurn.queuedVisualDraftIds?.has(message.id)) ? "待确认" : "排队中"} {visibleQueuedMessages.length}{" "}
                           条
                         </span>
                       </div>
                       <div data-chat-queued-list className="space-y-1.5">
-                        {queuedMessages.map((queued) => {
+                        {visibleQueuedMessages.map((queued) => {
                           const isEditing = editingQueueId === queued.id
                           const isGuided = Boolean(queued.handoffRequestedAt)
                           const retainedReply = !managedTurn ? queued.botReplyTo : undefined
                           const canResumeParked = !managedTurn && !readOnly && canResumeParkedQueuedMessage(queued)
+                          const botVisualQueued = managedTurn?.queuedVisualDraftIds?.has(queued.id)
+                          const ordinaryImageInBot = Boolean(managedTurn && (queued.imageDelivery || queued.chatImages?.length))
                           return (
                             <div
                               key={queued.id}
@@ -10030,7 +10307,9 @@ export function ChatContainer({
                                       继续发送
                                     </button>
                                   )}
-                                  {managedTurn?.submitDraft && (
+                                  {botVisualQueued && <span className="shrink-0 text-xs text-muted-foreground">排队中</span>}
+                                  {ordinaryImageInBot && <span className="shrink-0 text-xs text-muted-foreground">请回到普通聊天处理</span>}
+                                  {managedTurn?.submitDraft && !botVisualQueued && !ordinaryImageInBot && (
                                     <button
                                       type="button"
                                       onClick={() => void submitQueuedMessage(queued)}
@@ -10066,21 +10345,23 @@ export function ChatContainer({
                                       {isGuided ? "已引导" : "引导"}
                                     </button>
                                   )}
-                                  <QueuedMessageActions
+                                  {!ordinaryImageInBot && <QueuedMessageActions
                                     botState={
                                       managedTurn?.submitDraft
-                                        ? managedTurn.sendingDraftIds?.has(queued.id)
-                                          ? "sending"
-                                          : isGuided
-                                            ? "unconfirmed"
-                                            : "queued"
+                                        ? botVisualQueued
+                                          ? "host-queued"
+                                          : managedTurn.sendingDraftIds?.has(queued.id)
+                                            ? "sending"
+                                            : isGuided
+                                              ? "unconfirmed"
+                                              : "queued"
                                         : undefined
                                     }
                                     onChooseSkillTarget={queued.botExplicitSkill && !queued.botSkillTarget && !queued.handoffRequestedAt && !queued.botHandoffTarget && managedTurn?.chooseSkillTarget
                                       ? () => managedTurn.chooseSkillTarget!(queued) : undefined}
                                     onEdit={() => startEditingQueuedMessage(queued)}
                                     onDelete={() => handleDeleteQueuedMessage(queued)}
-                                  />
+                                  />}
                                 </div>
                               )}
                             </div>

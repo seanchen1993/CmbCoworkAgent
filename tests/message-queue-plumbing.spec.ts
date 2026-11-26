@@ -1674,8 +1674,15 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   assertSourceOrder(
     cancelBody,
     "flushPendingStreamTranscriptMessages(threadId, activeRunToken)",
-    "controller.abort()",
+    "stopDesktopRun(controller)",
     "explicit cancel also persists already-rendered chunks before aborting"
+  )
+  const stopStart = agentIpc.indexOf("function stopDesktopRun(")
+  assert(stopStart >= 0, "the desktop stop helper exists")
+  assertIncludes(
+    agentIpc.slice(stopStart, stopStart + 240),
+    "controller.abort()",
+    "the desktop stop helper aborts the physical run"
   )
 }
 
@@ -2001,12 +2008,12 @@ function testQueuedSendRevalidatesModelAndWorkspace(): void {
   )
   assertIncludes(
     submitQueuedMessageBody,
-    "const selectedModel = queuedModel?.available",
+    ": queuedModel?.available ? queuedModel : currentSelectedModel",
     "queued send prefers its saved model only while it remains available"
   )
   assertIncludes(
     submitQueuedMessageBody,
-    ": !delivery && currentSelectedModel?.available",
+    "const currentSelectedModel = models.find(model => model.id === currentModel && model.available)",
     "queued send falls back to the thread's current available model"
   )
   assertIncludes(
@@ -2694,7 +2701,9 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
   )
   const pumpEffectStart = chat.indexOf("if (queueAutoDrainSuppressed) return")
   assert(pumpEffectStart >= 0, "pump effect not found")
-  const pumpEffectBody = chat.slice(pumpEffectStart, pumpEffectStart + 2800)
+  const pumpEffectEnd = chat.indexOf("const reconcileBotDrafts", pumpEffectStart)
+  assert(pumpEffectEnd > pumpEffectStart, "queue pump effect has a complete boundary")
+  const pumpEffectBody = chat.slice(pumpEffectStart, pumpEffectEnd)
   assertIncludes(
     pumpEffectBody,
     "if (submitInFlightRef.current.has(threadId)) return",

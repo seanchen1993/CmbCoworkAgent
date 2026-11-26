@@ -43,6 +43,7 @@ export type ChatImageOwnerRequest = {
 } & (
   | { action: "pin"; messageId: string; ids: string[]; previousMessageId?: string }
   | { action: "unpin"; messageId: string }
+  | { action: "abandon"; messageId: string; incarnation: string }
   | { action: "discard"; ids: string[] }
 )
 
@@ -54,7 +55,8 @@ export interface ChatImageStatusRequest {
 }
 
 export type ChatImageSubmissionStatus =
-  | "missing" | "pending" | "unknown" | "accepted" | "running" | "succeeded" | "failed" | "rejected"
+  | "missing" | "pending" | "unknown" | "accepted" | "running" | "awaiting"
+  | "succeeded" | "failed" | "rejected" | "cancelled"
 export const chatUploadExtensions = [...attachmentExtensions, ...chatImageExtensions]
 export const chatUploadLabel = chatUploadExtensions.map(ext => ext.slice(1)).join("、")
 

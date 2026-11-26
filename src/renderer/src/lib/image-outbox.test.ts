@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import type { QueuedMessage } from "../types"
 import type { ChatImageSubmissionStatus } from "../../../shared/file-attachment"
-import { claimImageComposer, imageComposerSource, ownsParkedImageComposer, parkImageOutbox, runFrozenImageOutbox } from "./image-outbox"
+import { claimImageComposer, imageComposerSource, imageQueuePresentation, ownsParkedImageComposer, parkImageOutbox, runFrozenImageOutbox } from "./image-outbox"
 
 const ref = { id: "4b48c1c3-066f-43cf-af84-b4050459db25", filename: "chart.png", slot: 0 }
 const composer = { draftInput: "请分析图表", draftAttachments: [{
@@ -51,6 +51,33 @@ describe("ordinary image outbox", () => {
     expect(operations.consume).not.toHaveBeenCalled()
   })
 
+  it("presents an idle image as sending and reserves the queue label for a waiting draft", () => {
+    const immediate = { ...entry, imageDelivery: { ...entry.imageDelivery!, immediate: true as const } }
+    expect(imageQueuePresentation(immediate, undefined, true)).toBe("preparing")
+    expect(imageQueuePresentation(immediate, "submitted", false)).toBe("sending")
+    expect(imageQueuePresentation(immediate, "accepted", false)).toBe("hidden")
+    expect(imageQueuePresentation(entry, undefined, false)).toBe("queued")
+    expect(imageQueuePresentation(immediate, undefined, false)).toBe("queued")
+    expect(imageQueuePresentation(entry, "preparing", true)).toBe("preparing")
+  })
+
+  it("does not hand off an image removed while submission status is being read", async () => {
+    let resolveStatus!: (status: ChatImageSubmissionStatus) => void
+    const send = vi.fn(), finish = vi.fn()
+    let present = true
+    const submission = runFrozenImageOutbox(entry, {
+      status: () => new Promise(resolve => { resolveStatus = resolve }),
+      canSend: () => present,
+      send,
+      finish
+    })
+    present = false
+    resolveStatus("missing")
+    expect(await submission).toBeUndefined()
+    expect(send).not.toHaveBeenCalled()
+    expect(finish).not.toHaveBeenCalled()
+  })
+
   it("recovers a lost ACK from the persisted outcome and never sends a completed request again", async () => {
     let state: ChatImageSubmissionStatus = "missing"
     const finish = vi.fn(), send = vi.fn(async () => {
@@ -63,6 +90,22 @@ describe("ordinary image outbox", () => {
     expect(finish).toHaveBeenCalledWith(false)
     await runFrozenImageOutbox(JSON.parse(JSON.stringify(entry)), operations)
     expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it("continues to reconcile a known running receipt after the submitting stream is lost", async () => {
+    const status = vi.fn<() => Promise<ChatImageSubmissionStatus>>()
+      .mockResolvedValueOnce("missing")
+      .mockResolvedValueOnce("running")
+      .mockResolvedValueOnce("awaiting")
+      .mockResolvedValueOnce("cancelled")
+    const send = vi.fn().mockRejectedValue(new Error("stream disconnected"))
+    const finish = vi.fn()
+    const operations = { status, send, finish }
+    expect(await runFrozenImageOutbox(entry, operations)).toBe("running")
+    expect(await runFrozenImageOutbox(entry, operations)).toBe("awaiting")
+    expect(await runFrozenImageOutbox(entry, operations)).toBe("cancelled")
+    expect(send).toHaveBeenCalledOnce()
+    expect(finish).toHaveBeenCalledExactlyOnceWith(false)
   })
 
   it("reopens a cold accepted request with exactly the parked model, text, mode and id; uncertain work stays parked", async () => {

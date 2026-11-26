@@ -35,6 +35,7 @@ import {
   summaryRetryByteBudget
 } from "./context-compaction-recovery"
 import { BOT_PREPARED_USER_REQUEST_KEY } from "./agent-run-service"
+import { isDesktopChatImageScope } from "./chat-image-middleware"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -1348,7 +1349,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     const scope = options.chatImageMessageScope
     if (!scope || !message) return 0
     const bot = message.additional_kwargs?.cmb_chat_images_source === "bot"
-    if (scope === "desktop" ? bot : !bot || !scope.messageId || message.id !== scope.messageId) return 0
+    if (isDesktopChatImageScope(scope) ? bot : !bot || !scope.messageId || message.id !== scope.messageId) return 0
     const images = message.additional_kwargs?.cmb_chat_images
     return Array.isArray(images) ? images.length : 0
   }

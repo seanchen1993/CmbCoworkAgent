@@ -287,6 +287,8 @@ export function BotConversation({
         }
         throw new Error(blocked)
       }
+      const validationError = validateBotDraft(draft)
+      if (validationError) throw new Error(validationError)
       if (!draft.botExplicitSkill && draft.skillBlock?.trim() && client.hostId === "local") {
         try {
           const restored = await sender.restoreLegacySkill(draft)
@@ -409,6 +411,19 @@ export function BotConversation({
     task.origin.kind !== "work_result" || !task.origin.review)
   const running = conversationTasks.find(active)
   const queued = conversationTasks.filter((task) => task.state === "queued")
+  const visualAdmissions = useMemo(() => {
+    const states = new Map(sender.visualAdmissions)
+    for (const task of tasks) {
+      if (task.threadId !== threadId) continue
+      if (task.origin.kind !== "user" || task.origin.imageAdmission !== "pending")
+        states.delete(task.requestId)
+      else if (task.state === "queued") states.set(task.requestId, "queued")
+      else if (task.state === "running" || task.state === "waiting_user")
+        states.set(task.requestId, "admitting")
+      else states.delete(task.requestId)
+    }
+    return states
+  }, [sender, sendingRevision, tasks, threadId])
   const submit = useCallback<ManagedChatTurn["submit"]>(
     async (input, options) => {
       const messages = input?.messages
@@ -490,14 +505,18 @@ export function BotConversation({
       chooseSkillTarget: !work && workDirectory && client.hostId === "local" ? draft => {
         if (draft.botExplicitSkill && !draft.botSkillTarget && !draft.handoffRequestedAt && !draft.botHandoffTarget && queue.getQueuedMessage(draft.id) === draft) setSkillDraft({ draft })
       } : undefined,
-      discardDraft: (draft) => sender.discard(draft),
+      discardDraft: (draft) => { void sender.discard(draft, visualAdmissions.get(draft.id) === "queued") },
       validateDraft: draft => inputBlockedReason() ?? validateBotDraft(draft),
       reconcileDrafts,
-      sendingDraftIds: sender.sending,
+      sendingDraftIds: new Set([...sender.sending, ...Array.from(visualAdmissions).flatMap(([id, state]) =>
+        state === "admitting" ? [id] : [])]),
+      queuedVisualDraftIds: new Set(Array.from(visualAdmissions).flatMap(([id, state]) =>
+        state === "queued" ? [id] : [])),
       maxPendingDrafts: BOT_REQUEST_RECEIPT_LIMIT,
-      draftReceiptRevision: tasks
-        .map((task) => `${task.id}:${task.updatedAt}:${task.state}`)
-        .join("|"),
+      draftReceiptRevision: `${sendingRevision}:${workId ? 0 : workRevision}:` + tasks.map(task => {
+        const admission = task.origin.kind === "user" ? task.origin.imageAdmission ?? "" : ""
+        return `${task.id}:${task.updatedAt}:${task.state}:${admission}`
+      }).join("|"),
       attachFiles: (maxFiles, maxChars) => client.attachFiles(bot.id, maxFiles, maxChars),
       attachFileBytes: (files, maxChars) => client.attachFileBytes(bot.id, files, maxChars),
       ...(client.hostId === "local" && !work?.source && client.attachWorkspaceFile ? {
@@ -527,8 +546,10 @@ export function BotConversation({
       hasBoundWorkSettings,
       sender,
       sendingRevision,
+      workRevision,
       controlFocusRequest,
       tasks,
+      visualAdmissions,
       cancel,
       running,
       backgroundBusy,

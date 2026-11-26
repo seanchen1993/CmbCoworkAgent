@@ -42,6 +42,7 @@ export async function parkImageOutbox(operations: {
 /** The durable state wins even when the renderer lost the ACK or the stream threw. */
 export async function runFrozenImageOutbox(entry: QueuedMessage, operations: {
   status: () => Promise<ChatImageSubmissionStatus>
+  canSend?: () => boolean
   send: (request: NonNullable<NonNullable<QueuedMessage["imageDelivery"]>["frozen"]>, id: string) => Promise<void>
   finish: (failed: boolean) => void
 }) {
@@ -49,13 +50,15 @@ export async function runFrozenImageOutbox(entry: QueuedMessage, operations: {
   if (!frozen) throw new Error("图片消息缺少已保存的输入")
   let status = await operations.status()
   if (imageDeliveryAction(status) === "send") {
+    if (operations.canSend && !operations.canSend()) return
     try {
       await operations.send(frozen, entry.id)
     } catch (error) {
       status = await operations.status()
-      if (imageDeliveryAction(status) !== "finish") throw error
+      if (imageDeliveryAction(status) !== "finish" && !isActiveImageReceipt(status)) throw error
     }
-    if (imageDeliveryAction(status) !== "finish") status = await operations.status()
+    if (!isActiveImageReceipt(status) && imageDeliveryAction(status) !== "finish")
+      status = await operations.status()
   }
   if (imageDeliveryAction(status) === "finish") operations.finish(status === "failed")
   return status
@@ -80,11 +83,29 @@ export function ownsParkedImageComposer(draft: ImageComposer, queue: QueuedMessa
     item.imageDelivery.incarnation === incarnation && item.imageDelivery.source === source)
 }
 
+export type ImageSendPhase = "preparing" | "submitted" | "accepted"
+
+/** A durable recovery record can coexist with the in-flight turn. */
+export function imageQueuePresentation(
+  entry: QueuedMessage, phase: ImageSendPhase | undefined, canSendImmediately: boolean
+) {
+  if (!entry.imageDelivery) return "queued"
+  if (phase === "accepted") return "hidden"
+  if (phase === "submitted") return "sending"
+  if (canSendImmediately && (phase === "preparing" || entry.imageDelivery.immediate)) return "preparing"
+  return "queued"
+}
+
+export function isActiveImageReceipt(status: ChatImageSubmissionStatus | undefined):
+  status is "pending" | "running" | "awaiting" {
+  return status === "pending" || status === "running" || status === "awaiting"
+}
+
 export function imageDeliveryAction(status: ChatImageSubmissionStatus) {
   switch (status) {
     case "missing": case "accepted": return "send"
-    case "running": case "pending": return "wait"
-    case "succeeded": case "failed": return "finish"
+    case "running": case "pending": case "awaiting": return "wait"
+    case "succeeded": case "failed": case "cancelled": return "finish"
     case "rejected": case "unknown": return "review"
   }
 }

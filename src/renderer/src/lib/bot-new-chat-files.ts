@@ -1,6 +1,9 @@
 import type { BotClient } from "../../../shared/bots/contracts"
 import {
+  isChatImagePath,
+  isVisualDocumentPath,
   MAX_ATTACHMENT_FILE_BYTES,
+  MAX_ATTACHMENT_TOTAL_CHARS,
   MAX_ATTACHMENT_PICKER_FILES,
   type FileAttachment
 } from "../../../shared/file-attachment"
@@ -42,11 +45,12 @@ export class BotDraftFileTransfer {
     }
     // Removed files must not keep their blobs alive for the rest of the workspace session.
     this.keep(files)
-    let remaining = 24_000 - existing.reduce((sum, file) => sum + file.content.length, 0)
+    let remaining = Math.max(0, MAX_ATTACHMENT_TOTAL_CHARS - existing.reduce((sum, file) => sum + file.content.length, 0))
     const result: FileAttachment[] = []
     for (const file of files) {
       if (!isCurrent()) throw new Error("收件人已切换，请重新选择。")
-      if (remaining < 1) throw new Error("附件正文超过 24,000 字符，请减少附件后重试。")
+      if (remaining === 0 && !isChatImagePath(file.name) && !isVisualDocumentPath(file.name))
+        throw new Error("附件正文字数已达上限，可添加图片或含图文档。")
       let attachment = this.retained.get(file)
       if (!attachment) {
         const bytes = await file.arrayBuffer()

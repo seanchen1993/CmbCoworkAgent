@@ -5,7 +5,7 @@ import { chatUploadLabel, MAX_ATTACHMENT_PICKER_FILES, MAX_ATTACHMENT_TOTAL_CHAR
 import { renderToStaticMarkup } from "react-dom/server"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
-import { runFrozenImageOutbox, imageDeliveryAction } from "./image-outbox"
+import { runFrozenImageOutbox, imageDeliveryAction, isActiveImageReceipt } from "./image-outbox"
 import { canClaimQueuedMessage } from "./queued-message-content"
 
 vi.mock("@/components/ui/popover", () => ({
@@ -23,7 +23,10 @@ const source = ts.createSourceFile(
   ts.ScriptKind.TSX
 )
 
-it("delivers an already accepted image using the exact frozen model after the renderer catalogue changes", async () => {
+it.each([
+  ["accepted", "old-A"],
+  ["missing", "new-B"]
+])("uses the correct frozen image model when its receipt is %s and the catalogue changes", async (initialStatus, modelId) => {
   let submission: ts.Expression | undefined
   function visit(node: ts.Node) {
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === "submitQueuedMessage" &&
@@ -37,16 +40,25 @@ it("delivers an already accepted image using the exact frozen model after the re
   const queued = { id: "queue-1", created_at: now, updated_at: now, text: "original", modelId: "old-A",
     botReplyTo: { role: "user" }, chatImages: [{ id: "image", filename: "x.png", slot: 0 }],
     imageDelivery: { workspacePath: "/work", incarnation: "inc", source: "", frozen } }
-  let status = "accepted"
+  let status = initialStatus
+  let current = queued
   const send = vi.fn(async () => { status = "succeeded" })
   const deleted = vi.fn()
   const bindings = { threadId: "thread", workspacePath: "/work", currentThread: {}, managedTurn: null,
     currentThreadIdRef: { current: "thread" }, chatViewMountedRef: { current: true }, readOnlyRef: { current: false },
-    managedTurnRef: { current: null }, getQueuedMessage: () => queued, stream: { submit: send },
-    window: { api: { file: { chatImageSubmissionStatus: async () => status } } }, canClaimQueuedMessage,
+    managedTurnRef: { current: null }, getQueuedMessage: () => current, stream: { submit: send },
+    workspacePathRef: { current: "/work" },
+    useAppStore: { getState: () => ({ threads: [{ thread_id: "thread" }] }) },
+    window: { api: { file: { chatImageSubmissionStatus: async () => status, updateImageOwners: vi.fn() } } },
+    updateQueuedMessage: (_id: string, edits: Partial<typeof queued>, callback: (error: null) => void) => {
+      current = { ...current, ...edits }
+      callback(null)
+    }, canClaimQueuedMessage,
     threadDraftIncarnation: () => ({}), threadIncarnationKey: () => "inc", isSameGitWorkspacePath: (a: string, b: string) => a === b,
     imageDeliveryAction, runFrozenImageOutbox, deleteQueuedMessage: deleted, setActiveTurnStartTime: vi.fn(),
-    clearFinishedWorkflowRun: vi.fn(), setError: vi.fn(), currentModel: "new-B", models: [{ id: "new-B", available: true }],
+    imageSendPhases: new Map(), editingImageIds: new Set(), setQueuePumpTick: vi.fn(),
+    isActiveImageReceipt, setObservedImageReceipt: vi.fn(), setImageQueueError: vi.fn(),
+    clearFinishedWorkflowRun: vi.fn(), setError: vi.fn(), currentModel: "new-B", models: [{ id: "new-B", available: true, inputModalities: ["text", "image"] }],
     revalidateOrdinaryBotReply: vi.fn(() => { throw new Error("Unexpected first-submit quote validation") }),
     loadResolvedAgentMode: vi.fn(() => { throw new Error("Unexpected mode hydration") }) }
   const script = ts.transpileModule("const submit = " + submission.getText(source), {
@@ -57,7 +69,7 @@ it("delivers an already accepted image using the exact frozen model after the re
   expect(send).toHaveBeenCalledOnce()
   expect(send).toHaveBeenCalledWith({ messages: [{ type: "human", content: frozen.message }] },
     expect.objectContaining({ config: { configurable: { thread_id: "thread", hook_turn_id: queued.id,
-      model_id: "old-A", agent_mode: "workflow", chat_images: queued.chatImages } } }))
+      model_id: modelId, agent_mode: "workflow", chat_images: queued.chatImages } } }))
   expect(bindings.revalidateOrdinaryBotReply).not.toHaveBeenCalled()
   expect(bindings.loadResolvedAgentMode).not.toHaveBeenCalled()
   expect(deleted).toHaveBeenCalledWith(queued.id)

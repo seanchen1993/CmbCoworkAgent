@@ -1,4 +1,4 @@
-import { createChatImageMiddleware, type ChatImageMessageScope } from "./chat-image-middleware"
+import { createChatImageMiddleware, isDesktopChatImageScope, type ChatImageMessageScope } from "./chat-image-middleware"
 import { captureDesktopImageAccess } from "../chat-images"
 import { inspectImageRequest } from "../models/image-request"
 import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
@@ -5320,11 +5320,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const modelPurpose = options.botCommunication && options.botSkillDispatch && !options.botResultReport
     ? "bot-skill-dispatch" : "agent"
   const activeImageScope = options.chatImageMessageScope
-  const validateMediaScope = activeImageScope === "desktop" && threadId
-    ? captureDesktopImageAccess(threadId)
-    : typeof activeImageScope === "object" ? activeImageScope.validateAccess : undefined
+  const desktopImageScope = isDesktopChatImageScope(activeImageScope)
+  const validateMediaScope = desktopImageScope
+    ? threadId ? captureDesktopImageAccess(threadId) : undefined
+    : activeImageScope?.validateAccess
   const validateDocument = options.validateChatDocument
-  const validateImageAccess = activeImageScope === "desktop" && validateDocument
+  const validateImageAccess = desktopImageScope && validateDocument
     ? () => { validateDocument(); validateMediaScope?.() }
     : validateMediaScope
   const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId, validateImageAccess)

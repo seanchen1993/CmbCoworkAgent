@@ -85,7 +85,7 @@ export async function stageWorkspaceChatImage(request: WorkspaceChatImageRequest
     if (isVisualDocumentPath(candidate)) {
       const { getFileAttachmentParserClient } = await import("./file-attachment-parser/client")
       const parsed = await getFileAttachmentParserClient().parse({
-        kind: "bytes", fileName: basename(candidate), bytes: Uint8Array.from(bytes).buffer
+        kind: "bytes", fileName: basename(candidate), bytes: Uint8Array.from(bytes).buffer, allowHtmlSource: true
       }, request.maxLength, "workspace-document:" + randomUUID(), true)
       assertCurrent()
       return stageOrdinaryDocument(threadId, { ...parsed, filePath: candidate }, { root, assertCurrent, identity })

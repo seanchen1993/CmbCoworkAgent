@@ -51,8 +51,16 @@ jobs:
           src/main/file-attachment-parser/client.test.ts
           src/main/chat-images.test.ts
           src/main/workspace-chat-image.test.ts
+          src/main/ipc/managed-background-cancellation.test.ts
           src/shared/attachment-message-parts.test.ts
           src/shared/agent-runtime-settings-integration.test.ts
+          src/renderer/src/lib/image-outbox.test.ts
+          src/renderer/src/lib/chat-composer-guard.test.ts
+          src/renderer/src/lib/bot-draft-sender.test.ts
+          src/renderer/src/lib/bot-conversation-transition.test.ts
+
+      - name: Exercise image send and cancellation in Electron
+        run: npm run test:chat-attachments:e2e
 
   # ------------------------------------------------------------------
   # Linux 专用:在老 glibc 容器里编 node-pty 原生模块

@@ -385,6 +385,7 @@ export interface QueuedMessage {
     workspacePath: string
     incarnation: string
     source: string
+    immediate?: true
     frozen?: { message: string; mode: "normal" | "coordinator" | "workflow"; modelId: string }
   }
   chatImages?: import("../../shared/file-attachment").SubmittedChatImage[]
