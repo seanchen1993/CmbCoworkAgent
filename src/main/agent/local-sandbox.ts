@@ -7600,8 +7600,14 @@ export class LocalSandbox
   }
 
   /** Isolated checkout teardown waits for both process ownership and pending starts. */
-  static async cancelBackgroundTasksAndWait(threadId: string, taskIds?: readonly string[]): Promise<void> {
-    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({ threadId, taskIds: taskIds && new Set(taskIds) }))
+  static async cancelBackgroundTasksAndWait(
+    threadId: string,
+    taskIds?: readonly string[],
+    { includeChildRuns = false }: { includeChildRuns?: boolean } = {}
+  ): Promise<void> {
+    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({
+      threadId, includeChildRuns, taskIds: taskIds && new Set(taskIds)
+    }))
   }
 
   static async cancelOwnedBackgroundTasksAndWait(threadId: string, ownerId: string): Promise<void> {

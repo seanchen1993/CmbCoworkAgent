@@ -13,6 +13,8 @@ import {
 } from "./message-role-collision"
 import type { RoleCollisionMessage } from "./message-role-collision"
 import { buildSubagentTaskInvocationIdentity } from "./subagent-invocation-identity"
+import { resolveToolResultOwnership, type ToolOwnershipMessage } from "./tool-result-ownership"
+import { extractVisibleReasoning } from "./model-reasoning"
 import { isInternalGoalPrompt, isVisibleTranscriptMessage } from "./transcript-visibility"
 
 export {
@@ -87,8 +89,18 @@ export interface FilteredThreadValuesInput {
   internalGoalMessageTimeOrder?: unknown
 }
 
+export const toolReplayObservations = Symbol("toolReplayObservations")
+
+export interface CompletedToolReplayObservation {
+  assistant: CheckpointAuthorityTranscriptMessage
+  calls: Array<{ id: string; name: string; args?: unknown }>
+  results: CheckpointAuthorityTranscriptMessage[]
+}
+
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
+  historical_tool_replay_id?: string
+  legacy_checkpoint_replay_of?: string
   provider_source_id?: string
   provider_occurrence?: number
   role?: string
@@ -96,6 +108,7 @@ export interface CheckpointAuthorityTranscriptMessage {
   reasoning?: string
   tool_calls?: unknown[]
   tool_call_id?: string
+  [toolReplayObservations]?: readonly CompletedToolReplayObservation[]
   name?: string
   status?: string
   is_error?: boolean
@@ -245,7 +258,7 @@ export function mergeCheckpointAuthorityTranscriptMessage<
 
   const checkpointClearsToolCallContent = isCheckpointEmptyAssistantToolCallMessage(base)
   const reasoning = base.reasoning || incoming.reasoning
-  return {
+  const merged = {
     ...base,
     ...(reasoning ? { reasoning } : {}),
     content: checkpointClearsToolCallContent
@@ -266,6 +279,21 @@ export function mergeCheckpointAuthorityTranscriptMessage<
     start_at: incoming.start_at ?? base.start_at,
     end_at: incoming.end_at ?? base.end_at
   } as T
+  const captured = incoming[toolReplayObservations]
+  if (captured?.length) {
+    const previous = base[toolReplayObservations]
+    merged[toolReplayObservations] = previous && previous !== captured
+      ? [...new Set([...previous, ...captured])]
+      : captured
+  }
+  if (merged.role === "tool") {
+    merged.historical_tool_replay_id = [base, incoming].find((row) =>
+      row.historical_tool_replay_id && row.content === merged.content && row.tool_call_id === merged.tool_call_id &&
+      row.name === merged.name && row.status === merged.status && row.is_error === merged.is_error &&
+      row.reasoning === merged.reasoning && row.goal_id === merged.goal_id && row.active_window_id === merged.active_window_id
+    )?.historical_tool_replay_id
+  }
+  return merged
 }
 
 function preserveMessageIdCollision<T extends CheckpointAuthorityTranscriptMessage>(
@@ -352,7 +380,10 @@ export function mergeCheckpointAuthorityTranscriptMessages<
 >(
   baseMessages: readonly T[],
   incomingMessages: readonly T[],
-  options: { isSameMessage?: (left: T, right: T) => boolean } = {}
+  options: {
+    isSameMessage?: (left: T, right: T) => boolean
+    useStableProviderOccurrences?: boolean
+  } = {}
 ): T[] {
   const merged: T[] = []
   const indexById = new Map<string, number>()
@@ -387,6 +418,14 @@ export function mergeCheckpointAuthorityTranscriptMessages<
     }
   }
   let incomingSegmentStartsNewTurn = false
+  const readOccurrence = (message: T, sourceId: string) =>
+    getMessageProviderOccurrence(message) ??
+    // An unsuffixed provider ID is its first occurrence even when it is
+    // inserted after newer checkpoint occurrences during this merge.
+    (options.useStableProviderOccurrences &&
+    (message.role === "assistant" || message.role === "tool") && message.id === sourceId
+      ? 1
+      : undefined)
 
   // Callers provide transcript order explicitly (for example, the database
   // returns durable messages by ordinal). Provider timestamps can be missing or
@@ -409,8 +448,8 @@ export function mergeCheckpointAuthorityTranscriptMessages<
       rawExistingIndex === undefined || exactIdHasDifferentRole
         ? (normalizeMessageRoleCollisionIds(merged, [rawIncoming])[0] ?? rawIncoming)
         : rawIncoming
-    const incomingOccurrence = getMessageProviderOccurrence(incoming)
     const incomingSourceId = getMessageProviderSourceId(incoming)
+    const incomingOccurrence = readOccurrence(incoming, incomingSourceId)
     let highestProviderIdentityOccurrence = 0
     const providerIdentityCandidates = merged.flatMap((candidate, candidateIndex) => {
       if (
@@ -419,7 +458,7 @@ export function mergeCheckpointAuthorityTranscriptMessages<
       ) {
         return []
       }
-      const declaredOccurrence = getMessageProviderOccurrence(candidate)
+      const declaredOccurrence = readOccurrence(candidate, incomingSourceId)
       const effectiveOccurrence = declaredOccurrence ?? highestProviderIdentityOccurrence + 1
       highestProviderIdentityOccurrence = Math.max(
         highestProviderIdentityOccurrence,
@@ -600,6 +639,108 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   if (!isRecord(checkpoint)) return []
   const channelValues = isRecord(checkpoint.channel_values) ? checkpoint.channel_values : undefined
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
+}
+
+export interface CheckpointReplayTurns {
+  hiddenAnchors: ReadonlySet<string>
+  hiddenAssistants: ReadonlySet<string>
+  leadingHiddenAssistants: ReadonlySet<string>
+  uniqueMessageIds: ReadonlySet<string>
+  rawResultByCall: ReadonlyMap<string, string>
+  rawToolTranscript: readonly ToolOwnershipMessage[]
+}
+
+export function readCheckpointToolReplayMessages(checkpoint: unknown): CheckpointAuthorityTranscriptMessage[] {
+  const raw = getCheckpointMessages(checkpoint)
+  return deriveCheckpointTranscriptIndex(checkpoint).visibleMessages.flatMap(({ rawIndex }) => {
+    const message = rawIndex === undefined ? undefined : raw[rawIndex]
+    if (rawIndex === undefined || !isRecord(message)) return []
+    const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+    const metadata = isRecord(message.additional_kwargs) ? message.additional_kwargs :
+      isRecord(kwargs?.additional_kwargs) ? kwargs.additional_kwargs : undefined
+    const role = getMessageRole(message)
+    const status = readString(message.status) ?? readString(kwargs?.status)
+    return [{
+      id: getMessageId(message, rawIndex),
+      ...((role === "assistant" || role === "tool") && getMessageProviderTupleFromMetadata(metadata)),
+      role,
+      content: role === "user"
+        ? readString(metadata?.cmb_visible_user_message) || getMessageContent(message)
+        : getMessageContent(message),
+      reasoning: role === "assistant" ? extractVisibleReasoning(message) || undefined : undefined,
+      tool_calls: role === "assistant" ? getMessageToolCalls(message) : undefined,
+      tool_call_id: readString(message.tool_call_id) ?? readString(kwargs?.tool_call_id),
+      name: role === "tool" ? readString(message.name) ?? readString(kwargs?.name) : undefined,
+      status,
+      is_error: status === "error" || message.is_error === true || kwargs?.is_error === true ||
+        metadata?.is_error === true ? true : undefined,
+      goal_id: readString(message.goal_id) ?? readString(kwargs?.goal_id),
+      active_window_id: readString(message.active_window_id) ?? readString(kwargs?.active_window_id)
+    }]
+  })
+}
+
+/** Use original user turns to confirm ownership when their visible projection omits a boundary. */
+export function readCheckpointReplayTurns(checkpoint: unknown): CheckpointReplayTurns | undefined {
+  const hiddenAnchors = new Set<string>()
+  const hiddenAssistants = new Set<string>()
+  const leadingHiddenAssistants = new Set<string>()
+  let visibleAnchor: string | undefined
+  let inHiddenTurn = false
+  const messages = getCheckpointMessages(checkpoint)
+  messages.forEach((message, index) => {
+    if (!isRecord(message)) return
+    const role = getMessageRole(message)
+    if (role === "user") {
+      const content = getMessageContent(message)
+      if (isInternalNotificationMessage(message) || !isVisibleTranscriptMessage("user", content)) {
+        inHiddenTurn = true
+        if (visibleAnchor) hiddenAnchors.add(visibleAnchor)
+      } else {
+        visibleAnchor = getMessageId(message, index)
+        inHiddenTurn = false
+      }
+    } else if (role === "system") {
+      visibleAnchor = undefined
+      inHiddenTurn = false
+    } else if (inHiddenTurn && role === "assistant") {
+      const id = getMessageId(message, index)
+      hiddenAssistants.add(id)
+      if (!visibleAnchor) leadingHiddenAssistants.add(id)
+    }
+  })
+  if (!hiddenAnchors.size && !leadingHiddenAssistants.size) return
+  const rawRows: ToolOwnershipMessage[] = []
+  const seenIds = new Set<string>()
+  const uniqueMessageIds = new Set<string>()
+  messages.forEach((message, index) => {
+    if (!isRecord(message)) return
+    const role = getMessageRole(message)
+    const id = getMessageId(message, index)
+    if (seenIds.has(id)) uniqueMessageIds.delete(id)
+    else uniqueMessageIds.add(id)
+    seenIds.add(id)
+    if (role === "user" || role === "system") {
+      rawRows.push({ id, role })
+    } else if (role === "assistant") {
+      rawRows.push({ id, role, tool_calls: getMessageToolCalls(message) })
+    } else if (role === "tool") {
+      const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+      rawRows.push({
+        id,
+        role,
+        tool_call_id: readString(message.tool_call_id) ?? readString(kwargs?.tool_call_id)
+      })
+    }
+  })
+  return {
+    hiddenAnchors,
+    hiddenAssistants,
+    leadingHiddenAssistants,
+    uniqueMessageIds,
+    rawResultByCall: resolveToolResultOwnership(rawRows, (message) => message.id),
+    rawToolTranscript: rawRows
+  }
 }
 
 export function filterNewCheckpointReplayMessages(

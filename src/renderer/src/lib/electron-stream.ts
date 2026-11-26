@@ -183,6 +183,8 @@ export function createElectronStream(options: ElectronStreamOptions) {
   let callbacks: Pick<ElectronStreamOptions, "onCustomEvent" | "onError"> = options
   const tuples = new SnapshotMessageTupleManager()
   const manager = new StreamManager<StreamValues>(tuples, { throttle: false })
+  let authoritativeOrder: Array<string | undefined> = []
+  let messageOrderRevision = 0
   const readMessages = (values: StreamValues | null): Message[] =>
     Array.isArray(values?.messages) ? values.messages : EMPTY_MESSAGES
 
@@ -190,6 +192,8 @@ export function createElectronStream(options: ElectronStreamOptions) {
     await manager.start(
       async (signal) => {
         tuples.clear()
+        authoritativeOrder = []
+        messageOrderRevision++
         const optimistic = submitOptions?.optimisticValues
         manager.setStreamValues(
           typeof optimistic === "function" ? optimistic({}) : (optimistic ?? {})
@@ -239,7 +243,13 @@ export function createElectronStream(options: ElectronStreamOptions) {
               // means no message update, whereas messages: [] is an explicit reset.
               const data = { ...manager.values, ...event.data }
               if (Array.isArray(event.data.messages)) {
-                data.messages = sanitizeSnapshotMessages(event.data.messages)
+                const messages = sanitizeSnapshotMessages(event.data.messages)
+                if (messages.length !== authoritativeOrder.length ||
+                    messages.some((message, index) => message.id !== authoritativeOrder[index])) {
+                  authoritativeOrder = messages.map((message) => message.id)
+                  messageOrderRevision++
+                }
+                data.messages = messages
               }
               yield { ...event, data }
             } else {
@@ -320,6 +330,9 @@ export function createElectronStream(options: ElectronStreamOptions) {
     getSnapshot: manager.getSnapshot,
     get messages() {
       return readMessages(manager.values)
+    },
+    get messageOrderRevision() {
+      return messageOrderRevision
     },
     get values() {
       return manager.values ?? {}

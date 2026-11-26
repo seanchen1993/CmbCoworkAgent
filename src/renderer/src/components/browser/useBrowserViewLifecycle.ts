@@ -13,17 +13,19 @@ function formatBrowserViewLifecycleError(error: unknown): string {
 interface UseBrowserViewLifecycleOptions {
   currentThreadId: string | null
   harnessSessionThreadId: string | null
+  visibleBtwThreadId?: string | null
   mainView: string
   rightPanelCollapsed: boolean
   isAgentFocusActive: boolean
   overlayModule?: "preview" | "git" | "browser" | null
   overlayThreadId?: string | null
-  onRequestBrowserPanel: () => void
+  onRequestBrowserPanel: (threadId: string | null) => void
 }
 
 export function useBrowserViewLifecycle({
   currentThreadId,
   harnessSessionThreadId,
+  visibleBtwThreadId = null,
   mainView,
   rightPanelCollapsed,
   isAgentFocusActive,
@@ -125,14 +127,15 @@ export function useBrowserViewLifecycle({
       if (mainView !== "thread" && mainView !== "harness") return
       const requestedThreadId = request.threadId ?? null
       const activeThreadId = mainView === "harness" ? harnessSessionThreadId : currentThreadId
-      if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
-      if (requestedThreadId && !activeThreadId) return
-      onRequestBrowserPanel()
+      const isVisibleBtwRequest = mainView === "thread" && requestedThreadId === visibleBtwThreadId
+      if (requestedThreadId && (!activeThreadId || (requestedThreadId !== activeThreadId && !isVisibleBtwRequest))) return
+      onRequestBrowserPanel(requestedThreadId)
     })
   }, [
     currentThreadId,
     harnessSessionThreadId,
     mainView,
-    onRequestBrowserPanel
+    onRequestBrowserPanel,
+    visibleBtwThreadId
   ])
 }

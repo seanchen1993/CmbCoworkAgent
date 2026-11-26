@@ -50,7 +50,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
+import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext, type RightModule } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
 import {
   useThreadActions,
@@ -355,11 +355,12 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 
 interface RightPanelProps {
   threadId?: string | null
-  moduleMode: "work" | "preview" | "git" | "browser"
+  moduleMode: RightModule
   showSystemConstraints?: boolean
   resourcePreviewRequest?: OpenResourcePreviewDetail | null
   onResourcePreviewRequestHandled?: () => void
   listenForResourcePreview?: boolean
+  observeCompletedResources?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
@@ -464,7 +465,7 @@ const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
     const wasLoading = previousLoadingRef.current
     const isLoading = streamData.isLoading
     previousLoadingRef.current = isLoading
-    if (!(wasLoading && !isLoading) || !latestResourceEvent) return
+    if (moduleMode === "btw" || !(wasLoading && !isLoading) || !latestResourceEvent) return
 
     if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
     lastAppliedPreviewKeyRef.current = latestResourceEvent.key
@@ -535,6 +536,7 @@ export function RightPanel({
   resourcePreviewRequest = null,
   onResourcePreviewRequestHandled,
   listenForResourcePreview = true,
+  observeCompletedResources = true,
   onRequestPreviewMode,
   onRequestWorkMode,
   onPreviewFullscreenChange,
@@ -545,22 +547,26 @@ export function RightPanel({
     pluginVersion,
     rightPanelWorkRequest,
     consumeRightPanelWorkRequest,
-    skillGenerationByThread,
+    skillGenerationPhase,
+    skillGenerationError,
     setSkillGenerationPhase
   } = useAppStore(
-    useShallow((s) => ({
-      currentThreadId: s.currentThreadId,
-      pluginVersion: s.pluginVersion,
-      rightPanelWorkRequest: s.rightPanelWorkRequest,
-      consumeRightPanelWorkRequest: s.consumeRightPanelWorkRequest,
-      // Subscribe to the whole map so we re-render when any thread's card changes
-      skillGenerationByThread: s.skillGenerationByThread,
-      setSkillGenerationPhase: s.setSkillGenerationPhase
-    }))
+    useShallow((state) => {
+      const { phase, errorText } = selectSkillGenerationAgent(state, threadId ?? state.currentThreadId)
+      return {
+        currentThreadId: state.currentThreadId,
+        pluginVersion: state.pluginVersion,
+        rightPanelWorkRequest: state.rightPanelWorkRequest,
+        consumeRightPanelWorkRequest: state.consumeRightPanelWorkRequest,
+        skillGenerationPhase: phase,
+        skillGenerationError: errorText,
+        setSkillGenerationPhase: state.setSkillGenerationPhase
+      }
+    })
   )
   const currentThreadId = threadId ?? storeCurrentThreadId
   const { request: localPreviewRequest, clear: clearLocalPreviewRequest } =
-    useResourcePreviewRequest(currentThreadId, listenForResourcePreview)
+    useResourcePreviewRequest(currentThreadId, listenForResourcePreview && moduleMode !== "btw")
   const activeResourcePreviewRequest = resourcePreviewRequest ?? localPreviewRequest
   const handleResourcePreviewRequestHandled = useCallback(() => {
     clearLocalPreviewRequest()
@@ -579,11 +585,6 @@ export function RightPanel({
     [currentThreadId, pluginRunArtifacts]
   )
   const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
-  // Derive the current thread's card state from the per-thread map
-  const skillGenerationAgent = selectSkillGenerationAgent(
-    { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
-    currentThreadId
-  )
   const todos = useThreadStateSelector(currentThreadId, (state) => state.todos) ?? []
   const workspaceFiles =
     useThreadStateSelector(currentThreadId, (state) => state.workspaceFiles) ?? []
@@ -591,6 +592,15 @@ export function RightPanel({
   const coordinatorWorkers =
     useThreadStateSelector(currentThreadId, (state) => state.coordinatorWorkers) ?? []
   const workspacePath = useThreadStateSelector(currentThreadId, (state) => state.workspacePath)
+  const workPanelVisible = moduleMode === "work"
+  const workPanelKey = useMemo(() => JSON.stringify([currentThreadId, workspacePath]), [currentThreadId, workspacePath])
+  const [retainedWorkPanelKey, setRetainedWorkPanelKey] = useState<string | null>(null)
+  // Cover the work panel only while the same thread and workspace remain selected.
+  const nextWorkPanelKey = workPanelVisible || (moduleMode === "btw" && retainedWorkPanelKey === workPanelKey)
+    ? workPanelKey
+    : null
+  if (nextWorkPanelKey !== retainedWorkPanelKey) setRetainedWorkPanelKey(nextWorkPanelKey)
+  const workPanelMounted = nextWorkPanelKey !== null
   const workspacePathRef = useRef(workspacePath)
   workspacePathRef.current = workspacePath
   const moduleModeRef = useRef(moduleMode)
@@ -605,7 +615,7 @@ export function RightPanel({
   )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
-  const handledWorkRequestIdsRef = useRef<Set<number>>(new Set())
+  const lastHandledWorkRequestId = useRef<number | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const workspacePanelRef = useRef<HTMLDivElement>(null)
 
@@ -970,7 +980,7 @@ export function RightPanel({
   }, [])
 
   useEffect(() => {
-    if (moduleMode !== "work") return undefined
+    if (!workPanelMounted) return undefined
     const timer = window.setTimeout(() => void refreshLspConfig(), 0)
     const unsubscribe = window.api.lsp.onChanged(() => void refreshLspConfig())
     return () => {
@@ -978,7 +988,7 @@ export function RightPanel({
       lspConfigRequestIdRef.current += 1
       unsubscribe()
     }
-  }, [moduleMode, refreshLspConfig])
+  }, [workPanelMounted, refreshLspConfig])
 
   const handleLspSummaryChange = useCallback(
     ({ config, status }: { config: LspConfig; status: LspStatus | null }): void => {
@@ -1000,10 +1010,10 @@ export function RightPanel({
 
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
-    if (skillGenerationAgent.phase === "generating") {
+    if (skillGenerationPhase === "generating") {
       setExclusiveOpenPanel("agents")
     }
-  }, [setExclusiveOpenPanel, skillGenerationAgent.phase])
+  }, [setExclusiveOpenPanel, skillGenerationPhase])
 
   useEffect(() => {
     setSystemConstraintsOpen(false)
@@ -1013,8 +1023,8 @@ export function RightPanel({
     if (!rightPanelWorkRequest) return
     if (rightPanelWorkRequest.threadId !== currentThreadId) return
     if (rightPanelWorkRequest.target === "systemConstraints" && !showSystemConstraints) return
-    if (handledWorkRequestIdsRef.current.has(rightPanelWorkRequest.id)) return
-    handledWorkRequestIdsRef.current.add(rightPanelWorkRequest.id)
+    if (lastHandledWorkRequestId.current === rightPanelWorkRequest.id) return
+    lastHandledWorkRequestId.current = rightPanelWorkRequest.id
     setExclusiveOpenPanel(rightPanelWorkRequest.target)
     consumeRightPanelWorkRequest(rightPanelWorkRequest.id)
   }, [
@@ -1101,19 +1111,19 @@ export function RightPanel({
   // "error" is intentionally NOT auto-cleared — it stays visible so the user
   // can read the error, and must be dismissed manually via the ✕ button on the card.
   useEffect(() => {
-    if (canMutateCurrentThreadState && skillGenerationAgent.phase === "done") {
+    if (canMutateCurrentThreadState && skillGenerationPhase === "done") {
       const t = setTimeout(() => setSkillGenerationPhase(null), 3000)
       return () => clearTimeout(t)
     }
     return undefined
-  }, [canMutateCurrentThreadState, skillGenerationAgent.phase, setSkillGenerationPhase])
+  }, [canMutateCurrentThreadState, skillGenerationPhase, setSkillGenerationPhase])
 
   // Log skill generation errors to the console for easier diagnosis on Windows
   useEffect(() => {
-    if (skillGenerationAgent.phase === "error") {
-      console.error("[SkillGen] 技能生成失败:", skillGenerationAgent.errorText)
+    if (skillGenerationPhase === "error") {
+      console.error("[SkillGen] 技能生成失败:", skillGenerationError)
     }
-  }, [skillGenerationAgent.phase, skillGenerationAgent.errorText])
+  }, [skillGenerationPhase, skillGenerationError])
 
   const refreshGlobalCatalogSummary = useCallback(async (): Promise<void> => {
     const requestId = ++globalSummaryRequestIdRef.current
@@ -1168,14 +1178,14 @@ export function RightPanel({
   }, [currentGlobalHookWorkerRevision])
 
   useEffect(() => {
-    if (moduleMode !== "work") return undefined
+    if (!workPanelMounted) return undefined
     const promise = refreshGlobalCatalogSummary()
     globalSummaryPromiseRef.current = promise
     return () => {
       globalSummaryRequestIdRef.current += 1
       void window.api.hooks.catalog.cancel(RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE).catch(() => undefined)
     }
-  }, [moduleMode, refreshGlobalCatalogSummary])
+  }, [workPanelMounted, refreshGlobalCatalogSummary])
 
   const refreshWorkspaceHookSummary = useCallback(async (): Promise<void> => {
     if (!workspacePath) return
@@ -1220,13 +1230,13 @@ export function RightPanel({
   }, [currentHookCatalogKey, currentHookWorkerRevision, workspacePath])
 
   useEffect(() => {
-    if (moduleMode !== "work" || !workspacePath) return undefined
+    if (!workPanelMounted || !workspacePath) return undefined
     void refreshWorkspaceHookSummary()
     return () => {
       hookSummaryRequestIdRef.current += 1
       void window.api.hooks.catalog.cancel(RIGHT_PANEL_HOOK_SUMMARY_SCOPE).catch(() => undefined)
     }
-  }, [moduleMode, refreshWorkspaceHookSummary, workspacePath])
+  }, [workPanelMounted, refreshWorkspaceHookSummary, workspacePath])
 
   const loadHooks = useCallback(async (): Promise<void> => {
     const requestId = ++hooksCatalogRequestIdRef.current
@@ -1357,7 +1367,7 @@ export function RightPanel({
       intentId: number,
       authorization?: SuccessfulToolFilePreviewGrant
     ): void => {
-      if (!currentThreadId) return
+      if (!currentThreadId || moduleModeRef.current === "btw") return
       if (
         !isCurrentOpenResourcePreviewIntent(
           currentThreadId,
@@ -1418,7 +1428,7 @@ export function RightPanel({
   }, [currentThreadId, replacePreviewExternalAuthorization])
 
   useEffect(() => {
-    if (currentThreadId && !activeResourcePreviewRequest) {
+    if (moduleMode !== "btw" && currentThreadId && !activeResourcePreviewRequest) {
       beginOpenResourcePreviewIntent(currentThreadId)
     }
   }, [activeResourcePreviewRequest, currentThreadId, moduleMode])
@@ -1527,6 +1537,7 @@ export function RightPanel({
 
   const [workspacePanelHeight, setWorkspacePanelHeight] = useState(0)
   useEffect(() => {
+    if (!workPanelVisible) return
     const panel = workspacePanelRef.current
     if (!panel) return
     const observer = new ResizeObserver(([entry]) => {
@@ -1534,11 +1545,11 @@ export function RightPanel({
     })
     observer.observe(panel)
     return () => observer.disconnect()
-  }, [moduleMode])
+  }, [workPanelVisible])
 
   // Calculate available content height
   const getAvailableContentHeight = useCallback(() => {
-    if (moduleMode !== "work") return 0
+    if (!workPanelMounted) return 0
 
     const sectionCount = (showSystemConstraints ? 8 : 7) + (activePluginRunArtifacts ? 1 : 0)
     let used = HEADER_HEIGHT * sectionCount
@@ -1559,7 +1570,7 @@ export function RightPanel({
     return Math.max(0, workspacePanelHeight - used)
   }, [
     workspacePanelHeight,
-    moduleMode,
+    workPanelMounted,
     tasksOpen,
     filesOpen,
     activePluginRunArtifacts,
@@ -2057,13 +2068,14 @@ export function RightPanel({
   return (
     <aside
       ref={containerRef}
+      hidden={moduleMode === "btw"}
       className={cn(
-        "flex w-full flex-col overflow-hidden",
+        moduleMode !== "btw" && "flex w-full flex-col overflow-hidden",
         moduleMode === "work" ? "bg-transparent p-3" : "border-l border-border",
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
-      {currentThreadId && (
+      {currentThreadId && observeCompletedResources && (
         <RightPanelStreamEffects
           key={currentThreadId}
           threadId={currentThreadId}
@@ -2199,7 +2211,7 @@ export function RightPanel({
         </div>
       )}
 
-      {moduleMode === "work" && (
+      {workPanelMounted && (
         <div
           ref={workspacePanelRef}
           data-testid="workspace-info-panel"
@@ -2254,7 +2266,7 @@ export function RightPanel({
                 className="right-panel-scroll overflow-auto border-t border-border/45"
                 style={{ height: heights.files }}
               >
-                <FilesContent threadId={currentThreadId} />
+                <FilesContent threadId={currentThreadId} visible={workPanelVisible} />
               </div>
             )}
           </div>
@@ -2312,7 +2324,7 @@ export function RightPanel({
                 isOpen={systemConstraintsOpen}
                 onToggle={() => toggleExclusivePanel("systemConstraints", systemConstraintsOpen)}
               />
-              {systemConstraintsOpen && (
+              {workPanelVisible && systemConstraintsOpen && (
                 <div
                   className="right-panel-scroll overflow-auto border-t border-border/45"
                   style={{ height: heights.systemConstraints }}
@@ -2331,7 +2343,7 @@ export function RightPanel({
               badge={
                 subagents.length +
                 coordinatorWorkers.length +
-                (skillGenerationAgent.phase !== null ? 1 : 0)
+                (skillGenerationPhase !== null ? 1 : 0)
               }
               isOpen={agentsOpen}
               onToggle={() => toggleExclusivePanel("agents", agentsOpen)}
@@ -2341,7 +2353,7 @@ export function RightPanel({
                 className="right-panel-scroll overflow-auto border-t border-border/45"
                 style={{ height: heights.agents }}
               >
-                <AgentsContent threadId={currentThreadId} />
+                <AgentsContent threadId={currentThreadId} visible={workPanelVisible} />
               </div>
             )}
           </div>
@@ -2366,7 +2378,7 @@ export function RightPanel({
               isOpen={skillsOpen}
               onToggle={() => toggleExclusivePanel("skills", skillsOpen)}
             />
-            {skillsOpen && (
+            {workPanelVisible && skillsOpen && (
               <div
                 className="right-panel-scroll overflow-auto border-t border-border/45"
                 style={{ height: heights.skills }}
@@ -2401,7 +2413,7 @@ export function RightPanel({
                 onToggle={() => toggleExclusivePanel("plugins", pluginsOpen)}
               />
               <div className="absolute inset-y-0 left-24 z-10 flex items-center">
-                <ProjectPluginDevelopmentGuide entry="workspace" />
+                {workPanelVisible && <ProjectPluginDevelopmentGuide entry="workspace" />}
               </div>
             </div>
             {pluginsOpen && (
@@ -2461,7 +2473,7 @@ export function RightPanel({
               isOpen={lspOpen}
               onToggle={() => toggleExclusivePanel("lsp", lspOpen)}
             />
-            {lspOpen && (
+            {workPanelVisible && lspOpen && (
               <div
                 className="right-panel-scroll overflow-auto border-t border-border/45"
                 style={{ height: heights.lsp }}
@@ -2623,8 +2635,12 @@ function isAbsolutePath(filePath: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|\/)/.test(filePath)
 }
 
-function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Element {
-  const workspaceFiles = useThreadStateSelector(threadId, (state) => state.workspaceFiles) ?? []
+function FilesContent({ threadId, visible }: { threadId: string | null; visible: boolean }): React.JSX.Element {
+  const liveFiles = useThreadStateSelector(threadId, (state) => visible ? state.workspaceFiles : null)
+  const [retainedFiles, setRetainedFiles] = useState(liveFiles)
+  // A covered tree keeps its last input until the work panel is visible again.
+  if (visible && liveFiles !== retainedFiles) setRetainedFiles(liveFiles)
+  const workspaceFiles = (visible ? liveFiles : retainedFiles) ?? []
   const workspacePath = useThreadStateSelector(threadId, (state) => state.workspacePath)
   const thread = useAppStore((state) =>
     threadId ? (state.threads.find((candidate) => candidate.thread_id === threadId) ?? null) : null
@@ -2649,9 +2665,14 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
   const workspaceKey = workspacePath ? normalizeWorkspaceFileKey(workspacePath) : ""
   requestFenceRef.current.observe(threadId, workspacePath)
   const scanProgress = scanState?.threadId === threadId ? scanState.count : null
+  const currentLoadBoundary =
+    loadBoundary?.threadId === threadId && loadBoundary.workspacePath === workspacePath
+      ? loadBoundary
+      : null
 
   // Load workspace path and files for current thread
   useEffect(() => {
+    if (!visible) return
     let cancelled = false
     const scanController = new AbortController()
     const requestToken = requestFenceRef.current.begin(threadId, workspacePath)
@@ -2685,6 +2706,9 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
           if (!isCurrentRequest()) return
           if (watcherResult.success && watcherResult.restarted) {
             markWorkspaceFilesStale(threadId, path)
+          } else if (watcherResult.success && currentLoadBoundary && hasLoadedWorkspaceFiles(threadId, path)) {
+            // The same file tree is still mounted and its watcher stayed active.
+            return
           }
         }
 
@@ -2737,13 +2761,14 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
     // The normalized workspace key is part of the lifecycle: switching A -> B
     // within one thread invalidates every late A read/scan/continuation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, workspaceKey])
+  }, [threadId, workspaceKey, visible])
 
   useEffect(() => {
     if (!threadId || !workspacePath) return
     const workspaceKey = normalizeWorkspaceFileKey(workspacePath)
-    return subscribeWorkspaceFileResults((publishedKey, files, result) => {
-      if (publishedKey !== workspaceKey || !result) return
+    return subscribeWorkspaceFileResults((publishedKey, files, result, filePatch) => {
+      // ThreadProvider applies watcher patches. Only scans change the load boundary.
+      if (publishedKey !== workspaceKey || !result || filePatch) return
       if (
         result.workspacePath &&
         normalizeWorkspaceFileKey(result.workspacePath) !== workspaceKey
@@ -2806,11 +2831,6 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
     }
   }, [continuationLoading, setWorkspaceFiles, threadId, workspaceFiles.length, workspacePath])
 
-  const currentLoadBoundary =
-    loadBoundary?.threadId === threadId && loadBoundary.workspacePath === workspacePath
-      ? loadBoundary
-      : null
-
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -2841,7 +2861,7 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="py-1 overflow-auto flex-1">
-            <FileTree files={workspaceFiles} threadId={threadId} />
+            <FileTree files={workspaceFiles} threadId={threadId} visible={visible} />
           </div>
           {currentLoadBoundary?.truncated && (
             <div className="shrink-0 border-t border-border/50 bg-background/80 px-3 py-2 text-xs text-muted-foreground">
@@ -3408,41 +3428,44 @@ function ResourcePreview({
 interface FileInfo extends WorkspaceFileTreeFile {}
 type TreeNode = WorkspaceFileTreeNode
 
-// File arrays are shared by every task on the same physical workspace. Cache
-// their immutable tree structure too, so switching tasks or reopening the
-// panel does not rebuild/sort a 50k-file tree.
-const fileTreeCache = new WeakMap<FileInfo[], TreeNode[]>()
-
-function FileTree({
+const FileTree = memo(function FileTree({
   files,
-  threadId
+  threadId,
+  visible
 }: {
   files: FileInfo[]
   threadId: string | null
+  visible: boolean
 }): React.JSX.Element {
   const openFile = useThreadActions(threadId)?.openFile
   const workspacePath = useThreadStateSelector(threadId, (state) => state.workspacePath) ?? ""
-  const projectedTree = getWorkspaceFileTreeProjection(files)?.tree ?? fileTreeCache.get(files)
-  const [fallbackProjection, setFallbackProjection] = useState<{
-    files: FileInfo[]
+  const projectedTree = getWorkspaceFileTreeProjection(files)?.tree
+  const [displayedTree, setDisplayedTree] = useState<{
+    threadId: string | null
+    workspacePath: string
     tree: TreeNode[]
   } | null>(null)
-  const tree =
-    projectedTree ?? (fallbackProjection?.files === files ? fallbackProjection.tree : null)
+  // Keep the directory rows mounted while the new snapshot is being projected.
+  const retainedTree = displayedTree?.threadId === threadId && displayedTree.workspacePath === workspacePath
+    ? displayedTree.tree
+    : null
+  if (projectedTree && projectedTree !== retainedTree) {
+    setDisplayedTree({ threadId, workspacePath, tree: projectedTree })
+  }
+  const tree = projectedTree ?? retainedTree
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   useEffect(() => {
-    if (projectedTree) return
-    let cancelled = false
-    void buildWorkspaceFileTreeProjection(files).then((projection) => {
-      if (cancelled) return
-      fileTreeCache.set(files, projection.tree)
-      setFallbackProjection({ files, tree: projection.tree })
+    if (!visible || projectedTree) return
+    const controller = new AbortController()
+    void buildWorkspaceFileTreeProjection(files, controller.signal).then((projection) => {
+      if (controller.signal.aborted) return
+      setDisplayedTree({ threadId, workspacePath, tree: projection.tree })
+    }).catch(error => {
+      if (!controller.signal.aborted) console.error("[FileTree] Failed to build file tree:", error)
     })
-    return () => {
-      cancelled = true
-    }
-  }, [files, projectedTree])
+    return () => controller.abort()
+  }, [files, projectedTree, threadId, visible, workspacePath])
 
   const toggleExpand = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -3477,7 +3500,7 @@ function FileTree({
       />
     </div>
   )
-}
+})
 
 const FILE_TREE_NODE_PAGE_SIZE = 200
 
@@ -3510,6 +3533,7 @@ function FileTreeNodeList({
         <FileTreeNode
           key={node.path}
           node={node}
+          revision={node.is_dir && !expanded.has(node.path) ? node.children.length > 0 : node.revision}
           depth={depth}
           expanded={expanded}
           onToggle={onToggle}
@@ -3562,6 +3586,7 @@ const FileTreeNode = memo(
     workspacePath
   }: {
     node: TreeNode
+    revision: number | boolean
     depth: number
     expanded: Set<string>
     onToggle: (path: string) => void
@@ -3654,6 +3679,7 @@ const FileTreeNode = memo(
     const isExpanded = nextProps.expanded.has(nextProps.node.path)
     return (
       prevProps.node === nextProps.node &&
+      prevProps.revision === nextProps.revision &&
       wasExpanded === isExpanded &&
       // Expanded nodes render children that need the latest Set reference
       (!isExpanded || prevProps.expanded === nextProps.expanded) &&
@@ -3721,7 +3747,7 @@ function FileIcon({
   }
 }
 
-function SkillGenerationCard({
+export function SkillGenerationCard({
   phase,
   streamedText,
   errorText,
@@ -3845,27 +3871,27 @@ function SkillGenerationCard({
   )
 }
 
-function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Element {
+function AgentsContent({ threadId, visible }: { threadId: string | null; visible: boolean }): React.JSX.Element {
   const {
     currentThreadId: storeCurrentThreadId,
-    skillGenerationByThread,
-    skillRetryContextByThread,
+    phase,
+    errorText,
+    streamedText,
+    skillRetryContext,
     setSkillGenerationPhase
   } = useAppStore(
-    useShallow((s) => ({
-      currentThreadId: s.currentThreadId,
-      skillGenerationByThread: s.skillGenerationByThread,
-      skillRetryContextByThread: s.skillRetryContextByThread,
-      setSkillGenerationPhase: s.setSkillGenerationPhase
-    }))
-  )
-  const skillGenerationAgent = selectSkillGenerationAgent(
-    { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
-    threadId
-  )
-  const skillRetryContext = selectSkillRetryContext(
-    { skillRetryContextByThread } as Parameters<typeof selectSkillRetryContext>[0],
-    threadId
+    useShallow((state) => {
+      const { phase, errorText, streamedText } = selectSkillGenerationAgent(state, threadId)
+      return {
+        currentThreadId: state.currentThreadId,
+        phase,
+        errorText,
+        // The retained card can read the accumulated draft when it becomes visible again.
+        streamedText: visible ? streamedText : "",
+        skillRetryContext: selectSkillRetryContext(state, threadId),
+        setSkillGenerationPhase: state.setSkillGenerationPhase
+      }
+    })
   )
   const canMutateCurrentThreadState = threadId === storeCurrentThreadId
   const retryInFlightRef = useRef(false)
@@ -3880,8 +3906,6 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
     (worker) => worker.status === "running"
   )
   const [sharedNowMs, setSharedNowMs] = useState(() => Date.now())
-
-  const hasSkillGen = skillGenerationAgent.phase !== null
 
   const handleRetry = useCallback((): void => {
     if (!threadId || !canMutateCurrentThreadState || !skillRetryContext || retryInFlightRef.current)
@@ -3899,12 +3923,13 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   }, [canMutateCurrentThreadState, threadId, skillRetryContext, setSkillGenerationPhase])
 
   useEffect(() => {
-    if (!hasRunningCoordinatorWorker) return
+    if (!visible || !hasRunningCoordinatorWorker) return
+    setSharedNowMs(Date.now())
     const timer = window.setInterval(() => setSharedNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [hasRunningCoordinatorWorker])
+  }, [hasRunningCoordinatorWorker, visible])
 
-  if (subagents.length === 0 && coordinatorWorkers.length === 0 && !hasSkillGen) {
+  if (subagents.length === 0 && coordinatorWorkers.length === 0 && phase === null) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <GitBranch className="size-8 mb-2 opacity-50" />
@@ -3917,20 +3942,19 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   return (
     <div className="p-3 space-y-3">
       {/* Virtual skill generation card — shown above regular subagents */}
-      {hasSkillGen && (
+      {phase !== null && (
         <SkillGenerationCard
-          phase={skillGenerationAgent.phase!}
-          streamedText={skillGenerationAgent.streamedText}
-          errorText={skillGenerationAgent.errorText}
+          phase={phase}
+          streamedText={streamedText}
+          errorText={errorText}
           onDismiss={
-            canMutateCurrentThreadState && skillGenerationAgent.phase === "error"
+            canMutateCurrentThreadState && phase === "error"
               ? () => setSkillGenerationPhase(null)
               : undefined
           }
           onRetry={
             canMutateCurrentThreadState &&
-            (skillGenerationAgent.phase === "error" ||
-              skillGenerationAgent.phase === "generating") &&
+            (phase === "error" || phase === "generating") &&
             skillRetryContext
               ? handleRetry
               : undefined

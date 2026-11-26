@@ -58,7 +58,7 @@ export function formatKnowledgeSyncError(error: unknown): string {
     return MESSAGES.repository
   }
   if (
-    /authentication failed|incorrect username or password|could not read (?:username|password)|terminal prompts disabled|invalid (?:username|password|credentials|access token)|error code:\s*git023\b|\b401\b|账号或密码不正确|密码过期/i.test(
+    /authentication failed|incorrect username or password|could not read (?:username|password)|terminal prompts disabled|user interactivity has been disabled|logon failed, use ctrl\+c to cancel basic|invalid (?:username|password|credentials|access token)|error code:\s*git023\b|\b401\b|账号或密码不正确|密码过期/i.test(
       text
     )
   ) {

@@ -39,8 +39,14 @@ const bundle = await build({
           { filter: /^\.\/(ToolCallRenderer|MessageFeedbackDialog|HookLogViews)$/ },
           (args) => ({ path: args.path, namespace: "fixture" })
         )
+        builder.onResolve({ filter: /[\\/]lib[\\/]thread-context(?:\.tsx?)?$/ }, () => ({
+          path: "thread-context",
+          namespace: "fixture"
+        }))
         builder.onLoad({ filter: /.*/, namespace: "fixture" }, (args) => ({
-          contents: args.path.includes("HookLog")
+          contents: args.path === "thread-context"
+            ? "export const useThreadStateSelector = () => undefined"
+            : args.path.includes("HookLog")
             ? "export const HookLogChip=()=>null"
             : args.path.includes("Feedback")
               ? "export const MessageFeedbackDialog=()=>null"
@@ -182,9 +188,28 @@ try {
     assert.match(await assistant.locator("time").innerText(), /14:35/)
     assert.equal(await page.evaluate(() => window.timestampFormats), before)
   })
-  await check("long user messages still expand and collapse", async () => {
-    await page.evaluate(() => window.fixture.longUser())
-    await user.getByRole("button", { name: "显示更多", exact: true }).click()
+  await check("long user messages collapse before the first resize notification", async () => {
+    const skippedObservation = await page.evaluate(() => {
+      const NativeResizeObserver = window.ResizeObserver
+      let skipped = false
+      window.ResizeObserver = class extends NativeResizeObserver {
+        observe(target, options) {
+          if (target.hasAttribute("data-chat-search-user-content-collapse-threshold")) {
+            skipped = true
+            return
+          }
+          super.observe(target, options)
+        }
+      }
+      try {
+        window.fixture.longUser()
+      } finally {
+        window.ResizeObserver = NativeResizeObserver
+      }
+      return skipped
+    })
+    assert.equal(skippedObservation, true)
+    await user.getByRole("button", { name: "显示更多", exact: true }).click({ timeout: 3000 })
     await user.getByRole("button", { name: "收起", exact: true }).click()
     assert.equal(await opacity(user.locator("time")), 1)
   })

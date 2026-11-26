@@ -38,9 +38,12 @@ describe("Bot execution presentation", () => {
     const workerCall = { ...message, id: "worker-turn-test-2::review" }
     const workerResult = { ...control, id: "worker-turn-test-2::" + control.id }
     expect(projectBotExecution([workerCall, workerResult], false).hiddenMessages.has(workerCall.id)).toBe(true)
+    const workerReplay = { ...workerResult, id: `${workerResult.id}::cmb-same-role-duplicate:tool:2` }
+    expect(projectBotExecution([workerCall, workerReplay], false).hiddenMessages.has(workerCall.id)).toBe(true)
     const historical = "Only the four scoped bot_work_result tools can run in a result review. This call did not execute."
     expect(projectBotExecution([message, result("review", true, historical)], false).hiddenMessages.has("review")).toBe(true)
     for (const unproven of [result("review", true, content), result("review", true, historical + " File not found."),
+      { ...control, id: "provider-result", provider_source_id: control.id },
       { ...control, content: botToolControlReceipt("result_review_scope", { name: "execute", id: "other" }) },
       { ...control, content: botToolControlReceipt("result_review_scope", { name: "write_file", id: "call-review" }) }]) {
       expect(projectBotExecution([message, unproven], false).foldedTools.size).toBe(0)
@@ -60,6 +63,9 @@ describe("Bot execution presentation", () => {
       ...group("another-page", b, 1, true), ...group("retried", a, 1, false)]
     const projection = projectBotExecution(messages, false)
     expect(projection.hiddenMessages.has("initial")).toBe(true)
+    const recovery = messages[messages.length - 1]
+    const recoveryReplay = { ...recovery, id: `${recovery.id}::cmb-same-role-duplicate:tool:2` }
+    expect(projectBotExecution([...messages.slice(0, -1), recoveryReplay], false).hiddenMessages.has("initial")).toBe(true)
     expect(projection.hiddenMessages.has("later-failure")).toBe(false)
     expect(projection.hiddenMessages.has("another-page")).toBe(false)
     for (const extra of [

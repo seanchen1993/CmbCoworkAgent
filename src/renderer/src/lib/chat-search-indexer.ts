@@ -117,6 +117,7 @@ export function createChatSearchIndexer(
       type: "begin",
       id,
       role: plan.role,
+      sideUserContent: doc.plan?.sideUserContent,
       stripThink: plan.stripThink,
       cleanAttachments: plan.cleanAttachments
     })

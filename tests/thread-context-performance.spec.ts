@@ -112,7 +112,7 @@ async function main(): Promise<void> {
   )
   assert.match(
     rightPanelSource,
-    /\{lspOpen && \([\s\S]{0,500}<LspPanel/,
+    /\{workPanelVisible && lspOpen && \([\s\S]{0,500}<LspPanel/,
     "the runtime-probing LSP panel must remain unmounted while its section is closed"
   )
   assert.match(lspPanelSource, /window\.api\.lsp\.getStatus\(/)
@@ -148,7 +148,7 @@ async function main(): Promise<void> {
 
   assert.match(
     sidebarSource,
-    /useThreadStateSummaries\(\)/,
+    /useSyncExternalStore\(subscribeToThreadStateSummaries, getSnapshot, getSnapshot\)/,
     "the permanently mounted sidebar must subscribe to lightweight summaries"
   )
   assert.doesNotMatch(
@@ -867,8 +867,8 @@ async function main(): Promise<void> {
   )
   assert.match(
     cleanupSource,
-    /threadHistoryLoadGenerationRef\.current\[threadId\][\s\S]*\+ 1/,
-    "permanent deletion must invalidate queued transcript persistence continuations"
+    /const historyGenerations = threadHistoryLoadGenerationRef\.current[\s\S]*?isBtwThreadId\(threadId\) && isThreadRetired\(threadId\)[\s\S]*?delete historyGenerations\[threadId\][\s\S]*?else \{\s*historyGenerations\[threadId\] = \(historyGenerations\[threadId\] \?\? 0\) \+ 1/,
+    "retired side conversations release their history generation, while reusable thread IDs invalidate pending history work"
   )
 
   const persistStart = source.indexOf("const saveSubagentTranscripts = useCallback")

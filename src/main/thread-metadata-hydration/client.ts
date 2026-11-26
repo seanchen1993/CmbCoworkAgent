@@ -210,7 +210,7 @@ export class ThreadMetadataHydrationClient {
   private async request(
     kind: RequestKind,
     payload:
-      | Pick<ThreadMetadataHydrationReadThreadRequest, "type" | "threadId" | "search">
+      | Pick<ThreadMetadataHydrationReadThreadRequest, "type" | "threadId" | "search" | "sideParent">
       | {
           type: "read-list-page"
           beforeUpdatedAt?: number
@@ -343,6 +343,13 @@ export class ThreadMetadataHydrationClient {
       }
     )
     return request
+  }
+
+  readSideParent(threadId: string): Promise<Thread | null> {
+    // A caller validates the snapshot against mutations observed since dispatch.
+    // Do not share a read that may have started before that observation.
+    return this.request("thread", { type: "read-thread", threadId, sideParent: true }, null)
+      .then(value => value as Thread | null)
   }
 
   async readListPage(
@@ -577,6 +584,10 @@ export function readThreadHydrationInWorker(
   webContentsId?: number
 ): Promise<Thread | null> {
   return getDefaultClient().readThread(threadId, webContentsId)
+}
+
+export function readSideParentInWorker(threadId: string): Promise<Thread | null> {
+  return getDefaultClient().readSideParent(threadId)
 }
 
 export function readThreadSearchHydrationInWorker(

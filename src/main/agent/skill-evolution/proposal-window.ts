@@ -267,6 +267,11 @@ export function resetSkillProposalWindow(threadId: string): void {
   proposalWindows.delete(threadId)
 }
 
+export function disposeSkillProposalWindow(threadId: string): void {
+  resetSkillProposalWindow(threadId)
+  recentSkillUsageTurns.delete(threadId)
+}
+
 export function getRecentSkillUsageNames(threadId: string): string[] {
   return Array.from(
     new Set((recentSkillUsageTurns.get(threadId) ?? []).flatMap((turn) => turn.usedSkills))

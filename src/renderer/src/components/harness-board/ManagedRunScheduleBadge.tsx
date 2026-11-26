@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog"
 import { ManagedRunModelField } from "./ManagedRunModelField"
 import {
-  MANAGED_RUN_MODEL_LABELS,
+  getManagedRunModelOption,
   type ManagedRunModelSelection
 } from "../../../../shared/managed-run-model"
 import { ManagedRunStartTimeField } from "./ManagedRunStartTimeField"
@@ -152,7 +152,7 @@ export function ManagedRunScheduleBadge({
                 <div className="space-y-1">
                   <p className="text-xs text-muted-foreground">使用模型</p>
                   <p className="text-sm font-medium">
-                    {MANAGED_RUN_MODEL_LABELS[schedule.modelSelection ?? "default"]}
+                    {getManagedRunModelOption(schedule.modelSelection).name}
                   </p>
                 </div>
                 {schedule.failureReason && (

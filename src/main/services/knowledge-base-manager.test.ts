@@ -41,7 +41,10 @@ import {
   readKnowledgeState,
   writeKnowledgeState
 } from "./knowledge-base-state"
-import { KnowledgeRepositoryLocalChangesError } from "./knowledge-repository"
+import {
+  KnowledgeRepositoryFallbackError,
+  KnowledgeRepositoryLocalChangesError
+} from "./knowledge-repository"
 import * as knowledgeRepository from "./knowledge-repository"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
 
@@ -502,7 +505,7 @@ it("uses only the normal periodic refresh for failures", async () => {
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
   await vi.advanceTimersByTimeAsync(60_000)
   expect(globalThis.fetch).toHaveBeenCalledTimes(1)
-  await vi.advanceTimersByTimeAsync(223 * 60_000)
+  await vi.advanceTimersByTimeAsync(463 * 60_000)
   expect(globalThis.fetch).toHaveBeenCalledTimes(1)
   await vi.advanceTimersByTimeAsync(60_000)
   await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2))
@@ -544,12 +547,12 @@ it("randomizes every periodic interval and merges a pending automatic refresh at
   await vi.advanceTimersByTimeAsync(1)
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
-  await vi.advanceTimersByTimeAsync(225 * 60_000 - 2)
+  await vi.advanceTimersByTimeAsync(465 * 60_000 - 2)
   expect(fetchMock).toHaveBeenCalledTimes(1)
   await vi.advanceTimersByTimeAsync(1)
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
   await vi.waitFor(async () => expect((await listKnowledgeBases()).refreshing).toBe(false))
-  await vi.advanceTimersByTimeAsync(254 * 60_000)
+  await vi.advanceTimersByTimeAsync(494 * 60_000)
   expect(fetchMock).toHaveBeenCalledTimes(2)
   refreshKnowledgeBasesInBackground()
   await vi.advanceTimersByTimeAsync(60_000)
@@ -584,7 +587,7 @@ it("cancels pending startup, identity and periodic refreshes when stopped", asyn
   )
   startKnowledgeBaseManager()
   stopKnowledgeBaseManager()
-  await vi.advanceTimersByTimeAsync(300 * 60_000)
+  await vi.advanceTimersByTimeAsync(540 * 60_000)
   expect(fetchMock).not.toHaveBeenCalled()
   refreshKnowledgeBasesInBackground()
   stopKnowledgeBaseManager()
@@ -617,6 +620,30 @@ it("stores a single friendly description from the first underlying failure and d
   expect(logs).not.toContain(item.repoUrl)
   expect(logs).not.toContain("master1")
   expect(logs).not.toContain("\u001b")
+})
+
+it("logs the SSH failure without exposing repository addresses or changing the friendly message", async () => {
+  const sshUrl = "git@ssh.example.test:knowledge/main.git"
+  await writeKnowledgeState(mergeCloudKnowledgeState(null, [{ ...item, sshUrl }]))
+  const log = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+  mocks.syncKnowledgeRepository.mockRejectedValue(
+    new KnowledgeRepositoryFallbackError(
+      "Both transports failed",
+      new Error(`fatal: Authentication failed for ${item.repoUrl}`),
+      new Error(`Command failed: git ls-remote ${sshUrl}\nPermission denied (publickey).`)
+    )
+  )
+
+  const result = await syncKnowledgeBase(item.idKey)
+  expect(result.message).toBe(
+    "读取内容、沉淀工作区更新失败：仓库认证失败，请检查本机 Git 凭据是否有效，并确认账号具有仓库访问权限。"
+  )
+  const logs = log.mock.calls.map(([message]) => message).join("\n")
+  expect(logs).toContain("Authentication failed for <knowledge-repository>")
+  expect(logs).toContain("SSH 失败：Command failed: git ls-remote <knowledge-repository>")
+  expect(logs).toContain("Permission denied (publickey).")
+  expect(logs).not.toContain(item.repoUrl)
+  expect(logs).not.toContain(sshUrl)
 })
 
 it("keeps different workspace failure descriptions separate", async () => {

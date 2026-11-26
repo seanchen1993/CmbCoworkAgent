@@ -18,7 +18,9 @@ import { createChatSearchPlan } from "../../shared/chat-search-plan"
 import { findChatSearchLocations, projectChatSearchPlan, validateChatSearchLocation } from "../../shared/chat-search-index"
 import { createThreadSearchMessagePlan } from "../../shared/thread-search-projection"
 import { THREAD_MESSAGE_TEXT_LIMIT } from "../../shared/thread-message-content"
+import { WORKFLOW_NOTIFICATION_MARKER_PREFIX } from "../../shared/transcript-visibility"
 import {
+  getBackwardThreadMessageCandidatesSql,
   THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET,
   THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT
 } from "./page-reader"
@@ -262,6 +264,164 @@ describe("thread message hydration worker", () => {
       maxYoungGenerationSizeMb: 32,
       stackSizeMb: 4
     })
+  })
+
+  it("returns the bounded visible text suffix of an oversized side-context row", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(`INSERT INTO thread_messages
+      (thread_id, message_id, role, content_json, created_at, ordinal) VALUES ('side-parent', ?, ?, ?, 0, ?)`)
+    const marker = "PARENT_TAIL_MARKER"
+    const storedContent = [
+      { type: "text", text: "甲".repeat(59_000) },
+      { type: "text", text: "乙".repeat(59_000) },
+      { type: "image", data: "OMITTED_IMAGE" },
+      { type: "text", text: `${"丙".repeat(58_990)}😀${marker}` }
+    ]
+    insert.run("hidden", "user", JSON.stringify(WORKFLOW_NOTIFICATION_MARKER_PREFIX + "x".repeat(60_000)), 0)
+    insert.run("answer", "assistant", JSON.stringify(storedContent), 1)
+    database.prepare("INSERT INTO thread_message_buckets VALUES ('side-parent', 2, 2, 0)").run()
+    const client = createWorkerClient(path)
+    const options = { limit: 128, byteBudget: 512 * 1024, beforeOrdinal: 2, beforeMessageId: "\u0001" }
+
+    const preview = await client.readPage("side-parent", options)
+    expect(preview.truncatedMessageIds).toEqual(["answer"])
+    expect(JSON.stringify(preview.messages[0].content)).not.toContain(marker)
+
+    const sideContextTextByteBudget = 51_200
+    const publicPage = await client.readPage("side-parent", { ...options, sideContextTextByteBudget, userOrdinalFloor: 1 }, 17)
+    expect(publicPage.messages).toEqual(preview.messages)
+    const side = await client.readPage("side-parent", { ...options, sideContextTextByteBudget })
+    expect(side.messages.map(message => message.id)).toEqual(["answer"])
+    const body = String(side.messages[0].content)
+    expect(body.endsWith(marker)).toBe(true)
+    expect(body).not.toContain("OMITTED_IMAGE")
+    expect(body).not.toContain("\uFFFD")
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(sideContextTextByteBudget)
+    expect(side.beforeMessageId).toBe("answer")
+
+    const older = await client.readPage("side-parent", {
+      ...options, beforeOrdinal: side.beforeOrdinal!, beforeMessageId: side.beforeMessageId!,
+      sideContextTextByteBudget
+    })
+    expect(older.messages.map(({ id, content }) => ({ id, content }))).toEqual([{ id: "hidden", content: "" }])
+  })
+
+  it("omits proven replay text across page boundaries and retains other tool executions and output versions", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(`INSERT INTO thread_messages
+      (thread_id, message_id, provider_source_id, provider_occurrence, role, content_json, tool_call_id,
+       name, status, created_at, ordinal) VALUES ('side-replay', ?, ?, ?, 'tool', ?, 'shared-call',
+       'read_file', 'success', 0, ?)`)
+    const original = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    const otherExecution = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    const revised = `${original}::cmb-same-role-duplicate:tool:2`
+    const revisedReplay = `${original}::cmb-same-role-duplicate:tool:3`
+    const replay = `${original}::cmb-same-role-duplicate:tool:4`
+    const ambiguous = "provider-result"
+    const ambiguousCopy = `${ambiguous}::cmb-same-role-duplicate:tool:2`
+    insert.run(original, null, null, '"Same output"', 0)
+    insert.run(otherExecution, null, null, '"Same output"', 1)
+    insert.run(ambiguous, null, null, '"Unverified output"', 2)
+    insert.run(ambiguousCopy, ambiguous, 2, '"Unverified output"', 3)
+    insert.run(revised, original, 2, '"Changed output"', 4)
+    insert.run(revisedReplay, original, 3, '"Changed output"', 4)
+    insert.run(replay, original, 4, '"Same output"', 5)
+    database.prepare("INSERT INTO thread_message_buckets VALUES ('side-replay', 7, 6, 0)").run()
+    const client = createWorkerClient(path)
+    const options = { beforeOrdinal: 6, beforeMessageId: "\u0001", sideContextTextByteBudget: 20 }
+    const latest = await client.readPage("side-replay", { ...options, limit: 2 })
+    expect(latest.messages.map(({ id, content }) => [id, content])).toEqual([[revisedReplay, ""], [replay, ""]])
+    expect(latest.beforeMessageId).toBe(revisedReplay)
+    expect(latest.hasMore).toBe(true)
+    expect(latest.truncatedMessageIds).toBeUndefined()
+    const prior = await client.readPage("side-replay", {
+      ...options, limit: 8, beforeOrdinal: latest.beforeOrdinal!, beforeMessageId: latest.beforeMessageId!
+    })
+    expect(prior.messages.map(({ id, content }) => [id, content])).toEqual([
+      [original, "Same output"], [otherExecution, "Same output"], [ambiguous, "Unverified output"],
+      [ambiguousCopy, "Unverified output"], [revised, "Changed output"]
+    ])
+    const combined = await client.readPage("side-replay", { ...options, limit: 8 })
+    expect(combined.messages).toEqual([...prior.messages, ...latest.messages])
+  })
+
+  it("uses the persisted tail of a fragmented side-context row and filters from its opening text", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(`INSERT INTO thread_messages
+      (thread_id, message_id, role, content_json, created_at, ordinal) VALUES ('fragment-parent', ?, ?, ?, 0, ?)`)
+    const fragment = database.prepare(`INSERT INTO thread_message_fragments
+      (thread_id, message_id, content_text, created_at) VALUES ('fragment-parent', ?, ?, 0)`)
+    const state = database.prepare(`INSERT INTO thread_message_fragment_states
+      (thread_id, message_id, total_chars, updated_at) VALUES ('fragment-parent', ?, ?, 0)`)
+    const marker = "LAST_PERSISTED_FRAGMENT"
+    const stored = [
+      { id: "hidden", role: "user", head: "", first: WORKFLOW_NOTIFICATION_MARKER_PREFIX },
+      { id: "answer", role: "assistant", head: "First line\n", first: "Start of the stored body\n" }
+    ]
+    for (const [ordinal, { id, role, head, first }] of stored.entries()) {
+      insert.run(id, role, JSON.stringify(head), ordinal)
+      const chunks = [first, ...Array.from({ length: 8 }, () => "界".repeat(16_000)), `😀${marker}`]
+      for (const chunk of chunks) fragment.run(id, chunk)
+      state.run(id, chunks.reduce((length, chunk) => length + chunk.length, head.length))
+    }
+    database.prepare("INSERT INTO thread_message_buckets VALUES ('fragment-parent', 2, 2, 0)").run()
+    const client = createWorkerClient(path)
+    const options = { limit: 128, byteBudget: 512 * 1024, beforeOrdinal: 2, beforeMessageId: "\u0001" }
+
+    const preview = await client.readPage("fragment-parent", options)
+    expect(preview.truncatedMessageIds).toEqual(["answer"])
+    expect(preview.messages[0].content).not.toContain(marker)
+
+    const sideContextTextByteBudget = 100
+    const side = await client.readPage("fragment-parent", { ...options, sideContextTextByteBudget })
+    const body = String(side.messages[0].content)
+    expect(body).toMatch(new RegExp(`😀${marker}$`))
+    expect(body).not.toContain("\uFFFD")
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(sideContextTextByteBudget)
+    const older = await client.readPage("fragment-parent", {
+      ...options, beforeOrdinal: side.beforeOrdinal!, beforeMessageId: side.beforeMessageId!,
+      sideContextTextByteBudget
+    })
+    expect(older.messages.map(({ id, content }) => ({ id, content }))).toEqual([{ id: "hidden", content: "" }])
+  })
+
+  it("pages only user candidates inside a captured ordinal range", async () => {
+    const { database, path } = createDatabase()
+    database.exec(`
+      CREATE INDEX idx_thread_messages_thread_order ON thread_messages(thread_id, ordinal, created_at);
+      CREATE INDEX idx_thread_messages_role_order
+        ON thread_messages(thread_id, role, ordinal DESC, created_at DESC, message_id DESC);
+    `)
+    const insert = database.prepare(`INSERT INTO thread_messages (
+      thread_id, message_id, role, content_json, created_at, ordinal
+    ) VALUES ('context', ?, ?, ?, ?, ?)`)
+    for (const [id, ordinal] of Object.entries({ active: 3, steer: 4, hiddenA: 10, hiddenB: 11, postCapture: 312 })) {
+      insert.run(id, "user", JSON.stringify(id), ordinal, ordinal)
+    }
+    for (let ordinal = 12; ordinal < 312; ordinal++) {
+      const content = ordinal === 311 ? "x".repeat(520 * 1024) : "unfinished tool result"
+      insert.run(`tool-${ordinal}`, "tool", JSON.stringify(content), ordinal, ordinal)
+    }
+    const plan = database.prepare(`EXPLAIN QUERY PLAN ${getBackwardThreadMessageCandidatesSql(true)}`)
+      .all("context", 3, 312, "\u0001", 3)
+    expect(plan.map(row => row.detail)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/idx_thread_messages_role_order \(thread_id=\? AND role=\? AND ordinal>\? AND ordinal<\?\)/)
+    ]))
+
+    const client = createWorkerClient(path)
+    const latest = await client.readPage("context", {
+      userOrdinalFloor: 3, beforeOrdinal: 312, beforeMessageId: "\u0001", limit: 2
+    })
+    expect(latest.messages.map(message => message.id)).toEqual(["hiddenA", "hiddenB"])
+    expect(latest.hasMore).toBe(true)
+    expect(client.getDiagnostics().lastStats?.scannedCandidates).toBe(3)
+
+    const older = await client.readPage("context", {
+      userOrdinalFloor: 3, beforeOrdinal: latest.beforeOrdinal!, beforeMessageId: latest.beforeMessageId!, limit: 2
+    })
+    expect(older.messages.map(message => message.id)).toEqual(["steer"])
+    expect(older.hasMore).toBe(false)
+    expect(client.getDiagnostics().lastStats?.scannedCandidates).toBe(1)
   })
 
   it("reads two explicit forward pages across dense, repeated, and sparse ordinals", async () => {

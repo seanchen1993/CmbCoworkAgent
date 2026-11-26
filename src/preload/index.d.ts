@@ -1,3 +1,4 @@
+import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
 import type { GitGraphPage } from "../shared/git-graph"
 import type {
   GitBranchKind,
@@ -29,6 +30,11 @@ import type {
   RunAnalysisStages,
   RunAnalysisSessions
 } from "../shared/project-run-analysis"
+import type { PersonalEfficiencyExportOptions } from "../shared/personal-efficiency-export"
+import type {
+  PersonalEfficiencyData,
+  PersonalEfficiencyFilters
+} from "../shared/personal-efficiency"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -217,6 +223,7 @@ import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
+  ProjectMetricOverviewData,
   ProjectMetricSummaryData,
   ProjectMetricTrendData,
   ProjectMetricTrendFilters
@@ -1377,6 +1384,10 @@ interface CustomAPI {
     ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
+  btw: {
+    create(request: BtwRequest): Promise<{ id: string; ordinal: number; thread: Thread }>
+    close(id: string): Promise<void>
+  }
   models: {
     getCatalog: () => Promise<{
       models: ModelConfig[]
@@ -2420,7 +2431,7 @@ interface CustomAPI {
         context: unknown
       }) => void
     ) => () => void
-    intentResponse: (requestId: string, accepted: boolean) => Promise<void>
+    intentResponse: (requestId: string, accepted: boolean) => Promise<boolean>
     /**
      * Manually retry a failed skill generation. Skips the intent banner and
      * jumps straight to generate → confirm → write.
@@ -2434,6 +2445,7 @@ interface CustomAPI {
       callback: (req: {
         threadId?: string
         requestId: string
+        source?: "proposal"
         skillId: string
         name: string
         description: string
@@ -2441,11 +2453,12 @@ interface CustomAPI {
       }) => void
     ) => () => void
     confirmResponse: (requestId: string, approved: boolean, content?: string) => Promise<void>
+    onBtwRequestClosed: (callback: (request: BtwSkillRequestClosed) => void) => () => void
     /** Listen to streaming generation progress from the main process */
     onGenerating: (
       callback: (event: {
         threadId?: string
-        phase: "start" | "token" | "done" | "error"
+        phase: "start" | "token" | "done" | "error" | "settled"
         text: string
       }) => void
     ) => () => void
@@ -2845,6 +2858,20 @@ interface CustomAPI {
     projectMetricGroupOptions: (
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ) => Promise<{ success: boolean; data?: string[]; error?: string }>
+    personalEfficiency: (
+      filters: PersonalEfficiencyFilters,
+      sapId?: string
+    ) => Promise<{ success: boolean; data?: PersonalEfficiencyData; error?: string }>
+    personalEfficiencyExport: (
+      filters: PersonalEfficiencyFilters,
+      options?: PersonalEfficiencyExportOptions
+    ) => Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }>
+    projectMetricOverview: (
+      filters: ProjectMetricFilters
+    ) => Promise<{ success: boolean; data?: ProjectMetricOverviewData; error?: string }>
+    projectMetricIndicatorExport: (
+      filters: ProjectMetricFilters
+    ) => Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }>
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>

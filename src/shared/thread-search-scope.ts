@@ -1,8 +1,10 @@
 import { isRemoteInboxMetadata, REMOTE_INBOX_WORKSPACE_NAME } from "./remote-inbox-workspace"
+import { isBtwThreadId } from "./btw-chat"
 
 import type { ThreadSearchRoute } from "./thread-search-types"
 
 interface ThreadClassification {
+  thread_id?: string
   metadata?: Record<string, unknown> | null
 }
 
@@ -52,7 +54,7 @@ export function isBotThread(thread: ThreadClassification | null | undefined): bo
 
 export function isRegularChatThread(thread: ThreadClassification | null | undefined): boolean {
   return (
-    Boolean(thread) &&
+    Boolean(thread) && !isBtwThreadId(thread?.thread_id) &&
     !isHarnessProjectModeThread(thread) &&
     (!isBotThread(thread) || isLocalWorkConversation(thread))
   )

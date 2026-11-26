@@ -7,16 +7,17 @@ async function readSource(relativePath: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const [watcher, preload, threadContext, workspaceLoader, rightPanel, gitPanel, harnessBoard, app] =
+  const [watcher, preload, threadContext, workspaceLoader, treeProjection, rightPanel, gitPanel, harnessBoard, gitChangeNotice] =
     await Promise.all([
       readSource("src/main/services/workspace-watcher.ts"),
       readSource("src/preload/index.ts"),
       readSource("src/renderer/src/lib/thread-context.tsx"),
       readSource("src/renderer/src/lib/workspace-file-load.ts"),
+      readSource("src/renderer/src/lib/workspace-file-tree-projection.ts"),
       readSource("src/renderer/src/components/panels/RightPanel.tsx"),
       readSource("src/renderer/src/components/panels/GitPanelView.tsx"),
       readSource("src/renderer/src/components/harness-board/HarnessBoardView.tsx"),
-      readSource("src/renderer/src/App.tsx")
+      readSource("src/renderer/src/components/git/GitChangeNotice.tsx")
     ])
 
   const notifyStart = watcher.indexOf("function notifyRenderer(")
@@ -56,15 +57,12 @@ async function main(): Promise<void> {
     "renderer IPC must not be nested inside a per-thread loop"
   )
   assert.match(
-    rightPanel,
-    /fileTreeCache = new WeakMap<FileInfo\[\], TreeNode\[\]>\(\)/,
+    treeProjection,
+    /new WeakMap<WorkspaceFileTreeFile\[\], WorkspaceFileTreeProjection>\(\)/,
     "same-array task switches and panel remounts must share the built file tree"
   )
   assert.doesNotMatch(
-    rightPanel.slice(
-      rightPanel.indexOf("function buildFileTree"),
-      rightPanel.indexOf("function FileTree")
-    ),
+    treeProjection,
     /\[\.\.\.files\]\.sort/,
     "file-tree construction must not globally copy-sort every file"
   )
@@ -93,8 +91,8 @@ async function main(): Promise<void> {
   )
   assert.match(
     sharedRefreshSource,
-    /workspaceThreadIdsByPathRef\.current\.get\(workspaceKey\)[\s\S]*workspaceFiles: files/,
-    "same-path ThreadStates must share the exact published files-array reference"
+    /workspaceThreadIdsByPathRef\.current\.get\(workspaceKey\)[\s\S]*reconcileWorkspaceFilePatch\(state\.workspaceFiles, files, filePatch\)[\s\S]*state: \{ \.\.\.state, workspaceFiles \}/,
+    "same-path ThreadStates must consume the published files and reconcile pending tool reports"
   )
   assert.equal(
     sharedRefreshSource.match(/refreshWorkspaceFilesFromChangeBatch\(/g)?.length ?? 0,
@@ -110,7 +108,7 @@ async function main(): Promise<void> {
     "FilesContent must consume ThreadProvider results instead of starting a duplicate scan"
   )
   for (const [name, source] of [
-    ["App", app],
+    ["GitChangeNotice", gitChangeNotice],
     ["GitPanel", gitPanel],
     ["HarnessBoard", harnessBoard]
   ] as const) {

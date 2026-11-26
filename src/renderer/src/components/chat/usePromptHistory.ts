@@ -1,7 +1,20 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react"
 import { watchPromptHistory, type PromptHistoryCursor, type PromptHistoryEntry } from "@/lib/prompt-history"
 
 type Arrow = "ArrowUp" | "ArrowDown"
+type SetInput = (value: string, cursor?: PromptHistoryCursor) => void
+type PendingNavigation = { workspace: string; threadId: string; target: HTMLTextAreaElement; keys: Arrow[] }
+
+interface NavigationState {
+  workspace: string | null
+  threadId: string
+  input: string
+  browsing: boolean
+  entries: PromptHistoryEntry[] | null
+  index: number | null
+  setInput: SetInput
+}
+
 function step(index: number | null, key: Arrow, length: number): number | null {
   if (index === null) return length - 1
   if (key === "ArrowUp") return Math.max(0, index - 1)
@@ -12,10 +25,41 @@ function applyChoice(
   workspace: string,
   entries: PromptHistoryEntry[],
   index: number | null,
-  setInput: (value: string, cursor?: PromptHistoryCursor) => void
+  setInput: SetInput
 ) {
   const choice = index === null ? undefined : entries[index]
   setInput(choice?.text ?? "", choice && { workspace, ...choice })
+}
+
+function createHistoryActions(
+  state: RefObject<NavigationState | null>,
+  pending: RefObject<PendingNavigation | null>
+) {
+  return {
+    cancelPending() { pending.current = null },
+    navigate(event: KeyboardEvent): boolean {
+      if (!state.current) return false
+      const { workspace, threadId, input, browsing, entries, index, setInput } = state.current
+      if (!workspace || (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
+        event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
+        event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        (!browsing && input !== "") || !(event.target instanceof HTMLTextAreaElement)) return false
+
+      if (!entries) {
+        // Replay early keystrokes when IndexedDB opens, provided the same draft still has focus.
+        const prior = pending.current
+        if (prior && prior.workspace === workspace && prior.threadId === threadId) prior.keys.push(event.key)
+        else pending.current = { workspace, threadId, target: event.target, keys: [event.key] }
+      } else {
+        if (!entries.length) return false
+        const next = step(index, event.key, entries.length)
+        applyChoice(workspace, entries, next, setInput)
+        if (next !== null && entries[next].text === input) event.target.setSelectionRange(input.length, input.length)
+      }
+      event.preventDefault()
+      return true
+    }
+  }
 }
 
 export function usePromptHistory(
@@ -23,11 +67,17 @@ export function usePromptHistory(
   threadId: string,
   input: string,
   cursor: PromptHistoryCursor | undefined,
-  setInput: (value: string, cursor?: PromptHistoryCursor) => void
+  setInput: SetInput
 ) {
   const [history, setHistory] = useState<{ workspace: string; entries: PromptHistoryEntry[]; trimmed: number } | null>(null)
-  const pending = useRef<{ workspace: string; threadId: string; target: HTMLTextAreaElement; keys: Arrow[] } | null>(null)
-  const cancelPending = () => { pending.current = null }
+  const pending = useRef<PendingNavigation | null>(null)
+  const navigation = useRef<NavigationState | null>(null)
+  // Composer handlers can outlive a render. They only need the latest committed history.
+  const [actions] = useState(() => createHistoryActions(navigation, pending))
+  useLayoutEffect(() => () => {
+    navigation.current = null
+    pending.current = null
+  }, [])
   useEffect(() => workspace
     ? watchPromptHistory(workspace, (entries, trimmed) => setHistory({ workspace, entries, trimmed }))
     : undefined, [workspace])
@@ -61,6 +111,7 @@ export function usePromptHistory(
   const browsing = recalled
   const navigationIndex = browsing ? index : null
   useLayoutEffect(() => {
+    navigation.current = { workspace, threadId, input, browsing, entries, index: navigationIndex, setInput }
     const rejected = entries && index < 0 && withdrawn
     if (recalled && rejected) {
       setInput("")
@@ -79,26 +130,5 @@ export function usePromptHistory(
     applyChoice(workspace, entries, next, setInput)
   }, [workspace, threadId, input, recalled, entries, index, navigationIndex, browsing, withdrawn, setInput])
 
-  function navigate(event: KeyboardEvent): boolean {
-    if (!workspace || (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
-      event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
-      event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
-      (!browsing && input !== "") || !(event.target instanceof HTMLTextAreaElement)) return false
-
-    if (!entries) {
-      // Replay early keystrokes when IndexedDB opens, provided the same draft still has focus.
-      const prior = pending.current
-      if (prior && prior.workspace === workspace && prior.threadId === threadId) prior.keys.push(event.key)
-      else pending.current = { workspace, threadId, target: event.target, keys: [event.key] }
-    } else {
-      if (!entries.length) return false
-      const next = step(navigationIndex, event.key, entries.length)
-      applyChoice(workspace, entries, next, setInput)
-      if (next !== null && entries[next].text === input) event.target.setSelectionRange(input.length, input.length)
-    }
-    event.preventDefault()
-    return true
-  }
-
-  return { browsing, navigate, cancelPending }
+  return { browsing, ...actions }
 }

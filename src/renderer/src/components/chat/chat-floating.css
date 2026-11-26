@@ -64,3 +64,17 @@
 [data-thread-floating-chat="true"] > [data-thread-chat-content]:has([data-chat-notice], .bot-notice, .bot-queue, .bot-empty) {
   padding-top: var(--chat-floating-header-height, 0px);
 }
+
+/* Compact composer inside the auxiliary pane. */
+[data-side-composer="true"] {
+  border-radius: 20px;
+  background: var(--background-interactive);
+  box-shadow: none;
+}
+[data-side-composer="true"] [data-composer-actions] { min-height: var(--btw-toolbar-height, 2.5rem); }
+[data-side-composer="true"] [data-composer-actions] button[type="submit"] {
+  width: 26px;
+  height: 26px;
+  background: var(--foreground);
+  color: var(--background);
+}

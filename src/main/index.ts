@@ -422,12 +422,15 @@ import {
   startKnowledgeBaseManager,
   stopKnowledgeBaseManager
 } from "./services/knowledge-base-manager"
-import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
+import {
+  initializeAdoptionTracker,
+  shutdownAdoptionTrackerAfterWrites
+} from "./services/adoption-tracker"
 import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreadSummaries, initializeDatabase, flush, getDb } from "./db"
+import { getRecentThreadWorkspacePathsForSandbox, initializeDatabase, flush, getDb } from "./db"
 import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
 import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
 import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
@@ -986,20 +989,13 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
   const workspaces: string[] = []
   const seen = new Set<string>()
 
-  for (const thread of getAllThreadSummaries().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
-    if (!thread.metadata) continue
-    try {
-      const metadata = JSON.parse(thread.metadata)
-      const workspacePath =
-        typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
-      if (!workspacePath) continue
-      const key = workspacePath.toLowerCase()
-      if (seen.has(key)) continue
-      seen.add(key)
-      workspaces.push(workspacePath)
-    } catch {
-      // Ignore malformed metadata and keep scanning recent threads.
-    }
+  for (const path of getRecentThreadWorkspacePathsForSandbox(STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+    const workspacePath = path.trim()
+    if (!workspacePath) continue
+    const key = workspacePath.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    workspaces.push(workspacePath)
   }
 
   return workspaces
@@ -1781,13 +1777,10 @@ if (browserNativeMessagingHostLaunch) {
     stopKnowledgeBaseManager()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
-    try {
-      shutdownAdoptionTracker()
-    } catch (err) {
-      console.warn("[Main] shutdownAdoptionTracker error:", err)
-    }
-
     const cleanup = Promise.all([
+      shutdownAdoptionTrackerAfterWrites().catch((err) =>
+        console.warn("[Main] shutdownAdoptionTracker error:", err)
+      ),
       stopLocalBotHost().catch((error) => console.warn("[Bots] Shutdown failed", error)),
       builtinRobotManager
         .stop()

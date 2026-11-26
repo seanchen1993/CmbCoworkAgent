@@ -27,6 +27,7 @@ import {
   writeKnowledgeState
 } from "./knowledge-base-state"
 import {
+  KnowledgeRepositoryFallbackError,
   KnowledgeRepositoryLocalChangesError,
   knowledgeWorkspaceHasChanges,
   syncKnowledgeRepository,
@@ -34,7 +35,7 @@ import {
 } from "./knowledge-repository"
 
 const BACKGROUND_REFRESH_DELAY_MS = 30 * 60 * 1_000
-const MIN_REFRESH_INTERVAL_MS = 225 * 60 * 1_000
+const MIN_REFRESH_INTERVAL_MS = 465 * 60 * 1_000
 const REFRESH_INTERVAL_JITTER_MS = 30 * 60 * 1_000
 const QUERY_PATH = "/devclaw/knowledge-config/query"
 const QUERY_TIMEOUT_MS = 5_000
@@ -272,8 +273,12 @@ async function syncWorkspace(
     const blocked = error instanceof KnowledgeRepositoryLocalChangesError
     const message = blocked ? error.message : formatKnowledgeSyncError(error)
     if (!blocked) {
+      const sshFailure =
+        error instanceof KnowledgeRepositoryFallbackError
+          ? `\nSSH 失败：${errorMessage(error.sshError, item)}`
+          : ""
       console.warn(
-        `[knowledge_manage] ${item.idKey}/${role} 同步失败：${errorMessage(error, item)}`
+        `[knowledge_manage] ${item.idKey}/${role} 同步失败：${errorMessage(error, item)}${sshFailure}`
       )
     }
     await updateWorkspace(item.idKey, {
