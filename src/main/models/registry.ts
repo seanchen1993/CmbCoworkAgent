@@ -17,6 +17,7 @@ import {
   IDLE_MODEL_UAT_NOTICE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   isModelAvailable,
+  isModelSelectable,
   isValidSapId,
   type BuiltinModelLockedField
 } from "../../shared/model-catalog"
@@ -527,6 +528,17 @@ export function getAvailableModelConfigOrDefault(
   const requested = getModelConfigByRef(value)
   assertIdleModelServiceHours(requested)
   if (isModelAvailable(requested)) return requested
+  return getAvailableDefaultModelConfig()
+}
+
+/** Resolve a model for a conversation before it sends a request. */
+export function getSelectableModelConfigOrDefault(value?: string | null): ResolvedModelConfig | null {
+  const requested = getModelConfigByRef(value)
+  if (requested && isModelSelectable(requested)) return requested
+  return getAvailableDefaultModelConfig()
+}
+
+function getAvailableDefaultModelConfig(): ResolvedModelConfig | null {
   const selectedDefault = getDefaultModelConfig()
   if (isModelAvailable(selectedDefault)) return selectedDefault
   return getModelConfigs().find(isModelAvailable) ?? null

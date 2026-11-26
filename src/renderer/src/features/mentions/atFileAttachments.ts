@@ -5,13 +5,30 @@
 import type { FileAttachment, FileInfo } from "@/types"
 import { attachmentImages, isChatImagePath, isVisualDocumentPath } from "../../../../shared/file-attachment"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
-import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
+import { normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
   isSupportedWorkspaceMentionFilePath,
   extractAtFileMentions,
   normalizeAtFileMentionPath,
   type AtFileSuggestion
 } from "./useAtFileMentions"
+
+// Only exact paths to supported files in the active workspace become attachments.
+export function matchedWorkspaceMentions(text: string, files: readonly FileInfo[], allowImages = false): FileInfo[] {
+  const paths = extractAtFileMentions(text).map(normalizeAtFileMentionPath).filter(Boolean)
+  if (!paths.length) return []
+  const wanted = new Set(paths)
+  const matched = new Map<string, FileInfo>()
+  for (const file of files) {
+    if (file.is_dir) continue
+    const key = normalizeAtFileMentionPath(file.path)
+    if (wanted.has(key) && !matched.has(key) && isSupportedWorkspaceMentionFilePath(file.path, allowImages)) {
+      matched.set(key, file)
+      if (matched.size === wanted.size) break
+    }
+  }
+  return paths.flatMap(path => matched.get(path) ?? [])
+}
 
 interface WorkspaceReadFileResult {
   success: boolean
@@ -140,11 +157,11 @@ export function resolveAtFileSelection(params: {
 
   const mentionedFile = toMentionedWorkspaceFile(file, workspacePath)
   const existingPaths = new Set([
-    ...attachments.map((item) => item.filePath),
-    ...mentionedFiles.map((item) => item.absolutePath)
+    ...attachments.map((item) => normalizeGitWorkspacePathKey(item.filePath)),
+    ...mentionedFiles.map((item) => normalizeGitWorkspacePathKey(item.absolutePath))
   ])
 
-  if (existingPaths.has(mentionedFile.absolutePath)) {
+  if (existingPaths.has(normalizeGitWorkspacePathKey(mentionedFile.absolutePath))) {
     return { kind: "duplicate", filename: file.filename }
   }
   if (attachments.length + mentionedFiles.length >= maxAttachments) {
@@ -275,9 +292,9 @@ export async function resolveAtFileAttachments(
     let fileText = rawMessage
     for (const range of [...protectedRanges].sort((a, b) => b.start - a.start))
       fileText = fileText.slice(0, range.start) + " ".repeat(range.end - range.start) + fileText.slice(range.end)
-    const mentionPaths = extractAtFileMentions(fileText)
+    const matchedMentions = workspacePath ? matchedWorkspaceMentions(fileText, workspaceFiles, allowImages) : []
     const currentAttachments = attachments.length > 0 ? [...attachments] : []
-    const existingAttachmentPaths = new Set(currentAttachments.map((item) => item.filePath))
+    const existingAttachmentPaths = new Set(currentAttachments.map((item) => normalizeGitWorkspacePathKey(item.filePath)))
     let currentAttachmentChars = currentAttachments.reduce(
       (sum, item) => sum + item.content.length,
       0
@@ -300,13 +317,14 @@ export async function resolveAtFileAttachments(
       mentionFile: MentionedWorkspaceFile,
       sourcePath?: string
     ): void => {
-      const existing = mentionCandidates.get(mentionFile.absolutePath)
+      const pathKey = normalizeGitWorkspacePathKey(mentionFile.absolutePath)
+      const existing = mentionCandidates.get(pathKey)
       if (existing) {
         // 同一个文件如果同时来自 popover 选择和 rawMessage 解析，只记录一份，来源继续累加。
         if (sourcePath) existing.sourcePaths.add(sourcePath)
         return
       }
-      mentionCandidates.set(mentionFile.absolutePath, {
+      mentionCandidates.set(pathKey, {
         mentionFile,
         sourcePaths: sourcePath ? new Set([sourcePath]) : new Set<string>()
       })
@@ -327,20 +345,10 @@ export async function resolveAtFileAttachments(
     }
 
     // 再解析用户仍保留在 rawMessage 里的 @路径，把“手选”和“手打”两种来源合并。
-    if (mentionPaths.length > 0 && workspacePath) {
-      for (const mentionPath of mentionPaths) {
-        const normalizedMention = normalizeAtFileMentionPath(mentionPath)
-        if (!normalizedMention) continue
-
-        // 这里只在当前 workspace 文件清单中做精确匹配，避免把普通 @文本误识别成附件。
-        const workspaceFile = workspaceFiles.find(
-          (file) => !file.is_dir && normalizeAtFileMentionPath(file.path) === normalizedMention
-        )
-        if (!workspaceFile) continue
-        // 输入阶段已经做过一次过滤，这里再做一层防御，确保发送阶段也不会把不支持的文件带进去。
-        if (!isSupportedWorkspaceMentionFilePath(workspaceFile.path, allowImages)) continue
-        if (isChatImagePath(workspaceFile.path) || (allowImages && isVisualDocumentPath(workspaceFile.path))) hasImageMention = true
-
+    if (workspacePath) {
+      for (const workspaceFile of matchedMentions) {
+        if (allowImages && (isChatImagePath(workspaceFile.path) || isVisualDocumentPath(workspaceFile.path)))
+          hasImageMention = true
         addMentionCandidate(
           toMentionedWorkspaceFile(
             {
@@ -354,7 +362,7 @@ export async function resolveAtFileAttachments(
             },
             workspacePath
           ),
-          normalizedMention
+          normalizeAtFileMentionPath(workspaceFile.path)
         )
       }
     }
@@ -367,19 +375,19 @@ export async function resolveAtFileAttachments(
         throw new Error(`最多只能发送 ${maxAttachments} 个附件，请调整附件后重试。`)
       if (pendingRetained > 0 && pendingRetained > maxTotalChars - currentAttachmentChars)
         throw new Error("附件内容已达上限，请调整附件后重试。")
-      for (const { mentionFile, sourcePaths } of mentionCandidates.values()) {
+      for (const [pathKey, { mentionFile, sourcePaths }] of mentionCandidates) {
+        // 已经作为显式附件或前序 mention 带入的文件不再重复追加。
+        if (existingAttachmentPaths.has(pathKey)) {
+          // 这个路径已经在附件列表里了，说明对应的 mention 文本可以安全消费掉。
+          sourcePaths.forEach((path) => handledMentionPaths.add(path))
+          continue
+        }
+
         // 数量上限命中后直接停止，和普通附件的 UX 保持一致。
         if (!readWorkspaceAttachment && currentAttachments.length >= maxAttachments) {
           if (hasImageMention) throw new Error(`最多只能发送 ${maxAttachments} 个附件，请调整附件后重试。`)
           mentionCountLimitHit = true
           break
-        }
-
-        // 已经作为显式附件或前序 mention 带入的文件不再重复追加。
-        if (existingAttachmentPaths.has(mentionFile.absolutePath)) {
-          // 这个路径已经在附件列表里了，说明对应的 mention 文本可以安全消费掉。
-          sourcePaths.forEach((path) => handledMentionPaths.add(path))
-          continue
         }
 
         const visualDocument = isVisualDocumentPath(mentionFile.workspaceFilePath)
@@ -396,7 +404,7 @@ export async function resolveAtFileAttachments(
           if (attachment.visualNotice) warningMessage = attachment.visualNotice
           currentAttachments.push(attachment)
           sourcePaths.forEach(path => handledMentionPaths.add(path))
-          existingAttachmentPaths.add(mentionFile.absolutePath)
+          existingAttachmentPaths.add(pathKey)
           continue
         }
 
@@ -417,7 +425,7 @@ export async function resolveAtFileAttachments(
           pendingRetained -= 1
           currentAttachments.push(attachment)
           sourcePaths.forEach(path => handledMentionPaths.add(path))
-          existingAttachmentPaths.add(mentionFile.absolutePath)
+          existingAttachmentPaths.add(pathKey)
           currentAttachmentChars += attachment.content.length
           continue
         }
@@ -456,7 +464,7 @@ export async function resolveAtFileAttachments(
           truncated
         })
         sourcePaths.forEach((path) => handledMentionPaths.add(path))
-        existingAttachmentPaths.add(mentionFile.absolutePath)
+        existingAttachmentPaths.add(pathKey)
         currentAttachmentChars += content.length
       }
     }

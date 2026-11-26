@@ -1,6 +1,7 @@
 import { publishThreadDirectoryIdentityChanged } from "./thread-directory-lifecycle"
 import { ensureManagedRunSchedulesSchema } from "./managed-run-schedules"
 import { installThreadSearchSchema } from "../thread-search/schema"
+import { THREAD_DIRECTORY_VISIBLE_SQL } from "../thread-metadata-hydration/summary-sql"
 import { publishedThreadMessageFragmentsSql } from "./thread-message-fragment-storage"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import { ensureUiGuideSchema } from "./ui-guide-store"
@@ -4239,6 +4240,25 @@ export function getThreadTranscriptBoundaryOrdinal(
   }
 }
 
+export function hasOrderedThreadGraphTranscriptBoundaries(
+  threadId: string,
+  firstId: string,
+  currentId: string
+): boolean {
+  const stmt = getDb().prepare(
+    `SELECT 1 FROM thread_graph_transcript_boundaries AS first
+     JOIN thread_graph_transcript_boundaries AS current ON current.thread_id = first.thread_id
+     WHERE first.thread_id = ? AND first.graph_user_id = ? AND current.graph_user_id = ?
+       AND first.ordinal <= current.ordinal`
+  )
+  try {
+    stmt.bind([threadId, firstId, currentId])
+    return stmt.step()
+  } finally {
+    stmt.free()
+  }
+}
+
 export function withThreadMessageIdentitySnapshot<T>(operation: () => T): T {
   return getDb().withReadSnapshot(operation)
 }
@@ -5988,7 +6008,7 @@ export function getAllThreads(): ThreadRow[] {
   return threads
 }
 
-/** List projection used by startup/sidebar paths that must never copy transcript state. */
+/** Read all thread summaries without loading transcript state. */
 export function getAllThreadSummaries(): ThreadSummaryRow[] {
   const database = getDb()
   const stmt = database.prepare(
@@ -6005,6 +6025,31 @@ export function getAllThreadSummaries(): ThreadSummaryRow[] {
     stmt.free()
   }
   return threads
+}
+
+export function getRecentThreadWorkspacePathsForSandbox(limit: number): string[] {
+  const stmt = getDb().prepare(
+    `SELECT CASE
+              WHEN json_valid(metadata) THEN
+                CASE WHEN json_type(metadata, '$.workspacePath') = 'text'
+                     THEN json_extract(metadata, '$.workspacePath') END
+            END AS workspace_path
+     FROM threads
+     WHERE ${THREAD_DIRECTORY_VISIBLE_SQL}
+     ORDER BY updated_at DESC
+     LIMIT ?`
+  )
+  const paths: string[] = []
+  try {
+    stmt.bind([limit])
+    while (stmt.step()) {
+      const { workspace_path: path } = stmt.getAsObject()
+      if (typeof path === "string") paths.push(path)
+    }
+    return paths
+  } finally {
+    stmt.free()
+  }
 }
 
 export interface PersistedThreadWorkspaceBinding {

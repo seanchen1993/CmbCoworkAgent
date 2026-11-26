@@ -54,6 +54,7 @@ jobs:
           src/main/ipc/managed-background-cancellation.test.ts
           src/shared/attachment-message-parts.test.ts
           src/shared/agent-runtime-settings-integration.test.ts
+          src/renderer/src/features/mentions/atFileAttachments.test.ts
           src/renderer/src/lib/image-outbox.test.ts
           src/renderer/src/lib/chat-composer-guard.test.ts
           src/renderer/src/lib/bot-draft-sender.test.ts

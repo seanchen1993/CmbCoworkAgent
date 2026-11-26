@@ -113,6 +113,32 @@ describe("thread database narrow projections", () => {
     )
   })
 
+  it("keeps auxiliary conversations out of the recent sandbox prewarm window", () => {
+    const parentId = "00000000-0000-4000-8000-000000000001"
+    const recentTime = Date.now() + 1
+    const rows = [
+      ["outside-the-limit", recentTime, '{"workspacePath":"C:/older"}'],
+      ["recent-other-workspace", recentTime + 1, '{"workspacePath":"C:/other"}'],
+      ["recent-invalid-metadata", recentTime + 2, '{"workspacePath":'],
+      [parentId, recentTime + 3, '{"workspacePath":"C:/parent"}'],
+      ...Array.from({ length: 5 }, (_, i) => [
+        `btw-${parentId}-00000000-0000-4000-8000-00000000000${i + 2}`,
+        recentTime + 4 + i,
+        '{"workspacePath":"C:/parent"}'
+      ])
+    ] as const
+    const database = threadDb.getDb()
+    try {
+      for (const [id, updatedAt, metadata] of rows) {
+        database.run(`INSERT INTO threads (thread_id, created_at, updated_at, metadata, status)
+          VALUES (?, ?, ?, ?, 'idle')`, [id, updatedAt, updatedAt, metadata])
+      }
+      expect(threadDb.getRecentThreadWorkspacePathsForSandbox(3)).toEqual(["C:/parent", "C:/other"])
+    } finally {
+      for (const [id] of rows) database.run("DELETE FROM threads WHERE thread_id = ?", [id])
+    }
+  })
+
   it("projects away 20k legacy timing entries without mutating the thread", () => {
     const messageTimes: Record<string, { start_at: string; marker: string }> = {}
     const messageTimeOrder: Array<{ id: string; start_at: string; marker: string }> = []

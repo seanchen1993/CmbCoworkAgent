@@ -2,6 +2,7 @@ import { captureImageScopeCleanup } from "../chat-images"
 import { createBotThreadReplyResolver } from "../bots/thread-message-replies"
 import { copyForkInputProjections, readForkReplyOrigins } from "../bots/fork-input-projection"
 import { BOT_PREPARED_USER_REQUEST_KEY } from "../agent/agent-run-service"
+import { pendingNotificationScheduler } from "../agent/pending-notification-scheduler"
 import { BOT_FORK_DELIVERY_BOUNDARY, botHistoricalMessageReader, botHistoryHidesTitle, botLegacyHistoryRequests,
   decorateBotHistoryPage, protectedBotHistoryTitle, renamedBotHistoryTitleMetadata } from "../bots/history-input-projection"
 import {
@@ -64,8 +65,11 @@ import {
   type ThreadRow,
   type ThreadSummaryRow
 } from "../db"
+import { isSqliteRecoveryFamilyAbsent } from "../db/sqlite-recovery-family"
+import { listRegisteredSqliteQuarantineArtifacts } from "../utils/sqlite-durable-file"
 import {
   withCheckpointer,
+  closeCheckpointer,
   clearToolConcurrencyLocksForThread,
   retireThreadCheckpointers,
   pendingApprovals
@@ -79,6 +83,8 @@ import {
   disposeAgentThreadState,
   disposeDeletedAgentThreadRuntime,
   forgetCoordinatorThreadState,
+  getActiveAgentRunSettlement,
+  getActiveAgentUserMessageId,
   hasActiveAgentRun,
   isActiveAgentRunAborting,
   waitForActiveAgentRunToSettle
@@ -88,6 +94,7 @@ import {
   deleteThreadWorkerCheckpoints,
   deleteThreadWorkflowCheckpoints,
   getThreadCheckpointPath,
+  peekThreadCheckpointPath,
   getDbPath,
   purgeThreadCheckpointArtifacts
 } from "../storage"
@@ -290,6 +297,18 @@ import {
   getSubagentTranscriptBlobReferenceHashKey,
   isSubagentTranscriptBlobRef
 } from "../../shared/subagent-transcript-storage"
+import {
+  bindSideWindow,
+  captureSideContext,
+  closeOwnedSideThread,
+  createSideThread,
+  getSideThreadTeardownAttempt,
+  hasRegisteredSideThread,
+  runSideThreadTeardown,
+  sideThreadIds,
+  unregisterSideThread
+} from "./btw-chat"
+import { getBtwParentId } from "../../shared/btw-chat"
 import { createThreadService } from "../services/thread-service"
 import { collectReferencedTranscriptHashesFromPages } from "./thread-transcript-gc-scan"
 import { getCapturedRawApiCall } from "../services/llm-api-request-capture"
@@ -1710,6 +1729,7 @@ async function verifyForkCheckpointPersisted(
 
 export async function forkThread(params: ThreadForkParams): Promise<ThreadForkResponse> {
   const sourceThreadId = assertValidCheckpointThreadId(params.sourceThreadId)
+  if (getBtwParentId(sourceThreadId)) throw new Error("辅助对话暂不支持 fork。")
   const sourceLease = requireThreadMutationLease(sourceThreadId, "源会话不存在。")
   const explicitCheckpointId = params.checkpointId?.trim()
   if (explicitCheckpointId) assertValidCheckpointThreadId(explicitCheckpointId)
@@ -1991,6 +2011,7 @@ async function workflowWorktreeDirectoryMayExist(directory: string): Promise<boo
 
 async function listForkableCheckpoints(threadId: string): Promise<ForkableCheckpoint[]> {
   const sourceThreadId = assertValidCheckpointThreadId(threadId)
+  if (getBtwParentId(sourceThreadId)) return []
   const sourceLease = requireThreadMutationLease(sourceThreadId, "源会话不存在。")
   return withThreadMutationLeaseLock(sourceLease, async (sourceRow) => {
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
@@ -2385,6 +2406,7 @@ export async function resolveForkCheckpointForMessage(
   params: ThreadForkCheckpointForMessageParams
 ): Promise<ForkableCheckpoint | null> {
   const sourceThreadId = assertValidCheckpointThreadId(params.threadId)
+  if (getBtwParentId(sourceThreadId)) return null
   const messageId = params.messageId.trim()
   if (!messageId) return null
   const sourceLease = requireThreadMutationLease(sourceThreadId, "源会话不存在。")
@@ -3045,7 +3067,8 @@ function normalizeThreadDeleteOptions(options: unknown): ThreadDeleteOptions | u
 export type ThreadDeletionService = (
   event: IpcMainInvokeEvent,
   threadId: string,
-  options?: ThreadDeleteOptions
+  options?: ThreadDeleteOptions,
+  onSideThreadsDeleted?: (ids: string[]) => void
 ) => Promise<void>
 
 function threadDeletionMetadata(row: ThreadSummaryRow): Record<string, unknown> {
@@ -3089,6 +3112,17 @@ function hasBotWorkMetadata(metadata: Record<string, unknown>): boolean {
     metadata.botLocalConversation === true ||
     (metadata.botHostId === "local" && typeof metadata.botWorkId === "string")
   )
+}
+
+async function sideThreadHasNoCheckpoint(threadId: string): Promise<boolean> {
+  const checkpointPath = peekThreadCheckpointPath(threadId)
+  try {
+    return await isSqliteRecoveryFamilyAbsent(checkpointPath) &&
+      listRegisteredSqliteQuarantineArtifacts(checkpointPath).length === 0
+  } catch (error) {
+    console.warn("[Threads] Could not verify auxiliary conversation checkpoint absence:", error)
+    return false
+  }
 }
 
 export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService {
@@ -3308,6 +3342,22 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         }
       })
     }
+  )
+
+  function sideWindow(event: IpcMainInvokeEvent) {
+    if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) {
+      throw new Error("辅助对话仅支持本机桌面窗口。")
+    }
+    return bindSideWindow(event.sender, id => stopSideThread(id))
+  }
+
+  ipcMain.handle("btw:create", (event, request: unknown) =>
+    createSideThread(request, event.sender, sideWindow(event), parentId =>
+      captureSideContext(parentId, hasActiveAgentRun(parentId), getActiveAgentUserMessageId(parentId)))
+  )
+  ipcMain.handle("btw:close", (event, id: unknown) =>
+    closeOwnedSideThread(sideWindow(event), id, threadId =>
+      stopSideThread(threadId, BrowserWindow.fromWebContents(event.sender)))
   )
 
   // Create a new thread
@@ -3873,14 +3923,30 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
     }
   }
 
+  const assertSideThreadsIdle = (ids: string[]): void => {
+    for (const id of ids) {
+      const row = getThreadCore(id)
+      if (!row) continue
+      const runtime = threadDeletionRuntime(threadDeletionMetadata(row))
+      if (hasPendingApprovalForThread(id) || runtime.hasActiveRun(id) || runtime.hasExternalRun(id) ||
+          runtime.hasWorkflowRun(id) || runtime.hasWorkerRun(id) || runtime.hasBackgroundShell(id)) {
+        throw new Error("辅助对话仍在运行，已跳过该会话。")
+      }
+    }
+  }
+
   const performThreadDeletion = async (
     event: IpcMainInvokeEvent,
     threadId: string,
     metadata: Record<string, unknown>,
     options: ThreadDeleteOptions | undefined,
-    assertOwnership: (row: ThreadSummaryRow, metadata: Record<string, unknown>) => void
+    assertOwnership: (row: ThreadSummaryRow, metadata: Record<string, unknown>) => void,
+    deletedSideThreadIds: string[]
   ): Promise<void> => {
     const { groupGuard, requireIdle } = options ?? {}
+    const sideParentId = getBtwParentId(threadId)
+    const isSideThread = sideParentId !== undefined && metadata.btwParentId === sideParentId
+    const sideStillClosing = "辅助对话仍在退出，已停止删除。请稍后重试。"
     console.log("[Threads] Deleting thread:", threadId)
 
     // ThreadId-keyed run-store tombstone FIRST, before any await: launches and
@@ -3919,16 +3985,21 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       try {
         await workflowRunManager.cancelAndWait(threadId)
       } catch (error) {
+        if (isSideThread) throw new Error(sideStillClosing, { cause: error })
         console.warn("[Threads] Workflow cancel on delete failed:", error)
       }
+      if (isSideThread && workflowRunManager.isActive(threadId)) throw new Error(sideStillClosing)
       const window = BrowserWindow.fromWebContents(event.sender)
       // An external owner can start while the workflow cancellation is settling.
       assertNoExternalThreadRunOwner(threadId, metadata, requireIdle)
-      const runOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
+      const runOutcome = isSideThread
+        ? await cancelAndWaitForAgentThreadRun(threadId, window, getActiveAgentRunSettlement(threadId))
+        : await cancelAndWaitForAgentThreadRun(threadId, window)
       if (runOutcome === "shell_timed_out") {
         throw new Error("Shell 任务仍在退出，已停止删除。请稍后重试。")
       }
       if (runOutcome === "timed_out") {
+        if (isSideThread) throw new Error(sideStillClosing)
         console.warn("[Threads] Timed out waiting for foreground run cleanup during delete")
       }
       // Drop the thread's tool-concurrency locks so the module-level map
@@ -4010,45 +4081,73 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         threadId,
         "Thread was deleted."
       )
-      const waitForCleanupBestEffort = async (workerIds?: string[]) => {
+      const waitForCleanup = async (workerIds?: string[]) => {
         try {
           await coordinatorWorkerManager.waitForWorkerCleanup(threadId, workerIds)
         } catch (error) {
+          if (isSideThread) throw new Error(sideStillClosing, { cause: error })
           console.warn("[Threads] Timed out waiting for coordinator worker cleanup:", error)
         }
       }
-      if (cancelledWorkers.length > 0) {
-        await waitForCleanupBestEffort(cancelledWorkers.map((worker) => worker.worker_id))
+      if (!isSideThread && cancelledWorkers.length > 0) {
+        await waitForCleanup(cancelledWorkers.map((worker) => worker.worker_id))
       }
-      await waitForCleanupBestEffort()
-
-      // Revoke remote access before deleting the local authority record. If the
-      // durable revocation fails, abort deletion so an active grant can never
-      // outlive a missing thread by accident.
-      await imRemoteAccessService.disableThread(threadId)
+      await waitForCleanup()
 
       // The teardown above crosses several async boundaries. Revalidate the
       // destructive selection and external run ownership synchronously at the
       // database commit boundary so a revived/rebound task cannot be deleted
       // using a stale bulk-selection snapshot.
-      const latestThread = getThreadCore(threadId)
-      if (!latestThread) throw new Error("Thread not found")
-      let latestMetadata: Record<string, unknown>
-      try {
-        const parsed = latestThread.metadata ? (JSON.parse(latestThread.metadata) as unknown) : {}
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          throw new Error("Thread metadata is not an object")
+      const assertCanCommitDeletion = () => {
+        const latestThread = getThreadCore(threadId)
+        if (!latestThread) throw new Error("Thread not found")
+        let latestMetadata: Record<string, unknown>
+        try {
+          const parsed = latestThread.metadata ? (JSON.parse(latestThread.metadata) as unknown) : {}
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("Thread metadata is not an object")
+          }
+          latestMetadata = parsed as Record<string, unknown>
+        } catch {
+          throw new Error("会话元数据异常，无法确认删除条件，请重新打开后再试。")
         }
-        latestMetadata = parsed as Record<string, unknown>
-      } catch {
-        throw new Error("会话元数据异常，无法确认删除条件，请重新打开后再试。")
+        assertThreadDeletionGroup(latestThread, latestMetadata, groupGuard)
+        assertOwnership(latestThread, latestMetadata)
+        if (isExternallyManagedThreadRunBusy(threadId, latestMetadata)) {
+          throw new Error("会话仍在运行或有待处理结果，已停止删除。")
+        }
+        // Worktree removal relies on the durable side binding while any of its execution is live.
+        if (isSideThread && (
+          getActiveAgentRunSettlement(threadId) || workflowRunManager.isActive(threadId) ||
+          coordinatorWorkerManager.hasUnsettledWorkersForThread(threadId) || hasPendingApprovalForThread(threadId) ||
+          LocalSandbox.hasActiveBackgroundTasks(threadId, { includeChildRuns: true })
+        )) {
+          throw new Error(sideStillClosing)
+        }
       }
-      assertThreadDeletionGroup(latestThread, latestMetadata, groupGuard)
-      assertOwnership(latestThread, latestMetadata)
-      if (isExternallyManagedThreadRunBusy(threadId, latestMetadata)) {
-        throw new Error("会话仍在运行或有待处理结果，已停止删除。")
+      // The parent lock prevents a new side tab from publishing during deletion.
+      // Keep the parent available to retry if any child's teardown is refused.
+      const children = sideThreadIds(threadId)
+      if (children.length > 0) {
+        assertCanCommitDeletion()
+        if (requireIdle) assertSideThreadsIdle(children)
+        for (const id of children) {
+          const stop = getSideThreadTeardownAttempt(id)
+          if (stop) await stop.catch(() => undefined)
+          try {
+            if (getThreadCore(id)) await deleteThread(event, id, { requireIdle })
+          } catch (error) {
+            if (getThreadCore(id)) throw error
+          }
+          deletedSideThreadIds.push(id)
+        }
       }
 
+      // Revoke remote access before deleting the local authority record. If the
+      // durable revocation fails, abort deletion so an active grant can never
+      // outlive a missing thread by accident.
+      await imRemoteAccessService.disableThread(threadId)
+      assertCanCommitDeletion()
       // Delete from our metadata store — the point of no return.
       const cleanImages = captureImageScopeCleanup(threadId)
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
@@ -4060,6 +4159,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         dbDeleteThread(threadId)
       }
       void cleanImages().catch(error => console.warn("[Threads] 图片清理失败", error))
+      unregisterSideThread(threadId)
+      pendingNotificationScheduler.clearClosedSideThreadState(threadId)
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       void cancelSearchBackfill(threadId)
       forgetLegacySubagentTranscriptMigration(threadId)
@@ -4086,6 +4187,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)
       throw e
     }
+
     // Drop the in-memory flush-failed snapshots only AFTER the point of no
     // return: dropped earlier, a deletion failing pre-DB-delete would have
     // already lost the surviving thread's only copy of a terminal state whose
@@ -4200,7 +4302,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
     await deletionCheckpoint
   }
 
-  const deleteThread: ThreadDeletionService = async (event, threadId, rawOptions) => {
+  const deleteThread: ThreadDeletionService = async (event, threadId, rawOptions, onSideThreadsDeleted) => {
     const options = normalizeThreadDeleteOptions(rawOptions)
     const lease = requireThreadMutationLease(threadId)
     // Abort a parser before waiting for the same-thread mutation lock. Every
@@ -4274,15 +4376,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         if (busy || runtime.hasBackgroundShell(threadId)) {
           throw new Error("会话仍在运行，已跳过该会话。")
         }
+        assertSideThreadsIdle(sideThreadIds(threadId))
       }
       assertNoExternalThreadRunOwner(threadId, metadata, options?.requireIdle)
       const releaseShellBlock = LocalSandbox.blockNewBackgroundTasks(threadId)
-      const deletion = performThreadDeletion(event, threadId, metadata, options, assertOwnership).finally(releaseShellBlock)
+      const deletedSideThreadIds: string[] = []
+      const deletion = performThreadDeletion(event, threadId, metadata, options, assertOwnership, deletedSideThreadIds).finally(releaseShellBlock)
       deletingThreads.set(threadId, deletion)
       try {
         await deletion
       } finally {
         if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
+        if (deletedSideThreadIds.length) onSideThreadsDeleted?.(deletedSideThreadIds)
       }
     })
   }
@@ -4293,7 +4398,16 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
   ): Promise<ThreadDeleteResult> => {
     if (typeof threadId !== "string" || !threadId) throw new Error("会话标识无效。")
     const owner = findBotWorkThreadOwner(threadId)
-    if (!owner) return deleteThread(event, threadId, rawOptions)
+    if (!owner) {
+      let deletedSideThreadIds: string[] | undefined
+      try {
+        await deleteThread(event, threadId, rawOptions, ids => { deletedSideThreadIds = ids })
+      } catch (error) {
+        if (!deletedSideThreadIds?.length) throw error
+        return { deletedSideThreadIds, deletionError: error instanceof Error ? error.message : String(error) }
+      }
+      return deletedSideThreadIds?.length ? { deletedSideThreadIds } : undefined
+    }
     const options = normalizeThreadDeleteOptions(rawOptions)
     if (
       !event.senderFrame ||
@@ -4357,6 +4471,99 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
     }
     return { deletedWork: { botId: result.botId, workId: result.workId } }
   }
+  function stopSideThread(threadId: string, window?: BrowserWindow | null): Promise<void> {
+    pendingNotificationScheduler.clearClosedSideThreadState(threadId)
+    let waitForSettlement: (() => Promise<void>) | undefined
+    return runSideThreadTeardown(
+      threadId,
+      () => disposeSideThread(threadId, window, wait => { waitForSettlement = wait }),
+      () => {
+        if (!waitForSettlement || hasRegisteredSideThread(threadId)) return undefined
+        // Window teardown has no renderer that can retry. Follow existing
+        // completion promises once and keep the workspace binding live.
+        return { wait: waitForSettlement, retry: () => disposeSideThread(threadId, undefined) }
+      }
+    )
+  }
+
+  async function disposeSideThread(
+    threadId: string,
+    window: BrowserWindow | null | undefined,
+    deferUntilSettled?: (wait: () => Promise<void>) => void
+  ): Promise<void> {
+    const lease = captureThreadMutationLease(threadId)
+    if (!lease) return
+    let releaseShellBlock: (() => void) | undefined
+    try {
+      // Pass any run admission already in the lock. The window has fenced
+      // this ID, so later admissions cannot publish a new controller.
+      await withThreadMutationLeaseLock(lease, row => {
+        const metadata = threadDeletionMetadata(row)
+        const parentId = getBtwParentId(threadId)
+        if (!parentId || metadata.btwParentId !== parentId) {
+          throw new Error("辅助对话归属无效。")
+        }
+        stopWatching(threadId)
+        if (hasExternalThreadRunOwner(threadId, metadata)) {
+          throw new Error("辅助对话仍由其他运行入口使用。")
+        }
+        releaseShellBlock = LocalSandbox.blockNewBackgroundTasks(threadId)
+      })
+      coordinatorWorkerManager.cancelWorkersForThread(threadId, "Side conversation closed.", {
+        suppressNotificationAutoRun: true,
+        dismissNotificationOnTerminalPersist: true
+      })
+      // An admitted run can still need the mutation lock during setup.
+      const activeRunSettlement = getActiveAgentRunSettlement(threadId)
+      const [foreground, workflow, workers] = await Promise.allSettled([
+        cancelAndWaitForAgentThreadRun(threadId, window, activeRunSettlement),
+        workflowRunManager.cancelAndWait(threadId),
+        coordinatorWorkerManager.waitForWorkerCleanup(threadId)
+      ])
+      const foregroundPending = foreground.status === "fulfilled" && foreground.value !== "settled"
+      const workflowRunId = workflowRunManager.activeRunId(threadId)
+      if (foregroundPending || workflowRunId || workers.status === "rejected") {
+        deferUntilSettled?.(async () => {
+          await Promise.allSettled([
+            foregroundPending ? activeRunSettlement : undefined,
+            foregroundPending ? LocalSandbox.cancelBackgroundTasksAndWait(threadId, undefined, { includeChildRuns: true }) : undefined,
+            workflowRunId ? workflowRunManager.waitForRunLifecycle(threadId, workflowRunId) : undefined,
+            workers.status === "rejected" ? coordinatorWorkerManager.waitForWorkerSettlement(threadId) : undefined
+          ])
+        })
+      }
+      const failure = [foreground, workflow, workers].find(result => result.status === "rejected")
+      if (failure) throw failure.reason
+      if (foregroundPending || workflowRunId || hasPendingApprovalForThread(threadId)) {
+        throw new Error("辅助对话正在退出，请稍后重试关闭。")
+      }
+      await withThreadMutationLeaseLock(lease, async row => {
+        const metadata = threadDeletionMetadata(row)
+        const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        await fireSessionEnd(threadId, workspacePath)
+        disposeDeletedAgentThreadRuntime(threadId)
+        forgetCoordinatorThreadState(threadId)
+        coordinatorWorkerManager.forgetThread(threadId)
+        forgetLegacySubagentTranscriptMigration(threadId)
+        clearToolConcurrencyLocksForThread(threadId)
+        await closeCheckpointer(threadId)
+        // Closing fences new sends before settling existing work. Only remove
+        // a never-used row: a first request, graph boundary, or recovery file
+        // may be the only durable copy of a cancelled or interrupted turn.
+        if (getThreadMessageOrdinalBoundary(threadId) === 0 &&
+          await sideThreadHasNoCheckpoint(threadId) && getThreadMessageOrdinalBoundary(threadId) === 0) {
+          dbDeleteThread(threadId)
+        }
+      })
+    } catch (error) {
+      // A concurrently committed deletion already owns the remaining cleanup.
+      if (error instanceof ThreadMutationLeaseExpiredError && !getThreadCore(threadId)) return
+      throw error
+    } finally {
+      releaseShellBlock?.()
+    }
+  }
+
   ipcMain.handle("threads:delete", deleteThreadFromRenderer)
 
   // Get thread history (checkpoints)
@@ -4412,7 +4619,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       const result = await withThreadRunMutationLock(normalizedThreadId, async () => {
         if (!isCurrent()) return null
         return readLatestCheckpointRuntimeTupleInWorker(
-          getThreadCheckpointPath(normalizedThreadId),
+          peekThreadCheckpointPath(normalizedThreadId),
           normalizedThreadId,
           "",
           hydration.workerKey,

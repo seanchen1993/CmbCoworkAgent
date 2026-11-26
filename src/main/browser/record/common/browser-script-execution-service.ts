@@ -343,6 +343,9 @@ async function connectInAppBrowser(options: {
   }
 
   const { chromium } = await import("playwright")
+  if (options.isCancelled()) {
+    throw new BrowserScriptExecutionCancelledError()
+  }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`)
   try {
     const { context, page } = await waitForBrowserPanelPage(
@@ -476,6 +479,9 @@ export async function executeRecordingScriptInBuiltinBrowser(
     }
 
     const { expect } = await import("playwright/test")
+    if (executionController.cancelled) {
+      throw new BrowserScriptExecutionCancelledError()
+    }
     const runner = new AsyncFunction(
       "page",
       "browser",

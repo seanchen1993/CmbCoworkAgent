@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
+import { TimedOutPredecessorFence } from "../agent/run-settlement-fence"
 
 // Run the real IPC callbacks without initializing Electron or the agent runtime.
 function loadCancelCallback<Input = Record<string, unknown>>(
@@ -39,22 +40,30 @@ function loadCancelCallback<Input = Record<string, unknown>>(
   ) as (event: { sender: object }, input: Input) => Promise<boolean> | boolean
 }
 
-function loadThreadDeletionHelper(cancelBackgroundTasksWithin: () => Promise<boolean>) {
+function loadThreadDeletionHelper(
+  cancelBackgroundTasksWithin: () => Promise<boolean>,
+  activeRunSettled = new Map<string, Promise<void>>(),
+  timedOutPredecessorFence = new TimedOutPredecessorFence()
+) {
   const source = readFileSync(resolve("src/main/ipc/agent.ts"), "utf8")
-  const start = source.indexOf("async function cancelAndWaitForAgentThreadRun(")
-  const end = source.indexOf("async function waitForReplacedRunToSettle", start)
-  const code = ts.transpileModule(source.slice(start, end), {
+  const start = source.indexOf("export function getActiveAgentRunSettlement(")
+  const end = source.indexOf("async function withActiveRunReplacementLock", start)
+  const code = ts.transpileModule(source.slice(start, end).replace(/^export /gm, ""), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
   }).outputText
   return new Function(
     "activeRuns",
+    "activeRunSettled",
+    "timedOutPredecessorFence",
     "LocalSandbox",
+    "ACTIVE_RUN_REPLACEMENT_WARN_MS",
     "ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS",
     `${code}
-return cancelAndWaitForAgentThreadRun`
-  )(new Map(), { cancelBackgroundTasksWithin }, 30_000) as (
-    threadId: string
-  ) => Promise<string>
+return { cancelAndWaitForAgentThreadRun, getActiveAgentRunSettlement }`
+  )(new Map(), activeRunSettled, timedOutPredecessorFence, { cancelBackgroundTasksWithin }, 5_000, 30_000) as {
+    cancelAndWaitForAgentThreadRun: (threadId: string, window?: undefined, settlement?: Promise<void>) => Promise<string>
+    getActiveAgentRunSettlement: (threadId: string) => Promise<void> | undefined
+  }
 }
 
 function loadWorkerCancel(
@@ -223,12 +232,46 @@ describe("managed background cancellation IPC wiring", () => {
     [false, "shell_timed_out"]
   ])("waits for idle thread and child shell cleanup before deletion (%s)", async (shellSettled, outcome) => {
     const cancelShell = vi.fn(async () => shellSettled)
-    const closeThread = loadThreadDeletionHelper(cancelShell)
+    const { cancelAndWaitForAgentThreadRun: closeThread } = loadThreadDeletionHelper(cancelShell)
 
     await expect(closeThread("idle-thread")).resolves.toBe(outcome)
     expect(cancelShell).toHaveBeenCalledExactlyOnceWith("idle-thread", 30_000, {
       includeChildRuns: true
     })
+  })
+
+  it("waits for current and replaced physical runs even after the controller is gone", async () => {
+    vi.useFakeTimers()
+    const current = Promise.withResolvers<void>()
+    const replaced = Promise.withResolvers<void>()
+    const threadId = "side-thread"
+    const fence = new TimedOutPredecessorFence()
+    const active = new Map([[threadId, current.promise]])
+    fence.track(threadId, replaced.promise)
+    const { cancelAndWaitForAgentThreadRun: closeThread, getActiveAgentRunSettlement } =
+      loadThreadDeletionHelper(async () => true, active, fence)
+    const settled = vi.fn()
+    try {
+      await expect(closeThread(threadId)).resolves.toBe("settled")
+      const sideClose = closeThread(threadId, undefined, getActiveAgentRunSettlement(threadId)).then(settled)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).not.toHaveBeenCalled()
+
+      active.delete(threadId)
+      current.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).not.toHaveBeenCalled()
+      expect(getActiveAgentRunSettlement(threadId)).toBeDefined()
+
+      replaced.resolve()
+      await sideClose
+      expect(settled).toHaveBeenCalledExactlyOnceWith("settled")
+      expect(getActiveAgentRunSettlement(threadId)).toBeUndefined()
+    } finally {
+      current.resolve()
+      replaced.resolve()
+      vi.useRealTimers()
+    }
   })
 
   it.each([true, false])(

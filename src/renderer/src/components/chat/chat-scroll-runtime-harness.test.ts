@@ -155,11 +155,15 @@ function makeVirtualListProps(
 
 function renderVirtualList(
   messageCount: number,
-  runtime: ChatScrollRuntimeHarness
+  runtime: ChatScrollRuntimeHarness,
+  mountWhenEmpty = false
 ): CapturedVirtuosoProps | null {
   virtuosoProbe.latestProps = null
   renderToStaticMarkup(
-    React.createElement(ChatMessageVirtualList, makeVirtualListProps(messageCount, runtime))
+    React.createElement(ChatMessageVirtualList, {
+      ...makeVirtualListProps(messageCount, runtime),
+      mountWhenEmpty
+    })
   )
   return virtuosoProbe.latestProps as unknown as CapturedVirtuosoProps | null
 }
@@ -189,6 +193,17 @@ describe("chat scroll render/runtime harness", () => {
   beforeEach(() => {
     virtuosoProbe.latestProps = null
     virtuosoProbe.renderCount = 0
+  })
+
+  it("mounts the confirmed empty workbench list without announcing rendered messages", () => {
+    const runtime = new ChatScrollRuntimeHarness()
+    const virtuoso = renderVirtualList(0, runtime, true)
+
+    expect(virtuoso?.data).toEqual([])
+    expect(virtuoso?.initialTopMostItemIndex).toBeUndefined()
+    virtuoso?.itemsRendered()
+    expect(runtime.state).toMatchObject({ mode: "initializing", dataReady: false })
+    expect(runtime.scrollCommands).toEqual([])
   })
 
   it("hydrates 0 to 500 rows at LAST and survives out-of-order layout callbacks", async () => {

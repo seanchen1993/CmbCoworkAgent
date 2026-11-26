@@ -1,7 +1,9 @@
 /**
- * Pure functions for the skill proposal flow.
+ * Functions for the skill proposal flow.
  * No Electron, no LLM, no IPC — fully unit-testable.
  */
+
+import { sanitizeSkillId } from "../../utils/skill-identifiers"
 
 // ─────────────────────────────────────────────────────────
 // Worthiness judgement
@@ -139,7 +141,7 @@ function parseJsonObjectFromModelText(raw: string): Record<string, unknown> | nu
 
 /**
  * Parse the LLM's skill proposal JSON response.
- * Returns null if the text cannot be parsed or required fields are missing.
+ * Returns null if the draft cannot be parsed or has no usable skill ID.
  */
 export function parseSkillProposal(raw: string): SkillProposal | null {
   const parsed = parseJsonObjectFromModelText(raw) as {
@@ -157,12 +159,88 @@ export function parseSkillProposal(raw: string): SkillProposal | null {
   ) {
     return null
   }
+  const skillId = sanitizeSkillId(parsed.skillId) || sanitizeSkillId(parsed.name)
+  if (!skillId) return null
   return {
     name: parsed.name,
-    skillId: parsed.skillId,
+    skillId,
     description: parsed.description,
     content: parsed.content
   }
+}
+
+const SKILL_PROPOSAL_IDLE_TIMEOUT_MS = 60_000
+
+export async function streamSkillProposal(
+  openStream: (signal: AbortSignal) => Promise<AsyncIterable<{ content: unknown }>>,
+  onProgress: (phase: "token" | "done" | "error", text: string) => void,
+  closeSignal?: AbortSignal
+): Promise<SkillProposal | null> {
+  if (closeSignal?.aborted) return null
+  const idleController = new AbortController()
+  const signal = closeSignal
+    ? AbortSignal.any([closeSignal, idleController.signal])
+    : idleController.signal
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+  const resetIdleTimer = (): void => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => idleController.abort(), SKILL_PROPOSAL_IDLE_TIMEOUT_MS)
+  }
+
+  let text = ""
+  resetIdleTimer()
+  try {
+    const stream = await openStream(signal)
+    for await (const { content } of stream) {
+      if (closeSignal?.aborted) return null
+      resetIdleTimer()
+      if (typeof content === "string" && content) {
+        text += content
+        onProgress("token", content)
+      }
+    }
+    if (closeSignal?.aborted) return null
+    if (idleController.signal.aborted) throw idleController.signal.reason
+  } catch (error) {
+    if (closeSignal?.aborted) return null
+    throw idleController.signal.aborted
+      ? new Error(`技能草稿生成超时（${SKILL_PROPOSAL_IDLE_TIMEOUT_MS / 1000}s 内无新内容），请点击重试`)
+      : error
+  } finally {
+    clearTimeout(idleTimer)
+  }
+
+  const proposal = parseSkillProposal(text)
+  if (!proposal) {
+    onProgress("error", "技能草稿解析失败，请重试")
+    return null
+  }
+  onProgress("done", text)
+  return proposal
+}
+
+export async function settleSkillProposal(
+  confirm: () => Promise<{ approved: boolean; content?: string }>,
+  save: (content?: string) => Promise<void>,
+  side?: {
+    signal: AbortSignal
+    onProgress: (phase: "settled" | "error", text: string) => void
+  }
+): Promise<void> {
+  if (side?.signal.aborted) return
+  try {
+    const decision = await confirm()
+    if (side?.signal.aborted) return
+    if (decision.approved) await save(decision.content)
+  } catch (error) {
+    if (!side) throw error
+    if (!side.signal.aborted) {
+      const message = error instanceof Error ? error.message : String(error)
+      side.onProgress("error", `无法保存技能。${message}`)
+    }
+    return
+  }
+  if (side && !side.signal.aborted) side.onProgress("settled", "")
 }
 
 // ─────────────────────────────────────────────────────────

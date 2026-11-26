@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createChatSearchIndexer } from "./chat-search-indexer"
+import { appendBtwReferences } from "../../../shared/btw-references"
 import { createChatSearchPlan } from "../../../shared/chat-search-plan"
 import { findChatSearchLocations, projectChatSearchPlan } from "../../../shared/chat-search-index"
 import type { ChatSearchCorpus, ChatSearchDocument } from "./chat-search-matches"
@@ -61,6 +62,32 @@ describe("asynchronous search index lifecycle", () => {
     for (const packet of worker.messages)
       expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThan(64 * 1024)
     indexer.dispose()
+  })
+
+  it("preserves side message presentation through the renderer search worker", async () => {
+    const worker = new WorkerHarness()
+    const endpoint = {
+      onmessage: null as ((event: MessageEvent) => void) | null,
+      postMessage: (data: object) => worker.dispatchEvent(new MessageEvent("message", { data }))
+    }
+    vi.stubGlobal("self", endpoint)
+    vi.spyOn(worker, "reply").mockImplementation(request => {
+      endpoint.onmessage?.(new MessageEvent("message", { data: request }))
+    })
+    const indexer = createChatSearchIndexer(() => worker as unknown as Worker)
+    try {
+      await import("./chat-search.worker")
+      const user = appendBtwReferences("/goal visible request", [{ text: "hidden quote" }])
+      const documents = corpus([
+        { ...doc("side", user), plan: createChatSearchPlan("user", user, { sideConversation: true }) },
+        { ...doc("ordinary", user), plan: createChatSearchPlan("user", user) }
+      ])
+      expect((await indexer.search(documents, "/goal visible request")).map(match => match.messageId)).toEqual(["side"])
+      expect((await indexer.search(documents, "hidden quote")).map(match => match.messageId)).toEqual(["ordinary"])
+    } finally {
+      indexer.dispose()
+      vi.unstubAllGlobals()
+    }
   })
 
   it("drops superseded work at a worker boundary without queueing old documents", async () => {

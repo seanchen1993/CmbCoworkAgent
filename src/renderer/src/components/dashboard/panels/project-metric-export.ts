@@ -6,7 +6,7 @@ const HEADER = [
   "CMBDevClaw 插件",
   "室",
   "组",
-  "立项时间",
+  "立项日期",
   "ST 发起时间",
   "ST 结束时间",
   "UAT 发起时间",
@@ -14,12 +14,15 @@ const HEADER = [
   "非功能问题数",
   "功能点",
   "缺陷密度",
-  "发起 ST 耗时",
-  "发起 UAT 耗时",
-  "特性上线耗时",
+  "发起 ST 耗时（工作日）",
+  "发起 UAT 耗时（工作日）",
+  "特性上线耗时（工作日）",
   "Token",
   "代码行数",
-  "单行代码消耗 Token 数"
+  "单行代码消耗 Token 数",
+  "关联特性编号",
+  "开发报工工时（小时）",
+  "首次上线日期"
 ]
 
 function valueOrDash(value: number | null): number | string {
@@ -71,7 +74,10 @@ export function projectMetricExportSheet(items: ProjectMetricProjectItem[]): {
         item.inputTokensPerAdoptedLine,
         "输出 Token/行",
         item.outputTokensPerAdoptedLine
-      )
+      ),
+      item.featureCodes.join("\n") || "—",
+      valueOrDash(item.devWorkHours),
+      dateOrDash(item.firstOnlineDate)
     ])
   }
 }

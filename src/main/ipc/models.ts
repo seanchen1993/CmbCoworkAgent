@@ -9,6 +9,7 @@ import {
 import Store from "electron-store"
 import { userIdentityKey } from "../../shared/user-identity"
 import { isValidTaskCommitCard } from "../../shared/task-commit-binding"
+import { isBtwThreadId } from "../../shared/btw-chat"
 import { randomUUID } from "crypto"
 import { getDb, getPersistedThreadWorkspaceBindings, getThreadCore as getThreadCoreSync } from "../db"
 import * as fs from "fs/promises"
@@ -36,7 +37,8 @@ import {
   coordinatorWorkerManager,
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
-import { forgetCoordinatorThreadState, hasActiveAgentRun } from "./agent"
+import { forgetCoordinatorThreadState, getActiveAgentRunSettlement, hasActiveAgentRun } from "./agent"
+import { canRunSideThread, getSideThreadTeardown, hasRegisteredSideThread } from "./btw-chat"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
 import {
@@ -146,6 +148,20 @@ interface ManualWorktreeCreateResult {
 }
 
 const manualWorktreeCreateCoordinator = new CurrentRequestCoalescer<ManualWorktreeCreateResult>()
+
+function getWorktreeGuardWorkspaceBindings() {
+  // Closed auxiliary transcripts can stay durable after their tabs and runs
+  // settle. They have no workspace claim once all live use has ended.
+  return getPersistedThreadWorkspaceBindings().filter(({ threadId }) =>
+    !isBtwThreadId(threadId) ||
+    hasRegisteredSideThread(threadId) ||
+    getSideThreadTeardown(threadId) !== undefined ||
+    getActiveAgentRunSettlement(threadId) !== undefined ||
+    workflowRunManager.isActive(threadId) ||
+    coordinatorWorkerManager.hasUnsettledWorkersForThread(threadId) ||
+    LocalSandbox.hasActiveBackgroundTasks(threadId, { includeChildRuns: true })
+  )
+}
 
 function sanitizeManualWorktreeBranch(branch: string): string {
   return branch.replace(/[^a-zA-Z0-9\-_./]/g, "-")
@@ -4862,7 +4878,8 @@ export function registerModelHandlers(
           if (
             latestWorkspacePath &&
             normalizeWorkspacePathKey(path.resolve(latestWorkspacePath)) ===
-              normalizeWorkspacePathKey(path.resolve(page.workspacePath))
+              normalizeWorkspacePathKey(path.resolve(page.workspacePath)) &&
+            canRunSideThread(threadId)
           ) {
             await startWatching(threadId, page.workspacePath)
             if (page.directories) {
@@ -4901,7 +4918,7 @@ export function registerModelHandlers(
   // (same-path calls are a no-op).
   ipcMain.handle("workspace:ensureWatching", async (_event, { threadId }: WorkspaceLoadParams) => {
     const workspacePath = await readThreadWorkspacePath(threadId)
-    if (!workspacePath) return { success: false }
+    if (!workspacePath || !canRunSideThread(threadId)) return { success: false }
     const watcherState = await startWatching(threadId, workspacePath)
     return {
       success: watcherState !== "failed" && watcherState !== "superseded",
@@ -4920,7 +4937,9 @@ export function registerModelHandlers(
       setActiveWatchedThread(threadId)
       if (!threadId) return { success: true, restarted: false, workspacePath: null }
       const workspacePath = await readThreadWorkspacePath(threadId)
-      if (!workspacePath) return { success: true, restarted: false, workspacePath: null }
+      if (!workspacePath || !canRunSideThread(threadId)) {
+        return { success: true, restarted: false, workspacePath: null }
+      }
       const watcherState = await startWatching(threadId, workspacePath)
       return {
         success: watcherState !== "failed" && watcherState !== "superseded",
@@ -5076,7 +5095,7 @@ export function registerModelHandlers(
           // cannot hide another task's binding. The scan is bounded and fails
           // closed on inaccessible paths. Because it awaits filesystem I/O,
           // repeat the DB snapshot synchronously immediately before deletion.
-          const bindingSnapshot = getPersistedThreadWorkspaceBindings()
+          const bindingSnapshot = getWorktreeGuardWorkspaceBindings()
           const bindingConflict = await findCanonicalPersistedWorkspaceBindingConflict(
             bindingSnapshot,
             target.path
@@ -5095,7 +5114,7 @@ export function registerModelHandlers(
           if (
             !persistedWorkspaceBindingSnapshotEquals(
               bindingSnapshot,
-              getPersistedThreadWorkspaceBindings()
+              getWorktreeGuardWorkspaceBindings()
             )
           ) {
             throw new Error("任务工作区绑定在删除前发生变化，请重试")
@@ -5176,7 +5195,7 @@ export function registerModelHandlers(
                 // A failed/stale response is not permission to remove a checkout
                 // that this or another task now owns. Re-read all durable bindings
                 // under the repository lock immediately before rollback mutation.
-                const bindingSnapshot = getPersistedThreadWorkspaceBindings()
+                const bindingSnapshot = getWorktreeGuardWorkspaceBindings()
                 const durableBinding = await findCanonicalPersistedWorkspaceBindingConflict(
                   bindingSnapshot,
                   worktreePath,
@@ -5190,7 +5209,7 @@ export function registerModelHandlers(
                 if (
                   !persistedWorkspaceBindingSnapshotEquals(
                     bindingSnapshot,
-                    getPersistedThreadWorkspaceBindings()
+                    getWorktreeGuardWorkspaceBindings()
                   )
                 ) {
                   throw new Error("任务工作区绑定在回滚前发生变化，拒绝自动删除")

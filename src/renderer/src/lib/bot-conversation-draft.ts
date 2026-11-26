@@ -72,7 +72,8 @@ const ordinaryImageDraft = draftFields.extend({
 })
 
 /** Restore only user-selected image descriptors for this incarnation and workspace. */
-export function bindOrdinaryImageDraft(context: DraftContext, row: Thread, workspace: string | null,
+export function bindOrdinaryImageDraft(context: DraftContext,
+  row: Pick<Thread, "thread_id" | "created_at" | "metadata">, workspace: string | null,
   onError: (error: string | null) => void): () => void {
   const id = row.thread_id
   const root = normalizeGitWorkspacePathKey(workspace ?? "")
@@ -189,7 +190,7 @@ export function matchesBotThreadDraftRef(row: Thread | null, ref: BotOrdinaryThr
     sameIncarnation(ref.incarnation, threadDraftIncarnation(row)))
 }
 
-export function threadDraftIncarnation(row: Thread): BotOrdinaryThreadRef["incarnation"] {
+export function threadDraftIncarnation(row: Pick<Thread, "created_at" | "metadata">): BotOrdinaryThreadRef["incarnation"] {
   const token = row.metadata?.cmb_thread_incarnation
   return {
     token: typeof token === "string" && token.length ? token : null,

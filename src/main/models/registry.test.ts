@@ -84,6 +84,7 @@ import {
   getModelConfigByRef,
   getModelConfigs,
   getModelByTier,
+  getSelectableModelConfigOrDefault,
   refreshBuiltinModelCatalog,
   resetBuiltinModelOverride,
   startBuiltinModelCatalogRefresh,
@@ -352,6 +353,24 @@ describe("builtin model registry", () => {
     expect(getAvailableModelConfigOrDefault()?.ref).toBe(proRef)
     expect(getModelByTier("premium")?.ref).toBe(proRef)
     expect(getDefaultModelConfig()?.ref).toBe(ultraRef)
+  })
+
+  it("selects a configured Ultra for an idle conversation outside service hours", () => {
+    configureIdleModel()
+    vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+    const ultraRef = "builtin:maodou-ultra"
+    state.storedDefault = ultraRef
+
+    expect(getSelectableModelConfigOrDefault(ultraRef)).toMatchObject({
+      ref: ultraRef,
+      maxTokens: 128_000,
+      unavailableReason: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+    })
+    expect(getSelectableModelConfigOrDefault()?.ref).toBe("builtin:idle-ultra")
+    expect(() => getAvailableModelConfigOrDefault(ultraRef)).toThrow(IDLE_MODEL_OUTSIDE_HOURS_MESSAGE)
+
+    state.sapId = undefined
+    expect(getSelectableModelConfigOrDefault(ultraRef)?.ref).toBe("builtin:minimax-m2p5-229b-w8a8")
   })
 
   it("notifies the UI at closing and on resume, then releases the timer and listener", async () => {

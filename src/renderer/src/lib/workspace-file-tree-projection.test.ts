@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   appendWorkspaceFileTreeProjectionPage,
+  buildWorkspaceFileTreeProjection,
   createWorkspaceFileTreeProjectionBuilder,
   finalizeWorkspaceFileTreeProjection,
   getWorkspaceFileTreeProjection,
@@ -90,5 +91,18 @@ describe("workspace file tree projection", () => {
     expect(getWorkspaceFileTreeProjection(nextFiles)).toBe(projection)
     expect(projection.tree.map((node) => node.path)).toEqual(["/src", "/b.txt"])
     expect(projection.tree[0]?.children.map((node) => node.path)).toEqual(["/src/a.ts"])
+  })
+
+  it("cancels a discarded build before publishing its projection", async () => {
+    const files = [{ path: "/file.ts", is_dir: false }]
+    const controller = new AbortController()
+    const abandoned = buildWorkspaceFileTreeProjection(files, controller.signal)
+    controller.abort()
+
+    await expect(abandoned).rejects.toMatchObject({ name: "AbortError" })
+    expect(getWorkspaceFileTreeProjection(files)).toBeUndefined()
+    await expect(buildWorkspaceFileTreeProjection(files)).resolves.toMatchObject({
+      tree: [{ path: "/file.ts" }]
+    })
   })
 })

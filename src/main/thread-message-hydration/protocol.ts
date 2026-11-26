@@ -9,6 +9,13 @@ export interface ThreadMessageHydrationWorkerStats {
   estimatedBytes: number
 }
 
+export interface ThreadMessageHydrationPageOptions extends ThreadMessagesPageOptions {
+  /** Only inspect user rows strictly above this ordinal when paging backward. */
+  userOrdinalFloor?: number
+  /** Project the visible text suffix needed by a side conversation. */
+  sideContextTextByteBudget?: number
+}
+
 export interface ThreadMessageHydrationReadRequest {
   type: "read-page"
   requestId: number
@@ -16,7 +23,7 @@ export interface ThreadMessageHydrationReadRequest {
   checkpointDirectory?: string
   threadId: string
   options: Pick<
-    ThreadMessagesPageOptions,
+    ThreadMessageHydrationPageOptions,
     | "beforeOrdinal"
     | "beforeMessageId"
     | "targetMessageId"
@@ -28,6 +35,8 @@ export interface ThreadMessageHydrationReadRequest {
     | "notAfterCreatedAt"
     | "recoveryCheckpointId"
     | "recoveryTranscriptRevision"
+    | "userOrdinalFloor"
+    | "sideContextTextByteBudget"
   >
   cancellationBuffer: SharedArrayBuffer
 }
