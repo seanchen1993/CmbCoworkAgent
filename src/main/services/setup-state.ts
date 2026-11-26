@@ -19,8 +19,10 @@
  * different name; this constant is only ever joined with a workspace path.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { constants } from "node:fs"
+import { mkdir, open, readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { waitForAbort } from "../utils/wait-for-abort"
 
 const STATE_DIR = ".cmbdevclaw"
 const STATE_FILE = "setup-state.json"
@@ -38,12 +40,14 @@ function getStatePath(workspacePath: string): string {
  * otherwise. Read errors (corrupt JSON, perm denied) intentionally return
  * `false` — better to re-init than skip silently if state is unreadable.
  */
-export function hasWorkspaceBeenInitialised(workspacePath: string | undefined): boolean {
+export async function hasWorkspaceBeenInitialised(
+  workspacePath: string | undefined,
+  signal?: AbortSignal
+): Promise<boolean> {
   if (!workspacePath) return true // No workspace → no init concept; treat as done.
   try {
-    const p = getStatePath(workspacePath)
-    if (!existsSync(p)) return false
-    const raw = readFileSync(p, "utf-8")
+    const read = readFile(getStatePath(workspacePath), { encoding: "utf8", signal })
+    const raw = await waitForAbort(read, signal)
     const parsed = JSON.parse(raw) as SetupState
     return typeof parsed.initialisedAt === "string" && parsed.initialisedAt.length > 0
   } catch {
@@ -52,19 +56,28 @@ export function hasWorkspaceBeenInitialised(workspacePath: string | undefined): 
 }
 
 /**
- * Write the setup-state marker. Idempotent: silently overwrites an existing
- * file (in the unusual case where a maintenance run wants to refresh the
- * timestamp). Caller should only invoke after Setup hooks completed without
+ * Record successful Setup. An already valid marker needs no refresh.
+ * Caller should only invoke after Setup hooks completed without
  * fatal blocking; we never want to mark "initialised" if a hook crashed early.
  */
-export function markWorkspaceInitialised(workspacePath: string | undefined): void {
+export async function markWorkspaceInitialised(workspacePath: string | undefined): Promise<void> {
   if (!workspacePath) return
+  const path = getStatePath(workspacePath)
   try {
-    const p = getStatePath(workspacePath)
-    const dir = dirname(p)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    const state: SetupState = { initialisedAt: new Date().toISOString() }
-    writeFileSync(p, JSON.stringify(state, null, 2), "utf-8")
+    await mkdir(dirname(path), { recursive: true })
+    const file = await open(path, constants.O_WRONLY | constants.O_CREAT)
+    try {
+      const { size } = await file.stat()
+      if (size > 0 && await hasWorkspaceBeenInitialised(workspacePath)) return
+      const state: SetupState = { initialisedAt: new Date().toISOString() }
+      const data = JSON.stringify(state, null, 2)
+      // All generated markers have the same byte length. Concurrent retries overwrite
+      // from offset zero without emptying a valid marker first. Trim old corrupt tails last.
+      await file.writeFile(data, "utf8")
+      if (size > Buffer.byteLength(data)) await file.truncate(Buffer.byteLength(data))
+    } finally {
+      await file.close()
+    }
   } catch (e) {
     console.warn(`[Setup] failed to persist init state for ${workspacePath}:`, e)
   }

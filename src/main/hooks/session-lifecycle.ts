@@ -25,6 +25,9 @@ import {
 //   - fireSessionEndAll()       ← before-quit drains everything
 // As long as both call sites stay wired, this Map is bounded by live thread count.
 interface StartedSession {
+  // Cleared when Setup or SessionStart is dispatched and SessionEnd becomes due.
+  preparing?: AbortController
+  setup?: Promise<void>
   workspacePath?: string
   pluginOutputDir?: string
   systemId?: string
@@ -44,34 +47,49 @@ interface StartedSession {
 const startedSessions = new Map<string, StartedSession>()
 // A close may be awaiting a workspace command when the app begins its quit drain.
 const closingSideSessions = new Map<string, Promise<void>>()
-const pendingSideSetups = new Set<{
+interface SideSetup {
   parentId: string
   workspaceKey: string
   lifetime: AbortSignal
   attempt: Promise<void>
-}>()
+}
+const pendingSideSetups = new Set<SideSetup>()
+// Keep only same-family attempts overlapping a marker read, including ones that end before it returns.
+const markerReads = new Set<{ parentId: string; candidates: Set<SideSetup> }>()
 
 // Only a closing side can hand off Setup. Independent sessions keep their original concurrency.
-function waitForClosedSideSetups(parentId: string, workspaceKey: string): Promise<void> | undefined {
-  const closing = [...pendingSideSetups].filter(setup => setup.parentId === parentId && setup.lifetime.aborted)
-  if (closing.length === 0) return
-
-  const initialised = Promise.withResolvers<void>()
-  let targetDirectory: Promise<string> | undefined
-  const attempts = closing.map(async (setup) => {
-    if (setup.workspaceKey === workspaceKey) {
-      await setup.attempt
-    } else {
-      // The workspace picker can return another spelling of the same directory.
-      // A slow filesystem lookup must never extend the original Setup wait.
-      targetDirectory ??= getWorkspaceExecutionKey(workspaceKey)
-      const aliases = Promise.all([targetDirectory, getWorkspaceExecutionKey(setup.workspaceKey)])
-        .then(([target, source]) => target === source, () => false)
-      if (await Promise.race([aliases, setup.attempt.then(() => false)])) await setup.attempt
+async function needsWorkspaceSetup(parentId: string, workspacePath: string, signal: AbortSignal): Promise<boolean> {
+  const candidates = new Set([...pendingSideSetups].filter(setup => setup.parentId === parentId))
+  const read = { parentId, candidates }
+  markerReads.add(read)
+  try {
+    if (await hasWorkspaceBeenInitialised(workspacePath, signal)) return false
+    const workspaceKey = resolve(workspacePath)
+    let targetDirectory: Promise<string> | undefined
+    while (!signal.aborted) {
+      const closing = [...candidates].filter(setup => setup.lifetime.aborted)
+      if (closing.length === 0) return true
+      const initialised = Promise.withResolvers<boolean>()
+      const attempts = closing.map(async setup => {
+        candidates.delete(setup)
+        if (setup.workspaceKey === workspaceKey) {
+          await setup.attempt
+        } else {
+          targetDirectory ??= getWorkspaceExecutionKey(workspaceKey)
+          const aliases = Promise.all([targetDirectory, getWorkspaceExecutionKey(setup.workspaceKey)])
+            .then(([target, source]) => target === source, () => false)
+          if (await Promise.race([aliases, setup.attempt.then(() => false)])) await setup.attempt
+        }
+        if (!signal.aborted && await hasWorkspaceBeenInitialised(workspacePath, signal)) initialised.resolve(true)
+      })
+      const done = Promise.race([initialised.promise, Promise.all(attempts).then(() => false)])
+      if (await waitForAbort(done, signal)) return false
+      // All checked attempts failed. A different side may have closed while we waited.
     }
-    if (hasWorkspaceBeenInitialised(workspaceKey)) initialised.resolve()
-  })
-  return Promise.race([initialised.promise, Promise.all(attempts).then(() => undefined)])
+    return false
+  } finally {
+    markerReads.delete(read)
+  }
 }
 
 /** True when there are still-active sessions awaiting SessionEnd. */
@@ -101,13 +119,14 @@ export async function fireSessionStartOnce(
     | "harnessNodeStatus"
     | "projectCode"
     | "projectDir"
-  >
+  >,
+  runSignal?: AbortSignal
 ): Promise<void> {
   const lifetime = getSideThreadLifetimeSignal(threadId)
-  if (lifetime?.aborted) return
+  if (lifetime?.aborted || runSignal?.aborted) return
   const existing = startedSessions.get(threadId)
   if (existing) {
-    startedSessions.set(threadId, {
+    Object.assign(existing, {
       workspacePath: workspacePath ?? existing.workspacePath,
       pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
       systemId: systemId ?? existing.systemId,
@@ -124,9 +143,11 @@ export async function fireSessionStartOnce(
       projectDir: harnessContext?.projectDir ?? existing.projectDir,
       hookScope: hookScope ?? existing.hookScope
     })
-    return
+    return existing.setup
   }
-  startedSessions.set(threadId, {
+  const preparing = new AbortController()
+  const session: StartedSession = {
+    preparing,
     workspacePath,
     pluginOutputDir,
     systemId,
@@ -141,61 +162,75 @@ export async function fireSessionStartOnce(
     projectCode: harnessContext?.projectCode,
     projectDir: harnessContext?.projectDir,
     hookScope
-  })
+  }
+  startedSessions.set(threadId, session)
 
-  // Setup(init) belongs to the workspace and settles before a live session starts.
-  if (workspacePath && !hasWorkspaceBeenInitialised(workspacePath)) {
-    const workspaceKey = resolve(workspacePath)
-    const parentId = getBtwParentId(threadId) ?? threadId
+  const parentId = getBtwParentId(threadId) ?? threadId
+  let needsSetup = false
+  if (workspacePath) {
+    const signals = [preparing.signal, lifetime, runSignal].filter((s): s is AbortSignal => !!s)
+    const signal = AbortSignal.any(signals)
     try {
-      const pending = waitForClosedSideSetups(parentId, workspaceKey)
-      if (pending) await waitForAbort(pending, lifetime)
-      lifetime?.throwIfAborted()
-      if (!pending || !hasWorkspaceBeenInitialised(workspacePath)) {
-        const setupContext: HookContext = {
-          workspacePath,
-          sessionId: threadId,
-          turnId,
-          pluginOutputDir,
-          systemId,
-          ...harnessContext,
-          setupTrigger: "init"
-        }
-        const hooks = resolveEnabledHooksForRun(
-          workspacePath,
-          "Setup",
-          setupContext,
-          hookScope,
-          onHookSkipped
-        )
-        // Closing the initiating side releases its wait. A later session joins
-        // the actual batch and can retry with its own context if it fails.
-        const attempt = runSetupHooks(hooks, setupContext, onHookResult)
-          .then((result) => {
-            if (result === null) {
-              markWorkspaceInitialised(workspacePath)
-            } else if (!lifetime?.aborted) {
-              console.warn(
-                `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
-                result.stderr || result.stdout || "(no detail)"
-              )
-            }
-          })
-          .catch((e) => {
-            if (!lifetime?.aborted) console.warn("[Hooks] Setup(init) hook error:", e)
-          })
-        if (lifetime) {
-          const setup = { parentId, workspaceKey, lifetime, attempt }
-          pendingSideSetups.add(setup)
-          void attempt.then(() => pendingSideSetups.delete(setup))
-        }
-        await waitForAbort(attempt, lifetime)
+      needsSetup = await waitForAbort(needsWorkspaceSetup(parentId, workspacePath, signal), signal)
+      signal.throwIfAborted()
+    } catch (e) {
+      if (startedSessions.get(threadId) === session) startedSessions.delete(threadId)
+      if (signal.aborted) return
+      throw e
+    }
+  }
+  delete session.preparing
+  if (workspacePath && needsSetup) {
+    try {
+      const setupContext: HookContext = {
+        workspacePath,
+        sessionId: threadId,
+        turnId,
+        pluginOutputDir,
+        systemId,
+        ...harnessContext,
+        setupTrigger: "init"
       }
+      const hooks = resolveEnabledHooksForRun(
+        workspacePath,
+        "Setup",
+        setupContext,
+        hookScope,
+        onHookSkipped
+      )
+      // Closing the initiating side releases its wait. A later session joins
+      // the actual batch and can retry with its own context if it fails.
+      const attempt = runSetupHooks(hooks, setupContext, onHookResult)
+        .then(async (result) => {
+          if (result === null) {
+            await markWorkspaceInitialised(workspacePath)
+          } else if (!lifetime?.aborted) {
+            console.warn(
+              `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
+              result.stderr || result.stdout || "(no detail)"
+            )
+          }
+        })
+        .catch((e) => {
+          if (!lifetime?.aborted) console.warn("[Hooks] Setup(init) hook error:", e)
+        })
+      if (lifetime) {
+        const setup = { parentId, workspaceKey: resolve(workspacePath), lifetime, attempt }
+        pendingSideSetups.add(setup)
+        for (const read of markerReads) {
+          if (read.parentId === parentId) read.candidates.add(setup)
+        }
+        void attempt.then(() => pendingSideSetups.delete(setup))
+      }
+      session.setup = attempt
+      await waitForAbort(attempt, lifetime)
     } catch (e) {
       if (!lifetime?.aborted) console.warn("[Hooks] Setup(init) hook error:", e)
+    } finally {
+      delete session.setup
     }
-    if (lifetime?.aborted) return
   }
+  if (lifetime?.aborted || startedSessions.get(threadId) !== session) return
 
   const context: HookContext = {
     workspacePath,
@@ -257,6 +292,11 @@ export async function fireSessionEnd(
   const started = startedSessions.get(threadId)
   if (!started) return closingSideSessions.get(threadId)
   startedSessions.delete(threadId)
+  if (started.preparing) {
+    started.preparing.abort()
+    clearOnceStateForSession(threadId)
+    return
+  }
   const effectiveWorkspacePath = workspacePath ?? started.workspacePath
   const effectivePluginOutputDir = pluginOutputDir ?? started.pluginOutputDir
   const context: HookContext = {

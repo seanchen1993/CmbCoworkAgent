@@ -199,7 +199,8 @@ function testPromptSkillHookAndHarnessPreparation(): void {
       "await resolveHarnessFeatureBindingContext(bindingMetadata)",
       "createStandardTurnTrace({",
       "harnessAgentContext = await getHarnessAgentContext(metadata",
-      "await fireSessionStartOnce(",
+      "const sessionStart = fireSessionStartOnce(",
+      "await waitForAbort(sessionStart, abortController.signal)",
       "const preparedPrompt = await prepareUserPromptForCurrentRun"
     ],
     "Feature Harness, trace and prompt preparation"
@@ -379,9 +380,16 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
     "desktop approval waits"
   )
   assertIncludes(runtime, "pendingApprovals.set(req.id", "Runtime registers approval ownership")
-  assertIncludes(
+  assertSourceOrder(
     runtime,
-    'options.abortSignal?.addEventListener("abort", onAbort',
+    [
+      "const requestApproval = async (",
+      "signal = options.abortSignal",
+      'rejectPending("abort")',
+      "pendingApprovals.set(req.id",
+      'approvalDecisionBroker.register(',
+      'signal?.addEventListener("abort", onAbort, { once: true })\n      if (signal?.aborted)'
+    ],
     "stopping the run rejects its pending approval"
   )
   assertIncludes(
@@ -525,7 +533,8 @@ function testBotPromptReceiptAppliesOnlyAfterAcceptedSubmission(): void {
     "if (!preparedPrompt.accepted) {",
     "effectiveMessage = preparedPrompt.content",
     "botPreparedSystemPrompt = approved?.extraSystemPrompt",
-    "extraSystemPrompt: botPreparedSystemPrompt",
+    "extraSystemPrompt: !botTurnContext && botPreparedSystemPrompt",
+    "[runExecutionContext.extraSystemPrompt, botPreparedSystemPrompt].filter(Boolean)",
     ": runExecutionContext.extraSystemPrompt"
   ], "the original system prompt passes through when no accepted Bot receipt adds context")
 }

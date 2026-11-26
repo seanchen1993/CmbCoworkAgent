@@ -1430,11 +1430,11 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     }
   }
 
-  const sessionStart = agentIpc.indexOf("await fireSessionStartOnce(")
+  const sessionStart = agentIpc.indexOf("const sessionStart = fireSessionStartOnce(")
   const sessionStartBody = agentIpc.slice(sessionStart, sessionStart + 800)
   assertSourceOrder(
     sessionStartBody,
-    "await fireSessionStartOnce(",
+    "await waitForAbort(sessionStart, abortController.signal)",
     "throwIfInvokeAborted()",
     "invoke setup revalidates ownership after SessionStart hooks"
   )

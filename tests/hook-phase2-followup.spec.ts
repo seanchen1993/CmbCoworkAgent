@@ -761,8 +761,8 @@ const agentIpcSrc = _read(
   "utf-8"
 )
 assert(
-  /await fireSessionStartOnce\(/.test(agentIpcSrc),
-  "P3e agent invoke waits for fireSessionStartOnce"
+  /const sessionStart = fireSessionStartOnce\([^;]*?\)\s*await waitForAbort\(sessionStart, abortController\.signal\)/.test(agentIpcSrc),
+  "P3e agent invoke waits for SessionStart until the turn is cancelled"
 )
 assert(
   !/setLateHookResultListener/.test(runnerSrc),

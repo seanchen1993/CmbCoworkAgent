@@ -3,13 +3,14 @@ import { mkdtemp, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate as flush } from "node:timers/promises"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { beginSideThreadClose, unregisterSideThread } from "../ipc/btw-chat"
 import { hasRunningSideHooks, sideThreads, waitForSideHooksOnQuit } from "../side-thread-registry"
 import { runHooksEnriched } from "./required-skill"
 import { runHooks, type HookContext } from "./runner"
 import { createHookScope, filterScopedHooks, type HookScopeController } from "./scope"
 import { fireSessionEnd, fireSessionEndAll, fireSessionStartOnce, hasActiveSessions } from "./session-lifecycle"
+import { hasWorkspaceBeenInitialised } from "../services/setup-state"
 import type { HookConfig, HookEvent } from "./types"
 
 const { enabledHooks, initialisedWorkspaces, markInitialised, resolveStage, spawnCommand } = vi.hoisted(() => ({
@@ -35,9 +36,9 @@ vi.mock("./scope", async (importOriginal) => ({
 }))
 
 vi.mock("../services/setup-state", () => ({
-  hasWorkspaceBeenInitialised: (workspacePath: string) => initialisedWorkspaces.has(workspacePath),
-  markWorkspaceInitialised: (workspacePath: string) => {
-    if (markInitialised(workspacePath) !== false) initialisedWorkspaces.add(workspacePath)
+  hasWorkspaceBeenInitialised: vi.fn(async (workspacePath: string) => initialisedWorkspaces.has(workspacePath)),
+  markWorkspaceInitialised: async (workspacePath: string) => {
+    if (await markInitialised(workspacePath) !== false) initialisedWorkspaces.add(workspacePath)
   }
 }))
 
@@ -99,6 +100,8 @@ function fakeChild() {
   })
 }
 
+beforeEach(() => { enabledHooks.mockReturnValue([]) })
+
 afterEach(async () => {
   unregisterSideThread(sideThreadId)
   unregisterSideThread(siblingThreadId)
@@ -117,6 +120,117 @@ afterEach(async () => {
 })
 
 describe("side thread Hook lifetime", () => {
+  it.each([true, false])("ignores a slow marker read after its session was replaced (initialised: %s)", async initialised => {
+    const read = Promise.withResolvers<boolean>()
+    vi.mocked(hasWorkspaceBeenInitialised).mockReturnValueOnce(read.promise)
+    const old = fireSessionStartOnce(mainThreadId, "/workspace")
+    await fireSessionEnd(mainThreadId)
+    expect(enabledHooks).not.toHaveBeenCalled()
+    await fireSessionStartOnce(mainThreadId)
+    enabledHooks.mockClear()
+    read.resolve(initialised)
+    await old
+    expect(enabledHooks).not.toHaveBeenCalled()
+  })
+
+  it("lets a stopped main turn retry while the first marker read is outstanding", async () => {
+    const read = Promise.withResolvers<boolean>()
+    vi.mocked(hasWorkspaceBeenInitialised).mockReturnValueOnce(read.promise)
+    const stop = new AbortController()
+    const start = fireSessionStartOnce(mainThreadId, "/workspace", undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, stop.signal)
+    stop.abort()
+    await start
+    expect(hasActiveSessions()).toBe(false)
+    expect(enabledHooks).not.toHaveBeenCalled()
+    await fireSessionStartOnce(mainThreadId, "/workspace")
+    read.resolve(false)
+    await flush()
+    expect(enabledHooks.mock.calls.map(([, event]) => event)).toEqual(["Setup", "SessionStart"])
+  })
+
+  it("rechecks a stale missing marker after the closing side finished Setup", async () => {
+    registerSideThread()
+    const { entered, pending, request } = holdFirstHook()
+    enabledHooks.mockImplementation((_workspace, event) => event === "Setup" ? [hook(event, event)] : [])
+    const side = fireSessionStartOnce(sideThreadId, "/workspace")
+    await entered.promise
+    beginSideThreadClose(sideThreadId)
+    await side
+
+    const stale = Promise.withResolvers<boolean>()
+    vi.mocked(hasWorkspaceBeenInitialised).mockReturnValueOnce(stale.promise)
+    const main = fireSessionStartOnce(mainThreadId, "/workspace")
+    pending.resolve(Response.json({}))
+    await vi.waitFor(() => expect(initialisedWorkspaces.has("/workspace")).toBe(true))
+    stale.resolve(false)
+    await main
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it.each([true, false])("joins a side that started during the parent's marker read (finished: %s)", async finished => {
+    registerSideThread()
+    const stale = Promise.withResolvers<boolean>()
+    vi.mocked(hasWorkspaceBeenInitialised).mockReturnValueOnce(stale.promise)
+    const main = fireSessionStartOnce(mainThreadId, "/workspace")
+    const { entered, pending, request } = holdFirstHook()
+    enabledHooks.mockImplementation((_workspace, event) => event === "Setup" ? [hook(event, event)] : [])
+    const side = fireSessionStartOnce(sideThreadId, "/workspace")
+    await entered.promise
+    beginSideThreadClose(sideThreadId)
+    await side
+    if (finished) {
+      pending.resolve(Response.json({}))
+      await vi.waitFor(() => expect(initialisedWorkspaces.has("/workspace")).toBe(true))
+    }
+    stale.resolve(false)
+    await flush()
+    pending.resolve(Response.json({}))
+    await main
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it("joins a second closing side while checking an unsuccessful handoff", async () => {
+    registerSideThread()
+    registerSideThread(siblingThreadId)
+    const first = Promise.withResolvers<Response>()
+    const second = Promise.withResolvers<Response>()
+    const request = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    vi.stubGlobal("fetch", request)
+    enabledHooks.mockImplementation((_workspace, event) => event === "Setup" ? [{ ...hook(event, event), fallback: "block" }] : [])
+    const side = fireSessionStartOnce(sideThreadId, "/workspace")
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1))
+    beginSideThreadClose(sideThreadId)
+    await side
+    const main = fireSessionStartOnce(mainThreadId, "/workspace")
+    await flush()
+    const stale = Promise.withResolvers<boolean>()
+    const reading = Promise.withResolvers<void>()
+    vi.mocked(hasWorkspaceBeenInitialised).mockImplementationOnce(() => { reading.resolve(); return stale.promise })
+    first.resolve(Response.json({}, { status: 500 }))
+    await reading.promise
+    const sibling = fireSessionStartOnce(siblingThreadId, "/workspace")
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2))
+    beginSideThreadClose(siblingThreadId)
+    await sibling
+    stale.resolve(false)
+    await flush()
+    second.resolve(Response.json({}))
+    await main
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it("dispatches SessionStart only after the marker write settles", async () => {
+    const write = Promise.withResolvers<void>()
+    markInitialised.mockReturnValueOnce(write.promise)
+    const main = fireSessionStartOnce(mainThreadId, "/workspace")
+    await vi.waitFor(() => expect(markInitialised).toHaveBeenCalledOnce())
+    expect(enabledHooks.mock.calls.map(([, event]) => event)).toEqual(["Setup"])
+    write.resolve()
+    await main
+    expect(enabledHooks.mock.calls.map(([, event]) => event)).toEqual(["Setup", "SessionStart"])
+  })
+
   it.each(["UserPromptSubmit", "PreSkillUse", "PostSkillUse", "Stop"] as const)(
     "stops waiting for %s and fences remaining hooks when the registered side closes",
     async (event) => {
