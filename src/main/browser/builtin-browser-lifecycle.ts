@@ -1,6 +1,7 @@
 import { stopBrowserProfileImportRuntime } from "../ipc/browser-profile-import"
 import type { BrowserService } from "./core/browser-service"
 import { setGlobalBrowserService } from "./core/browser-service-registry"
+import { disposeSharedBrowserScriptExecutionConnection } from "./record/common/browser-script-execution-service"
 
 interface DisposeBuiltinBrowserForMainWindowEventOptions {
   browserService: BrowserService | null
@@ -19,15 +20,17 @@ export function disposeBuiltinBrowserForMainWindowEvent({
   }
 
   void reason
+  void disposeSharedBrowserScriptExecutionConnection()
   browserService?.disposeAll()
 }
 
 export function beginBuiltinBrowserAppQuitCleanup(
   browserService: BrowserService | null
-): () => void {
+): () => Promise<void> {
   setGlobalBrowserService(null)
   stopBrowserProfileImportRuntime()
-  return () => {
+  return async () => {
+    await disposeSharedBrowserScriptExecutionConnection()
     browserService?.disposeAll()
   }
 }

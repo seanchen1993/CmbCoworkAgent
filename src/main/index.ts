@@ -1891,8 +1891,8 @@ if (browserNativeMessagingHostLaunch) {
       Promise.resolve().then(() => closeWorkspaceFilePreviewProtocol()),
       Promise.resolve().then(() => closeDesignAssetProtocol()),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
-    ]).finally(() => {
-      disposeBuiltinBrowserAfterAppCleanup()
+    ]).finally(async () => {
+      await disposeBuiltinBrowserAfterAppCleanup()
     })
 
     const CLEANUP_TIMEOUT_MS = 10_000

@@ -162,7 +162,11 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
   }
 
   const nextArgs = buildPlaywrightMcpArgs(runtimePort)
-  if (!isManagedPlaywrightMcpConnectorSynced(existing, { enabled: true, args: nextArgs })) {
+  const connectorChanged = !isManagedPlaywrightMcpConnectorSynced(existing, {
+    enabled: true,
+    args: nextArgs
+  })
+  if (connectorChanged) {
     upsertMcpConnector({
       id: existing?.id,
       name: PLAYWRIGHT_MCP_NAME,
@@ -178,5 +182,5 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
     })
   }
 
-  return { invalidateCapabilities: runtimePort !== null }
+  return { invalidateCapabilities: connectorChanged }
 }

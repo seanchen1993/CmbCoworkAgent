@@ -16,6 +16,7 @@ import {
   withScriptRecordingDeviceViewport
 } from "../../../../shared/browser-script-recording"
 import {
+  buildPlaywrightScriptRecorderDisposeScript,
   buildPlaywrightScriptRecorderInjectionScript,
   inspectPlaywrightScriptRecorderMessage,
   parsePlaywrightScriptRecorderEvent,
@@ -25,6 +26,7 @@ import {
 
 let activeSession: BrowserRecordingSession | null = null
 let lastSession: BrowserRecordingSession | null = null
+let stopRecordingPromise: Promise<BrowserRecordingSession> | null = null
 const recordingStateListeners = new Set<(session: BrowserRecordingSession) => void>()
 let nextSessionNumber = 0
 let nextActionNumber = 0
@@ -32,9 +34,7 @@ let pendingExplicitNavigation: { expiresAt: number; url?: string } | null = null
 
 const EXPLICIT_NAVIGATION_TTL_MS = 10_000
 
-function normalizeDeviceViewport(
-  viewport?: BrowserDeviceSize
-): BrowserDeviceSize | undefined {
+function normalizeDeviceViewport(viewport?: BrowserDeviceSize): BrowserDeviceSize | undefined {
   if (
     !viewport ||
     !Number.isFinite(viewport.width) ||
@@ -132,6 +132,7 @@ const CONTAINER_TEST_ID_PATTERN =
 const INTERACTIVE_TAG_NAMES = new Set(["button", "a", "input", "textarea", "select", "option"])
 const FRAME_ELEMENT_SELECTOR_CACHE = new Map<string, string>()
 const FRAME_INJECTION_PROMISES = new Map<string, Promise<void>>()
+const FRAME_DISPOSAL_PROMISES = new Map<string, Promise<void>>()
 const FRAME_CHANNEL_FRAME_CACHE = new Map<string, WebFrameMain>()
 
 function now(): string {
@@ -164,6 +165,32 @@ async function executeScriptRecorderScriptInIsolatedWorld(
   return frame.executeJavaScriptInIsolatedWorld(PLAYWRIGHT_SCRIPT_RECORDER_ISOLATED_WORLD_ID, [
     { code }
   ])
+}
+
+function disposeScriptRecorder(frame: WebFrameMain): Promise<void> {
+  const key = frameCacheKey(frame)
+  const existing = FRAME_DISPOSAL_PROMISES.get(key)
+  if (existing) return existing
+
+  const disposal = (async () => {
+    if (frame.detached || frame.isDestroyed()) return
+    const script = buildPlaywrightScriptRecorderDisposeScript()
+    let disposed = false
+    try {
+      disposed = (await executeScriptRecorderScriptInIsolatedWorld(frame, script)) === true
+    } catch {
+      // The recorder may have fallen back to the frame's main world.
+    }
+    if (!disposed && !frame.detached && !frame.isDestroyed()) {
+      await frame.executeJavaScript(script).catch(() => undefined)
+    }
+  })().finally(() => {
+    if (FRAME_DISPOSAL_PROMISES.get(key) === disposal) {
+      FRAME_DISPOSAL_PROMISES.delete(key)
+    }
+  })
+  FRAME_DISPOSAL_PROMISES.set(key, disposal)
+  return disposal
 }
 
 function readString(value: unknown): string | undefined {
@@ -796,7 +823,6 @@ export function startScriptRecording(
     script: ""
   }
   FRAME_ELEMENT_SELECTOR_CACHE.clear()
-  FRAME_INJECTION_PROMISES.clear()
   FRAME_CHANNEL_FRAME_CACHE.clear()
 
   const currentUrl = readString(options.currentUrl ?? undefined)
@@ -847,9 +873,10 @@ export function resumeScriptRecording(): BrowserRecordingSession {
   return toView(activeSession)
 }
 
-export function stopScriptRecording(
+export async function stopScriptRecording(
   environment?: BrowserRecordingEnvironment
-): BrowserRecordingSession {
+): Promise<BrowserRecordingSession> {
+  if (stopRecordingPromise) return stopRecordingPromise
   if (!activeSession) return toView(lastSession)
 
   const deviceViewport = normalizeDeviceViewport(environment?.deviceViewport)
@@ -867,8 +894,26 @@ export function stopScriptRecording(
   pendingExplicitNavigation = null
   lastSession = activeSession
   activeSession = null
-  FRAME_CHANNEL_FRAME_CACHE.clear()
-  return toView(lastSession)
+  const stoppedSession = toView(lastSession)
+  stopRecordingPromise = (async () => {
+    try {
+      await Promise.allSettled([...FRAME_INJECTION_PROMISES.values()])
+      await Promise.allSettled(
+        [...new Set(FRAME_CHANNEL_FRAME_CACHE.values())].map((frame) =>
+          disposeScriptRecorder(frame)
+        )
+      )
+    } catch (error) {
+      console.warn("[BrowserScriptRecording] failed to clean up recorder frames", error)
+    } finally {
+      FRAME_ELEMENT_SELECTOR_CACHE.clear()
+      FRAME_CHANNEL_FRAME_CACHE.clear()
+    }
+    return stoppedSession
+  })().finally(() => {
+    stopRecordingPromise = null
+  })
+  return stopRecordingPromise
 }
 
 export function getScriptRecording(): BrowserRecordingSession {
@@ -903,8 +948,22 @@ async function installScriptRecorderInternal(frame: WebFrameMain): Promise<void>
   if (!activeSession || activeSession.status !== "recording") return
   if (frame.detached || frame.isDestroyed() || frame.url.startsWith("devtools:")) return
 
+  const currentFrameCacheKey = frameCacheKey(frame)
+  const priorInjections = [...FRAME_INJECTION_PROMISES.entries()]
+    .filter(([key]) => key.endsWith(`:${currentFrameCacheKey}`))
+    .map(([, promise]) => promise)
+  if (priorInjections.length > 0) {
+    await Promise.allSettled(priorInjections)
+  }
+  const pendingDisposal = FRAME_DISPOSAL_PROMISES.get(currentFrameCacheKey)
+  if (pendingDisposal) {
+    await pendingDisposal.catch(() => undefined)
+  }
+  if (!activeSession || activeSession.status !== "recording") return
+
   // 主链路只执行 Playwright 注入脚本；旧脚本保留在仓库里，但不再运行。
-  const channelId = `${activeSession.id}:${frameCacheKey(frame)}`
+  const sessionId = activeSession.id
+  const channelId = `${sessionId}:${currentFrameCacheKey}`
   const script = buildPlaywrightScriptRecorderInjectionScript(channelId)
 
   try {
@@ -922,6 +981,10 @@ async function installScriptRecorderInternal(frame: WebFrameMain): Promise<void>
       typeof injectionResult === "string" && injectionResult.trim()
         ? injectionResult.trim()
         : channelId
+    if (activeSession?.id !== sessionId || activeSession.status !== "recording") {
+      await disposeScriptRecorder(frame)
+      return
+    }
     FRAME_CHANNEL_FRAME_CACHE.set(resolvedChannelId, frame)
     await cacheFrameElementSelector(frame)
   } catch {
@@ -997,7 +1060,9 @@ export function resetScriptRecordingForTests(): void {
   nextSessionNumber = 0
   nextActionNumber = 0
   pendingExplicitNavigation = null
+  stopRecordingPromise = null
   FRAME_ELEMENT_SELECTOR_CACHE.clear()
   FRAME_INJECTION_PROMISES.clear()
+  FRAME_DISPOSAL_PROMISES.clear()
   FRAME_CHANNEL_FRAME_CACHE.clear()
 }

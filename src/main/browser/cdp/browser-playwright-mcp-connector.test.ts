@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
-  connectors: [] as any[],
+  connectors: [] as Array<Record<string, unknown>>,
   upsertMcpConnector: vi.fn(),
   cdpPort: null as number | null
 }))
@@ -36,10 +36,7 @@ describe("managed Playwright MCP connector", () => {
       name: "In-app-browser",
       kind: "stdio",
       command: process.execPath,
-      args: [
-        resolveBundledPlaywrightMcpCliPath(),
-        "--cdp-endpoint=http://127.0.0.1:19222"
-      ],
+      args: [resolveBundledPlaywrightMcpCliPath(), "--cdp-endpoint=http://127.0.0.1:19222"],
       env: { ELECTRON_RUN_AS_NODE: "1" },
       enabled: true,
       lazyLoad: false
@@ -66,10 +63,7 @@ describe("managed Playwright MCP connector", () => {
       expect.objectContaining({
         id: "builtin-browser",
         command: process.execPath,
-        args: [
-          resolveBundledPlaywrightMcpCliPath(),
-          "--cdp-endpoint=http://127.0.0.1:19223"
-        ],
+        args: [resolveBundledPlaywrightMcpCliPath(), "--cdp-endpoint=http://127.0.0.1:19223"],
         env: {
           HTTPS_PROXY: "http://proxy.example",
           ELECTRON_RUN_AS_NODE: "1"
@@ -85,10 +79,7 @@ describe("managed Playwright MCP connector", () => {
         name: "In-app-browser",
         kind: "stdio",
         command: process.execPath,
-        args: [
-          resolveBundledPlaywrightMcpCliPath(),
-          "--cdp-endpoint=http://127.0.0.1:19224"
-        ],
+        args: [resolveBundledPlaywrightMcpCliPath(), "--cdp-endpoint=http://127.0.0.1:19224"],
         env: { ELECTRON_RUN_AS_NODE: "1" },
         enabled: true,
         lazyLoad: false
@@ -117,5 +108,30 @@ describe("managed Playwright MCP connector", () => {
         enabled: true
       })
     )
+  })
+
+  it("does not invalidate capabilities when the managed connector is unchanged", async () => {
+    mocks.cdpPort = 19226
+    mocks.connectors = [
+      {
+        id: "builtin-browser",
+        name: "In-app-browser",
+        kind: "stdio",
+        command: process.execPath,
+        args: [resolveBundledPlaywrightMcpCliPath(), "--cdp-endpoint=http://127.0.0.1:19226"],
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+        enabled: true,
+        lazyLoad: false
+      }
+    ]
+
+    await expect(
+      syncPlaywrightMcpConnectorForBrowserCdpConfig({
+        enabled: true,
+        profileImportEnabled: true
+      })
+    ).resolves.toEqual({ invalidateCapabilities: false })
+
+    expect(mocks.upsertMcpConnector).not.toHaveBeenCalled()
   })
 })

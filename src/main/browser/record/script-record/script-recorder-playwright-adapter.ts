@@ -5,6 +5,7 @@ import { getPlaywrightRecorderSourceBundle } from "../common/playwright-codegen/
 // Playwright 录制器动作通过这个前缀回传到 Electron 宿主。
 export const PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX = "[PlaywrightScriptRecorder]"
 export const PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG = "__cmbPlaywrightScriptRecorderInstalled"
+export const PLAYWRIGHT_SCRIPT_RECORDER_DISPOSE_KEY = "__cmbPlaywrightScriptRecorderDispose"
 export const PLAYWRIGHT_SCRIPT_RECORDER_FRAME_CHANNEL_KEY =
   "__cmbPlaywrightScriptRecorderFrameChannelId"
 export const PLAYWRIGHT_SCRIPT_RECORDER_FRAME_SELECTOR_HELPER =
@@ -892,23 +893,80 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     // 录制时页面交互保持正常。label 激活控件产生的合成 click（detail=0）
     // 会以 clickCount=0 的 click 动作上报，由宿主的 parse 层丢弃（与 codegen
     // 的 detail===0 过滤一致），避免 checkbox/radio/switch 被重复记录。
+    const globalListenersBeforeRecorder = new Set(injectedScript.onGlobalListenersRemoved);
     const recorder = new PollingRecorder(injectedScript, { recorderMode: "api" });
+    const recorderGlobalListeners = [...injectedScript.onGlobalListenersRemoved].filter(
+      (listener) => !globalListenersBeforeRecorder.has(listener)
+    );
     try {
       document.addEventListener("mousemove", rememberHoveredActionSelector, true);
     } catch {}
+    let recorderStyle;
     try {
-      const style = document.createElement("style");
-      style.textContent = "x-pw-overlay { display: none !important; }";
-      (document.head || document.documentElement).appendChild(style);
+      recorderStyle = document.createElement("style");
+      recorderStyle.textContent = "x-pw-overlay { display: none !important; }";
+      (document.head || document.documentElement).appendChild(recorderStyle);
     } catch {}
 
     window.__cmbPlaywrightScriptRecorder = recorder;
+    window.${PLAYWRIGHT_SCRIPT_RECORDER_DISPOSE_KEY} = () => {
+      try {
+        if (recorder._pollRecorderModeTimer) {
+          injectedScript.utils.builtins.clearTimeout(recorder._pollRecorderModeTimer);
+          recorder._pollRecorderModeTimer = undefined;
+        }
+      } catch {}
+      try {
+        for (const listener of recorderGlobalListeners) {
+          injectedScript.onGlobalListenersRemoved.delete(listener);
+        }
+      } catch {}
+      try {
+        const listeners = recorder._recorder?._listeners;
+        if (Array.isArray(listeners)) {
+          for (const remove of listeners.splice(0)) {
+            try { remove(); } catch {}
+          }
+        }
+      } catch {}
+      try {
+        const stylesheet = recorder._recorder?._stylesheet;
+        if (stylesheet) {
+          document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
+            (candidate) => candidate !== stylesheet
+          );
+        }
+      } catch {}
+      try { document.removeEventListener("mousemove", rememberHoveredActionSelector, true); } catch {}
+      try { recorderStyle?.remove(); } catch {}
+      try { delete window.__cmbPlaywrightScriptRecorder; } catch {}
+      try { delete window.__pw_recorderState; } catch {}
+      try { delete window.__pw_recorderElementPicked; } catch {}
+      try { delete window.__pw_recorderSetMode; } catch {}
+      try { delete window.__pw_recorderSetOverlayState; } catch {}
+      try { delete window.__pw_recorderRecordAction; } catch {}
+      try { delete window.__pw_recorderPerformAction; } catch {}
+      try { delete window.__pw_resume; } catch {}
+      try { delete window.__pw_refreshOverlay; } catch {}
+      try { delete window[FRAME_SELECTOR_HELPER]; } catch {}
+      try { delete window[FRAME_CHANNEL_KEY]; } catch {}
+      try { delete window.${PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG}; } catch {}
+      try { delete window.${PLAYWRIGHT_SCRIPT_RECORDER_DISPOSE_KEY}; } catch {}
+      return true;
+    };
     window.__pw_refreshOverlay?.();
     // Only mark the frame after all recorder hooks are installed so a transient
     // initialization error can be retried on the next frame lifecycle event.
     window.${PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG} = true;
     window[FRAME_CHANNEL_KEY] = RECORDER_FRAME_CHANNEL_ID;
     return RECORDER_FRAME_CHANNEL_ID;
+  })()`
+}
+
+export function buildPlaywrightScriptRecorderDisposeScript(): string {
+  return String.raw`(() => {
+    const dispose = window.${PLAYWRIGHT_SCRIPT_RECORDER_DISPOSE_KEY};
+    return typeof dispose === "function" ? dispose() === true : false;
   })()`
 }
 

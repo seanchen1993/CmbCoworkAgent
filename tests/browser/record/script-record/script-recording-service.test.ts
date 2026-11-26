@@ -3,6 +3,7 @@ import type { WebFrameMain } from "electron"
 import type { BrowserLocatorMetadata } from "../../../../src/shared/browser-types"
 import { buildPlaywrightLocator } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
 import {
+  buildPlaywrightScriptRecorderDisposeScript,
   buildPlaywrightScriptRecorderInjectionScript,
   inspectPlaywrightScriptRecorderMessage,
   PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX,
@@ -153,7 +154,7 @@ describe("script recording service", () => {
     resetScriptRecordingForTests()
   })
 
-  it("reports frame diagnostics without exposing recorded fill values", () => {
+  it("reports frame diagnostics without exposing recorded fill values", async () => {
     const diagnostic = inspectPlaywrightScriptRecorderMessage(
       `${PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX}${JSON.stringify({
         type: "action",
@@ -191,7 +192,7 @@ describe("script recording service", () => {
     expect(JSON.stringify(diagnostic)).not.toContain("do-not-log-this-value")
   })
 
-  it("starts with the current page and generates a script recording draft", () => {
+  it("starts with the current page and generates a script recording draft", async () => {
     const session = startScriptRecording({
       currentUrl: "https://example.com/dashboard",
       threadId: "thread-1"
@@ -207,12 +208,12 @@ describe("script recording service", () => {
       })
     ])
 
-    const stopped = stopScriptRecording()
+    const stopped = await stopScriptRecording()
     expect(stopped.script).toContain('test("recorded script flow", async ({ page }) => {')
     expect(stopped.script).toContain("await page.goto('https://example.com/dashboard');")
   })
 
-  it("records script fill and click actions and dedupes repeated fills", () => {
+  it("records script fill and click actions and dedupes repeated fills", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/login" })
 
@@ -245,7 +246,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(2)
     expect(session.actions[0]).toMatchObject({
       kind: "fill",
@@ -262,7 +263,7 @@ describe("script recording service", () => {
     expect(session.script).toContain("await page.getByRole('button', { name: '登录' }).click();")
   })
 
-  it("uses the recorded href selector with its embedded codegen nth", () => {
+  it("uses the recorded href selector with its embedded codegen nth", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://github.com/seanchen1993/CmbCoworkAgent/actions" })
 
@@ -278,14 +279,14 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       `await page.locator('a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]').nth(1).click();`
     )
     expect(session.script).toContain(".nth(1)")
   })
 
-  it("uses the codegen label-text selector to click hidden radio cards", () => {
+  it("uses the codegen label-text selector to click hidden radio cards", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -302,7 +303,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByText('🎨 设计师 做设计的人', { exact: true }).click();"
     )
@@ -310,7 +311,7 @@ describe("script recording service", () => {
     expect(session.script).not.toContain("getByLabel('🎨 设计师 做设计的人'")
   })
 
-  it("falls back to the visible label text when a hidden radio has no codegen selector", () => {
+  it("falls back to the visible label text when a hidden radio has no codegen selector", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -326,7 +327,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByText('🎨 设计师 做设计的人', { exact: true }).click();"
     )
@@ -334,7 +335,7 @@ describe("script recording service", () => {
     expect(session.script).not.toContain("getByLabel('🎨 设计师 做设计的人'")
   })
 
-  it("keeps the codegen radio role selector for visible radio inputs", () => {
+  it("keeps the codegen radio role selector for visible radio inputs", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -350,13 +351,13 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
     )
   })
 
-  it("keeps check semantics when the recorder targets a checkbox directly", () => {
+  it("keeps check semantics when the recorder targets a checkbox directly", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -373,7 +374,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions[0]).toMatchObject({
       kind: "click",
       toggle: "check"
@@ -384,7 +385,7 @@ describe("script recording service", () => {
     expect(session.script).not.toContain(".click();")
   })
 
-  it("keeps uncheck semantics when unchecking a checkbox", () => {
+  it("keeps uncheck semantics when unchecking a checkbox", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -401,7 +402,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions[0]).toMatchObject({
       kind: "click",
       toggle: "uncheck"
@@ -411,7 +412,7 @@ describe("script recording service", () => {
     )
   })
 
-  it("clicks switch-style checkboxes through their label wrapper", () => {
+  it("clicks switch-style checkboxes through their label wrapper", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -426,14 +427,14 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('checkbox', { name: 'emailNotif', exact: true }).click();"
     )
     expect(session.script).not.toContain("getByText('emailNotif', { exact: true }).click()")
   })
 
-  it("clicks menuitem radio options through their semantic role", () => {
+  it("clicks menuitem radio options through their semantic role", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -448,14 +449,14 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
     )
     expect(session.script).not.toContain('locator("button[name=\\"branch\\"]")')
   })
 
-  it("keeps the committed branch filter fill before selecting a menuitem radio option", () => {
+  it("keeps the committed branch filter fill before selecting a menuitem radio option", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/branches" })
 
@@ -495,7 +496,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'Select branch', exact: true }).click();"
     )
@@ -512,7 +513,7 @@ describe("script recording service", () => {
     )
   })
 
-  it("keeps literal values for sensitive script fills", () => {
+  it("keeps literal values for sensitive script fills", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -526,7 +527,7 @@ describe("script recording service", () => {
       value: "12345678"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toEqual([
       expect.objectContaining({
         kind: "fill",
@@ -541,7 +542,7 @@ describe("script recording service", () => {
     )
   })
 
-  it("renders combobox fills for datalist-backed inputs", () => {
+  it("renders combobox fills for datalist-backed inputs", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -555,13 +556,13 @@ describe("script recording service", () => {
       value: "你好"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('combobox', { name: '用户名 (支持自动补全)' }).fill('你好');"
     )
   })
 
-  it("renders spinbutton fills for numeric inputs", () => {
+  it("renders spinbutton fills for numeric inputs", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -576,13 +577,13 @@ describe("script recording service", () => {
       value: "11"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('spinbutton', { name: '年龄' }).fill('11');"
     )
   })
 
-  it("renders slider fills for range inputs", () => {
+  it("renders slider fills for range inputs", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -597,13 +598,13 @@ describe("script recording service", () => {
       value: "6"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('slider', { name: '编程经验（年）' }).fill('6');"
     )
   })
 
-  it("keeps alternating fill and enter actions in the generated script", () => {
+  it("keeps alternating fill and enter actions in the generated script", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/search" })
 
@@ -644,7 +645,7 @@ describe("script recording service", () => {
       key: "Enter"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'Search' }).fill('你好');"
     )
@@ -662,7 +663,7 @@ describe("script recording service", () => {
     )
   })
 
-  it("supersedes a fill replayed with the same value after Enter", () => {
+  it("supersedes a fill replayed with the same value after Enter", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/branches" })
     const branchFilter = {
@@ -701,7 +702,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions.map((action) => action.kind)).toEqual(["press", "fill", "click"])
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'Select branch', exact: true }).press('Enter');"
@@ -717,7 +718,7 @@ describe("script recording service", () => {
     )
   })
 
-  it("keeps duplicate role targets distinct by recording their occurrence index", () => {
+  it("keeps duplicate role targets distinct by recording their occurrence index", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/search" })
 
@@ -746,7 +747,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(2)
     expect(session.actions[0]).toMatchObject({
       kind: "click",
@@ -770,7 +771,7 @@ describe("script recording service", () => {
     )
   })
 
-  it("records typed text between focusing a textbox and pressing Enter", () => {
+  it("records typed text between focusing a textbox and pressing Enter", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://demo.playwright.dev/todomvc/#/" })
 
@@ -801,7 +802,7 @@ describe("script recording service", () => {
       key: "Enter"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'What needs to be done?' }).click();"
     )
@@ -813,7 +814,7 @@ describe("script recording service", () => {
     )
   })
 
-  it("prefers the nearest meaningful ancestor when clicking inside decorative icons", () => {
+  it("prefers the nearest meaningful ancestor when clicking inside decorative icons", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/detail" })
 
@@ -828,7 +829,7 @@ describe("script recording service", () => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "click",
@@ -843,7 +844,7 @@ describe("script recording service", () => {
     expect(session.script).not.toContain('getByTestId("operation-area")')
   })
 
-  it("keeps svg targets when ancestor text is volatile", () => {
+  it("keeps svg targets when ancestor text is volatile", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/detail" })
 
@@ -874,7 +875,7 @@ describe("script recording service", () => {
       ]
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "click",
@@ -888,7 +889,7 @@ describe("script recording service", () => {
     expect(session.script).not.toContain('getByText("一键报工 数据获取时间：08-05 16:33"')
   })
 
-  it("persists paused draft edits before continuing recording", () => {
+  it("persists paused draft edits before continuing recording", async () => {
     startScriptRecording({ threadId: "thread-1" })
     pauseScriptRecording()
 
@@ -918,7 +919,7 @@ test("recorded script flow", async ({ page }) => {
       key: "Enter"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('保存后的内容');"
     )
@@ -930,7 +931,7 @@ test("recorded script flow", async ({ page }) => {
     )
   })
 
-  it("does not record implicit navigation after link clicks", () => {
+  it("does not record implicit navigation after link clicks", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/list" })
 
@@ -947,7 +948,7 @@ test("recorded script flow", async ({ page }) => {
       url: "https://example.com/detail"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.script).toContain(
       "await page.getByRole('link', { name: 'Open detail' }).click();"
@@ -955,7 +956,7 @@ test("recorded script flow", async ({ page }) => {
     expect(session.script).not.toContain("await page.goto('https://example.com/detail');")
   })
 
-  it("does not record implicit navigation after tab clicks", () => {
+  it("does not record implicit navigation after tab clicks", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://todomvc.com/" })
 
@@ -972,13 +973,13 @@ test("recorded script flow", async ({ page }) => {
       url: "https://medium.com/@tastejs/reposts"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.script).toContain("await page.getByRole('tab', { name: 'Reposts' }).click();")
     expect(session.script).not.toContain("await page.goto('https://medium.com/@tastejs/reposts');")
   })
 
-  it("builds frame locators for script-recorded iframe actions", () => {
+  it("builds frame locators for script-recorded iframe actions", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const topFrame = createFrame({ url: "https://example.com/checkout" })
     const childFrame = createFrame({
@@ -998,7 +999,7 @@ test("recorded script flow", async ({ page }) => {
       value: "4242424242424242"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "page.locator('iframe').contentFrame().getByRole('textbox', { name: 'Card number' }).fill('4242424242424242');"
     )
@@ -1036,7 +1037,7 @@ test("recorded script flow", async ({ page }) => {
       value: "4242"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "page.locator('iframe[name=\"payment\"]').contentFrame().getByRole('textbox', { name: 'Card number' }).fill('4242');"
     )
@@ -1142,7 +1143,7 @@ test("recorded script flow", async ({ page }) => {
     await pendingInjection
   })
 
-  it("marks the frame only after the recorder is initialized", () => {
+  it("marks the frame only after the recorder is initialized", async () => {
     const script = buildPlaywrightScriptRecorderInjectionScript("frame-channel-1")
     const recorderInitialization = script.indexOf("const recorder = new PollingRecorder")
     const installedMarker = script.lastIndexOf(
@@ -1154,11 +1155,70 @@ test("recorded script flow", async ({ page }) => {
     )
     expect(script).toContain('const RECORDER_FRAME_CHANNEL_ID = "frame-channel-1"')
     expect(script).toContain("channelId: RECORDER_FRAME_CHANNEL_ID")
+    expect(script).toContain("const globalListenersBeforeRecorder = new Set(")
+    expect(script).toContain("injectedScript.onGlobalListenersRemoved.delete(listener)")
+    expect(script).toContain("document.adoptedStyleSheets.filter(")
     expect(installedMarker).toBeGreaterThan(recorderInitialization)
     expect(script.slice(installedMarker)).toContain("return RECORDER_FRAME_CHANNEL_ID")
   })
 
-  it("falls back to the last hover selector for transient tooltip click selectors", () => {
+  it("disposes the injected recorder when recording stops", async () => {
+    startScriptRecording({ threadId: "thread-1" })
+    const executedScripts: string[] = []
+    const frame = createFrame({
+      url: "https://example.com/recording",
+      executeJavaScriptInIsolatedWorld: async (_worldId, scripts) => {
+        executedScripts.push(scripts[0]?.code ?? "")
+        return executedScripts.length === 1 ? "frame-channel-1" : true
+      }
+    })
+
+    await installScriptRecorder(frame)
+    await stopScriptRecording()
+
+    expect(executedScripts).toHaveLength(2)
+    expect(executedScripts[1]).toBe(buildPlaywrightScriptRecorderDisposeScript())
+  })
+
+  it("shares one stop task while recorder injection is still finishing", async () => {
+    startScriptRecording({ threadId: "thread-1" })
+    let releaseInjection: (() => void) | undefined
+    let executionCount = 0
+    const frame = createFrame({
+      url: "https://example.com/recording",
+      executeJavaScriptInIsolatedWorld: async () => {
+        executionCount += 1
+        if (executionCount === 1) {
+          await new Promise<void>((resolve) => {
+            releaseInjection = resolve
+          })
+          return "frame-channel-1"
+        }
+        return true
+      }
+    })
+
+    const injection = installScriptRecorder(frame)
+    await Promise.resolve()
+    const firstStop = stopScriptRecording()
+    const secondStop = stopScriptRecording()
+    let secondStopCompleted = false
+    void secondStop.then(() => {
+      secondStopCompleted = true
+    })
+
+    await Promise.resolve()
+    expect(secondStopCompleted).toBe(false)
+    releaseInjection?.()
+    const [firstSession, secondSession] = await Promise.all([firstStop, secondStop])
+    await injection
+
+    expect(firstSession.status).toBe("completed")
+    expect(secondSession).toEqual(firstSession)
+    expect(executionCount).toBe(2)
+  })
+
+  it("falls back to the last hover selector for transient tooltip click selectors", async () => {
     const script = buildPlaywrightScriptRecorderInjectionScript("frame-channel-1")
     const mouseMoveListener = script.indexOf(
       'document.addEventListener("mousemove", rememberHoveredActionSelector, true)'
@@ -1220,13 +1280,13 @@ test("recorded script flow", async ({ page }) => {
       })}`
     )
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "await page.locator('iframe').contentFrame().getByRole('tab', { name: '个人资料', exact: true }).click();"
     )
   })
 
-  it("keeps nested iframe paths aligned with Playwright codegen order", () => {
+  it("keeps nested iframe paths aligned with Playwright codegen order", async () => {
     startScriptRecording({ threadId: "thread-1" })
 
     const topFrame = createFrame({
@@ -1310,7 +1370,7 @@ test("recorded script flow", async ({ page }) => {
       }
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.script).toContain(
       "page.locator('iframe').first().contentFrame().getByRole('tab', { name: '个人资料', exact: true }).click();"
     )
@@ -1322,7 +1382,7 @@ test("recorded script flow", async ({ page }) => {
     )
   })
 
-  it("records file uploads as direct setInputFiles calls", () => {
+  it("records file uploads as direct setInputFiles calls", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/upload" })
 
@@ -1344,7 +1404,7 @@ test("recorded script flow", async ({ page }) => {
       paths: ["/tmp/fixtures/contract.pdf"]
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
 
     expect(session.actions).toHaveLength(2)
     expect(session.actions[1]).toMatchObject({
@@ -1359,7 +1419,7 @@ test("recorded script flow", async ({ page }) => {
     expect(session.script).not.toContain("TODO_FILE_INPUT_SELECTOR")
   })
 
-  it("normalizes Playwright fakepath fills on file inputs into setInputFiles", () => {
+  it("normalizes Playwright fakepath fills on file inputs into setInputFiles", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/profile" })
     const locator: BrowserLocatorMetadata = {
@@ -1379,7 +1439,7 @@ test("recorded script flow", async ({ page }) => {
       value: "C:\\fakepath\\think.webp"
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
 
     expect(session.actions).toHaveLength(2)
     expect(session.actions[1]).toMatchObject({
@@ -1398,7 +1458,7 @@ test("recorded script flow", async ({ page }) => {
     expect(session.script).not.toContain(".click();")
   })
 
-  it("replays direct file-input uploads without clicking a textbox locator first", () => {
+  it("replays direct file-input uploads without clicking a textbox locator first", async () => {
     startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/profile" })
 
@@ -1424,7 +1484,7 @@ test("recorded script flow", async ({ page }) => {
       paths: ["think.webp"]
     })
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
 
     expect(session.script).not.toContain('page.waitForEvent("filechooser")')
     expect(session.script).not.toContain("getByRole('textbox', { name: 'avatar' }).click()")
@@ -1434,7 +1494,7 @@ test("recorded script flow", async ({ page }) => {
     )
   })
 
-  it("records script navigation updates only while recording", () => {
+  it("records script navigation updates only while recording", async () => {
     recordScriptNavigation("https://should-not-record.test")
     expect(getScriptRecording().actions).toHaveLength(0)
 
@@ -1442,7 +1502,7 @@ test("recorded script flow", async ({ page }) => {
     recordScriptNavigation("https://example.com/first")
     recordScriptNavigation("https://example.com/second")
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
@@ -1451,14 +1511,14 @@ test("recorded script flow", async ({ page }) => {
     ])
   })
 
-  it("records implicit navigation only after an explicit navigation mark", () => {
+  it("records implicit navigation only after an explicit navigation mark", async () => {
     startScriptRecording({ threadId: "thread-1" })
 
     recordScriptNavigation("https://should-not-record.test", "implicit")
     markNextScriptNavigationExplicit("https://example.com/dashboard")
     recordScriptNavigation("https://example.com/dashboard", "implicit")
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "navigate",
@@ -1466,14 +1526,14 @@ test("recorded script flow", async ({ page }) => {
     })
   })
 
-  it("keeps a user-issued navigation when no successful load event follows", () => {
+  it("keeps a user-issued navigation when no successful load event follows", async () => {
     startScriptRecording({ threadId: "thread-1" })
 
     // BrowserService records this before awaiting loadURL because Chromium can
     // reject a redirected or superseded request with ERR_ABORTED.
     recordScriptNavigation("https://example.com/requested", "explicit")
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
@@ -1483,13 +1543,13 @@ test("recorded script flow", async ({ page }) => {
     expect(session.script).toContain("await page.goto('https://example.com/requested');")
   })
 
-  it("records implicit navigation after an untargeted explicit navigation mark", () => {
+  it("records implicit navigation after an untargeted explicit navigation mark", async () => {
     startScriptRecording({ threadId: "thread-1" })
 
     markNextScriptNavigationExplicit()
     recordScriptNavigation("https://example.com/history-entry", "implicit")
 
-    const session = stopScriptRecording()
+    const session = await stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "navigate",

@@ -180,7 +180,7 @@ function registerBrowserScriptRecordingIpc({ browserService, ipcMain }: BrowserI
 
   ipcMain.handle(
     "browser:stopScriptRecording",
-    (_event, environment?: BrowserRecordingEnvironment): BrowserRecordingSession =>
+    (_event, environment?: BrowserRecordingEnvironment): Promise<BrowserRecordingSession> =>
       stopScriptRecording(environment)
   )
 
