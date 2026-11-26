@@ -422,7 +422,10 @@ import {
   startKnowledgeBaseManager,
   stopKnowledgeBaseManager
 } from "./services/knowledge-base-manager"
-import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
+import {
+  initializeAdoptionTracker,
+  shutdownAdoptionTrackerAfterWrites
+} from "./services/adoption-tracker"
 import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
@@ -1781,13 +1784,10 @@ if (browserNativeMessagingHostLaunch) {
     stopKnowledgeBaseManager()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
-    try {
-      shutdownAdoptionTracker()
-    } catch (err) {
-      console.warn("[Main] shutdownAdoptionTracker error:", err)
-    }
-
     const cleanup = Promise.all([
+      shutdownAdoptionTrackerAfterWrites().catch((err) =>
+        console.warn("[Main] shutdownAdoptionTracker error:", err)
+      ),
       stopLocalBotHost().catch((error) => console.warn("[Bots] Shutdown failed", error)),
       builtinRobotManager
         .stop()

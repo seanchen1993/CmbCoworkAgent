@@ -42,7 +42,7 @@ import {
   sep
 } from "path"
 import { createHash, randomUUID } from "crypto"
-import { execFile, type ExecFileException } from "child_process"
+import { execFile } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
 import {
@@ -77,6 +77,7 @@ import {
   type EventReportResult,
   type IEventReporter
 } from "./event-reporter"
+import { AdoptionWorktrees } from "./adoption-worktree"
 import { getGitRootForPath } from "./git-repository-discovery"
 import {
   loadHarnessDeployUnitSnapshot,
@@ -102,6 +103,11 @@ import {
 import {
   cleanupAdoptionDeliveryRecords,
   closeAdoptionIndex,
+  pendingGenerationRepoPaths,
+  deferRepoGeneration,
+  listDueGenerationRepoChecks,
+  settleGenerationRepoCheck,
+  GENERATION_REPO_BATCH_SIZE,
   commitAdoptionMeasurements,
   deleteAdoptLineDetailsOlderThan,
   deleteThreadActiveSkillsOlderThan,
@@ -545,80 +551,7 @@ export function isCodeFile(filePath: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────
-// git work-tree gate
-//
-// code_gen is only reported for files that live inside a git work tree. Files
-// generated outside any git repo can never reach a commit, so our commit-driven
-// measurement never closes the loop on them — they would sit forever as "100%
-// uncommitted" noise. Such files are also where external platforms (e.g.
-// tag-dev / data-dev) own reporting via their own hook; gating here keeps the two
-// producers from double-counting the same generation, with the partition keyed
-// purely on a signal we own (git membership) — no coordination with that hook.
-//
-// Strict semantics: only a positive "true" from `--is-inside-work-tree` counts.
-// A missing repo, a git error, or git being unavailable all resolve to false
-// (skip). The result is cached per directory so the hot path spawns git at most
-// once per directory for the whole session. Trade-off: if git is ever
-// unavailable, code_gen reporting stops entirely — acceptable, since git is a
-// hard dependency of the rest of the app.
-// ─────────────────────────────────────────────────────────
-
-const GIT_WORKTREE_CACHE_MAX = 256
-const gitWorkTreeCache = new Map<string, boolean>()
-const gitWorkTreeRequests = new Map<string, Promise<boolean>>()
-
-function rememberGitWorkTreeResult(dir: string, inside: boolean): boolean {
-  // Bounded cache (Map preserves insertion order -> evict oldest first).
-  if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
-    const oldest = gitWorkTreeCache.keys().next().value
-    if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
-  }
-  gitWorkTreeCache.set(dir, inside)
-  return inside
-}
-
-async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
-  const dir = dirname(absPath)
-  const cached = gitWorkTreeCache.get(dir)
-  if (cached !== undefined) return cached
-  const inFlight = gitWorkTreeRequests.get(dir)
-  if (inFlight) return inFlight
-
-  const startedAt = Date.now()
-  const request = execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
-    cwd: dir,
-    encoding: "utf-8",
-    timeout: 5000,
-    maxBuffer: 1024 * 1024,
-    windowsHide: true
-  })
-    .then(({ stdout }) => {
-      const result = stdout.trim()
-      if (result !== "true") {
-        console.info("[AdoptionTracker] git work tree check returned non-true", {
-          dir,
-          stdout: result.slice(0, 120)
-        })
-      }
-      return rememberGitWorkTreeResult(dir, result === "true")
-    })
-    .catch((error: ExecFileException) => {
-      console.info("[AdoptionTracker] git work tree check failed", {
-        dir,
-        code: error.code,
-        signal: error.signal,
-        killed: error.killed,
-        elapsedMs: Date.now() - startedAt,
-        detail: (error.stderr?.trim() || error.message).slice(0, 512)
-      })
-      return rememberGitWorkTreeResult(dir, false)
-    })
-    .finally(() => {
-      if (gitWorkTreeRequests.get(dir) === request) gitWorkTreeRequests.delete(dir)
-    })
-  gitWorkTreeRequests.set(dir, request)
-  return request
-}
+const adoptionWorktrees = new AdoptionWorktrees()
 
 // ─────────────────────────────────────────────────────────
 // Line hashing (FNV-1a 32-bit) + normalisation
@@ -1367,11 +1300,18 @@ export function recordShellEdit(input: RecordShellEditInput): Promise<void> {
   return task
 }
 
-/** @internal Standalone regression seam; production recordGen remains fire-and-forget. */
-export async function waitForAdoptionRecordGenIdleForTest(): Promise<void> {
+async function waitForPendingGenerationWrites(): Promise<void> {
   while (inFlightRecordGenTasks.size > 0) {
     await Promise.all([...inFlightRecordGenTasks])
   }
+}
+
+export const waitForAdoptionRecordGenIdleForTest = waitForPendingGenerationWrites
+
+/** Join the existing bounded Electron quit cleanup without delaying individual writes. */
+export async function shutdownAdoptionTrackerAfterWrites(): Promise<void> {
+  await waitForPendingGenerationWrites()
+  shutdownAdoptionTracker()
 }
 
 function buildCodeGenerationProperties(args: {
@@ -1440,10 +1380,13 @@ function buildCodeGenerationProperties(args: {
 
 function enqueueTestCodeGeneration(
   properties: Record<string, unknown>,
-  createdAt: number
+  createdAt: number,
+  pendingRepoPath?: string
 ): boolean {
   const event = buildEvent("code_test_gen", "code_adoption", properties)
-  if (!enqueueEventOutbox(toOutboxEvent(event, createdAt))) {
+  const envelope = toOutboxEvent(event, createdAt)
+  if (pendingRepoPath) return deferRepoGeneration(pendingRepoPath, [envelope])
+  if (!enqueueEventOutbox(envelope)) {
     console.warn(
       `[AdoptionTracker] failed to persist code_test_gen event for genEventId=${String(properties.eventId ?? "unknown")}`
     )
@@ -1488,11 +1431,9 @@ async function doRecordGen(
       ctx.harnessDeployUnitId = resolveCodeDeployUnit(snapshot, absPath)
     }
 
-    // git-gate: only report generations that live inside a git work tree (see
-    // isInsideGitWorkTree). Non-git files never reach a commit and are where
-    // external platforms own reporting via their own hook — skipping them here
-    // avoids double-counting and removes events that could never close the loop.
-    if (!(await isInsideGitWorkTree(absPath))) {
+    const membership = await adoptionWorktrees.check(absPath)
+    const pendingRepoPath = membership === "unknown" ? absPath : undefined
+    if (membership === "outside") {
       console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
       return
     }
@@ -1526,7 +1467,8 @@ async function doRecordGen(
         deletedLineCount: resolveDeletedLineCount(input, lineChanges.deletedLineCount),
         createdAt,
         ctx,
-        testMatchRule
+        testMatchRule,
+        pendingRepoPath
       })
       return
     }
@@ -1548,7 +1490,8 @@ async function doRecordGen(
         deletedLineCount: resolveDeletedLineCount(input, baseline.supersededLineHashes.length),
         createdAt,
         ctx,
-        testMatchRule
+        testMatchRule,
+        pendingRepoPath
       })
       return
     }
@@ -1592,9 +1535,9 @@ async function doRecordGen(
     // gen_events, so commit measurement cannot turn it into a standard
     // code_adopt or add it to the existing adoption-rate numerator/denominator.
     if (testMatchRule) {
-      const persisted = enqueueTestCodeGeneration(generationProperties, createdAt)
+      const persisted = enqueueTestCodeGeneration(generationProperties, createdAt, pendingRepoPath)
       console.log(
-        `[AdoptionTracker] recordTestGen ${persisted ? "OK" : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+        `[AdoptionTracker] recordTestGen ${persisted ? (pendingRepoPath ? "awaiting work tree" : "OK") : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
       )
       return
     }
@@ -1655,7 +1598,8 @@ async function doRecordGen(
         change_kind: changeAttribution.changeKind,
         ...observabilityColumns
       },
-      toOutboxEvent(generationEvent, createdAt)
+      toOutboxEvent(generationEvent, createdAt),
+      pendingRepoPath
     )
     if (!indexed) {
       console.warn(
@@ -1669,7 +1613,7 @@ async function doRecordGen(
     // The outbox drain performs a final durability check before network I/O.
     scheduleBatchedCodeGenOutboxDrain()
     console.log(
-      `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${baseline.rawGeneratedLineCount} supersededHashes=${oldLineHashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+      `[AdoptionTracker] recordGen ${pendingRepoPath ? "awaiting work tree" : "OK"}: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${baseline.rawGeneratedLineCount} supersededHashes=${oldLineHashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
     )
   } catch (e) {
     console.warn("[AdoptionTracker] doRecordGen failed:", e)
@@ -1693,7 +1637,9 @@ function emitSkippedLargeAtGen(args: {
   /** Attribution snapshot taken before any await — see doRecordGen. */
   ctx: AdoptionContext
   testMatchRule: TestCodeMatchRule | null
+  pendingRepoPath?: string
 }): void {
+  const { pendingRepoPath } = args
   const {
     eventId,
     input,
@@ -1724,9 +1670,9 @@ function emitSkippedLargeAtGen(args: {
   })
 
   if (testMatchRule) {
-    const persisted = enqueueTestCodeGeneration(generationProperties, createdAt)
+    const persisted = enqueueTestCodeGeneration(generationProperties, createdAt, pendingRepoPath)
     console.log(
-      `[AdoptionTracker] recordTestGen ${persisted ? "OK" : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${lineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} oversize=true threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+      `[AdoptionTracker] recordTestGen ${persisted ? (pendingRepoPath ? "awaiting work tree" : "OK") : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${lineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} oversize=true threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
     )
     return
   }
@@ -1770,11 +1716,11 @@ function emitSkippedLargeAtGen(args: {
     changeKind: changeAttribution.changeKind,
     ...observabilityProps
   })
+  const events = [toOutboxEvent(generationEvent, createdAt), toOutboxEvent(adoptEvent, createdAt)]
   if (
-    enqueueEventOutboxBatch(
-      [toOutboxEvent(generationEvent, createdAt), toOutboxEvent(adoptEvent, createdAt)],
-      false
-    )
+    pendingRepoPath
+      ? deferRepoGeneration(pendingRepoPath, events)
+      : enqueueEventOutboxBatch(events, false)
   ) {
     scheduleBatchedCodeGenOutboxDrain()
   } else {
@@ -2859,6 +2805,15 @@ async function runCommitJob(
         if (timer) clearTimeout(timer)
       }
     }
+    const through = maxCreated ?? Date.now()
+    for (const file of pendingGenerationRepoPaths(() => paths, 0, through)) {
+      let restored: number
+      do {
+        restored = settleGenerationRepoCheck(file, "inside", through)
+        // A large commit/backlog must leave time for UI IPC between batches.
+        if (restored) await new Promise<void>((resume) => setImmediate(resume))
+      } while (restored === GENERATION_REPO_BATCH_SIZE)
+    }
     const fileDiffs = await readPendingCommitFileDiffs(
       job,
       measurable.map((snapshot) => snapshot.absPath),
@@ -2980,7 +2935,13 @@ export function hasPendingGenerationsForCommit(
       return true
     if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
-  return false
+  return (
+    pendingGenerationRepoPaths(
+      () => snapshots.map((s) => resolvePath(s.absPath)),
+      minCreated,
+      maxCreated ?? Date.now()
+    ).length > 0
+  )
 }
 
 // ─────────────────────────────────────────────────────────
@@ -3558,6 +3519,35 @@ async function drainAdoptionEventOutbox(generation: number, signal: AbortSignal)
   if (isOutboxLifecycleCurrent(generation, signal)) flushAdoptionIndex()
 }
 
+// Separate from delivery: a slow Git probe must never hold up ready outbox events.
+let repoCheckRunning = false
+export async function retryGenerationRepoChecks(): Promise<void> {
+  if (!initialized || repoCheckRunning) return
+  repoCheckRunning = true
+  const lifecycle = outboxLifecycleGeneration
+  try {
+    for (const { id, file } of listDueGenerationRepoChecks(
+      Date.now(),
+      GENERATION_REPO_BATCH_SIZE
+    )) {
+      const checkedAt = Date.now()
+      const state = await adoptionWorktrees.check(file, "retry")
+      if (!initialized || lifecycle !== outboxLifecycleGeneration) return
+      try {
+        settleGenerationRepoCheck(file, state, checkedAt, id)
+      } catch (error) {
+        // One malformed envelope must not starve the other due rows.
+        settleGenerationRepoCheck(file, "unknown", checkedAt, id)
+        console.warn("[AdoptionTracker] deferred generation restore failed:", { id, error })
+      }
+    }
+  } catch (error) {
+    console.warn("[AdoptionTracker] deferred work tree check failed:", error)
+  } finally {
+    repoCheckRunning = false
+  }
+}
+
 /** Flush all currently due adoption events. Exported for deterministic tests. */
 export function flushAdoptionEventOutbox(): Promise<void> {
   if (!initialized) return Promise.resolve()
@@ -3664,6 +3654,7 @@ export async function initializeAdoptionTracker(): Promise<boolean> {
     if (typeof sweepTimer.unref === "function") sweepTimer.unref()
 
     outboxTimer = setInterval(() => {
+      void retryGenerationRepoChecks()
       void flushAdoptionEventOutbox()
     }, OUTBOX_POLL_INTERVAL_MS)
     if (typeof outboxTimer.unref === "function") outboxTimer.unref()
@@ -3674,6 +3665,7 @@ export async function initializeAdoptionTracker(): Promise<boolean> {
     if (typeof commitJobTimer.unref === "function") commitJobTimer.unref()
 
     queueMicrotask(() => {
+      void retryGenerationRepoChecks()
       void flushAdoptionEventOutbox()
       void flushAdoptionCommitJobs()
     })
