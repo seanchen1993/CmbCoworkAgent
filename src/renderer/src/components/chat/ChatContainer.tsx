@@ -39,8 +39,10 @@ import {
   ChatExecutionDetailsContext,
   ChatFoldedToolCallsContext,
   ChatDesktopWorkIdContext,
-  ChatToolPresentationContext
+  ChatToolPresentationContext,
+  ChatUserImagePresentationContext
 } from "./chat-presentation-context"
+import { MessageImageGallery } from "./MessageImageGallery"
 import { QueuedMessageActions } from "./QueuedMessageActions"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botMessageHasEntranceBody } from "@/lib/bot-message-entrance"
@@ -5962,6 +5964,13 @@ export function ChatContainer({
   const allowWorkspaceImages = surface === "default" && !managedTurn && !readOnly
   const imageDraftIdentity = currentThread && threadDraftIncarnation(currentThread)
   const imageDraftBinding = imageDraftIdentity?.token ?? imageDraftIdentity?.legacyCreatedAt
+  const imageIncarnation = imageDraftIdentity && threadIncarnationKey(imageDraftIdentity)
+  const parentImagePresentation = useContext(ChatUserImagePresentationContext)
+  const presentOrdinaryImages = useCallback((message: Message) => {
+    if (!imageIncarnation || !message.hasChatImages) return null
+    const request = { threadId, messageId: message.id, incarnation: imageIncarnation, workspacePath: workspacePath ?? null }
+    return <MessageImageGallery sourceKey={JSON.stringify(request)} read={() => window.api.file.readMessageChatImages(request)} />
+  }, [threadId, imageIncarnation, workspacePath])
   useEffect(() => {
     if (!allowWorkspaceImages || historyOnly || restoredBotDraft || historyLoading || !currentThread ||
         currentThread.metadata?.botId || currentThread.metadata?.botWorkId ||
@@ -6301,11 +6310,12 @@ export function ChatContainer({
   }
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (content: string, options: { id?: string } = {}): Promise<Message> => {
+    async (content: string, options: { id?: string; hasChatImages?: boolean } = {}): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: options.id ?? crypto.randomUUID(),
         role: "user",
+        ...(options.hasChatImages ? { hasChatImages: true as const } : {}),
         content,
         created_at: userStartAt,
         start_at: userStartAt,
@@ -7922,7 +7932,7 @@ export function ChatContainer({
                   acknowledged = true
                   setPhase("accepted")
                   const display = guardCoordinatorPlainText(getQueuedDisplayContent(entry, true))
-                  void appendVisibleUserMessageWithTime(display, { id })
+                  void appendVisibleUserMessageWithTime(display, { id, hasChatImages: Boolean(entry.chatImages?.length) })
                   if (!threadMessages.length && currentThread?.title?.startsWith("Thread ")) {
                     const title = entry.text.trim() || entry.skillName
                     if (title) generateTitleForFirstMessage(threadId, title, entry.skillName, entry.skillDescription)
@@ -10104,6 +10114,7 @@ export function ChatContainer({
                     value={showExecutionDetails || searchExpandsExecutionDetails}
                   >
                     <ChatFoldedToolCallsContext.Provider value={foldedTools}>
+                    <ChatUserImagePresentationContext.Provider value={surface === "default" && !managedTurn ? presentOrdinaryImages : parentImagePresentation}>
                     <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
                       <ChatMessageVirtualList
                         historyWindowRevision={historyWindowRevision}
@@ -10174,6 +10185,7 @@ export function ChatContainer({
                         footer={chatMessageListFooter}
                       />
                     </ChatToolPresentationContext.Provider>
+                    </ChatUserImagePresentationContext.Provider>
                     </ChatFoldedToolCallsContext.Provider>
                   </ChatExecutionDetailsContext.Provider>
                 </div>

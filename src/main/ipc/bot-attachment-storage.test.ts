@@ -65,7 +65,7 @@ vi.mock("../workspace-file-preview/client", async () => {
 import * as db from "../db"
 import { createBotDeliveryTools, createBotReturnFileTools } from "../bots/tools"
 import { findHistoricalBotWorkDelivery, type BotHistoricalDeliveryReference } from "../bots/delivery-receipt"
-import { botAttachmentReceiptKey, workAttachmentStorage } from "../bots/attachment-storage"
+import { botAttachmentReceiptKey, withStagedWorkAttachments, workAttachmentStorage } from "../bots/attachment-storage"
 import { projectSkillWorkInput } from "../bots/input-files"
 import { createLocalBotWorkHistory } from "../bots/work-history"
 import { createBotOrdinaryThreads } from "../bots/ordinary-threads"
@@ -92,6 +92,20 @@ beforeAll(async () => {
 afterAll(async () => {
   await db.closeDatabase()
   await rm(fixtures.root, { recursive: true, force: true })
+})
+
+it("publishes an import when the storage path uses a directory alias", async () => {
+  const { botImportDestination, publishStagedBotImport } = await import("../bots/file-copy")
+  const storage = join(fixtures.root, "canonical upload directory")
+  const alias = join(fixtures.root, "upload-alias")
+  await mkdir(storage)
+  await symlink(storage, alias, process.platform === "win32" ? "junction" : "dir")
+  await withStagedWorkAttachments(alias, async staging => {
+    const file = await botImportDestination(staging, "report.html")
+    await writeFile(file.path, "body")
+    await publishStagedBotImport(alias, staging, file.path)
+    expect(await readFile(join(storage, file.id), "utf8")).toBe("body")
+  })
 })
 
 it.each([false, true])("signs workspace @file against the original thread and keeps its selected bytes (work=%s)", async managed => {

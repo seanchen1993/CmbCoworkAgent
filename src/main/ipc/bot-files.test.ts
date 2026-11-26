@@ -19,6 +19,7 @@ const imWorkspace = join("/test-data", "bots", "workspaces", "mock-im-binding")
 const fixture = vi.hoisted(() => ({
   dataRoot: vi.fn(() => "/test-data"),
   retainImageSelection: vi.fn(),
+  groupMessageImageInputs: vi.fn(),
   getBot: vi.fn(),
   getGroupMember: vi.fn(),
   getGroup: vi.fn(),
@@ -165,6 +166,27 @@ beforeEach(() => {
     size: 12,
     truncated: false
   })
+})
+
+it("checks the desktop window and revalidates group ownership before returning message pixels", async () => {
+  const bytes = Buffer.from(await pngBytes())
+  const digest = createHash("sha256").update(bytes).digest("hex")
+  const filename = "sent.png"
+  const file = { filename, size: bytes.length, mimeType: "image/png",
+    filePath: join(tmpdir(), ".bot-deliveries", digest, filename) }
+  const receipt = { id: "input-1", file, attachment: file, blockHash: "selected" }
+  fixture.groupMessageImageInputs.mockReturnValue([receipt])
+  fixture.stableRead.mockResolvedValue(bytes)
+  for (const source of ["subframe", "secondary"] as const)
+    await expect(register(source)("read-group-message-images", "g", "msg")).rejects.toThrow()
+  expect(fixture.groupMessageImageInputs).not.toHaveBeenCalled()
+  const invoke = register()
+  await expect(invoke("read-group-message-images", "g", "msg")).resolves.toEqual([
+    { filename, url: expect.stringMatching(/^data:image\/webp;base64,/) }
+  ])
+  expect(fixture.groupMessageImageInputs).toHaveBeenCalledWith("g", "msg")
+  fixture.groupMessageImageInputs.mockReturnValueOnce([receipt]).mockReturnValueOnce([])
+  await expect(invoke("read-group-message-images", "g", "msg")).rejects.toThrow("已变更")
 })
 
 it.each(["private", "group"] as const)("issues an image receipt only to its %s owner", async scope => {

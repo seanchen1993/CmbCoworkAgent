@@ -185,6 +185,8 @@ export type BotTaskOrigin =
       mentions?: BotMessageMention[]
       /** Exact picker/drop receipts accepted with this request; text alone grants nothing. */
       inputFileIds?: string[]
+      /** Visual receipts selected by the desktop user, including documents with embedded images. */
+      visualInputFileIds?: string[]
       /** Host receipt from this submission's actual prompt preparation. */
       allowedInputFileIds?: string[]
       imageAdmission?: "pending" | "accepted" | "withdrawn"
@@ -328,6 +330,7 @@ export interface BotGroupMessage {
   createdAt: number
   exchange?: { taskId: string; botId: string }
   files?: BotDeliveredFile[]
+  hasInputImages?: true
   /** A group transcript entry; answers are read from the exact original Runtime receipt. */
   question?: {
     taskId: string
@@ -599,8 +602,9 @@ export interface BotClient {
     groupId?: string,
     workId?: string
   ): Promise<import("../file-attachment").FileAttachment[]>
+  readGroupMessageImages?(groupId: string, messageId: string): Promise<import("../file-attachment").DraftAttachmentImage[]>
   readAttachmentImages?(
-    botId: string, inputId: string, groupId?: string, workId?: string
+    botId: string, inputId: string, groupId?: string, workId?: string, messageId?: string
   ): Promise<import("../file-attachment").DraftAttachmentImage[]>
   /** Retain a selected file from the exact local Bot conversation's workspace. */
   attachWorkspaceFile?(

@@ -11,6 +11,7 @@ import {
   isVisualDocumentPath,
   MAX_ATTACHMENT_PICKER_FILES,
   MAX_ATTACHMENT_FILE_NAME_LENGTH,
+  type DraftAttachmentImage,
   type FileAttachment
 } from "../../shared/file-attachment"
 import { basename, dirname, join, relative } from "node:path"
@@ -679,8 +680,26 @@ export function registerBotFileHandlers(
   }
   const imageWindow = (event: IpcMainInvokeEvent) =>
     getMainWindow ? assertChatAttachmentWindow(event, getMainWindow) : desktopWindow(event)
+  ipcMain.handle("bots:files:read-group-message-images", async (
+    event, hostId: unknown, group: unknown, message: unknown
+  ) => {
+    imageWindow(event)
+    const host = hostFor(hostId)
+    const groupId = botIdentifier(group), messageId = botIdentifier(message)
+    const lookup = () => host.groupMessageImageInputs(groupId, messageId)
+    const files = lookup()
+    const images: DraftAttachmentImage[] = []
+    for (const file of files)
+      images.push(...await readBotAttachmentImages(file, "bot-group-preview:" + file.id))
+    imageWindow(event)
+    const current = lookup()
+    if (current.length !== files.length || current.some((file, i) =>
+      file.id !== files[i].id || file.file.filePath !== files[i].file.filePath))
+      throw new BotError("CONFLICT", "群消息附件已变更")
+    return images
+  })
   ipcMain.handle("bots:files:read-attachment-images", async (
-    event, hostId: unknown, botId: unknown, input: unknown, groupId?: unknown, workId?: unknown
+    event, hostId: unknown, botId: unknown, input: unknown, groupId?: unknown, workId?: unknown, messageId?: unknown
   ) => {
     imageWindow(event)
     const host = hostFor(hostId)
@@ -688,7 +707,9 @@ export function registerBotFileHandlers(
     const group = groupId === undefined ? undefined : botIdentifier(groupId)
     const work = workId === undefined ? undefined : botIdentifier(workId)
     if (group && work) throw new BotError("INVALID_INPUT", "工作与群会话不能混用")
-    const lookup = () => host.desktopAttachmentPreviewInput(bot, inputId, group, work)
+    const message = messageId === undefined ? undefined : botIdentifier(messageId)
+    if (group && message) throw new BotError("INVALID_INPUT", "请通过群消息预览群图片")
+    const lookup = () => host.desktopAttachmentPreviewInput(bot, inputId, group, work, message)
     const file = lookup()
     const images = await readBotAttachmentImages(file, "bot-attachment-preview:" + inputId)
     imageWindow(event)

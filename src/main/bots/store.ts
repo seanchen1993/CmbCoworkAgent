@@ -3820,6 +3820,13 @@ export class BotStore {
     })
   }
 
+  groupMessageImageInputs(groupId: string, messageId: string): BotInputFile[] {
+    const row = this.rows(`SELECT i.inputs_json FROM bot_group_message_images i
+      JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
+      WHERE i.group_id=? AND i.message_id=? AND m.author_bot_id IS NULL`, [groupId, messageId])[0]
+    return row ? this.groupImageInputs(groupId, JSON.parse(String(row.inputs_json))).filter(hasBotInputImages) : []
+  }
+
   groupImagesForTask(task: BotTask): BotInputFile[] {
     if (task.origin.kind !== "group") return []
     const { groupId, messageId } = task.origin
@@ -3855,6 +3862,21 @@ export class BotStore {
       const { attachment, blockHash, workId, ...file } = JSON.parse(String(row.payload))
       return { id, botId: String(row.bot_id), file, ...(attachment ? { attachment, blockHash } : {}), ...(workId ? { workId } : {}) }
     })
+  }
+
+  desktopMessageImageInput(botId: string, inputId: string, messageId: string, workId?: string): BotInputFile {
+    const threadId = workId ? this.getWork(botId, workId).threadId : this.getBot(botId).threadId
+    const row = this.rows(`SELECT origin_json FROM bot_exchange_records WHERE bot_id=? AND thread_id=?
+      AND work_id IS ? AND request_id=? AND audience_key='desktop'
+      AND json_extract(origin_json,'$.kind')='user'
+      AND EXISTS (SELECT 1 FROM json_each(origin_json,'$.inputFileIds') WHERE value=?)`,
+      [botId, threadId, workId ?? null, messageId, inputId])[0]
+    if (!row) throw new BotError("NOT_FOUND", "此消息没有该附件")
+    const [file] = this.inputFiles(botId, [inputId])
+    // A skill dispatched from the private composer may retain its original private receipt.
+    if (file.workId !== workId && !(workId && !file.workId && JSON.parse(String(row.origin_json)).explicitSkill))
+      throw new BotError("INVALID_INPUT", "此附件不属于当前会话")
+    return file
   }
 
   desktopInputFiles(botId: string, ids: readonly string[], workId?: string): BotInputFile[] {
@@ -4390,7 +4412,10 @@ export class BotStore {
           throw new BotError("CONFLICT", "提及的 Bot 已不可用，请重新选择")
       }
       if (origin.kind === "user" && mentions.length) origin = { ...origin, mentions }
-      if (origin.kind === "user" && inputFileIds.length) origin = { ...origin, inputFileIds }
+      if (origin.kind === "user" && inputFileIds.length) {
+        const visualInputFileIds = files.filter(hasBotInputImages).map(file => file.id)
+        origin = { ...origin, inputFileIds, visualInputFileIds }
+      }
       if (origin.kind === "user" && explicitSkill) origin = { ...origin, explicitSkill }
       if (input.replyToId !== undefined) {
         if (origin.kind !== "user")
@@ -10983,7 +11008,7 @@ export class BotStore {
     }
     return this.rows(
       `WITH page AS (SELECT * FROM bot_group_messages WHERE group_id=? AND ordinal${targeted ? "<=" : "<"}? ${includeQuestions ? "" : "AND question_json IS NULL"} ORDER BY ordinal DESC LIMIT 50)
-       SELECT m.*, COALESCE(d.id,da.id,r.id,ra.id) AS exchange_id,
+       SELECT m.*, i.message_id AS image_message_id, COALESCE(d.id,da.id,r.id,ra.id) AS exchange_id,
         COALESCE(d.bot_id,da.bot_id,r.bot_id,ra.bot_id) AS recipient_id,
         COALESCE(d.origin_json,da.origin_json,r.origin_json,ra.origin_json) AS exchange_origin,
         COALESCE(
@@ -10993,6 +11018,7 @@ export class BotStore {
         q.id AS reply_id,q.ordinal AS reply_ordinal,q.author_bot_id AS reply_author,
         substr(q.text,1,1000) AS reply_text,q.files_json AS reply_files
        FROM page m
+       LEFT JOIN bot_group_message_images i ON i.group_id=m.group_id AND i.message_id=m.id
        LEFT JOIN bot_group_messages q ON q.id=m.reply_to_id AND q.group_id=m.group_id
        LEFT JOIN bot_tasks d ON d.request_id=m.id
        LEFT JOIN bot_exchange_archive da ON da.request_id=m.id
@@ -11026,6 +11052,7 @@ export class BotStore {
           groupId: String(row.group_id),
           authorBotId: row.author_bot_id == null ? null : String(row.author_bot_id),
           text: String(row.text),
+          ...(row.image_message_id && row.author_bot_id == null ? { hasInputImages: true as const } : {}),
           ...(row.reply_id
             ? {
                 replyTo: {

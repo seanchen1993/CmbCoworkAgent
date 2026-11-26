@@ -66,7 +66,10 @@ it("freezes group images by source group, request and selected member", () => {
     expect(deny.mock.calls).toHaveLength(1)
     expect(store.groupMessages(group.id)).toHaveLength(0)
     expect(store.sendGroup(req)).toBe(true)
-    expect(store.groupMessages(group.id)[0].text).toBe("📎 diagram.png")
+    expect(store.groupMessages(group.id)[0]).toMatchObject({ text: "📎 diagram.png", hasInputImages: true })
+    expect(store.groupMessageImageInputs(group.id, req.requestId).map(file => file.id)).toEqual([first.botInputId])
+    expect(store.groupMessageImageInputs(other.id, req.requestId)).toEqual([])
+    expect(store.groupMessageImageInputs(group.id, first.botInputId!)).toEqual([])
     expect(store.sendGroup(req, deny)).toBe(false)
     expect(deny.mock.calls).toHaveLength(1)
     expect(store.sendGroup(req)).toBe(false)
@@ -80,6 +83,7 @@ it("freezes group images by source group, request and selected member", () => {
     expect(() => store.inputFiles(a.id, [first.botInputId!])).toThrow()
     store.saveGroup({ ...group, memberIds: [b.id] }, group)
     expect(() => store.groupImagesForTask(task)).toThrow()
+    expect(store.groupMessageImageInputs(group.id, req.requestId)[0].id).toBe(first.botInputId)
   } finally {
     db.close()
   }
@@ -101,6 +105,9 @@ it("stages only the uniquely approved version and checks the same bytes it gives
     const [file] = store.inputFiles(bot.id, [selected.botInputId!])
     const body = buildAttachmentMessageParts([selected]).attachmentModelBlocks
     const task = store.enqueue({ botId: bot.id, requestId: "image", message: body, inputFileIds: [file.id] })
+    expect(store.desktopMessageImageInput(bot.id, file.id, "image").id).toBe(file.id)
+    expect(() => store.desktopMessageImageInput(bot.id, file.id, "other-message")).toThrow()
+    expect(store.messageOrigins(bot.id, ["image"])[0].origin).toMatchObject({ visualInputFileIds: [file.id] })
     const stage = vi.fn(async (_thread: string, filename: string, bytes: ArrayBuffer) => {
       expect(Buffer.from(bytes)).toEqual(data)
       return { ...png, image: { id: "snapshot", filename, width: 1, height: 1 } }

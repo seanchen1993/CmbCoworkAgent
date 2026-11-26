@@ -85,10 +85,12 @@ function createWorkAttachmentStorage(workspace: string, threadId: string, key: s
 
 /** Only this picker operation owns the staging directory. Committed snapshots can be shared. */
 export async function withStagedWorkAttachments<T>(storage: string, run: (staging: string) => Promise<T>): Promise<T> {
-  const prefix = join(storage, ".input-batch-")
+  // Match the canonical paths returned by the import and snapshot writers, including Windows 8.3 aliases.
+  const root = await realpath(storage)
+  const prefix = join(root, ".input-batch-")
   // libuv's mkdtemp needs an explicit extended-length path on Windows.
   const temporary = await mkdtemp(toNamespacedPath(prefix))
-  const staging = join(storage, basename(temporary))
+  const staging = join(root, basename(temporary))
   try {
     return await run(staging)
   } finally {

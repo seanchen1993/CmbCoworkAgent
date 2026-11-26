@@ -225,6 +225,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** A sent-image receipt exists; only the scoped preview IPC may read its pixels. */
+  hasChatImages?: true
   /** Added only to desktop history responses; storage and model inputs ignore it. */
   botHistoryInputOrigin?: import("../shared/bots/message-reply").BotHistoryInputOrigin
   botHistoryDeliveryScope?: import("../shared/bots/file-delivery").BotHistoryDeliveryScope

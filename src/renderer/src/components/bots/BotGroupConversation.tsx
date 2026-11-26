@@ -1,4 +1,5 @@
 import { botAttachmentIdentity } from "../../../../shared/bots/input-files"
+import { MessageImageGallery } from "@/components/chat/MessageImageGallery"
 import { AttachmentImagePreview } from "@/components/chat/AttachmentImagePreview"
 import { BotGroupMentionInput, type BotGroupInputControl } from "./BotGroupMentionInput"
 import {
@@ -802,6 +803,12 @@ export function BotGroupConversation({
                                       ”
                                     </span>
                                   </button>
+                                )}
+                                {item.hasInputImages && client.readGroupMessageImages && (
+                                  <MessageImageGallery
+                                    sourceKey={JSON.stringify([client.hostId, group.id, item.id])}
+                                    read={() => client.readGroupMessageImages!(group.id, item.id)}
+                                  />
                                 )}
                                 <GroupMessageMarkdown
                                   message={item}

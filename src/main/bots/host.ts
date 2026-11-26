@@ -788,7 +788,12 @@ export class LocalBotHost {
     return this.store.retainImageSelection(botId, groupId, workId, inputs)
   }
 
-  desktopAttachmentPreviewInput(botId: string, inputId: string, groupId?: string, workId?: string) {
+  groupMessageImageInputs(groupId: string, messageId: string) {
+    this.getGroup(groupId)
+    return this.store.groupMessageImageInputs(groupId, messageId)
+  }
+
+  desktopAttachmentPreviewInput(botId: string, inputId: string, groupId?: string, workId?: string, messageId?: string) {
     if (groupId) {
       this.getGroupMember(groupId, botId)
       return this.store.groupImageInputs(groupId, [inputId])[0]
@@ -799,6 +804,7 @@ export class LocalBotHost {
       if (work.source || work.audienceKey !== "desktop")
         throw new BotError("CONFLICT", "此工作不能预览桌面输入附件")
     }
+    if (messageId) return this.store.desktopMessageImageInput(botId, inputId, messageId, workId)
     return this.store.desktopInputFiles(botId, [inputId], workId)[0]
   }
   retainGroupImage(groupId: string, memberId: string, attachment: FileAttachment, path: string) {

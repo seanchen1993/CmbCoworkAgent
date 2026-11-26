@@ -3222,6 +3222,20 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
 
   const desktopHistoryPage = async <T extends { messages: Message[] }>(event: IpcMainInvokeEvent, threadId: string, page: T): Promise<T> => {
     if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) return page
+    try {
+      const { getChatImageHistoryProjections } = await import("../chat-images")
+      const receipts = getChatImageHistoryProjections(threadId,
+        page.messages.filter(message => message.role === "user").map(message => message.id))
+      if (receipts.size) {
+        page = { ...page, messages: page.messages.map(message => {
+          const receipt = message.role === "user" ? receipts.get(message.id) : undefined
+          return receipt?.images.length && receipt.source !== "bot"
+            ? { ...message, hasChatImages: true as const } : message
+        }) }
+      }
+    } catch (error) {
+      console.warn("[ChatImages] Failed to read history preview metadata:", error)
+    }
     try { return await decorateBotHistoryPage(threadId, page, () => getThreadCore(threadId), readForkReplyOrigins) }
     catch (error) {
       console.warn("[Bots] Failed to read optional history display metadata:", error)

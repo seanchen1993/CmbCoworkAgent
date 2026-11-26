@@ -11,7 +11,8 @@ import { transformSync } from "esbuild"
 import { HumanMessage } from "@langchain/core/messages"
 import sharp from "sharp"
 import { buildAttachmentMessageParts } from "../shared/attachment-message-parts"
-import { checkpointDesktopImageMessageIds, checkpointHasChatImages } from "../shared/checkpoint-transcript"
+import { checkpointDesktopImageMessageIds, checkpointHasChatImages,
+  mergeCheckpointAuthorityTranscriptMessages } from "../shared/checkpoint-transcript"
 import { threadIncarnationKey } from "../shared/thread-incarnation"
 import { materializeChatImages } from "./agent/chat-image-middleware"
 import { captureThreadIncarnation } from "./services/thread-incarnation"
@@ -33,6 +34,7 @@ import {
   discardChatDraftImage,
   pinQueuedChatImages,
   readChatImage,
+  readMessageChatImages,
   stageChatImage,
   holdBotImageStage,
   sweepChatImageStorage,
@@ -91,6 +93,39 @@ describe("chat image input", () => {
     if (!first || !("owner" in first)) throw new Error("missing original claim")
     return { input, owner: first.owner }
   }
+
+  it("previews only approved message images in slot order and rechecks their owner after reading", async () => {
+    const threadId = "sent-image-preview"
+    db.createThread(threadId)
+    const pixels = await sharp({ create: { width: 4, height: 2, channels: 3, background: "blue" } }).png().toBuffer()
+    const refs = await Promise.all(["diagram.png", "report.docx 图 1"].map(async (filename, slot) => {
+      const file = await stageChatImage(threadId, "input.png", Uint8Array.from(pixels).buffer)
+      return { id: file.image!.id, filename, slot }
+    }))
+    const read = (id: string) => readMessageChatImages(threadId, id, () => {})
+    expect(await read("unsubmitted")).toEqual([])
+    bindChatImages(threadId, "sent", "original", refs, [...refs].reverse())
+    const images = await read("sent")
+    expect(images.map(image => image.filename)).toEqual(refs.map(ref => ref.filename))
+    expect(images.every(image => image.url.startsWith("data:image/webp;base64,"))).toBe(true)
+    expect(await readMessageChatImages("other", "sent", () => {})).toEqual([])
+    bindBotChatImages(threadId, "bot-sent", "original", "prepared", refs)
+    expect(await read("bot-sent")).toEqual([])
+    let checked = false
+    await expect(readMessageChatImages(threadId, "sent", () => {
+      if (checked) throw new Error("会话已变更")
+      checked = true
+    })).rejects.toThrow("会话已变更")
+  })
+
+  it("retains the sent image hint when a checkpoint races the durable or live user row", () => {
+    const message = { id: "image-row", role: "user", content: "Compare both figures" }
+    const withImages = { ...message, hasChatImages: true as const }
+    expect(mergeCheckpointAuthorityTranscriptMessages([message], [withImages])[0])
+      .toMatchObject(withImages)
+    expect(mergeCheckpointAuthorityTranscriptMessages([withImages], [message])[0])
+      .toMatchObject(withImages)
+  })
 
   it("claims an accepted but unstarted message once and recovers even an empty image manifest", async () => {
     const { input, owner } = makeClaim(request.userMessageId)

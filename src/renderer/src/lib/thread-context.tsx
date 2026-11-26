@@ -7016,6 +7016,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   id: messageId,
                   role,
                   content,
+                  ...(role === "user" && additionalKwargs?.cmb_chat_images_source !== "bot" &&
+                    Array.isArray(additionalKwargs?.cmb_chat_images) && additionalKwargs.cmb_chat_images.length
+                    ? { hasChatImages: true as const } : {}),
                   ...providerTuple,
                   ...(reasoning && { reasoning }),
                   tool_calls: toolCalls as Message["tool_calls"],

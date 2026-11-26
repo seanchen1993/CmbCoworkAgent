@@ -146,8 +146,10 @@ export const localBotsApi: BotClient = {
       groupId,
       workId
     ),
-  readAttachmentImages: (botId, inputId, groupId, workId) =>
-    ipcRenderer.invoke("bots:files:read-attachment-images", LOCAL_BOT_HOST_ID, botId, inputId, groupId, workId),
+  readGroupMessageImages: (groupId, messageId) =>
+    ipcRenderer.invoke("bots:files:read-group-message-images", LOCAL_BOT_HOST_ID, groupId, messageId),
+  readAttachmentImages: (botId, inputId, groupId, workId, messageId) =>
+    ipcRenderer.invoke("bots:files:read-attachment-images", LOCAL_BOT_HOST_ID, botId, inputId, groupId, workId, messageId),
   attachWorkspaceFile: (botId, threadId, fileId, maxChars, workId) =>
     ipcRenderer.invoke("bots:files:attach-workspace", LOCAL_BOT_HOST_ID, botId, threadId, fileId, maxChars, workId),
   exportFile: (botId, fileId, groupId, workId, suggestedName) =>

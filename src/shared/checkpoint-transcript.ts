@@ -99,6 +99,7 @@ export interface CompletedToolReplayObservation {
 
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
+  hasChatImages?: true
   historical_tool_replay_id?: string
   legacy_checkpoint_replay_of?: string
   provider_source_id?: string
@@ -260,6 +261,8 @@ export function mergeCheckpointAuthorityTranscriptMessage<
   const reasoning = base.reasoning || incoming.reasoning
   const merged = {
     ...base,
+    ...(base.role === "user" && incoming.role === "user" && base.id === incoming.id &&
+      incoming.hasChatImages ? { hasChatImages: true } : {}),
     ...(reasoning ? { reasoning } : {}),
     content: checkpointClearsToolCallContent
       ? base.content

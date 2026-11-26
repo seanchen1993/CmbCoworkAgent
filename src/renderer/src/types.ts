@@ -281,6 +281,7 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  hasChatImages?: true
   /** Verified display/edit metadata from native history, not execution authority. */
   botHistoryInputOrigin?: import("../../shared/bots/message-reply").BotHistoryInputOrigin
   botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope

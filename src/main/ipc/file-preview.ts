@@ -322,6 +322,18 @@ export function registerWorkspaceFilePreviewHandlers(
     const { assertCurrent } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
     return readDraftChatImage(request.threadId, request.imageId, assertCurrent)
   })
+  ipcMain.handle("workspace:readMessageChatImages", async (event, request: ChatImageStatusRequest) => {
+    const assertWindow = () => assertChatAttachmentWindow(event, getMainWindow)
+    assertWindow()
+    if (!request || !validBoundedString(request.messageId, 1024) ||
+        !(request.workspacePath === null || typeof request.workspacePath === "string"))
+      throw new Error("图片消息身份无效")
+    const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
+    const { assertCurrent, identity } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
+    if (threadIncarnationKey(identity) !== request.incarnation) throw new Error("图片所属会话已变更")
+    const { readMessageChatImages } = await import("../chat-images")
+    return readMessageChatImages(request.threadId, request.messageId, assertCurrent)
+  })
   ipcMain.handle("workspace:updateChatImageOwners", async (event, request: ChatImageOwnerRequest) => {
     const assertWindow = () => { assertChatAttachmentWindow(event, getMainWindow) }
     assertWindow()

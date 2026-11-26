@@ -260,7 +260,7 @@ import type {
   AttachmentFileSelectionResult,
   AttachmentGrantParseRequest,
   WorkspaceChatImageRequest, ChatImageOwnerRequest, ChatImageStatusRequest, ChatImageSubmissionStatus,
-  DraftChatImageRequest
+  DraftAttachmentImage, DraftChatImageRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
@@ -1875,6 +1875,7 @@ interface CustomAPI {
   }
   file: {
     readDraftChatImage: (request: DraftChatImageRequest) => Promise<string>
+    readMessageChatImages: (request: ChatImageStatusRequest) => Promise<DraftAttachmentImage[]>
     attachWorkspaceImage: (request: WorkspaceChatImageRequest) => Promise<ParsedAttachment>
     updateImageOwners: (request: ChatImageOwnerRequest) => Promise<void>
     chatImageSubmissionStatus: (request: ChatImageStatusRequest) => Promise<ChatImageSubmissionStatus>

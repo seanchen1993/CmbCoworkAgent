@@ -10,7 +10,7 @@ import type { AgentInvokeParams } from "./types"
 import { chatImageMarker } from "../shared/attachment-message-parts"
 import { normalizeGitWorkspacePathKey } from "../shared/workspace-path"
 import { threadIncarnationKey } from "../shared/thread-incarnation"
-import { type SubmittedChatImage, type ChatImageRef,
+import { MAX_CHAT_IMAGES, type DraftAttachmentImage, type SubmittedChatImage, type ChatImageRef,
   type FileAttachment } from "../shared/file-attachment"
 
 const validId = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/
@@ -104,20 +104,50 @@ export async function readChatImage(threadId: string, id: string) {
 }
 
 export async function readDraftChatImage(threadId: string, id: string, assertCurrent: () => void): Promise<string> {
+  const assertOwner = () => {
+    assertCurrent()
+    assertImageInputOwner(threadId, id)
+  }
+  assertOwner()
+  const url = await readPreviewImage(threadId, id)
+  assertOwner()
+  return url
+}
+
+async function readPreviewImage(threadId: string, id: string): Promise<string> {
   if (typeof id !== "string" || !validId.test(id)) throw new Error("图片引用无效")
-  assertCurrent()
-  assertImageInputOwner(threadId, id)
   const root = scope(threadId)
   const opened = await openStableFileHandle(root, join(root, id + ".webp"))
   try {
     const data = await readStableFileHandleBounded(opened, MAX_STAGED_CHAT_IMAGE_BYTES)
     if (!isStagedChatImage(data, data.length)) throw new Error("图片内容无效或超过预算")
-    assertCurrent()
-    assertImageInputOwner(threadId, id)
     return "data:image/webp;base64," + data.toString("base64")
   } finally {
     await opened.handle.close()
   }
+}
+
+/** Only the approved receipt binds stored pixels to a sent user message. */
+export async function readMessageChatImages(
+  threadId: string, messageId: string, assertCurrent: () => void
+): Promise<DraftAttachmentImage[]> {
+  const manifest = () => {
+    assertCurrent()
+    const receipt = boundChatImageReceipt(threadId, messageId)
+    if (!receipt || receipt.source === "bot") return []
+    if (receipt.images.length > MAX_CHAT_IMAGES) throw new Error("图片数量超限")
+    return [...receipt.images].sort((left, right) => left.slot - right.slot)
+  }
+  const refs = manifest()
+  if (!refs.length) return []
+  const results = await Promise.allSettled(refs.map(async ref => ({
+    filename: ref.filename,
+    url: await readPreviewImage(threadId, ref.id)
+  })))
+  if (JSON.stringify(refs) !== JSON.stringify(manifest())) throw new Error("图片消息已变更")
+  const images = results.flatMap(result => result.status === "fulfilled" ? [result.value] : [])
+  if (!images.length) throw new Error("图片文件不可用")
+  return images
 }
 
 

@@ -46,6 +46,10 @@ export const ChatMessagePresentationContext = createContext<
   ((message: Message) => ReactNode) | null
 >(null)
 
+export const ChatUserImagePresentationContext = createContext<
+  ((message: Message) => ReactNode) | null
+>(null)
+
 /** Host-verified Bot mention presentation; ordinary user text remains plain. */
 export const ChatUserTextPresentationContext = createContext<
   ((message: Message, text: string) => ReactNode) | null

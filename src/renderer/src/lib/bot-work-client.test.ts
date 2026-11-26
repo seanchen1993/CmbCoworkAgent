@@ -61,7 +61,7 @@ describe("original beta client bound to a work", () => {
   it("reads a picker image preview only within the bound work", async () => {
     const { client, scoped } = fixture()
     await scoped.readAttachmentImages!(work.botId, "input-fixture")
-    expect(client.readAttachmentImages).toHaveBeenCalledWith(work.botId, "input-fixture", undefined, work.id)
+    expect(client.readAttachmentImages).toHaveBeenCalledWith(work.botId, "input-fixture", undefined, work.id, undefined)
     expect(() => scoped.readAttachmentImages!(work.botId, "input-fixture", undefined, "other-work"))
       .toThrow("工作会话目标不一致")
     expect(client.readAttachmentImages).toHaveBeenCalledOnce()

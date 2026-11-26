@@ -1,5 +1,6 @@
 /** Real renderer -> preload -> main -> bundled document and image Workers. Build first. */
 import assert from "node:assert/strict"
+import { createServer } from "node:http"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
@@ -22,6 +23,7 @@ env.TMP = env.TEMP
 env.CMB_E2E_ELECTRON_BIN = createRequire(import.meta.url)("electron")
 env.CMB_E2E_DISABLE_GPU = "1"
 env.HTTPS_PROXY = env.HTTP_PROXY = "http://127.0.0.1:9"
+env.NO_PROXY = "localhost,127.0.0.1"
 const packaged = process.env.CHAT_ATTACHMENT_PACKAGED_EXECUTABLE
 let app
 try {
@@ -108,6 +110,7 @@ try {
   assert.equal(result.removedPreview, true)
   console.log("HTML, DOCX, XLSX, PNG, workspace mentions, image validation and queue ownership passed through Electron IPC")
   await verifyBotAttachmentPreviews(page, bytes, docx)
+  await verifySentImageHistory(page, profile, bytes)
   await verifyImageSendPresentation(app, page, result.threadId, profile, bytes)
   await verifyBotDraftComposerPreview(page, bytes)
   console.log("Attachment previews, image send, cancellation, reload, stop and workspace recovery passed")
@@ -150,6 +153,147 @@ async function verifyBotAttachmentPreviews(page, bytes, docx) {
   }
   assert.equal(wrongBot, true)
   assert.equal(wrongGroup, true)
+}
+
+// Keep routing and persistence real while making the model response deterministic and local.
+async function verifySentImageHistory(page, workspacePath, bytes) {
+  const answer = "Image history fixture completed."
+  let receivedImage = false
+  const server = createServer(async (request, response) => {
+    try {
+      let raw = ""
+      for await (const part of request) raw += part
+      const body = JSON.parse(raw)
+      receivedImage ||= body.messages?.some(message => Array.isArray(message.content) &&
+        message.content.some(part => part.type === "image_url" &&
+          part.image_url.url.startsWith("data:image/webp;base64,")))
+      const base = { id: "inline-image-reply", created: 1, model: body.model }
+      if (body.stream) {
+        response.writeHead(200, { "Content-Type": "text/event-stream" })
+        for (const [delta, finish] of [[{ role: "assistant", content: answer }, null], [{}, "stop"]]) {
+          response.write("data: " + JSON.stringify({ ...base, object: "chat.completion.chunk",
+            choices: [{ index: 0, delta, finish_reason: finish }] }) + "\n\n")
+        }
+        response.end("data: [DONE]\n\n")
+      } else {
+        response.writeHead(200, { "Content-Type": "application/json" })
+        response.end(JSON.stringify({ ...base, object: "chat.completion", choices: [
+          { index: 0, message: { role: "assistant", content: answer }, finish_reason: "stop" }
+        ] }))
+      }
+    } catch {
+      response.writeHead(400).end()
+    }
+  })
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve))
+  try {
+    const title = "Sent image history"
+    const threadId = await page.evaluate(async ({ baseUrl, workspacePath, title }) => {
+      const api = window.api
+      await api.models.setCustomConfig({ id: "image-history", name: "Image history", baseUrl,
+        model: "image-history", apiKey: "fixture", maxTokens: 64000, maxOutputTokens: 2048,
+        inputModalities: ["text", "image"] })
+      const model = "custom:image-history"
+      await api.models.setDefault(model)
+      await api.routing.setMode("pinned")
+      const thread = await api.threads.create({ title, workspacePath, model, agentMode: "normal" })
+      await api.workspace.set(thread.thread_id, workspacePath)
+      return thread.thread_id
+    }, { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, workspacePath, title })
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await page.getByText(title, { exact: true }).first().click()
+    const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
+    const filename = "sent-history.png"
+    const question = "Describe the uploaded color swatch."
+    const composer = chat.locator("textarea.composer-textarea")
+    await submitImage(page, composer, composer, filename, bytes, question)
+    const message = chat.locator('[data-chat-message-row][data-message-role="user"]').filter({ hasText: question })
+    await verifyInlineImage(page, message, filename)
+    await chat.getByText(answer, { exact: true }).first().waitFor({ timeout: 90_000 })
+    assert.ok(receivedImage, "the submitted image also reached the model")
+    await page.reload({ waitUntil: "domcontentloaded" })
+    const saved = await page.evaluate(id => window.api.threads.get(id), threadId)
+    await page.getByText(saved.title, { exact: true }).first().click()
+    await verifyInlineImage(page, message, filename)
+
+    const docQuestion = "Compare the figures in this report."
+    const docName = "illustrated-report.docx"
+    const other = await sharp({ create: { width: 5, height: 8, channels: 3, background: "red" } }).png().toBuffer()
+    await submitImage(page, composer, composer, docName, visualDocx([bytes, other]), docQuestion,
+      docName + " · 图 2")
+    const docMessage = chat.locator('[data-chat-message-row][data-message-role="user"]').filter({ hasText: docQuestion })
+    await verifyInlineImage(page, docMessage, docName + " · 图 1")
+    await verifyInlineImage(page, docMessage, docName + " · 图 2", [5, 8])
+
+    const botName = "Attachment Preview Bot"
+    const openBot = async () => {
+      await page.getByText("Bots", { exact: true }).first().click()
+      await page.getByText(botName, { exact: true }).first().click()
+    }
+    await openBot()
+    const bot = page.locator('[data-chat-surface="bot"]')
+    const botComposer = bot.locator('textarea, [role="textbox"][contenteditable="true"]').last()
+    const botFilename = "bot-history.png"
+    const botQuestion = "Inspect the Bot color swatch."
+    await submitImage(page, bot.getByRole("button", { name: "添加文件", exact: true }),
+      botComposer, botFilename, bytes, botQuestion)
+    const botMessage = bot.locator('[data-chat-message-row][data-message-role="user"]').filter({ hasText: botQuestion })
+    await verifyInlineImage(page, botMessage, botFilename)
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await openBot()
+    await verifyInlineImage(page, botMessage, botFilename)
+    const groupName = "Attachment Preview Group"
+    const openGroup = () => page.getByRole("button", { name: groupName, exact: true }).click()
+    await openGroup()
+    const groupComposer = page.locator(".bot-group-composer")
+    const groupFilename = "group-history.png"
+    const groupQuestion = "Describe the group color swatch."
+    await submitImage(page, groupComposer, groupComposer.getByRole("textbox"),
+      groupFilename, bytes, groupQuestion)
+    const groupMessage = page.locator('.bot-group-message[data-user="true"]').filter({ hasText: groupQuestion })
+    await verifyInlineImage(page, groupMessage, groupFilename)
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await page.getByText("Bots", { exact: true }).first().click()
+    await openGroup()
+    await verifyInlineImage(page, groupMessage, groupFilename)
+    console.log("Sent image pixels, lightbox and restored history passed in ordinary, private Bot and group chats")
+  } catch (error) {
+    console.error("Image history fixture UI at failure:", (await page.locator("body").innerText()).slice(-3600))
+    throw error
+  } finally {
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+  }
+}
+
+async function submitImage(page, drop, composer, filename, bytes, question, previewName = filename) {
+  const dataTransfer = await page.evaluateHandle(({ filename, bytes }) => {
+    const data = new DataTransfer()
+    data.items.add(new File([Uint8Array.from(bytes)], filename))
+    return data
+  }, { filename, bytes: Array.from(bytes) })
+  try {
+    await drop.dispatchEvent("drop", { dataTransfer })
+    await page.getByRole("button", { name: `预览图片 ${previewName}`, exact: true }).waitFor()
+    await composer.fill(question)
+    await composer.press("Enter")
+  } finally {
+    await dataTransfer.dispose()
+  }
+}
+
+async function verifyInlineImage(page, message, filename, dimensions = [12, 6]) {
+  const preview = message.getByRole("button", { name: `预览图片 ${filename}`, exact: true })
+  const pixels = await preview.locator("img").evaluate(async img => {
+    await img.decode()
+    return [img.naturalWidth, img.naturalHeight]
+  }, undefined, { timeout: 60_000 })
+  assert.deepEqual(pixels, dimensions)
+  await preview.click()
+  const dialog = page.getByRole("dialog", { name: filename })
+  await dialog.getByRole("img", { name: filename }).evaluate(img => img.decode())
+  await page.keyboard.press("Escape")
+  await dialog.waitFor({ state: "hidden" })
 }
 
 async function verifyBotDraftComposerPreview(page, bytes) {
