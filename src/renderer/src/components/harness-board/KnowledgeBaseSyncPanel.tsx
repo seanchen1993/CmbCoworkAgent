@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
+  GitBranch,
   Info,
   Loader2,
   RefreshCw,
@@ -19,6 +20,7 @@ import { Badge, badgeVariants, type BadgeProps } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { KnowledgePreviewPanel } from "./KnowledgePreviewPanel"
 import { KnowledgeBaseDeleteDialog } from "./KnowledgeBaseDeleteDialog"
+import { KnowledgeGitDrawer } from "./KnowledgeGitDrawer"
 import { SystemConstraintsGuideButton } from "./SystemConstraintsGuideButton"
 
 function knowledgeStatus(
@@ -77,6 +79,9 @@ export function KnowledgeBaseSyncPanel({
   const items = result?.knowledgeBases ?? []
   const [pendingDelete, setPendingDelete] = useState<KnowledgeBaseListItem | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [gitTargetId, setGitTargetId] = useState<string | null>(null)
+  const gitItem = items.find((item) => item.idKey === gitTargetId && item.visibility === "visible")
+  const gitWorkspace = gitItem?.workspaces.find((workspace) => workspace.role === "write")
   const operationBusy =
     loading ||
     deleting ||
@@ -151,6 +156,7 @@ export function KnowledgeBaseSyncPanel({
               syncingIds.has(item.idKey) || result?.syncingIds.includes(item.idKey) === true
             const expanded = expandedIds.has(item.idKey)
             const historical = item.visibility !== "visible"
+            const writeWorkspace = item.workspaces.find((workspace) => workspace.role === "write")
             const status = knowledgeStatus(item, syncing)
             const owner = [item.ownerName, item.ownerId].filter((value) => value.trim()).join("/")
             const commonError =
@@ -270,6 +276,15 @@ export function KnowledgeBaseSyncPanel({
                       )}
                     </Button>
                     <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={historical || operationBusy || !writeWorkspace?.localValid}
+                      onClick={() => setGitTargetId(item.idKey)}
+                    >
+                      <GitBranch className="size-3.5" />
+                      查看变更
+                    </Button>
+                    <Button
                       size="sm"
                       disabled={historical || operationBusy}
                       onClick={() => onSync(item.idKey)}
@@ -320,6 +335,14 @@ export function KnowledgeBaseSyncPanel({
         blocked={deleteBlocked}
         onClose={() => setPendingDelete(null)}
         onConfirm={() => void confirmDelete()}
+      />
+      <KnowledgeGitDrawer
+        target={
+          gitItem && gitWorkspace?.localValid
+            ? { id: gitItem.idKey, name: gitItem.name, workspacePath: gitWorkspace.localPath }
+            : null
+        }
+        onClose={() => setGitTargetId(null)}
       />
     </section>
   )

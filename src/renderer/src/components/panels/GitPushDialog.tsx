@@ -13,6 +13,7 @@ interface GitPushDialogProps {
   loading?: boolean
   branch: string
   pendingCommits?: Array<{ hash: string; message: string; date: string }>
+  container?: HTMLElement | null
   onOpenChange: (open: boolean) => void
   onSubmit: () => void
 }
@@ -24,6 +25,7 @@ export function GitPushDialog({
   loading = false,
   branch,
   pendingCommits,
+  container,
   onOpenChange,
   onSubmit
 }: GitPushDialogProps): React.JSX.Element | null {
@@ -45,7 +47,7 @@ export function GitPushDialog({
     // A workbench approval can arrive while push metadata or the push itself is pending.
     // Its portal must take focus above this native top-layer dialog.
     const syncModal = (): void => {
-      if (getOpenWorkbenchDialog()) {
+      if (getOpenWorkbenchDialog(container)) {
         if (dialog.matches(":popover-open")) {
           dialog.hidePopover()
           restoreBackground?.()
@@ -71,7 +73,7 @@ export function GitPushDialog({
       if (dialog.matches(":popover-open")) dialog.hidePopover()
       restoreBackground?.()
     }
-  }, [open])
+  }, [open, container])
 
   useLayoutEffect(() => {
     if (!open) return
@@ -123,7 +125,11 @@ export function GitPushDialog({
         onMountAutoFocus={(event) => event.preventDefault()}
         onUnmountAutoFocus={(event) => {
           event.preventDefault()
-          if (!dialogRef.current && document.activeElement === document.body && !getOpenWorkbenchDialog()) {
+          if (
+            !dialogRef.current &&
+            document.activeElement === document.body &&
+            !getOpenWorkbenchDialog(container)
+          ) {
             invokerRef.current?.focus({ preventScroll: true })
           }
         }}
@@ -257,6 +263,6 @@ export function GitPushDialog({
         </div>
       </FocusScope>
     </div>,
-    document.body
+    container ?? document.body
   )
 }

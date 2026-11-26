@@ -1659,6 +1659,7 @@ interface CustomAPI {
     getGitPanelMeta: (
       threadId: string,
       options?: {
+        knowledgeBaseId?: string
         worktreePath?: string
         includeSummary?: boolean
         refreshHead?: boolean
@@ -1685,6 +1686,7 @@ interface CustomAPI {
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
+        knowledgeBaseId?: string
         worktreePath?: string
       }
     ) => Promise<{
@@ -1713,7 +1715,7 @@ interface CustomAPI {
     getGitPanelFileDiff: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string }
+      options?: { knowledgeBaseId?: string; worktreePath?: string }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1764,7 +1766,7 @@ interface CustomAPI {
       changedFiles: number
     }>
     cancelGitPanelReads: (
-      family?: "panel" | "changed-summary" | "summary" | "workspace-probe"
+      family?: "panel" | "knowledge-panel" | "changed-summary" | "summary" | "workspace-probe"
     ) => Promise<void>
     isGit: (
       folderPath: string,
@@ -1802,14 +1804,14 @@ interface CustomAPI {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string; agentInitiated?: boolean }
+      options?: { knowledgeBaseId?: string; worktreePath?: string; agentInitiated?: boolean }
     ) => Promise<{
       success: boolean
       error?: string
     }>
     pushWorktree: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: { knowledgeBaseId?: string; worktreePath?: string }
     ) => Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -1831,7 +1833,7 @@ interface CustomAPI {
     rejectWorktreeChanges: (
       threadId: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: { knowledgeBaseId?: string; worktreePath?: string }
     ) => Promise<{
       success: boolean
       revertedFileCount?: number
@@ -3409,7 +3411,7 @@ interface CustomAPI {
     createBranch: (branch: string, cwd?: string) => Promise<GitBranchMutationResult>
   }
   gitPanel: {
-    getCommitHistory: (threadId: string) => Promise<{
+    getCommitHistory: (threadId: string, knowledgeBaseId?: string) => Promise<{
       success: boolean
       projectPath: string | null
       records: GitCommitHistoryRecord[]

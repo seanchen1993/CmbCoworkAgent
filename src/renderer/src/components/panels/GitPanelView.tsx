@@ -329,23 +329,28 @@ function formatGitPanelErrorMessage(message: string): string {
 }
 
 interface GitPanelViewProps {
-  threadId: string
+  threadId?: string
+  knowledgeBaseId?: string
+  pushDialogContainer?: HTMLElement | null
   workspacePath: string | null
   initialGitContext?: ThreadGitContext | null
   onOpenFileFolder?: (filePath: string) => void
 }
 
 export function GitPanelView(props: GitPanelViewProps): React.JSX.Element {
-  return <GitPanelWorkspaceView key={JSON.stringify([props.threadId, props.workspacePath])} {...props} />
+  const panelId = props.knowledgeBaseId ? `knowledge:${props.knowledgeBaseId}` : (props.threadId ?? "")
+  return <GitPanelWorkspaceView key={JSON.stringify([panelId, props.workspacePath])} {...props} threadId={panelId} />
 }
 
 function GitPanelWorkspaceView({
   threadId,
+  knowledgeBaseId,
+  pushDialogContainer,
   workspacePath,
   initialGitContext,
   onOpenFileFolder
-}: GitPanelViewProps): React.JSX.Element {
-  const showCustomizeView = useAppStore((state) => state.showCustomizeView)
+}: GitPanelViewProps & { threadId: string }): React.JSX.Element {
+  const showCustomizeView = useAppStore((state) => !knowledgeBaseId && state.showCustomizeView)
   const metaRequestIdRef = useRef(0)
   const diffRequestIdRef = useRef(0)
   const fileDiffRequestIdRef = useRef(0)
@@ -472,8 +477,8 @@ function GitPanelWorkspaceView({
   }, [threadId])
 
   useEffect(
-    () => () => { void window.api.workspace.cancelGitPanelReads("panel").catch(() => {}) },
-    []
+    () => () => { void window.api.workspace.cancelGitPanelReads(knowledgeBaseId ? "knowledge-panel" : "panel").catch(() => {}) },
+    [knowledgeBaseId]
   )
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
@@ -497,7 +502,7 @@ function GitPanelWorkspaceView({
         fileRefreshTimerRef.current = null
       }
       // 设置覆盖期间只合并查询需求，返回后补刷新；继续接收共享文件通知。
-      if (useAppStore.getState().showCustomizeView || diffLoadingPathRef.current) {
+      if ((!knowledgeBaseId && useAppStore.getState().showCustomizeView) || diffLoadingPathRef.current) {
         pendingRefreshRef.current = { meta: shouldRefreshMeta, diff: shouldRefreshDiff }
         return
       }
@@ -525,7 +530,10 @@ function GitPanelWorkspaceView({
           (async () => {
             try {
               const nextMeta = await window.api.workspace.getGitPanelMeta(
-                threadId, scope.diffPendingRoots.size ? { refreshHead: true } : undefined
+                threadId,
+                knowledgeBaseId || scope.diffPendingRoots.size
+                  ? { knowledgeBaseId, refreshHead: scope.diffPendingRoots.size > 0 }
+                  : undefined
               )
               if (requestId !== metaRequestIdRef.current) return
               panelRootsRef.current = nextMeta.repositoryRoots
@@ -550,6 +558,7 @@ function GitPanelWorkspaceView({
           (async () => {
             try {
               const nextDiff = await window.api.workspace.getGitPanelDiffs(threadId, {
+                knowledgeBaseId,
                 includeDiffs: false,
                 includeChangedFiles: false,
                 statusUntrackedMode: "normal"
@@ -581,7 +590,7 @@ function GitPanelWorkspaceView({
 
       await Promise.allSettled(tasks)
     },
-    [threadId, showToast]
+    [threadId, knowledgeBaseId, showToast]
   )
 
   useEffect(() => {
@@ -598,7 +607,7 @@ function GitPanelWorkspaceView({
     pendingRefreshRef.current = { meta: meta || Boolean(pendingRefreshRef.current?.meta), diff: true }
     if (fileRefreshTimerRef.current) clearTimeout(fileRefreshTimerRef.current)
     fileRefreshTimerRef.current = null
-    if (useAppStore.getState().showCustomizeView) return
+    if (!knowledgeBaseId && useAppStore.getState().showCustomizeView) return
     const timer = setTimeout(async () => {
       while (fileRefreshTimerRef.current === timer) {
         const checkout = pendingGitCheckouts(panelRootsRef.current ?? (workspacePath ? [workspacePath] : []))
@@ -814,7 +823,10 @@ function GitPanelWorkspaceView({
     const requestId = ++pushMetaRequestIdRef.current
     setPushMetaLoading(true)
     setPushMetaState(null)
-    const targetOptions = activeRepository ? { worktreePath: activeRepository.path } : undefined
+    const targetOptions =
+      activeRepository || knowledgeBaseId
+        ? { worktreePath: activeRepository?.path, knowledgeBaseId }
+        : undefined
 
     void window.api.workspace
       .getGitPanelMeta(threadId, targetOptions)
@@ -844,7 +856,7 @@ function GitPanelWorkspaceView({
     return () => {
       pushMetaRequestIdRef.current += 1
     }
-  }, [activeRepository, showToast, submitAction, threadId])
+  }, [activeRepository, knowledgeBaseId, showToast, submitAction, threadId])
 
   useEffect(() => {
     if (!hasMultipleRepositories) {
@@ -987,7 +999,7 @@ function GitPanelWorkspaceView({
     const scope = operationScope.current
     const isCurrent = () => !canceled && operationScope.current === scope
     void window.api.gitPanel
-      .getCommitHistory(threadId)
+      .getCommitHistory(threadId, knowledgeBaseId)
       .then((result) => {
         if (!isCurrent()) return
         const records = result.success ? result.records : []
@@ -1001,7 +1013,7 @@ function GitPanelWorkspaceView({
     return () => {
       canceled = true
     }
-  }, [submitAction, threadId])
+  }, [submitAction, threadId, knowledgeBaseId])
 
   const loadFileDiff = useCallback(
     async (filePath: string): Promise<void> => {
@@ -1010,7 +1022,7 @@ function GitPanelWorkspaceView({
         !threadId ||
         !filePath ||
         hasCheckoutRefresh(operationScope.current.diffPendingRoots, repo) ||
-        useAppStore.getState().showCustomizeView ||
+        (!knowledgeBaseId && useAppStore.getState().showCustomizeView) ||
         diffLoadingPathRef.current === filePath
       ) return
         const requestFileDiffId = ++fileDiffRequestIdRef.current
@@ -1040,7 +1052,7 @@ function GitPanelWorkspaceView({
         const result = await window.api.workspace.getGitPanelFileDiff(
           threadId,
           requestFilePath,
-          repo ? { worktreePath: repo.path } : undefined
+          repo || knowledgeBaseId ? { worktreePath: repo?.path, knowledgeBaseId } : undefined
         )
         if (!isLatestFileRequest() || result.taskId !== activeThreadIdRef.current) return
         if (!result.success || !result.file) {
@@ -1069,7 +1081,7 @@ function GitPanelWorkspaceView({
         }
       }
     },
-    [threadId, repositories, refresh]
+    [threadId, knowledgeBaseId, repositories, refresh]
   )
 
   const toggleFileExpanded = useCallback(
@@ -1142,7 +1154,7 @@ function GitPanelWorkspaceView({
   )
 
   useEffect(() => {
-    if (!threadId) return
+    if (!threadId || knowledgeBaseId) return
     const cleanup = window.api.workspace.onFilesChanged((data) => {
       if (!data.threadIds.includes(threadId)) return
       const changedWorkspacePath = data.literalWorkspacePath ?? data.workspacePath
@@ -1161,7 +1173,7 @@ function GitPanelWorkspaceView({
       fileRefreshTimerRef.current = null
       cleanup()
     }
-  }, [threadId, workspacePath, schedulePanelRefresh])
+  }, [threadId, knowledgeBaseId, workspacePath, schedulePanelRefresh])
 
   const captureOperation = useCallback((repository?: GitRepositoryInfo | null) => {
     const scope = operationScope.current
@@ -1229,7 +1241,9 @@ function GitPanelWorkspaceView({
         const result = await window.api.workspace.rejectWorktreeChanges(
           threadId,
           requestFilePaths,
-          actionRepository ? { worktreePath: actionRepository.path } : undefined
+          actionRepository || knowledgeBaseId
+            ? { worktreePath: actionRepository?.path, knowledgeBaseId }
+            : undefined
         )
         if (!result.success) throw new Error(result.error || "回滚失败")
         if (!operation.finishedInCurrentCheckout("文件已回退", false)) return
@@ -1250,6 +1264,7 @@ function GitPanelWorkspaceView({
     [
       captureOperation,
       threadId,
+      knowledgeBaseId,
       hasMultipleRepositories,
       refresh,
       resolveActionRepository,
@@ -1271,6 +1286,7 @@ function GitPanelWorkspaceView({
 
     void window.api.workspace
       .getGitPanelDiffs(threadId, {
+        knowledgeBaseId,
         includeDiffs: false,
         includeChangedFiles: false,
         statusUntrackedMode: "all",
@@ -1301,6 +1317,7 @@ function GitPanelWorkspaceView({
       })
   }, [
     threadId,
+    knowledgeBaseId,
     activeRepository,
     diffState?.omittedFileCount,
     formatFilesForRejectDialog,
@@ -1373,23 +1390,27 @@ function GitPanelWorkspaceView({
             threadId,
             finalMessage ?? "",
             requestSelectedPaths,
-            actionRepository ? { worktreePath: actionRepository.path } : undefined
+            actionRepository || knowledgeBaseId
+              ? { worktreePath: actionRepository?.path, knowledgeBaseId }
+              : undefined
           )
           if (!result.success) throw new Error(result.error || "提交失败")
           if (!operation.finishedInCurrentCheckout("提交成功", true)) return
           showToast("提交成功", "success")
-          insertLog("commit成功")
+          if (!knowledgeBaseId) insertLog("commit成功")
           // Remember the card actually committed with for this workspace.
           persistWorkspaceCard(commitCardNumber.trim())
         } else {
           const result = await window.api.workspace.pushWorktree(
             threadId,
-            actionRepository ? { worktreePath: actionRepository.path } : undefined
+            actionRepository || knowledgeBaseId
+              ? { worktreePath: actionRepository?.path, knowledgeBaseId }
+              : undefined
           )
           if (!result.success) throw new Error(result.error || "推送失败")
           if (!operation.finishedInCurrentCheckout("推送成功", true)) return
           showToast("推送成功", "success")
-          insertLog("push成功")
+          if (!knowledgeBaseId) insertLog("push成功")
         }
         resetCommitForm()
         setSubmitAction(null)
@@ -1416,6 +1437,7 @@ function GitPanelWorkspaceView({
     [
       captureOperation,
       threadId,
+      knowledgeBaseId,
       commitCardNumber,
       commitType,
       commitMessage,
@@ -1657,7 +1679,7 @@ function GitPanelWorkspaceView({
     const treeIndent = treeRow ? 8 + treeRow.depth * 18 : 8
     const ignoreKey = `${repo?.path ?? WORKSPACE_REPOSITORY_KEY}:file:${repo ? stripRepositoryPrefix(file.path, repo) : file.path}`
     const isIgnoring = ignoringPath === ignoreKey
-    const showGitignoreAction = canShowGitignoreAction(fullDisplayPath, file.status)
+    const showGitignoreAction = !knowledgeBaseId && canShowGitignoreAction(fullDisplayPath, file.status)
 
     return (
       <div
@@ -1765,7 +1787,7 @@ function GitPanelWorkspaceView({
     const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
     const ignoreKey = `${repo?.path ?? WORKSPACE_REPOSITORY_KEY}:file:${repo ? stripRepositoryPrefix(file.path, repo) : file.path}`
     const isIgnoring = ignoringPath === ignoreKey
-    const showGitignoreAction = canShowGitignoreAction(fullDisplayPath, file.status)
+    const showGitignoreAction = !knowledgeBaseId && canShowGitignoreAction(fullDisplayPath, file.status)
 
     return (
       <div className="flex h-full min-h-0 flex-col">
@@ -1833,107 +1855,109 @@ function GitPanelWorkspaceView({
                   }}
                 />
               )}
-              <Popover
-                open={pendingRevertFile?.path === file.path}
-                onOpenChange={(open) => {
-                  if (revertingFilePath) return
-                  setPendingRevertFile(open ? file : null)
-                }}
-              >
-                <PopoverAnchor asChild>
-                  <span className="inline-flex">
-                    <IconPopoverButton
-                      icon={
-                        <Undo2
-                          className={cn(
-                            "size-3",
-                            revertingFilePath === file.path && "animate-spin"
-                          )}
-                        />
-                      }
-                      popoverContent="回退文件"
-                      aria-label={revertingFilePath === file.path ? "回退中" : "回退文件"}
-                      align="end"
-                      stopPropagation
-                      disabled={hasPendingCheckout(pendingCheckoutRoots, repo) || Boolean(revertingFilePath && revertingFilePath !== file.path)}
-                      className={cn(
-                        revertingFilePath === file.path && "opacity-80",
-                        revertingFilePath &&
-                          revertingFilePath !== file.path &&
-                          "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground"
-                      )}
-                      onClick={() => setPendingRevertFile(file)}
-                    />
-                  </span>
-                </PopoverAnchor>
-                <PopoverContent
-                  align="end"
-                  sideOffset={6}
-                  className="w-72 p-3"
-                  onClick={(event) => event.stopPropagation()}
-                  onOpenAutoFocus={(event) => event.preventDefault()}
-                  onCloseAutoFocus={(event) => event.preventDefault()}
+              {!knowledgeBaseId && (
+                <Popover
+                  open={pendingRevertFile?.path === file.path}
+                  onOpenChange={(open) => {
+                    if (revertingFilePath) return
+                    setPendingRevertFile(open ? file : null)
+                  }}
                 >
-                  <div className="space-y-3">
-                    <div className="space-y-1">
-                      <div className="text-xs font-semibold text-foreground">确认回退文件</div>
-                      <p className="text-xs leading-5 text-muted-foreground">
-                        回退会回退全部变更，不会回退到大模型的上一次修改，请确认是否回退。
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-muted/20 px-2.5 py-2 text-[11px]">
-                      <div className="mb-1 text-muted-foreground">目标文件</div>
-                      <div className="truncate font-mono text-foreground" title={fullDisplayPath}>
-                        {fullDisplayPath}
-                      </div>
-                      {previousDisplayPath && (
-                        <div
-                          className="mt-1 truncate font-mono text-muted-foreground"
-                          title={previousDisplayPath}
-                        >
-                          {previousDisplayPath}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex justify-end gap-2">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={Boolean(revertingFilePath)}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          setPendingRevertFile(null)
-                        }}
-                      >
-                        取消
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        disabled={hasPendingCheckout(pendingCheckoutRoots, repo) || Boolean(revertingFilePath)}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          confirmPendingRevertFile()
-                        }}
-                      >
-                        {revertingFilePath === file.path ? (
-                          <>
-                            <Loader2 className="size-3.5 animate-spin" />
-                            回退中...
-                          </>
-                        ) : (
-                          <>
-                            <Undo2 className="size-3.5" />
-                            确认回退
-                          </>
+                  <PopoverAnchor asChild>
+                    <span className="inline-flex">
+                      <IconPopoverButton
+                        icon={
+                          <Undo2
+                            className={cn(
+                              "size-3",
+                              revertingFilePath === file.path && "animate-spin"
+                            )}
+                          />
+                        }
+                        popoverContent="回退文件"
+                        aria-label={revertingFilePath === file.path ? "回退中" : "回退文件"}
+                        align="end"
+                        stopPropagation
+                        disabled={hasPendingCheckout(pendingCheckoutRoots, repo) || Boolean(revertingFilePath && revertingFilePath !== file.path)}
+                        className={cn(
+                          revertingFilePath === file.path && "opacity-80",
+                          revertingFilePath &&
+                            revertingFilePath !== file.path &&
+                            "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground"
                         )}
-                      </Button>
+                        onClick={() => setPendingRevertFile(file)}
+                      />
+                    </span>
+                  </PopoverAnchor>
+                  <PopoverContent
+                    align="end"
+                    sideOffset={6}
+                    className="w-72 p-3"
+                    onClick={(event) => event.stopPropagation()}
+                    onOpenAutoFocus={(event) => event.preventDefault()}
+                    onCloseAutoFocus={(event) => event.preventDefault()}
+                  >
+                    <div className="space-y-3">
+                      <div className="space-y-1">
+                        <div className="text-xs font-semibold text-foreground">确认回退文件</div>
+                        <p className="text-xs leading-5 text-muted-foreground">
+                          回退会回退全部变更，不会回退到大模型的上一次修改，请确认是否回退。
+                        </p>
+                      </div>
+                      <div className="rounded-md border border-border/70 bg-muted/20 px-2.5 py-2 text-[11px]">
+                        <div className="mb-1 text-muted-foreground">目标文件</div>
+                        <div className="truncate font-mono text-foreground" title={fullDisplayPath}>
+                          {fullDisplayPath}
+                        </div>
+                        {previousDisplayPath && (
+                          <div
+                            className="mt-1 truncate font-mono text-muted-foreground"
+                            title={previousDisplayPath}
+                          >
+                            {previousDisplayPath}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={Boolean(revertingFilePath)}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setPendingRevertFile(null)
+                          }}
+                        >
+                          取消
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          disabled={hasPendingCheckout(pendingCheckoutRoots, repo) || Boolean(revertingFilePath)}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            confirmPendingRevertFile()
+                          }}
+                        >
+                          {revertingFilePath === file.path ? (
+                            <>
+                              <Loader2 className="size-3.5 animate-spin" />
+                              回退中...
+                            </>
+                          ) : (
+                            <>
+                              <Undo2 className="size-3.5" />
+                              确认回退
+                            </>
+                          )}
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                </PopoverContent>
-              </Popover>
+                  </PopoverContent>
+                </Popover>
+              )}
             </div>
           </div>
           {showMovePath && (
@@ -2027,7 +2051,7 @@ function GitPanelWorkspaceView({
     const treeIndent = 8 + row.depth * 18
     const ignoreKey = `${repo?.path ?? WORKSPACE_REPOSITORY_KEY}:directory:${row.fullPath}`
     const isIgnoring = ignoringPath === ignoreKey
-    const showGitignoreAction = row.files.some((file) =>
+    const showGitignoreAction = !knowledgeBaseId && row.files.some((file) =>
       canShowGitignoreAction(file.path, file.status)
     )
 
@@ -2172,7 +2196,7 @@ function GitPanelWorkspaceView({
                   </Badge>
                 )}
               </div>
-              {hasGitRepo && (
+              {hasGitRepo && !knowledgeBaseId && (
                 <p className="mt-1.5 text-xs text-muted-foreground leading-5">
                   {hasMultipleRepositories
                     ? "当前工作区包含多个 Git 仓库。请在下方“操作仓库”选择具体子仓库后提交、推送或回退；Pull 在“全部仓库”下会逐仓库执行。"
@@ -2347,31 +2371,33 @@ function GitPanelWorkspaceView({
                       />
                       {loading ? "刷新中..." : "刷新"}
                     </button>
-                    <button
-                      id="git-pull-button"
-                      onClick={() => {
-                        void runPull()
-                      }}
-                      disabled={pulling || loading || checkoutRefreshPending || activeRepositoryCheckoutPending}
-                      title={activeRepositoryCheckoutPending ? "目标仓库正在切换分支" : "Pull 远端代码"}
-                      aria-label="Pull 远端代码"
-                      className={cn(
-                        "group inline-flex items-center gap-1.5 rounded-xl px-3 py-1 text-[11px] font-medium",
-                        "border border-border/80 bg-background/60  cursor-pointer ",
-                        "active:scale-[0.97] transition-all duration-200",
-                        pulling &&
-                          "border-blue-400/60 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/30",
-                        "disabled:cursor-not-allowed"
-                      )}
-                    >
-                      <ArrowDown
+                    {!knowledgeBaseId && (
+                      <button
+                        id="git-pull-button"
+                        onClick={() => {
+                          void runPull()
+                        }}
+                        disabled={pulling || loading || checkoutRefreshPending || activeRepositoryCheckoutPending}
+                        title={activeRepositoryCheckoutPending ? "目标仓库正在切换分支" : "Pull 远端代码"}
+                        aria-label="Pull 远端代码"
                         className={cn(
-                          "size-3.5 transition-transform duration-300",
-                          pulling ? "animate-bounce" : "group-hover:translate-y-0.5"
+                          "group inline-flex items-center gap-1.5 rounded-xl px-3 py-1 text-[11px] font-medium",
+                          "border border-border/80 bg-background/60  cursor-pointer ",
+                          "active:scale-[0.97] transition-all duration-200",
+                          pulling &&
+                            "border-blue-400/60 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/30",
+                          "disabled:cursor-not-allowed"
                         )}
-                      />
-                      {pulling ? "拉取中..." : "Pull"}
-                    </button>
+                      >
+                        <ArrowDown
+                          className={cn(
+                            "size-3.5 transition-transform duration-300",
+                            pulling ? "animate-bounce" : "group-hover:translate-y-0.5"
+                          )}
+                        />
+                        {pulling ? "拉取中..." : "Pull"}
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -2460,7 +2486,7 @@ function GitPanelWorkspaceView({
                 {skippedDirs.length > 0 && (
                   <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
                     <div className="font-medium">
-                      已跳过未加入 .gitignore 的大目录；建议加入 .gitignore 文件长期隐藏
+                      {knowledgeBaseId ? "已跳过未跟踪的大目录" : "已跳过未加入 .gitignore 的大目录；建议加入 .gitignore 文件长期隐藏"}
                     </div>
                     <div className="mt-1 space-y-1">
                       {skippedDirItems.map((item) => {
@@ -2473,29 +2499,31 @@ function GitPanelWorkspaceView({
                             <span className="min-w-0 truncate font-mono" title={item.dir}>
                               {item.displayPath}
                             </span>
-                            <IconPopoverButton
-                              icon={
-                                isIgnoring ? (
-                                  <Loader2 className="size-3 animate-spin" />
-                                ) : (
-                                  <EyeOff className="size-3" />
-                                )
-                              }
-                              popoverContent="加入 .gitignore"
-                              aria-label={`将目录 ${item.dir} 加入 .gitignore`}
-                              align="end"
-                              stopPropagation
-                              disabled={hasPendingCheckout(pendingCheckoutRoots, item.repo) || Boolean(ignoringPath && !isIgnoring)}
-                              className={cn(
-                                "shrink-0 text-amber-700 hover:bg-amber-500/15 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-200",
-                                ignoringPath &&
-                                  !isIgnoring &&
-                                  "cursor-not-allowed opacity-40 hover:bg-transparent"
-                              )}
-                              onClick={() => {
-                                void handleAddGitignoreEntry(item.dir, "directory", item.repo)
-                              }}
-                            />
+                            {!knowledgeBaseId && (
+                              <IconPopoverButton
+                                icon={
+                                  isIgnoring ? (
+                                    <Loader2 className="size-3 animate-spin" />
+                                  ) : (
+                                    <EyeOff className="size-3" />
+                                  )
+                                }
+                                popoverContent="加入 .gitignore"
+                                aria-label={`将目录 ${item.dir} 加入 .gitignore`}
+                                align="end"
+                                stopPropagation
+                                disabled={hasPendingCheckout(pendingCheckoutRoots, item.repo) || Boolean(ignoringPath && !isIgnoring)}
+                                className={cn(
+                                  "shrink-0 text-amber-700 hover:bg-amber-500/15 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-200",
+                                  ignoringPath &&
+                                    !isIgnoring &&
+                                    "cursor-not-allowed opacity-40 hover:bg-transparent"
+                                )}
+                                onClick={() => {
+                                  void handleAddGitignoreEntry(item.dir, "directory", item.repo)
+                                }}
+                              />
+                            )}
                           </div>
                         )
                       })}
@@ -2777,6 +2805,7 @@ function GitPanelWorkspaceView({
         }}
       />
       <GitPushDialog
+        container={pushDialogContainer}
         open={!checkoutRefreshPending && submitAction === "push"}
         running={running === "push"}
         submitDisabled={activeRepositoryCheckoutPending}

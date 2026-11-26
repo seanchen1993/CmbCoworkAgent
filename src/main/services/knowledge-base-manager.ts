@@ -490,6 +490,17 @@ export async function resolveKnowledgeDepositionPath(
   return path
 }
 
+export async function resolveKnowledgeGitWorkspace(idKey: string, writing = false): Promise<string> {
+  if (typeof idKey !== "string" || !idKey.trim()) throw new Error("未选择知识库")
+  const item = (await readKnowledgeState())?.knowledgeBases.find((entry) => entry.idKey === idKey)
+  if (item?.visibility !== "visible") throw new Error("该知识库当前不可用")
+  const workspacePath = await resolveKnowledgeDepositionPath([idKey], idKey)
+  if (writing && isKnowledgeDirectoryInUse(workspacePath)) {
+    throw new Error("沉淀会话正在使用该工作区，请在会话结束后提交")
+  }
+  return workspacePath
+}
+
 export async function prepareKnowledgeDeposition(
   ids: readonly string[],
   targetId?: string

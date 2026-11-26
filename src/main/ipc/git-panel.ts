@@ -1,7 +1,8 @@
+import { resolveKnowledgeGitWorkspace } from "../services/knowledge-base-manager"
 import { BrowserWindow, type IpcMain } from "electron"
 import { randomUUID } from "crypto"
 import { execFile, spawn } from "child_process"
-import { appendFile, lstat, mkdir, readFile, rename, writeFile, rm, stat } from "fs/promises"
+import { appendFile, lstat, mkdir, readFile, realpath, rename, writeFile, rm, stat } from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
 import { getThreadCore } from "../db"
@@ -1266,33 +1267,59 @@ function formatDurationMs(startMs: number): string {
 async function rejectWorktreePaths(params: {
   threadId: string
   filePaths?: string[]
-  options?: { worktreePath?: string }
+  options?: { worktreePath?: string; knowledgeBaseId?: string }
 }): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> {
   const { threadId, filePaths, options } = params
+  const knowledgeBaseId = options?.knowledgeBaseId
   const startedAt = Date.now()
   const hasExplicitSelection = Array.isArray(filePaths)
   const preparation = prepareGitPanelWrite()
   let releaseWrite: (() => void) | undefined
   try {
-    const entryThread = getThreadCore(threadId)
-    if (!entryThread) return { success: false, error: "任务不存在" }
-    const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
-    const context = await getThreadWorkspaceContext(threadId)
-    if (!matchesThreadIncarnation(getThreadCore(threadId), expectedThreadIncarnation)) {
-      return { success: false, error: "任务已被替换，忽略过期的回退请求" }
+    if (
+      knowledgeBaseId !== undefined &&
+      (!hasExplicitSelection ||
+        filePaths.length === 0 ||
+        filePaths.some((filePath) => typeof filePath !== "string" || !filePath.trim()))
+    ) {
+      return { success: false, error: "请选择要回退的文件" }
     }
-    if (!context.workspacePath) {
-      return { success: false, error: "当前任务不在 Git 仓库中" }
-    }
-    const workspacePath = context.workspacePath
-    const capturedGitMetadataIdentity = getGitMetadataIdentity(context.metadata)
 
-    const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
+    let expectedThreadIncarnation: ReturnType<typeof captureThreadIncarnation> | undefined
+    let capturedGitMetadataIdentity: GitMetadataIdentity | undefined
+    let workspacePath: string
+    if (knowledgeBaseId === undefined) {
+      const entryThread = getThreadCore(threadId)
+      if (!entryThread) return { success: false, error: "任务不存在" }
+      expectedThreadIncarnation = captureThreadIncarnation(entryThread)
+      const context = await getThreadWorkspaceContext(threadId)
+      if (!matchesThreadIncarnation(getThreadCore(threadId), expectedThreadIncarnation)) {
+        return { success: false, error: "任务已被替换，忽略过期的回退请求" }
+      }
+      if (!context.workspacePath) {
+        return { success: false, error: "当前任务不在 Git 仓库中" }
+      }
+      workspacePath = context.workspacePath
+      capturedGitMetadataIdentity = getGitMetadataIdentity(context.metadata)
+    } else {
+      workspacePath = await resolveKnowledgeGitWorkspace(knowledgeBaseId, true)
+    }
+
+    const target = await resolveGitOperationPath(
+      workspacePath,
+      knowledgeBaseId === undefined ? options?.worktreePath : undefined
+    )
     if ("error" in target) return { success: false, error: target.error }
 
     const worktreePath = target.worktreePath
     const gitRoot = target.gitRoot
+    if (knowledgeBaseId !== undefined && (await realpath(gitRoot)) !== (await realpath(workspacePath))) {
+      return { success: false, error: "沉淀工作区不是有效的 Git 仓库" }
+    }
     releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
+    if (knowledgeBaseId !== undefined) {
+      await resolveKnowledgeGitWorkspace(knowledgeBaseId, true)
+    }
     const explicitSelections = hasExplicitSelection
       ? (filePaths || [])
           .map((rawPath) => {
@@ -1305,7 +1332,10 @@ async function rejectWorktreePaths(params: {
             return {
               rawPath,
               primaryPath,
-              basenameFallbackPath: getBasenameFallbackPath(worktreePath, rawPath, primaryPath)
+              basenameFallbackPath:
+                knowledgeBaseId === undefined
+                  ? getBasenameFallbackPath(worktreePath, rawPath, primaryPath)
+                  : null
             }
           })
           .filter(
@@ -1405,6 +1435,9 @@ async function rejectWorktreePaths(params: {
       `clean 完成：${plan.cleanTargets.length} 个文件，耗时 ${formatDurationMs(cleanStartedAt)}`
     )
 
+    if (knowledgeBaseId !== undefined) {
+      return { success: true, revertedFileCount: changedEntries.length }
+    }
     const touchedTargets = plan.touchedTargets.length > 0 ? plan.touchedTargets : targetPaths
     const convertedTouchedTargets =
       path.resolve(gitRoot) === path.resolve(worktreePath)
@@ -1420,6 +1453,8 @@ async function rejectWorktreePaths(params: {
     const latestMetadata = parseThreadMetadata(latestThread?.metadata)
     const latestGitMetadataIdentity = getGitMetadataIdentity(latestMetadata)
     if (
+      expectedThreadIncarnation &&
+      capturedGitMetadataIdentity &&
       matchesThreadIncarnation(latestThread, expectedThreadIncarnation) &&
       gitMetadataIdentityEquals(latestGitMetadataIdentity, capturedGitMetadataIdentity)
     ) {
@@ -1705,7 +1740,7 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
         threadId,
         filePaths,
         options
-      }: { threadId: string; filePaths?: string[]; options?: { worktreePath?: string } }
+      }: { threadId: string; filePaths?: string[]; options?: { worktreePath?: string; knowledgeBaseId?: string } }
     ) => {
       try {
         logGitStep(threadId, "reject_all", `开始回退，选择文件数：${filePaths?.length ?? "全部"}`)
@@ -1753,9 +1788,11 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "git-panel:getCommitHistory",
-    async (_event, { threadId }: { threadId: string }) => {
+    async (_event, { threadId, knowledgeBaseId }: { threadId: string; knowledgeBaseId?: string }) => {
       try {
-        const workspacePath = getThreadWorkspacePath(threadId)
+        const workspacePath = knowledgeBaseId !== undefined
+          ? await resolveKnowledgeGitWorkspace(knowledgeBaseId)
+          : getThreadWorkspacePath(threadId)
         if (!workspacePath) {
           return {
             success: false,

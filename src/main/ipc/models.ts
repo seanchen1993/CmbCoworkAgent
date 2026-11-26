@@ -2169,6 +2169,80 @@ async function resolveThreadWorkspaceContext(
   }
 }
 
+async function resolveKnowledgeGitContext(
+  knowledgeBaseId: string
+): ReturnType<typeof resolveThreadWorkspaceContext> {
+  const workspacePath = await resolveKnowledgeGitWorkspace(knowledgeBaseId)
+  const gitRoot = await getGitRoot(workspacePath)
+  if (!gitRoot || (await fs.realpath(gitRoot)) !== (await fs.realpath(workspacePath))) {
+    throw new Error("沉淀工作区不是有效的 Git 仓库")
+  }
+  return {
+    metadata: {},
+    workspacePath,
+    isWorktree: false,
+    isGitRepo: true,
+    worktreeBaseCommit: null,
+    worktreeBranch: null,
+    repositories: [
+      {
+        repoPath: workspacePath,
+        gitRoot,
+        workspaceRelativePath: ".",
+        displayPath: ".",
+        isWorkspaceRoot: true
+      }
+    ]
+  }
+}
+
+async function commitKnowledgeGitFiles(
+  knowledgeBaseId: string,
+  message: string,
+  filePaths: string[] | undefined
+): Promise<{ success: boolean; error?: string }> {
+  if (typeof message !== "string" || !/^\S+ #comment \S[\s\S]* #CMBDevClaw$/.test(message.trim())) {
+    return { success: false, error: "请选择任务卡片并填写提交说明" }
+  }
+  if (
+    !Array.isArray(filePaths) ||
+    !filePaths.length ||
+    filePaths.some((file) => typeof file !== "string" || !file.trim())
+  ) {
+    return { success: false, error: "请选择要提交的文件" }
+  }
+  const preparation = prepareGitPanelWrite()
+  let releaseWrite: (() => void) | undefined
+  try {
+    const context = await resolveKnowledgeGitContext(knowledgeBaseId)
+    const target = await resolveGitOperationTarget(context)
+    if ("error" in target) return { success: false, error: target.error }
+    const workspacePath = target.worktreePath
+    releaseWrite = await reserveGitPanelWrite(workspacePath, preparation)
+    await resolveKnowledgeGitWorkspace(knowledgeBaseId, true)
+    const selected = await resolveSelectedChangedFilesForGitOps(workspacePath, filePaths)
+    if (!selected.length) return { success: false, error: "没有需要提交的改动" }
+    await stageFilesForCommit(workspacePath, selected)
+    await runGitWithLiteralPathspecs(workspacePath, ["commit", "-m", message], selected)
+    const [commitSha, branch] = await Promise.all([
+      getHeadCommitCached(workspacePath, { silent: true, forceRefresh: true }).catch(() => null),
+      readCurrentBranch(workspacePath, true).catch(() => null)
+    ])
+    void recordGitCommitHistoryAsync({
+      workspacePath,
+      branch,
+      commitSha: commitSha || undefined,
+      fullMessage: message
+    }).catch((error) => console.warn("[GitPanel] failed to record commit history:", error))
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : "提交失败" }
+  } finally {
+    releaseWrite?.()
+    preparation.dispose()
+  }
+}
+
 async function resolveGitOperationTarget(
   context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>,
   requestedWorktreePath?: string | null
@@ -3905,7 +3979,10 @@ import {
   DEFAULT_THINKING_EFFORT
 } from "../storage"
 import { builtinRobotManager } from "../services/im/manager"
-import { refreshKnowledgeBasesInBackground } from "../services/knowledge-base-manager"
+import {
+  refreshKnowledgeBasesInBackground,
+  resolveKnowledgeGitWorkspace
+} from "../services/knowledge-base-manager"
 import type { BuiltinModelOverride, CustomModelConfig, ThinkingEffort } from "../storage"
 import {
   getBuiltinModelPublicConfigs,
@@ -5320,6 +5397,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }: {
         threadId: string
         options?: {
+          knowledgeBaseId?: string
           worktreePath?: string
           includeSummary?: boolean
           refreshHead?: boolean
@@ -5327,22 +5405,35 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
       }
     ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "meta", threadId, async () => {
-        let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-        try {
-          context = await resolveThreadWorkspaceContext(threadId, {
-            webContentsId: event.sender.id,
-            requestScope: "git-panel-meta"
-          })
-          return await buildGitPanelMetaState(threadId, context, options)
-        } catch (e) {
-          return createEmptyGitPanelMetaState(threadId, {
-            isWorktree: Boolean(context?.isWorktree),
-            isGitRepo: Boolean(context?.isGitRepo),
-            error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
-          })
+      gitReadRequestCoordinator.run(
+        event.sender,
+        options?.knowledgeBaseId !== undefined ? "knowledge-panel" : "panel",
+        "meta",
+        options?.knowledgeBaseId ?? threadId,
+        async () => {
+          let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+          try {
+            if (options?.knowledgeBaseId !== undefined) {
+              context = await resolveKnowledgeGitContext(options.knowledgeBaseId)
+              return await buildGitPanelMetaState(threadId, context, {
+                ...options,
+                worktreePath: context.workspacePath ?? undefined
+              })
+            }
+            context = await resolveThreadWorkspaceContext(threadId, {
+              webContentsId: event.sender.id,
+              requestScope: "git-panel-meta"
+            })
+            return await buildGitPanelMetaState(threadId, context, options)
+          } catch (e) {
+            return createEmptyGitPanelMetaState(threadId, {
+              isWorktree: Boolean(context?.isWorktree),
+              isGitRepo: Boolean(context?.isGitRepo),
+              error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
+            })
+          }
         }
-      })
+      )
   )
 
   ipcMain.handle(
@@ -5359,26 +5450,40 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           includeChangedFiles?: boolean
           statusUntrackedMode?: GitStatusUntrackedMode
           visibleFileLimit?: number
+          knowledgeBaseId?: string
           worktreePath?: string
         }
       }
     ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "diffs", threadId, async () => {
-        let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-        try {
-          context = await resolveThreadWorkspaceContext(threadId, {
-            webContentsId: event.sender.id,
-            requestScope: "git-panel-diffs"
-          })
-          return await buildGitPanelDiffState(threadId, context, options)
-        } catch (e) {
-          return createEmptyGitPanelDiffState(threadId, {
-            isWorktree: Boolean(context?.isWorktree),
-            isGitRepo: Boolean(context?.isGitRepo),
-            error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
-          })
+      gitReadRequestCoordinator.run(
+        event.sender,
+        options?.knowledgeBaseId !== undefined ? "knowledge-panel" : "panel",
+        "diffs",
+        options?.knowledgeBaseId ?? threadId,
+        async () => {
+          let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+          try {
+            if (options?.knowledgeBaseId !== undefined) {
+              context = await resolveKnowledgeGitContext(options.knowledgeBaseId)
+              return await buildGitPanelDiffState(threadId, context, {
+                ...options,
+                worktreePath: context.workspacePath ?? undefined
+              })
+            }
+            context = await resolveThreadWorkspaceContext(threadId, {
+              webContentsId: event.sender.id,
+              requestScope: "git-panel-diffs"
+            })
+            return await buildGitPanelDiffState(threadId, context, options)
+          } catch (e) {
+            return createEmptyGitPanelDiffState(threadId, {
+              isWorktree: Boolean(context?.isWorktree),
+              isGitRepo: Boolean(context?.isGitRepo),
+              error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
+            })
+          }
         }
-      })
+      )
   )
 
   ipcMain.handle(
@@ -5389,24 +5494,41 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         threadId,
         filePath,
         options
-      }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
+      }: {
+        threadId: string
+        filePath: string
+        options?: { worktreePath?: string; knowledgeBaseId?: string }
+      }
     ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "file-diff", threadId, async () => {
-        let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-        try {
-          context = await resolveThreadWorkspaceContext(threadId, {
-            webContentsId: event.sender.id,
-            requestScope: "git-panel-file-diff"
-          })
-          return await buildGitPanelFileDiffState(threadId, context, filePath, options)
-        } catch (e) {
-          return createEmptyGitPanelFileDiffState(threadId, {
-            isWorktree: Boolean(context?.isWorktree),
-            isGitRepo: Boolean(context?.isGitRepo),
-            error: e instanceof Error ? e.message : "加载文件 diff 失败"
-          })
+      gitReadRequestCoordinator.run(
+        event.sender,
+        options?.knowledgeBaseId !== undefined ? "knowledge-panel" : "panel",
+        "file-diff",
+        options?.knowledgeBaseId ?? threadId,
+        async () => {
+          let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+          try {
+            if (options?.knowledgeBaseId !== undefined) {
+              context = await resolveKnowledgeGitContext(options.knowledgeBaseId)
+              return await buildGitPanelFileDiffState(threadId, context, filePath, {
+                ...options,
+                worktreePath: context.workspacePath ?? undefined
+              })
+            }
+            context = await resolveThreadWorkspaceContext(threadId, {
+              webContentsId: event.sender.id,
+              requestScope: "git-panel-file-diff"
+            })
+            return await buildGitPanelFileDiffState(threadId, context, filePath, options)
+          } catch (e) {
+            return createEmptyGitPanelFileDiffState(threadId, {
+              isWorktree: Boolean(context?.isWorktree),
+              isGitRepo: Boolean(context?.isGitRepo),
+              error: e instanceof Error ? e.message : "加载文件 diff 失败"
+            })
+          }
         }
-      })
+      )
   )
 
   ipcMain.handle(
@@ -5590,6 +5712,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("workspace:cancelGitPanelReads", (event, family?: GitReadFamily): void => {
     const selectedFamily: GitReadFamily | undefined =
       family === "panel" ||
+      family === "knowledge-panel" ||
       family === "changed-summary" ||
       family === "summary" ||
       family === "workspace-probe"
@@ -5612,9 +5735,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         threadId: string
         message: string
         filePaths?: string[]
-        options?: { worktreePath?: string; agentInitiated?: boolean }
+        options?: { worktreePath?: string; agentInitiated?: boolean; knowledgeBaseId?: string }
       }
     ) => {
+      if (options?.knowledgeBaseId !== undefined) {
+        return commitKnowledgeGitFiles(options.knowledgeBaseId, message, filePaths)
+      }
       const preparation = prepareGitPanelWrite()
       let releaseWrite: (() => void) | undefined
       try {
@@ -5798,20 +5924,27 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:pushWorktree",
     async (
       _event,
-      { threadId, options }: { threadId: string; options?: { worktreePath?: string } }
+      { threadId, options }: { threadId: string; options?: { worktreePath?: string; knowledgeBaseId?: string } }
     ) => {
       logGitStep(threadId, "push", "开始推送流程")
       const steps: PushStepResult[] = []
       const preparation = prepareGitPanelWrite()
       let releaseWrite: (() => void) | undefined
       try {
-        const context = await resolveThreadWorkspaceContext(threadId)
+        const knowledgeBaseId = options?.knowledgeBaseId
+        const context =
+          knowledgeBaseId === undefined
+            ? await resolveThreadWorkspaceContext(threadId)
+            : await resolveKnowledgeGitContext(knowledgeBaseId)
         if (!context.workspacePath || !context.isGitRepo) {
           logGitStep(threadId, "push", "失败：当前任务不在 Git 仓库中")
           steps.push({ step: "final", status: "failed", detail: "当前任务不在 Git 仓库中" })
           return { success: false, error: "当前任务不在 Git 仓库中", steps }
         }
-        const target = await resolveGitOperationTarget(context, options?.worktreePath)
+        const target = await resolveGitOperationTarget(
+          context,
+          knowledgeBaseId === undefined ? options?.worktreePath : undefined
+        )
         if ("error" in target) {
           logGitStep(threadId, "push", `失败：${target.error}`)
           steps.push({ step: "final", status: "failed", detail: target.error })
@@ -5819,7 +5952,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
         const worktreePath = target.worktreePath
         releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
+        if (knowledgeBaseId !== undefined) {
+          await resolveKnowledgeGitWorkspace(knowledgeBaseId, true)
+        }
         const currentBranch = await readCurrentBranch(worktreePath, true)
+        if (knowledgeBaseId !== undefined && !currentBranch) {
+          return { success: false, error: "沉淀工作区未检出分支，无法推送", steps }
+        }
         const branch = currentBranch ?? "HEAD"
 
         steps.push({
@@ -5837,14 +5976,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // and first pushes with no upstream are still resolved (via
         // `--not --remotes=origin`). If this still returns empty, the
         // hook-independent push reconciler marks them on a later sweep.
-        const pushedCommitShasPromise = collectPublishedCommitShas(
-          worktreePath,
-          branch,
-          context.worktreeBaseCommit
-        ).catch((e) => {
-          console.warn("[GitPush] failed to capture published commit SHAs:", e)
-          return [] as string[]
-        })
+        const pushedCommitShasPromise =
+          knowledgeBaseId === undefined
+            ? collectPublishedCommitShas(worktreePath, branch, context.worktreeBaseCommit).catch(
+                (e) => {
+                  console.warn("[GitPush] failed to capture published commit SHAs:", e)
+                  return []
+                }
+              )
+            : Promise.resolve([])
         const pushPrepStartedAt = Date.now()
         const upstreamRef = await getConfiguredUpstreamRef(worktreePath, { silent: true })
         const useDefaultPush = shouldUseDefaultGitPush(upstreamRef, branch)
@@ -5891,6 +6031,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
 
         steps.push({ step: "final", status: "ok", detail: "推送成功" })
+        if (knowledgeBaseId !== undefined) {
+          return { success: true, autoCommitted: false, steps }
+        }
         notifyWorkspaceFilesChanged(threadId, worktreePath, "meta")
         if (
           context.workspacePath &&

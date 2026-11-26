@@ -87,6 +87,27 @@ describe("GitReadRequestCoordinator", () => {
     await expect(Promise.all([panel, latestProbe])).resolves.toEqual(["panel", "new-probe"])
   })
 
+  it("cancels knowledge drawer reads without cancelling the session Git panel", async () => {
+    const coordinator = new GitReadRequestCoordinator()
+    const sender = new FakeSender(13)
+    let finishSessionRead!: () => void
+    const session = coordinator.run(sender, "panel", "meta", "thread-a", async () => {
+      await new Promise<void>((resolve) => {
+        finishSessionRead = resolve
+      })
+      currentGitReadSignal()?.throwIfAborted()
+      return "session"
+    })
+    const knowledge = coordinator.run(sender, "knowledge-panel", "meta", "knowledge-a", () =>
+      pendingUntilCancelled("knowledge")
+    )
+    const cancelled = expect(knowledge).rejects.toMatchObject({ name: "AbortError" })
+    coordinator.cancel(sender.id, "knowledge-panel")
+    finishSessionRead()
+    await cancelled
+    await expect(session).resolves.toBe("session")
+  })
+
   it("cancels task A when task B wins the same panel family", async () => {
     const coordinator = new GitReadRequestCoordinator()
     const sender = new FakeSender(7)

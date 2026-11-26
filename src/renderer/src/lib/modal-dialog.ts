@@ -17,8 +17,14 @@ export function hasOpenModalDialog(): boolean {
   )
 }
 
-export function getOpenWorkbenchDialog(): HTMLElement | null {
-  return document.body.querySelector<HTMLElement>(`:scope > ${MODAL_DIALOG_SELECTOR}[data-state="open"]`)
+export function getOpenWorkbenchDialog(excluded?: HTMLElement | null): HTMLElement | null {
+  const selector = `:scope > ${MODAL_DIALOG_SELECTOR}[data-state="open"]`
+  if (!excluded) return document.body.querySelector<HTMLElement>(selector)
+  return (
+    Array.from(document.body.querySelectorAll<HTMLElement>(selector)).find(
+      (dialog) => dialog !== excluded
+    ) ?? null
+  )
 }
 
 // Workbench DialogContent portals to body. Native popovers need to yield their

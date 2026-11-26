@@ -61,10 +61,10 @@ describe.skipIf(process.platform === "win32")("Git panel and checkout write excl
       }
     }).replace(/\r?\n$/, "")
 
-  const invoke = (channel: string, payload: unknown): Promise<unknown> => {
+  const invoke = (channel: string, payload: unknown, event: unknown = null): Promise<unknown> => {
     const handler = handlers.get(channel)
     if (!handler) throw new Error(`Missing IPC handler ${channel}`)
-    return handler(null, payload)
+    return handler(event, payload)
   }
   const panel = (action: string, path?: string, fields: Record<string, unknown> = {}) =>
     invoke(`workspace:${action}`, {
@@ -194,6 +194,107 @@ describe.skipIf(process.platform === "win32")("Git panel and checkout write excl
     }
     return pending
   }
+
+  it("reviews, commits, pushes and reverts selected knowledge files in the write workspace", async () => {
+    const { knowledgeDirectory, mergeCloudKnowledgeState, writeKnowledgeState } =
+      await import("../services/knowledge-base-state")
+    const idKey = "knowledge-git-test"
+    await writeKnowledgeState(
+      mergeCloudKnowledgeState(null, [
+        {
+          idKey,
+          name: "Knowledge",
+          description: "",
+          ownerId: "",
+          ownerName: "",
+          repoUrl: "https://example.test/knowledge.git",
+          sshUrl: null,
+          gitRef: "main"
+        }
+      ])
+    )
+    const write = knowledgeDirectory(idKey, "write")
+    mkdirSync(write, { recursive: true })
+    const remote = join(harness, "knowledge-remote.git")
+    git(harness, "clone", "-q", "--bare", source, remote)
+    git(harness, "clone", "-q", remote, write)
+    git(write, "config", "user.email", "audit@example.test")
+    git(write, "config", "user.name", "Audit")
+    git(write, "config", "core.hooksPath", join(harness, "no-hooks"))
+    git(write, "config", "commit.gpgSign", "false")
+    writeFileSync(join(write, "tracked.txt"), "knowledge change\n")
+    writeFileSync(join(write, "keep.txt"), "leave pending\n")
+    const event = { sender: { id: 211, once: vi.fn() } }
+    const payload = {
+      threadId: "knowledge:test",
+      options: { knowledgeBaseId: idKey, worktreePath: repoA }
+    }
+    const metadataBefore = thread.metadata
+    await expect(invoke("workspace:getGitPanelMeta", payload, event)).resolves.toMatchObject({
+      success: true,
+      worktreeBranch: "main"
+    })
+    await expect(invoke("workspace:getGitPanelDiffs", payload, event)).resolves.toMatchObject({
+      success: true,
+      files: expect.arrayContaining(
+        [{ path: "tracked.txt" }, { path: "keep.txt" }].map((file) => expect.objectContaining(file))
+      )
+    })
+    await expect(
+      invoke(
+        "workspace:getGitPanelFileDiff",
+        {
+          ...payload,
+          filePath: "tracked.txt"
+        },
+        event
+      )
+    ).resolves.toMatchObject({
+      success: true,
+      file: { diff: expect.stringContaining("+knowledge change") }
+    })
+    await expect(
+      invoke("workspace:commitWorktree", {
+        ...payload,
+        message: "缺少任务卡片",
+        filePaths: ["tracked.txt"]
+      })
+    ).resolves.toMatchObject({ success: false, error: "请选择任务卡片并填写提交说明" })
+    const message = "TASK-123 #comment 更新知识库 #CMBDevClaw"
+    await expect(
+      invoke("workspace:commitWorktree", {
+        ...payload,
+        message,
+        filePaths: ["tracked.txt"]
+      })
+    ).resolves.toEqual({ success: true })
+    expect(git(write, "log", "-1", "--format=%s")).toBe(message)
+    expect(git(write, "show", "HEAD:tracked.txt")).toBe("knowledge change")
+    expect(git(write, "status", "--porcelain")).toBe("?? keep.txt")
+    await expect(invoke("workspace:getGitPanelMeta", payload, event)).resolves.toMatchObject({
+      success: true,
+      pendingCommits: [expect.objectContaining({ message })]
+    })
+    await expect(invoke("workspace:pushWorktree", payload)).resolves.toMatchObject({
+      success: true,
+      autoCommitted: false
+    })
+    expect(git(remote, "show", "main:tracked.txt")).toBe("knowledge change")
+    expect(git(write, "status", "--porcelain")).toBe("?? keep.txt")
+    writeFileSync(join(write, "tracked.txt"), "change to discard\n")
+    writeFileSync(join(write, "discard.txt"), "untracked to discard\n")
+    await expect(invoke("workspace:rejectWorktreeChanges", payload)).resolves.toMatchObject({
+      success: false,
+      error: "请选择要回退的文件"
+    })
+    await expect(
+      invoke("workspace:rejectWorktreeChanges", { ...payload, filePaths: ["tracked.txt", "discard.txt"] })
+    ).resolves.toMatchObject({ success: true, revertedFileCount: 2 })
+    expect(readFileSync(join(write, "tracked.txt"), "utf8")).toBe("knowledge change\n")
+    expect(git(write, "status", "--porcelain")).toBe("?? keep.txt")
+    expect(git(repoA, "show", "HEAD:tracked.txt")).toBe("before")
+    expect(thread.metadata).toBe(metadataBefore)
+  })
 
   it("keeps Pull on its original branch while alias checkouts fail busy and another repo can switch", async () => {
     const result = await whileGitRuns(nested, "pull", () => panel("pullWorktree", nested), async () => {

@@ -2006,6 +2006,7 @@ const api = {
     getGitPanelMeta: (
       threadId: string,
       options?: {
+        knowledgeBaseId?: string
         worktreePath?: string
         includeSummary?: boolean
         refreshHead?: boolean
@@ -2047,6 +2048,7 @@ const api = {
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
+        knowledgeBaseId?: string
         worktreePath?: string
       }
     ): Promise<{
@@ -2099,7 +2101,7 @@ const api = {
     getGitPanelFileDiff: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string }
+      options?: { knowledgeBaseId?: string; worktreePath?: string }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -2211,7 +2213,7 @@ const api = {
       }>
     },
     cancelGitPanelReads: (
-      family?: "panel" | "changed-summary" | "summary" | "workspace-probe"
+      family?: "panel" | "knowledge-panel" | "changed-summary" | "summary" | "workspace-probe"
     ): Promise<void> => {
       return ipcRenderer.invoke("workspace:cancelGitPanelReads", family) as Promise<void>
     },
@@ -2282,7 +2284,7 @@ const api = {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string; agentInitiated?: boolean }
+      options?: { knowledgeBaseId?: string; worktreePath?: string; agentInitiated?: boolean }
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:commitWorktree", {
         threadId,
@@ -2296,7 +2298,7 @@ const api = {
     },
     pushWorktree: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: { knowledgeBaseId?: string; worktreePath?: string }
     ): Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -2331,7 +2333,7 @@ const api = {
     rejectWorktreeChanges: (
       threadId: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: { knowledgeBaseId?: string; worktreePath?: string }
     ): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> => {
       return ipcRenderer.invoke("workspace:rejectWorktreeChanges", {
         threadId,
@@ -5067,14 +5069,15 @@ const api = {
   },
   gitPanel: {
     getCommitHistory: (
-      threadId: string
+      threadId: string,
+      knowledgeBaseId?: string
     ): Promise<{
       success: boolean
       projectPath: string | null
       records: GitCommitHistoryRecord[]
       error?: string
     }> =>
-      ipcRenderer.invoke("git-panel:getCommitHistory", { threadId }) as Promise<{
+      ipcRenderer.invoke("git-panel:getCommitHistory", { threadId, knowledgeBaseId }) as Promise<{
         success: boolean
         projectPath: string | null
         records: GitCommitHistoryRecord[]
