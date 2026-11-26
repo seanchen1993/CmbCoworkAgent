@@ -403,6 +403,37 @@ describe("shell monitor runtime dispatch", () => {
     }
   )
 
+  it("starts only the bound plugin's compile preparation in the background by default in managed sessions", async () => {
+    const { root, sandbox } = await fixture()
+    const script = path.join(root, "plugin files", "hooks", "task_runner.py")
+    const background = vi.spyOn(sandbox, "executeBackground").mockResolvedValue("background result")
+    const foreground = vi.spyOn(sandbox, "executeForTool").mockResolvedValue({
+      status: "completed",
+      result: { output: "foreground result", exitCode: 0, truncated: false }
+    })
+    const prepare = 'python -X utf8 "' + script + '" prepare-compile --run-id run-1'
+    const agent = createDeepAgent({
+      managedExecution: true,
+      backgroundCommandCwd: root,
+      backgroundPrepareCompilePaths: [script],
+      model: new ReplayModel((messages) => {
+        const results = messages.filter((message) => message._getType() === "tool").length
+        if (results === 0) return requestTool("execute", { command: prepare })
+        if (results === 1) return requestTool("execute", { command: prepare, run_in_background: false }, "foreground")
+        if (results === 2) return requestTool("execute", { command: 'python -X utf8 task_runner.py prepare-compile', run_in_background: true }, "unbound")
+        return new AIMessage({ content: "Finished", response_metadata: { finish_reason: "stop" } })
+      }),
+      backend: sandbox,
+      mainTodosEnabled: false,
+      mainSubagentsEnabled: false
+    })
+    await agent.invoke({ messages: [new HumanMessage("Prepare compilation")] })
+    expect(background.mock.calls.map(([command]) => command)).toEqual([prepare])
+    expect(foreground.mock.calls.map(([command]) => command)).toEqual([
+      prepare, "python -X utf8 task_runner.py prepare-compile"
+    ])
+  })
+
   it("still supports explicit background commands with automatic handoff disabled", async () => {
     const { sandbox, physicalExit } = await fixture()
     const raw = vi.spyOn(sandbox, "executeRaw").mockImplementation(async () => {

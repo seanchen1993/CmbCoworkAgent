@@ -155,6 +155,8 @@ import {
   SHELL_FIRST_TOOL_DESCRIPTIONS
 } from "./tool-strategy"
 import { profileShellCommand } from "./shell-command-profile"
+import { telemetryShellSegments } from "./telemetry-shell-syntax"
+import { resolveMarketRuntimePath } from "../services/market-content"
 import {
   DEFAULT_AGENT_OUTPUT_STYLE,
   resolveAgentOutputStyle,
@@ -523,7 +525,7 @@ const shellMonitorDeniedContext = new AsyncLocalStorage<boolean>()
 const BACKGROUND_EXEC_MANAGED_GUIDANCE = `
 ### 长时间命令执行
 
-托管会话中的 execute 以前台方式运行，最长等待 20 分钟，返回最终执行结果。
+托管会话中的 execute 默认以前台方式运行，最长等待 20 分钟。插件的编译准备可立即在后台启动，收到任务 ID 后用 monitor 获取终态。
 `
 
 const BACKGROUND_EXEC_GUIDANCE = `
@@ -2459,6 +2461,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     silentBackgroundServices = false,
     backgroundCommandShellSyntax = "posix",
     backgroundCommandCwd = "",
+    backgroundPrepareCompilePaths = [] as string[],
     autoBackgroundHandoff = true,
     registrySubagentSpecs = [],
     // Windows shell kind the runtime's commands execute in (derived from the
@@ -2711,6 +2714,19 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     const sandbox = filesystemBackend as LocalSandbox
     const originalExecute = mw.tools?.find((tool) => tool.name === "execute")
     if (originalExecute) {
+      const isBackgroundPrepareCompile = (command: string, cwd?: string): boolean => {
+        if (backgroundPrepareCompilePaths.length === 0) return false
+        const segments = telemetryShellSegments(command, backgroundCommandShellSyntax)
+        const segment = segments.length === 1 ? segments[0] : undefined
+        if (!segment || segment.background || segment.pipeline || segment.piped ||
+            segment.tokens.some((token) => token.operator || token.dynamic)) return false
+        const [python, flag, encoding, script, action] = segment.tokens.map((token) => token.value)
+        return /^python(?:3)?(?:\.exe)?$/i.test(python) &&
+          flag === "-X" && encoding === "utf8" && action === "prepare-compile" &&
+          backgroundPrepareCompilePaths.some((expected: string) =>
+            path.relative(expected, path.resolve(backgroundCommandCwd, cwd ?? "", script)) === ""
+          )
+      }
       const formatExecuteResponse = (result: import("deepagents").ExecuteResponse): string => {
         const parts = [result.output]
         if (result.exitCode !== null) {
@@ -2722,7 +2738,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       }
       const runExecute = async (
         input: { command: string; cwd?: string; run_in_background?: boolean; notify_on_complete?: boolean },
-        config?: RunnableConfig
+        config: RunnableConfig | undefined,
+        isPrepareCompile: boolean
       ): Promise<string> => {
         const readOnlyShell =
           filesystemAccess?.shellAccess === "read_only" ||
@@ -2762,7 +2779,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           return typeof result === "string" ? result : (JSON.stringify(result) ?? String(result))
         }
         const canMonitor = !runtimeShellMonitorBlocked && !shellMonitorDeniedContext.getStore()
-        const canRunInBackground = canMonitor && !managedExecution
+        const canRunInBackground = canMonitor && (!managedExecution || isPrepareCompile)
         const ownerId = getShellTaskOwnerId(config)
         if (canRunInBackground && input.run_in_background === true) {
           return shellTaskBackend.executeBackground(
@@ -2799,9 +2816,13 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 soloTaskTraceManager.getTraceContextForOwner(agentId)
               )
             : undefined
+          const isPrepareCompile = isBackgroundPrepareCompile(input.command, input.cwd)
+          if (isPrepareCompile && input.run_in_background === undefined) {
+            input = { ...input, run_in_background: true }
+          }
           const invoke = () => traceContext
-            ? executeTraceContext.run(traceContext, () => runExecute(input, config))
-            : runExecute(input, config)
+            ? executeTraceContext.run(traceContext, () => runExecute(input, config, isPrepareCompile))
+            : runExecute(input, config, isPrepareCompile)
           const owner = foregroundCommandEvidence.getStore()
           const source = config as { toolCall?: { id?: string }; configurable?: Record<string, unknown> } | undefined
           const callId = source?.toolCall?.id
@@ -2842,7 +2863,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 notifiedBackgroundCommands
                   ? "Run the command under the existing background process manager and return its task ID. Completion is delivered automatically to this conversation. Do not poll or detach the shell yourself."
                   : managedExecution
-                    ? "Managed sessions wait in the foreground up to 20 minutes and return the final command result."
+                    ? backgroundPrepareCompilePaths.length > 0
+                      ? "Managed sessions wait in the foreground up to 20 minutes. The project plugin's prepare-compile defaults to background. Use monitor to get the result."
+                      : "Managed sessions wait in the foreground up to 20 minutes and return the final command result."
                     : runtimeShellMonitorBlocked
                       ? "This session runs commands in the foreground."
                       : autoBackgroundHandoff
@@ -7398,6 +7421,13 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     retainedBackgroundCommands,
     silentBackgroundServices,
     backgroundCommandCwd: fileRoot,
+    backgroundPrepareCompilePaths:
+      pluginRoot && featureId && !options.worktreeIsolation &&
+      pluginName === "AutobizDevOps_Plugin_Kanban_fullstack"
+        ? [pluginRoot, resolveMarketRuntimePath(pluginRoot)].map((root) =>
+            path.join(root, "hooks", "task_runner.py")
+          )
+        : [],
     backgroundCommandShellSyntax: isPowerShell
       ? "powershell"
       : isBashLike
