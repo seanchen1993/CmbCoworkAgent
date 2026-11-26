@@ -15,6 +15,9 @@ const workerClient = readFileSync(
   new URL("../file-attachment-parser/client.ts", import.meta.url),
   "utf8"
 )
+const parserProtocol = readFileSync(
+  new URL("../file-attachment-parser/protocol.ts", import.meta.url), "utf8"
+)
 const parser = readFileSync(new URL("../file-parser.ts", import.meta.url), "utf8")
 
 describe("attachment read authorization boundary", () => {
@@ -50,7 +53,11 @@ describe("attachment read authorization boundary", () => {
     expect(models).toContain("getFileAttachmentParserClient().parse(")
     expect(worker).toContain("await parseFileBytes(")
     expect(worker).not.toContain("request.source.filePath")
-    expect(worker).toContain("FILE_ATTACHMENT_PARSE_MAX_RESPONSE_BYTES")
+    expect(worker).toContain("isBoundedParseResponse(attachment)")
+    expect(workerClient).toContain("isBoundedParseResponse(response.attachment)")
+    expect(parserProtocol).toContain("FILE_ATTACHMENT_PARSE_MAX_RESPONSE_BYTES")
+    expect(parserProtocol).toContain("image.bytes.byteLength")
+    expect(parserProtocol).toContain("MAX_ATTACHMENT_FILE_BYTES")
     expect(workerClient).toContain("maxOldGenerationSizeMb: 128")
     expect(workerClient).toContain("FILE_ATTACHMENT_PARSE_TIMEOUT_MS")
     expect(workerClient).toContain("void worker.terminate()")

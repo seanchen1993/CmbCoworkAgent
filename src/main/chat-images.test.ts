@@ -303,6 +303,23 @@ describe("chat image input", () => {
     expect(() => beginChatImageSubmission(make(acceptedFile))).toThrow("当前草稿")
   })
 
+  it("prioritizes the newest message when the conversation exceeds the visual context budget", async () => {
+    const png = await sharp({ create: { width: 8, height: 4, channels: 3, background: "blue" } }).png().toBuffer()
+    const file = await stageChatImage("parent", "tile.png", Uint8Array.from(png).buffer,
+      { draftWorkspace: "" })
+    const ref = { id: file.image!.id, filename: file.filename, slot: 0 }
+    const { attachmentModelBlocks } = buildAttachmentMessageParts([file])
+    const messages = Array.from({ length: 4 }, (_, i) => {
+      const id = "recent-" + i
+      const body = "Question " + i + attachmentModelBlocks
+      bindChatImages("parent", id, body, [ref], [ref])
+      return new HumanMessage({ id, content: body })
+    })
+    const result = await materializeChatImages("parent", messages, "desktop")
+    expect(result[0].content).toContain("历史图片未随本次请求发送")
+    expect(result.slice(1).every(message => Array.isArray(message.content))).toBe(true)
+  })
+
   it("delivers decodable pixels and the question in the same HTTP completion", async () => {
     const { getModelInstance } = await import("./agent/runtime")
     const recorded: string[] = []

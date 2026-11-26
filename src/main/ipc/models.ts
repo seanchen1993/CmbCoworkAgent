@@ -71,6 +71,7 @@ import {
   chatUploadExtensions,
   chatUploadLabel,
   MAX_ATTACHMENT_FILE_BYTES,
+  isVisualDocumentPath,
   MAX_ATTACHMENT_FILE_NAME_LENGTH,
   MAX_ATTACHMENT_PICKER_FILES,
   type AttachmentBytesParseRequest,
@@ -6455,7 +6456,9 @@ export function registerModelHandlers(
         ) {
           return { success: false, error: "无效的附件解析请求" }
         }
-        const imageScope = chatImageExtensions.includes(path.extname(request.filePath).toLowerCase())
+        const visualExtension = isVisualDocumentPath(request.filePath)
+        const imageScope = (request.threadId && visualExtension) ||
+          chatImageExtensions.includes(path.extname(request.filePath).toLowerCase())
           ? (await import("../workspace-chat-image")).captureOrdinaryImageDraft(request.threadId ?? "", request.workspacePath, assertSender)
           : undefined
         const resolved = await resolveExternalFileReadGrant(
@@ -6496,11 +6499,12 @@ export function registerModelHandlers(
               bytes: payload
             },
             request.maxLength,
-            attachmentParseLatestKey(event.sender.id)
+            attachmentParseLatestKey(event.sender.id), Boolean(imageScope)
           )
           attachment.filePath = opened.filePath
           assertSender()
-          return { success: true, attachment }
+          const { stageOrdinaryDocument } = await import("../workspace-chat-image")
+          return { success: true, attachment: await stageOrdinaryDocument(request.threadId ?? "", attachment, imageScope) }
         } finally {
           await opened.handle.close().catch(() => undefined)
         }
@@ -6545,14 +6549,18 @@ export function registerModelHandlers(
           assertCurrent()
           return { success: true, attachment }
         }
+        const { captureOrdinaryImageDraft, stageOrdinaryDocument } = await import("../workspace-chat-image")
+        const imageScope = request.threadId && isVisualDocumentPath(request.fileName)
+          ? captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertSender)
+          : undefined
         attachAttachmentParserCleanup(event)
         const attachment = await getFileAttachmentParserClient().parse(
           { kind: "bytes", fileName: path.basename(request.fileName), bytes: request.bytes },
           request.maxLength,
-          attachmentParseLatestKey(event.sender.id)
+          attachmentParseLatestKey(event.sender.id), Boolean(imageScope)
         )
         assertSender()
-        return { success: true, attachment }
+        return { success: true, attachment: await stageOrdinaryDocument(request.threadId ?? "", attachment, imageScope) }
       } catch (e) {
         return {
           success: false,

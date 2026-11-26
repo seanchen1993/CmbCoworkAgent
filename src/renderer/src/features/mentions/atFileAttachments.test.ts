@@ -41,7 +41,7 @@ describe("bounded @file attachment reads", () => {
     const result = await resolveAtFileAttachments({ ...params, readWorkspaceImage })
     expect(result.attachments[0].image?.id).toBe("original")
     expect(result.cleanedMessage).toBe("review chart.PNG")
-    expect(readWorkspaceImage).toHaveBeenCalledWith("/chart.PNG")
+    expect(readWorkspaceImage).toHaveBeenCalledWith("/chart.PNG", expect.any(Number))
     expect(readWorkspaceFile).not.toHaveBeenCalled()
     readWorkspaceImage.mockRejectedValueOnce(new Error("image failed"))
     await expect(resolveAtFileAttachments({ ...params, readWorkspaceImage })).rejects.toThrow("image failed")

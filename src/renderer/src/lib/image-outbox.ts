@@ -67,7 +67,8 @@ type ImageComposer = Pick<ThreadState, "draftInput" | "draftAttachments" | "draf
 /** Compare the original composer across a restart between parking and clearing it. */
 export function imageComposerSource(draft: ImageComposer): string {
   return JSON.stringify([draft.draftInput, draft.draftAttachments.map(file =>
-    file.image ? [file.image.id] : [file.filename, file.filePath, file.size, file.content]),
+    file.image ? [file.image.id] : [file.filename, file.filePath, file.size, file.content,
+      ...(file.embeddedImages ?? []).map(image => image.id)]),
     draft.draftMentionedWorkspaceFiles.map(file => [file.workspaceKey, file.workspaceFilePath]),
     draft.draftSkill?.path ?? null, draft.draftBuiltinBrowser, draft.draftBotReplyTo?.id ?? null])
 }

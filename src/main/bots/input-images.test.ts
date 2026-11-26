@@ -1,3 +1,5 @@
+import { visualDocx } from "../../../tests/support/document-attachment-fixtures.mjs"
+import { parseFileBytes } from "../file-parser"
 import { expect, it, vi } from "vitest"
 import { DatabaseSync } from "node:sqlite"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -9,7 +11,7 @@ import { canonicalBotMessageInput } from "../../shared/bots/message-mentions"
 import { LocalBotHost } from "./host"
 import { BotStore } from "./store"
 import { attachmentFallbackText } from "../../shared/file-attachment"
-import { isBotImageInput, prepareBotInputImages } from "./input-images"
+import { botBoundImageIds, isBotImageInput, prepareBotInputImages } from "./input-images"
 import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
 import type { FileAttachment } from "../../shared/file-attachment"
 
@@ -36,6 +38,13 @@ it("freezes group images by source group, request and selected member", () => {
     const text = buildAttachmentMessageParts([first]).attachmentModelBlocks.trim()
     const req = { groupId: group.id, requestId: "review-image", text, targetBotIds: [a.id],
       inputImageIds: [first.botInputId!] }
+    const doc = store.retainGroupImage(group.id, { ...png, filename: "report.docx",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      embeddedImageCount: 3 }, "/group-doc")
+    const overBudget = buildAttachmentMessageParts([first, doc], true).attachmentModelBlocks
+    expect(() => store.sendGroup({ ...req, text: overBudget, inputImageIds: [first.botInputId!, doc.botInputId!] }))
+      .toThrow("最多发送 3 张图片")
+    expect(store.groupMessages(group.id)).toHaveLength(0)
     expect(() => store.sendGroup({ ...req, inputImageIds: [second.botInputId!] })).toThrow()
     expect(() => store.sendGroup({ ...req, text: text + text })).toThrow()
     const deny = vi.fn(() => { throw new Error("no eligible vision model") })
@@ -144,5 +153,56 @@ it.each(["accept", "reject"] as const)("reports private image admission after th
     finish()
     await host.stop()
     db.close()
+  }
+})
+
+
+vi.mock("../file-attachment-parser/client", () => ({
+  getFileAttachmentParserClient: () => ({
+    parse: ({ fileName, bytes }: { fileName: string; bytes: ArrayBuffer },
+      maxLength?: number, _key?: string, includeImageBytes?: boolean) =>
+      parseFileBytes(fileName, bytes, maxLength, includeImageBytes),
+    cancelLatest: () => undefined
+  })
+}))
+
+it("extracts ordered pixels from the authorized immutable Word version and binds their resume identities", async () => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const root = await mkdtemp(join(tmpdir(), "bot-visual-doc-"))
+  try {
+    const store = new BotStore(db)
+    const bot = store.create({ name: "Word Review", instructions: "", color: "#112233", modelRef: null })
+    const pixels = [Buffer.from("first"), Buffer.from("second")]
+    const data: Buffer = visualDocx(pixels)
+    const digest = createHash("sha256").update(data).digest("hex")
+    const dir = join(root, ".bot-deliveries", digest)
+    await mkdir(dir, { recursive: true })
+    const path = join(dir, "report.docx")
+    await writeFile(path, data)
+    const parsed = await parseFileBytes("report.docx", Uint8Array.from(data).buffer)
+    const selected = store.retainInputFile(bot.id, parsed, path)
+    const [file] = store.inputFiles(bot.id, [selected.botInputId!])
+    const body = buildAttachmentMessageParts([selected], true).attachmentModelBlocks
+    const task = store.enqueue({ botId: bot.id, requestId: "word", message: body, inputFileIds: [file.id] })
+    const approved = [...botBoundImageIds(task, [file])]
+    const stage = vi.fn(async (_thread: string, filename: string, bytes: ArrayBuffer) => {
+      const index = pixels.findIndex(pixel => pixel.equals(Buffer.from(bytes)))
+      expect(index).toBeGreaterThanOrEqual(0)
+      return { ...png, image: { id: approved[index], filename, width: 1, height: 1 } }
+    })
+    const invoke = (message: string) => prepareBotInputImages(task, task.threadId, message, [file],
+      new AbortController().signal, stage)
+    expect(await invoke("hook removed the Word attachment")).toEqual([])
+    expect(await invoke(body + body)).toEqual([])
+    expect(stage).not.toHaveBeenCalled()
+    const images = await invoke(body)
+    expect(images.map(item => item.id)).toEqual(approved)
+    expect(images[0].filename).toContain("report.docx · 图 1")
+    expect(images[1].filename).toContain("report.docx · 图 2")
+    await writeFile(path, Buffer.alloc(data.length))
+    await expect(invoke(body)).rejects.toThrow("图片原件已变化")
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
   }
 })

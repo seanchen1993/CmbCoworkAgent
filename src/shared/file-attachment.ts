@@ -25,7 +25,12 @@ export function isChatImagePath(filePath: string): boolean {
   return chatImageExtensions.includes(filename.slice(filename.lastIndexOf(".")).toLowerCase())
 }
 
+export function isVisualDocumentPath(filename: string): boolean {
+  return /\.(?:docx|xlsx|html?)$/i.test(filename)
+}
+
 export interface WorkspaceChatImageRequest {
+  maxLength?: number
   threadId: string
   workspacePath: string
   filePath: string
@@ -67,6 +72,7 @@ export interface ChatImageRef {
   height: number
 }
 
+export const MAX_CHAT_IMAGES = 3
 export const MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
 export const MAX_ATTACHMENT_TOTAL_CHARS = 24_000
 export const MAX_ATTACHMENT_PICKER_FILES = 3
@@ -102,6 +108,9 @@ export interface AttachmentBytesParseRequest {
 /** Text extraction plus the retained original file's identity. */
 export interface FileAttachment {
   image?: ChatImageRef
+  embeddedImages?: ChatImageRef[]
+  embeddedImageCount?: number
+  visualNotice?: string
   /** Bot picker receipt; ordinary attachments and message text cannot mint this identity. */
   botInputId?: string
   /** A linked ordinary draft retained the extracted text without an original file version. */
@@ -112,6 +121,15 @@ export interface FileAttachment {
   mimeType: string
   size: number
   truncated: boolean
+}
+
+export function attachmentImages(file: FileAttachment): readonly ChatImageRef[] {
+  return file.image ? [file.image] : file.embeddedImages ?? []
+}
+
+export function submittedAttachmentImages(files: readonly FileAttachment[]): SubmittedChatImage[] {
+  return files.flatMap(file => attachmentImages(file))
+    .map(({ id, filename }, slot) => ({ id, filename, slot }))
 }
 
 /** A pure visual turn already has a payload; the UI must preserve the user's empty text. */

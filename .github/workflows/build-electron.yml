@@ -14,6 +14,45 @@ permissions:
   contents: write
 
 jobs:
+  windows-attachment-regressions:
+    name: Attachment regressions (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci --include=optional
+
+      - name: Enable and verify file symlinks on the ephemeral runner
+        shell: pwsh
+        run: |
+          $developerMode = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+          if (-not (Test-Path $developerMode)) { New-Item -Path $developerMode -Force | Out-Null }
+          New-ItemProperty -Path $developerMode -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
+          node --input-type=module -e "import { mkdtemp, symlink, writeFile, lstat, rm } from 'node:fs/promises'; import { join } from 'node:path'; import { tmpdir } from 'node:os'; const root = await mkdtemp(join(tmpdir(), 'attachment-symlink-')); try { await writeFile(join(root, 'target'), 'test'); const link = join(root, 'link'); await symlink('target', link, 'file'); if (!(await lstat(link)).isSymbolicLink()) throw Error('Expected a file symlink'); } finally { await rm(root, { recursive: true, force: true }); }"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Run attachment and symlink regressions
+        run: >-
+          npx vitest run --maxWorkers=2 --hookTimeout=35000
+          src/main/ipc/bot-attachment-storage.test.ts
+          src/main/ipc/bot-files.test.ts
+          src/main/ipc/attachment-security.test.ts
+          src/main/bots/input-images.test.ts
+          src/main/file-parser.test.ts
+          src/main/file-attachment-parser/client.test.ts
+          src/main/chat-images.test.ts
+          src/main/workspace-chat-image.test.ts
+          src/shared/attachment-message-parts.test.ts
+          src/shared/agent-runtime-settings-integration.test.ts
+
   # ------------------------------------------------------------------
   # Linux 专用:在老 glibc 容器里编 node-pty 原生模块
   # ------------------------------------------------------------------

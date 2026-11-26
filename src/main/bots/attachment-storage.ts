@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { mkdirSync, realpathSync } from "node:fs"
 import { mkdtemp, realpath, rm } from "node:fs/promises"
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BotInputFile } from "../../shared/bots/input-files"
 import type { BotWorkItem } from "../../shared/bots/work"
@@ -84,10 +84,13 @@ function createWorkAttachmentStorage(workspace: string, threadId: string, key: s
 }
 
 /** Only this picker operation owns the staging directory. Committed snapshots can be shared. */
-export async function withStagedWorkAttachments<T>(storage: string, use: (staging: string) => Promise<T>): Promise<T> {
-  const staging = await mkdtemp(join(storage, ".input-batch-"))
+export async function withStagedWorkAttachments<T>(storage: string, run: (staging: string) => Promise<T>): Promise<T> {
+  const prefix = join(storage, ".input-batch-")
+  // libuv's mkdtemp needs an explicit extended-length path on Windows.
+  const temporary = await mkdtemp(toNamespacedPath(prefix))
+  const staging = join(storage, basename(temporary))
   try {
-    return await use(staging)
+    return await run(staging)
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(error => {
       console.warn("[Bots] Could not remove attachment staging directory", error)

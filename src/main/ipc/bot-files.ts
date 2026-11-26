@@ -7,6 +7,7 @@ import { getFileAttachmentParserClient } from "../file-attachment-parser/client"
 import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import {
   MAX_ATTACHMENT_FILE_BYTES,
+  isVisualDocumentPath,
   MAX_ATTACHMENT_PICKER_FILES,
   MAX_ATTACHMENT_FILE_NAME_LENGTH,
   type FileAttachment
@@ -355,7 +356,7 @@ export function registerBotFileHandlers(
           if (asAttachments) {
             // Read extracted text from the very snapshot that will be referenced,
             // not from the editable import after its version has been retained.
-            const snapshot = managedSnapshot ?? (retain
+            const snapshot = managedSnapshot ?? (retain || (group && isVisualDocumentPath(source))
               ? await snapshotBotDeliveryFile(workspace, target.path, new AbortController().signal) : undefined)
             const opened = await openStableFileHandle(batch?.staging ?? workspace, snapshot?.attachmentPath ?? target.path)
             try {
@@ -373,10 +374,12 @@ export function registerBotFileHandlers(
               })
               if (validate().archived) throw new BotError("CONFLICT", "Bot 已归档")
               remainingChars -= attachment.content.length
-              if (!work?.source && botImageMime(attachment.filename, attachment.size)) imageWindow(event)
+              if (!work?.source && (attachment.embeddedImageCount || botImageMime(attachment.filename, attachment.size)))
+                imageWindow(event)
               if (managedSnapshot) staged.push({ attachment, path: managedSnapshot.attachmentPath })
               else attachments.push(snapshot
-                ? group ? host.retainGroupImage(group, bot.id, attachment, snapshot.attachmentPath)
+                ? group ? attachment.embeddedImageCount
+                  ? host.retainGroupImage(group, bot.id, attachment, snapshot.attachmentPath) : attachment
                   : work ? host.retainInputFile(bot.id, attachment, snapshot.attachmentPath, work.id)
                   : host.retainInputFile(bot.id, attachment, snapshot.attachmentPath)
                 : attachment)
@@ -448,11 +451,22 @@ export function registerBotFileHandlers(
         const attachment = await retainedAttachment({
           target: { id: path, path }, filename: basename(id), size: snapshot.size, maxChars,
           owner: event.sender.id, managed: Boolean(batch),
-          readText: budget => readRetainedWorkspaceText(threadId, root, snapshot.attachmentPath, budget, signal)
+          ...(isVisualDocumentPath(id) && snapshot.size <= MAX_ATTACHMENT_FILE_BYTES ? {
+            readBytes: async () => {
+              const opened = await openStableFileHandle(root, snapshot.attachmentPath)
+              try {
+                return Uint8Array.from(await readStableFileHandleBounded(opened, MAX_ATTACHMENT_FILE_BYTES)).buffer
+              } finally {
+                await opened.handle.close()
+              }
+            }
+          } : {
+            readText: budget => readRetainedWorkspaceText(threadId, root, snapshot.attachmentPath, budget, signal)
+          })
         })
         signal.throwIfAborted()
         const retain = (file: FileAttachment, snapshotPath: string) => {
-          if (botImageMime(file.filename, file.size)) imageWindow(event)
+          if (file.embeddedImageCount || botImageMime(file.filename, file.size)) imageWindow(event)
           return host.retainInputFile(bot.id, file, snapshotPath, work?.id)
         }
         if (batch) {
@@ -531,7 +545,7 @@ export function registerBotFileHandlers(
               try {
                 if (validate().archived) throw new BotError("CONFLICT", "Bot 已归档")
                 await copyBotFileBytes(target.path, bytes)
-                return retain
+                return retain || (group && isVisualDocumentPath(fileName))
                   ? await snapshotBotDeliveryFile(storage, target.path, new AbortController().signal)
                   : undefined
               } finally {
@@ -555,10 +569,12 @@ export function registerBotFileHandlers(
               })
               remainingChars -= attachment.content.length
               if (validate().archived) throw new BotError("CONFLICT", "Bot 已归档")
-              if (!work?.source && botImageMime(attachment.filename, attachment.size)) imageWindow(event)
+              if (!work?.source && (attachment.embeddedImageCount || botImageMime(attachment.filename, attachment.size)))
+                imageWindow(event)
               if (batch && snapshot) staged.push({ attachment, path: snapshot.attachmentPath })
               else attachments.push(snapshot
-                ? group ? host.retainGroupImage(group, bot.id, attachment, snapshot.attachmentPath)
+                ? group ? attachment.embeddedImageCount
+                  ? host.retainGroupImage(group, bot.id, attachment, snapshot.attachmentPath) : attachment
                   : work ? host.retainInputFile(bot.id, attachment, snapshot.attachmentPath, work.id)
                   : host.retainInputFile(bot.id, attachment, snapshot.attachmentPath)
                 : attachment)

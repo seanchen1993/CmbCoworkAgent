@@ -229,8 +229,12 @@ import { usePromptHistory } from "./usePromptHistory"
 import { isSameGitWorkspacePath, normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
   attachmentFallbackText,
+  attachmentImages,
+  submittedAttachmentImages,
+  MAX_CHAT_IMAGES,
   chatImageExtensions,
   isChatImagePath,
+  isVisualDocumentPath,
   chatUploadExtensions,
   chatUploadLabel,
   MAX_ATTACHMENT_FILE_BYTES,
@@ -2935,11 +2939,12 @@ export function ChatContainer({
             })
           }
           const result = await parseInput()
-          if (result?.attachment?.image) stagedImages.push(result.attachment.image.id)
+          const selectedImages = result?.attachment ? attachmentImages(result.attachment) : []
+          stagedImages.push(...selectedImages.map(image => image.id))
           if (!result || !isCurrent()) return
           if (result.success && result.attachment) {
             // #12: skip empty files
-            if (!result.attachment.image && !result.attachment.content.trim()) {
+            if (!selectedImages.length && !result.attachment.content.trim()) {
               if (result.attachment.filename.toLowerCase().endsWith(".docx")) {
                 setError(
                   `文件 "${result.attachment.filename}" 内容为空；若原始文件为 doc，请${DOC_SAVE_AS_DOCX_HINT}`
@@ -2950,6 +2955,10 @@ export function ChatContainer({
               continue
             }
             const attachment = result.attachment
+            if ([...snapshot, ...added, attachment].flatMap(attachmentImages).length > MAX_CHAT_IMAGES) {
+              setError("每条消息最多发送 3 张图片，含文档内嵌图片")
+              continue
+            }
             added.push(attachment.image ? { ...attachment, image: { ...attachment.image,
               draftWorkspace: normalizeGitWorkspacePathKey(uploadDraft.workspacePath ?? "") } } : attachment)
             existingPaths.add(result.attachment.filePath)
@@ -2961,14 +2970,19 @@ export function ChatContainer({
         }
         if (added.length && isCurrent()) {
           setAttachments([...snapshot, ...added])
-          stagedImages.length = 0
+          const adopted = new Set(added.flatMap(attachmentImages).map(image => image.id))
+          for (let i = stagedImages.length - 1; i >= 0; i--) {
+            if (adopted.has(stagedImages[i])) stagedImages.splice(i, 1)
+          }
         }
       } catch (err) {
         if (isCurrent()) setError(err instanceof Error ? err.message : "文件处理异常")
       } finally {
-        if (stagedImages.length)
-          void window.api.file.updateImageOwners({ action: "discard", threadId, workspacePath: uploadDraft.workspacePath ?? null,
-            ids: stagedImages }).catch(() => undefined)
+        for (let offset = 0; offset < stagedImages.length; offset += MAX_CHAT_IMAGES) {
+          void window.api.file.updateImageOwners({ action: "discard", threadId,
+            workspacePath: uploadDraft.workspacePath ?? null,
+            ids: stagedImages.slice(offset, offset + MAX_CHAT_IMAGES) }).catch(() => undefined)
+        }
         if (ordinaryUploadPending.current === uploadDraft) {
           ordinaryUploadPending.current = null
           if (chatViewMountedRef.current) setOrdinaryReadOwner(null)
@@ -3061,11 +3075,12 @@ export function ChatContainer({
 
   const removeAttachment = useCallback(
     (index: number) => {
-      const image = attachments[index]?.image
+      const removed = attachments[index]
+      const ids = removed ? attachmentImages(removed).map(image => image.id) : []
       setAttachments((prev) => prev.filter((_, i) => i !== index))
-      if (image && !managedUpload)
+      if (ids.length && !managedUpload)
         void window.api.file.updateImageOwners({ action: "discard", threadId, workspacePath: workspacePath ?? null,
-          ids: [image.id] }).catch(() => undefined)
+          ids }).catch(() => undefined)
     },
     [attachments, managedUpload, setAttachments, threadId, workspacePath]
   )
@@ -6547,9 +6562,9 @@ export function ChatContainer({
       // fresh composer and is not cleared when this draft is enqueued.
       const browser = selectedBuiltinBrowser
       const claimedAttachments = attachments
-      const keepImageDraft = attachments.some(file => file.image) ||
-        (allowWorkspaceImages && (mentionedFiles.some(file => isChatImagePath(file.workspaceFilePath)) ||
-          extractAtFileMentions(trimmedInput).some(isChatImagePath)))
+      const keepImageDraft = attachments.some(file => attachmentImages(file).length) ||
+        (allowWorkspaceImages && (mentionedFiles.some(file => isChatImagePath(file.workspaceFilePath) || isVisualDocumentPath(file.workspaceFilePath)) ||
+          extractAtFileMentions(trimmedInput).some(path => isChatImagePath(path) || isVisualDocumentPath(path))))
       let imageSource: string | undefined
       if (keepImageDraft && !managedTurn) {
         const state = threadContext.getThreadState(threadId)
@@ -6600,15 +6615,15 @@ export function ChatContainer({
           maxAttachments: MAX_ATTACHMENTS,
           maxTotalChars: MAX_TOTAL_CHARS,
           ...(allowWorkspaceImages && workspacePath ? {
-            readWorkspaceImage: async (filePath: string) => {
+            readWorkspaceImage: async (filePath: string, maxLength: number) => {
               const assertCurrent = () => {
                 if (!chatViewMountedRef.current || currentThreadIdRef.current !== threadId ||
                     normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey)
                   throw new Error("@图片所属会话或工作区已变更，请重新选择。")
               }
               assertCurrent()
-              const attachment = await window.api.file.attachWorkspaceImage({ threadId, workspacePath, filePath })
-              if (attachment.image) stagedMentionImages.push(attachment.image.id)
+              const attachment = await window.api.file.attachWorkspaceImage({ threadId, workspacePath, filePath, maxLength })
+              stagedMentionImages.push(...attachmentImages(attachment).map(image => image.id))
               assertCurrent()
               return attachment
             }
@@ -6747,6 +6762,13 @@ export function ChatContainer({
           })
         : ""
 
+      if ((attachmentPayload ?? []).reduce((count, file) =>
+        count + (file.botInputId ? file.embeddedImageCount ??
+          (["image/png", "image/jpeg", "image/webp"].includes(file.mimeType) ? 1 : 0) :
+          attachmentImages(file).length), 0) > MAX_CHAT_IMAGES) {
+        setError("每条消息最多发送 3 张图片，含文档内嵌图片")
+        return
+      }
       const inputFileIds = surface === "bot" ? botInputFileIds(attachmentPayload ?? []) : []
       const composedDraft: QueuedMessage = {
         id: crypto.randomUUID(),
@@ -6754,8 +6776,7 @@ export function ChatContainer({
         ...(selectedBotMentions.length ? { botMentions: parseBotMessageMentions(userText, selectedBotMentions) } : {}),
         ...(replyForSubmission ? { botReplyTo: replyForSubmission } : {}),
         attachmentModelBlocks,
-        chatImages: (attachmentPayload ?? []).flatMap((file, slot) =>
-          file.image ? [{ id: file.image.id, filename: file.filename, slot }] : []),
+        chatImages: submittedAttachmentImages(attachmentPayload ?? []),
         attachmentDisplayPrefix,
         ...(inputFileIds.length ? { botInputFileIds: inputFileIds } : {}),
         skillBlock,
@@ -7007,9 +7028,10 @@ export function ChatContainer({
       }
     } finally {
       releaseImageSource?.()
-      if (stagedMentionImages.length)
+      for (let offset = 0; offset < stagedMentionImages.length; offset += MAX_CHAT_IMAGES) {
         void window.api.file.updateImageOwners({ action: "discard", threadId, workspacePath: workspacePath ?? null,
-          ids: stagedMentionImages }).catch(() => undefined)
+          ids: stagedMentionImages.slice(offset, offset + MAX_CHAT_IMAGES) }).catch(() => undefined)
+      }
       history?.discard()
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.delete(threadId)
@@ -7282,7 +7304,7 @@ export function ChatContainer({
           })
           if (removed) {
             await window.api.file.updateImageOwners({ action: "unpin", ...scope })
-            const resident = new Set(threadContext.getThreadState(threadId).draftAttachments.map(file => file.image?.id))
+            const resident = new Set(threadContext.getThreadState(threadId).draftAttachments.flatMap(attachmentImages).map(image => image.id))
             const ids = (message.chatImages ?? []).map(ref => ref.id).filter(id => !resident.has(id))
             if (ids.length) await window.api.file.updateImageOwners({ action: "discard", ...scope, ids })
           }
@@ -10473,6 +10495,11 @@ export function ChatContainer({
                                 <span className="max-w-[160px] truncate" title={att.filePath}>
                                   {att.filename}
                                 </span>
+                                {att.visualNotice && (
+                                  <span className="text-xs text-amber-600" title={att.visualNotice}>
+                                    {att.visualNotice}
+                                  </span>
+                                )}
                                 {att.truncated && (
                                   <span className="text-amber-500" title="内容已截取">
                                     ⚠

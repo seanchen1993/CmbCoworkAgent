@@ -1,5 +1,5 @@
 import { BotError } from "./contracts"
-import { MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_PICKER_FILES, type FileAttachment } from "../file-attachment"
+import { MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_PICKER_FILES, MAX_CHAT_IMAGES, type FileAttachment } from "../file-attachment"
 
 export const BOT_INPUT_FILE_ID_PATTERN = /^input-[a-f0-9-]{36}$/
 
@@ -29,6 +29,17 @@ export function botImageMime(name: string, size: number): string | undefined {
 export function isBotImageInput(file: BotInputFile): boolean {
   const mime = botImageMime(file.file.filename, file.file.size)
   return Boolean(mime && file.attachment?.mimeType === mime && file.blockHash)
+}
+
+export function botInputImageCount(file: BotInputFile): number {
+  if (isBotImageInput(file)) return 1
+  const count = file.attachment?.embeddedImageCount
+  return file.blockHash && count && Number.isInteger(count) && count > 0 && count <= MAX_CHAT_IMAGES
+    ? count : 0
+}
+
+export function hasBotInputImages(file: BotInputFile): boolean {
+  return botInputImageCount(file) > 0
 }
 
 export function parseBotInputFileIds(value: unknown): string[] {

@@ -1,5 +1,6 @@
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
+import { MAX_CHAT_IMAGES } from "../../shared/file-attachment"
 import { chatImageMarker } from "../../shared/attachment-message-parts"
 import type { SubmittedChatImage } from "../../shared/file-attachment"
 import { boundChatImageReceipt, readChatImage } from "../chat-images"
@@ -15,7 +16,8 @@ export async function materializeChatImages(
   const expectedSource = scope === "desktop" ? undefined : "bot"
   const messages = [...original]
   let count = 0
-  for (const [index, message] of messages.entries()) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
     if (!HumanMessage.isInstance(message)) continue
     if (scope === "desktop" && message.additional_kwargs.cmb_chat_images_source === "bot") continue
     if (scope !== "desktop" && message.id !== scope.messageId) continue
@@ -29,9 +31,17 @@ export async function materializeChatImages(
       continue
     }
     if (scope !== "desktop") scope.validateAccess?.()
-    count += refs.length
-    if (count > 3) throw new Error("当前上下文的图片数量超过 3 张")
+    if (refs.length > MAX_CHAT_IMAGES) throw new Error("图片数量超限")
     let text = typeof message.content === "string" ? message.content : message.text
+    if (count + refs.length > MAX_CHAT_IMAGES) {
+      // Keep the document text and labels when older pixels no longer fit this request.
+      for (const ref of refs) text = text.replace(chatImageMarker(ref),
+        () => ref.filename + "（历史图片未随本次请求发送）")
+      messages[index] = new HumanMessage({ id: message.id, content: text, name: message.name })
+      count = MAX_CHAT_IMAGES
+      continue
+    }
+    count += refs.length
     const blocks: Exclude<HumanMessage["content"], string> = []
     const ordered = refs.map(ref => ({ ref, marker: chatImageMarker(ref) }))
       .sort((a, b) => text.indexOf(a.marker) - text.indexOf(b.marker))

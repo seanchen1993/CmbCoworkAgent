@@ -20,7 +20,7 @@ import { lstatSync, realpathSync } from "node:fs"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { createThread, getThreadCore, updateThread } from "../db"
 import { boundChatImageReceipt } from "../chat-images"
-import { isBotImageInput, prepareBotInputImages, botBoundImageIds } from "./input-images"
+import { hasBotInputImages, prepareBotInputImages, botBoundImageIds } from "./input-images"
 import { startAgentRun, steerAgentRun, type AgentRunTerminal } from "../agent/agent-run-service"
 import {
   createManagedTransportAgentRunDelivery,
@@ -142,8 +142,11 @@ function botReplyPreview(event: SchedulerRendererEvent): SchedulerRendererEvent 
   if (event.type === "custom" && event.data.type === "coordinator_ai_snapshot_message") {
     const message = event.data.assistantMessage
     if (message && typeof message === "object" && "content" in message) {
-      const { content: _draft, ...rest } = message
-      return "reasoning" in rest ? { ...event, data: { ...event.data, assistantMessage: rest } } : undefined
+      const assistantMessage = { ...message }
+      Reflect.deleteProperty(assistantMessage, "content")
+      return "reasoning" in assistantMessage
+        ? { ...event, data: { ...event.data, assistantMessage } }
+        : undefined
     }
   }
   return event
@@ -756,8 +759,8 @@ export function createLocalBotRunPort(
           // The same audience can steer at a graph boundary. An unrelated peer or routine cannot.
           if (!canSteerBotTask(task, message)) return false
           // A message with pixels needs its own model-routing/capability decision.
-          if (!message.mockSource && /type="image\/(?:png|jpeg|webp)"/.test(message.message) &&
-            getHost().inputFilesForTask(message.id).some(isBotImageInput)) return false
+          if (!message.mockSource && message.message.includes('input_id="input-') &&
+            getHost().inputFilesForTask(message.id).some(hasBotInputImages)) return false
           // Forwarding context is not an answer or a request to abandon the current turn.
           // Keep it in the existing inbox until the original interaction is resolved.
           if (message.origin.kind === "work" &&
@@ -1497,7 +1500,7 @@ export function createLocalBotRunPort(
             task.origin.kind === "notification" &&
             ["workflow", "coordinator"].includes(task.origin.notificationKind)
           const hasInputFiles = (task.origin.kind === "user" || task.origin.kind === "work") && Boolean(task.origin.inputFileIds?.length)
-          const hasGroupImages = task.origin.kind === "group" && /type="image\/(?:png|jpeg|webp)"/.test(task.message)
+          const hasGroupImages = task.origin.kind === "group"
           const files = hasInputFiles || hasGroupImages ? getHost().inputFilesForTask(task.id) : []
           let admittedImageFileIds: string[] = []
           const validateBotChatImageAccess = () => {
@@ -1513,7 +1516,7 @@ export function createLocalBotRunPort(
               throw new BotError("CONFLICT", "图片授权已发生变化")
           }
           const localImages = !task.mockSource && !work?.source &&
-            files.some(isBotImageInput)
+            files.some(hasBotInputImages)
           if (hasInputFiles)
             await verifyInputFiles(task.origin.kind === "work" ? files : files.filter(file => file.blockHash), signal)
           const projectedInput = projectSkillWorkInput(task, files)
@@ -1762,7 +1765,7 @@ export function createLocalBotRunPort(
                   } : {}),
                   prepareBotChatImages: async (body: string, activeSignal: AbortSignal) => {
                     const current = getHost().imagesForRunningTask(task.id)
-                    admittedImageFileIds = retainedInputFileIds(current.filter(isBotImageInput), body, task)
+                    admittedImageFileIds = retainedInputFileIds(current.filter(hasBotInputImages), body, task)
                     const result = await prepareBotInputImages(task, previewThreadId ?? task.threadId,
                       body, current, activeSignal, undefined, imageStages)
                     if (!result.length && task.origin.kind === "user" &&

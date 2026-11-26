@@ -3,7 +3,7 @@
  * 同时收口这类文件专用的去重、扩展名过滤、数量/字符上限控制和路径转换。
  */
 import type { FileAttachment, FileInfo } from "@/types"
-import { isChatImagePath } from "../../../../shared/file-attachment"
+import { isChatImagePath, isVisualDocumentPath } from "../../../../shared/file-attachment"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
@@ -47,7 +47,7 @@ interface ResolveAtFileAttachmentsParams {
     maxChars: number
   ) => Promise<WorkspaceReadFileResult>
   readWorkspaceAttachment?: (filePath: string, maxChars: number) => Promise<FileAttachment>
-  readWorkspaceImage?: (filePath: string) => Promise<FileAttachment>
+  readWorkspaceImage?: (filePath: string, maxLength: number) => Promise<FileAttachment>
   cancelWorkspaceFileReads?: () => void
 }
 
@@ -314,7 +314,7 @@ export async function resolveAtFileAttachments(
 
     // 先纳入输入框里已经通过 popover 选中过的 @文件，保证它们优先参与去重和带入。
     for (const mentionFile of mentionedFiles) {
-      if (isChatImagePath(mentionFile.workspaceFilePath)) {
+      if (isChatImagePath(mentionFile.workspaceFilePath) || (allowImages && isVisualDocumentPath(mentionFile.workspaceFilePath))) {
         if (!allowImages) throw new Error("@图片不适用于当前会话，请重新选择附件。")
         hasImageMention = true
       }
@@ -339,7 +339,7 @@ export async function resolveAtFileAttachments(
         if (!workspaceFile) continue
         // 输入阶段已经做过一次过滤，这里再做一层防御，确保发送阶段也不会把不支持的文件带进去。
         if (!isSupportedWorkspaceMentionFilePath(workspaceFile.path, allowImages)) continue
-        if (isChatImagePath(workspaceFile.path)) hasImageMention = true
+        if (isChatImagePath(workspaceFile.path) || (allowImages && isVisualDocumentPath(workspaceFile.path))) hasImageMention = true
 
         addMentionCandidate(
           toMentionedWorkspaceFile(
@@ -382,9 +382,14 @@ export async function resolveAtFileAttachments(
           continue
         }
 
-        if (allowImages && readWorkspaceImage && isChatImagePath(mentionFile.workspaceFilePath)) {
-          const attachment = await readWorkspaceImage(mentionFile.workspaceFilePath)
-          if (!attachment.image) throw new Error("@图片读取失败，请重新选择。")
+        const visualDocument = isVisualDocumentPath(mentionFile.workspaceFilePath)
+        if (allowImages && readWorkspaceImage && (isChatImagePath(mentionFile.workspaceFilePath) || visualDocument)) {
+          const remaining = maxTotalChars - currentAttachmentChars
+          if (visualDocument && remaining <= 0) throw new Error("附件内容已达上限，请调整附件后重试。")
+          const attachment = await readWorkspaceImage(mentionFile.workspaceFilePath, Math.max(1, remaining))
+          if (!visualDocument && !attachment.image) throw new Error("@图片读取失败，请重新选择。")
+          currentAttachmentChars += attachment.content.length
+          if (attachment.visualNotice) warningMessage = attachment.visualNotice
           currentAttachments.push(attachment)
           sourcePaths.forEach(path => handledMentionPaths.add(path))
           existingAttachmentPaths.add(mentionFile.absolutePath)

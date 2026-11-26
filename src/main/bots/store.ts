@@ -9,7 +9,7 @@ import type { BotConversationToolSource, BotThreadRenameInput, BotThreadSummary 
 import type { BotWorkDeletionIdentity, BotWorkDeletionRecord } from "./work-deletion"
 import type { BotInputHistoryResolver } from "./attachment-storage"
 import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
-import { BOT_INPUT_FILE_ID_PATTERN, isBotImageInput, parseBotInputFileIds, type BotInputFile } from "../../shared/bots/input-files"
+import { BOT_INPUT_FILE_ID_PATTERN, botInputImageCount, hasBotInputImages, parseBotInputFileIds, type BotInputFile } from "../../shared/bots/input-files"
 import type { FileAttachment } from "../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
 import {
@@ -1553,8 +1553,12 @@ export class BotStore {
       ])
     })
   }
-  private workSummary(row: Record<string, unknown>) {
-    const { goal, audienceKey, threadInitialized, ...summary } = this.work(row)
+  private workSummary(row: Record<string, unknown>): BotWorkSummary {
+    const summary: BotWorkSummary & Partial<Pick<BotWorkItem, "goal" | "audienceKey" | "threadInitialized">> =
+      this.work(row)
+    delete summary.goal
+    delete summary.audienceKey
+    delete summary.threadInitialized
     return summary
   }
   workSummaries(botId: string, workIds: string[], allowMissing?: true) {
@@ -4123,7 +4127,7 @@ export class BotStore {
     }
     if (!requests.length || (requests.length === 1 && requests[0] === assignment)) return assignment
     // Keep source text literal; it cannot mint attachment, skill or internal-goal transport markers.
-    const sourceText = `[${requests.map(body => JSON.stringify(body).replace(/[<>\[\]]/g,
+    const sourceText = `[${requests.map(body => JSON.stringify(body).replace(/[<>[\]]/g,
       character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)).join(",")}]`
     const message = `${WORK_ASSIGNMENT_PREFIX}${assignment}${WORK_ASSIGNMENT_SOURCE}${sourceText}`
     // Large originals are still available in full via the scoped, paginated work input.
@@ -4295,7 +4299,9 @@ export class BotStore {
         throw new BotError("INVALID_INPUT", "此附件引用只属于原私聊请求")
       const files = inputFileIds.length
         ? this.desktopInputFiles(input.botId, inputFileIds, input.skillDraftFromMain ? undefined : input.workId) : []
-      if (origin.kind === "user" && files.some(isBotImageInput) &&
+      if (files.reduce((total, file) => total + botInputImageCount(file), 0) > 3)
+        throw new BotError("INVALID_INPUT", "每条消息最多发送 3 张图片，含文档内嵌图片")
+      if (origin.kind === "user" && files.some(hasBotInputImages) &&
           !selectedMainBotSkill({ workId: input.workId, origin: { ...origin, explicitSkill }, message: input.message }))
         origin = { ...origin, imageAdmission: "pending" }
       if (mentions.length && (origin.kind !== "user" || mockSource))
@@ -9268,7 +9274,8 @@ export class BotStore {
     const candidate = this.scheduledWorkResultCandidate(work)
     let settled: BotScheduledWorkSnapshot["result"]
     if (candidate && candidate.kind !== "pending") {
-      const { kind, ...result } = candidate
+      const result = { ...candidate }
+      Reflect.deleteProperty(result, "kind")
       settled = result
     }
     const result = settled ?? previousResult
@@ -9498,7 +9505,7 @@ export class BotStore {
       this.transition(task.id, error ? "failed" : "completed", error ?? null)
       if (kind !== "silent") {
         const title = (snapshot?.title ?? "原任务")
-          .replace(/\s+/g, " ").replace(/[\\`*_{}\[\]()<>|]/g, "\\$&")
+          .replace(/\s+/g, " ").replace(/[\\`*_{}[\]()<>|]/g, "\\$&")
         const workStatus = snapshot?.workState === "completed" ? "已标记完成。" : ""
         const lastExecution = snapshot?.resultDependencyUnavailable
           ? "最近一次成果所需服务当前不可用，请查看原任务。" : formatObservedWorkResult(snapshot?.result)
@@ -11085,6 +11092,8 @@ export class BotStore {
       let visibleText = input.text
       if (images) {
         const files = this.groupImageInputs(group.id, input.inputImageIds!)
+        if (files.reduce((total, file) => total + botInputImageCount(file), 0) > 3)
+          throw new BotError("INVALID_INPUT", "每条消息最多发送 3 张图片，含文档内嵌图片")
         if (retainedInputFileIds(files, input.text).length !== files.length)
           throw new BotError("INVALID_INPUT", "群图片与提交的附件不一致，请重新选择")
         for (const file of files) {

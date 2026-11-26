@@ -6550,7 +6550,7 @@ export function registerAgentHandlers(ipcMain: IpcMain, getChatWindow: () => Bro
         return
       }
       const attachmentBudgetError = runExecutionContext.source === "desktop" &&
-        chatAttachmentBudgetError(message, request.chatImages?.length)
+        chatAttachmentBudgetError(message, request.chatImages ?? [])
       if (attachmentBudgetError) {
         safeSendToWindow(window, channel, { type: "error", error: attachmentBudgetError })
         runExecutionContext.onRunTerminated?.({ outcome: "error", code: "attachment_budget", message: attachmentBudgetError })

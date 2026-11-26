@@ -4,7 +4,7 @@ import type { BotWorkConversationResolution } from "../../../shared/bots/convers
 import type { BotOrdinaryThreadRef } from "../../../shared/bots/thread-history"
 import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
 import { isBotMessageReply } from "../../../shared/bots/message-reply"
-import { MAX_ATTACHMENT_PICKER_FILES } from "../../../shared/file-attachment"
+import { attachmentImages, MAX_ATTACHMENT_PICKER_FILES, MAX_CHAT_IMAGES } from "../../../shared/file-attachment"
 import type { useThreadContext } from "./thread-context"
 import { isThreadRetired } from "./store"
 import type { Thread } from "../types"
@@ -17,6 +17,7 @@ import {
   botConversationDraftKey,
   botThreadDraftKey,
   botDraftContentSchema,
+  draftImageRef,
   loadBotDraftRecord,
   saveBotDraftRecord,
   pruneBotDraftRecords
@@ -60,16 +61,13 @@ const threadSchema = z.object({
 })
 
 const ordinaryImageFile = z.object({
-  image: z.object({
-    id: z.string().uuid(), filename: z.string().min(1).max(512),
-    width: z.number().int().positive().max(8192), height: z.number().int().positive().max(8192),
-    draftWorkspace: z.string().max(32_768)
-  }),
+  image: draftImageRef,
   filename: z.string().min(1).max(512), filePath: z.literal(""), content: z.literal(""),
   mimeType: z.literal("image/webp"), size: z.number().int().nonnegative(), truncated: z.literal(false)
 })
 const ordinaryImageDraft = draftFields.extend({
-  attachments: z.array(z.union([ordinaryImageFile, botDraftContentSchema.shape.attachments.element]))
+  attachments: z.array(z.union([ordinaryImageFile, botDraftContentSchema.shape.attachments.element
+    .safeExtend({ embeddedImages: z.array(draftImageRef).max(MAX_CHAT_IMAGES).optional() })]))
     .max(MAX_ATTACHMENT_PICKER_FILES)
 })
 
@@ -82,9 +80,9 @@ export function bindOrdinaryImageDraft(context: DraftContext, row: Thread, works
   const key = ORDINARY_IMAGE_DRAFT_PREFIX + JSON.stringify([id, incarnation, root])
   let saved = false
   const state = context.getThreadState(id)
-  if (state.draftAttachments.some(file => file.image && file.image.draftWorkspace !== root)) {
+  if (state.draftAttachments.some(file => attachmentImages(file).some(image => image.draftWorkspace !== root))) {
     context.getThreadActions(id).setDraftAttachments(state.draftAttachments.filter(
-      file => !file.image || file.image.draftWorkspace === root))
+      file => attachmentImages(file).every(image => image.draftWorkspace === root)))
   }
   return bindDraft(context, id, () => {
     let fromStorage = false
@@ -109,7 +107,7 @@ export function bindOrdinaryImageDraft(context: DraftContext, row: Thread, works
     if (isThreadRetired(id) || normalizeGitWorkspacePathKey(context.getThreadState(id).workspacePath ?? "") !== root)
       return null
     const { draft } = composerDraft(context, id)
-    const hasImage = draft.attachments.some(file => file.image && file.image.draftWorkspace === root)
+    const hasImage = draft.attachments.some(file => attachmentImages(file).some(image => image.draftWorkspace === root))
     if (!hasImage && !saved) return null
     const error = saveBotDraftRecord<unknown>(key, hasImage ? draft : { version: 2, text: "", attachments: [] },
       ordinaryImageDraft, !hasImage)
@@ -218,8 +216,12 @@ export function preserveLinkComposerDraft(context: DraftContext, ref: BotOrdinar
   const storage = globalThis.localStorage
   const original = storage.getItem(key)
   const attachments = draft.attachments.some(file => !file.botInputId && !file.originalUnavailable)
-    ? draft.attachments.map(file => file.botInputId || file.originalUnavailable
-        ? file : { ...file, originalUnavailable: true as const })
+    ? draft.attachments.map(file => {
+        if (file.botInputId || file.originalUnavailable) return file
+        if (!file.embeddedImageCount) return { ...file, originalUnavailable: true as const }
+        return { ...file, embeddedImageCount: undefined, originalUnavailable: true as const,
+          visualNotice: "草稿只转入了文档文字，请在 Bot 会话中重新上传原件以读取图片。" }
+      })
     : draft.attachments
   writeThreadComposerDraft(ref, { ...draft, attachments })
   const written = storage.getItem(key)

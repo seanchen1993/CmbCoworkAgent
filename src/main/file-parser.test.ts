@@ -1,3 +1,4 @@
+import { visualDocx, visualXlsx } from "../../tests/support/document-attachment-fixtures.mjs"
 import { describe, expect, it } from "vitest"
 import { encode } from "iconv-lite"
 import AdmZip from "adm-zip"
@@ -110,5 +111,56 @@ describe("chat document uploads", () => {
   it("explains an empty dynamic document", async () => {
     await expect(parseFileBytes("empty.html", bytes("<title>App</title><main> </main><script>go()</script>")))
       .rejects.toThrow("静态正文")
+  })
+})
+
+
+describe("document visuals", () => {
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJXcAAAAASUVORK5CYII=", "base64")
+  const buffer = (value: Buffer) => Uint8Array.from(value).buffer
+
+  it("preserves Word paragraph and table image positions and emits no raw bytes to text-only callers", async () => {
+    const input = buffer(visualDocx([image, image]))
+    const parsed = await parseFileBytes("report.docx", input, undefined, true)
+    expect(parsed.content).toMatch(/Row 1【图 1】[\s\S]*Row 2【图 2】/)
+    expect(parsed.documentImages?.map(item => Buffer.from(item.bytes))).toEqual([image, image])
+    expect(await parseFileBytes("report.docx", input)).toMatchObject({ embeddedImageCount: 2 })
+    expect((await parseFileBytes("report.docx", input)).documentImages).toBeUndefined()
+  })
+
+  it("accepts image-only documents, labels omissions, and reports corrupted relationships", async () => {
+    const parsed = await parseFileBytes("pictures.docx",
+      buffer(visualDocx([image, image, image, image], { imageOnly: true })), undefined, true)
+    expect(parsed.content).toContain("【图 1】")
+    expect(parsed.documentImages).toHaveLength(3)
+    expect(parsed.visualNotice).toContain("超过图片数量上限")
+    await expect(parseFileBytes("broken.docx",
+      buffer(visualDocx([image], { missingRelationship: true })))).rejects.toThrow("无法解析 Word 文档")
+    const missing = await parseFileBytes("broken.docx", buffer(visualDocx([null])))
+    expect(missing.visualNotice).toContain("图片原件无法读取")
+  })
+
+  it("maps spreadsheet pictures to sheet and cell, and identifies charts it cannot render", async () => {
+    const parsed = await parseFileBytes("report.xlsx", buffer(visualXlsx(image)), undefined, true)
+    expect(parsed.content).toContain("## Sheet: Report")
+    expect(parsed.content).toContain("Code,147")
+    expect(parsed.content).toContain("C5 附近 【图 1】")
+    expect(parsed.visualNotice).toContain("原生图表")
+    expect(Buffer.from(parsed.documentImages![0].bytes)).toEqual(image)
+  })
+
+  it("includes inline HTML raster images without resolving outside references or hidden content", async () => {
+    const data = "data:image/png;base64," + image.toString("base64")
+    const html = '<p>Context</p><table><tr><td><img src="' + data + '"></td></tr></table>' +
+      '<img src="https://example.invalid/image.png"><img src="../private.png">' +
+      '<template><img src="' + data + '"></template>'
+    const parsed = await parseFileBytes("report.html", bytes(html), undefined, true)
+    expect(parsed.content).toContain("Context")
+    expect(parsed.content).toContain("【图 1】")
+    expect(parsed.documentImages).toHaveLength(1)
+    expect(parsed.visualNotice).toContain("外部文件或网址")
+    const truncated = await parseFileBytes("report.html", bytes(html), 3, true)
+    expect(truncated.visualNotice).toContain("截断")
+    expect(truncated.documentImages).toHaveLength(1)
   })
 })

@@ -37,7 +37,7 @@ function cellSpan(node: Element, name: string): number {
   return Math.max(1, span)
 }
 
-export function extractHtmlText(source: string): string {
+export function extractHtmlText(source: string, image?: (src: string) => string): string {
   const doc = parse(source)
   const html = doc.childNodes.find((node): node is Element => "tagName" in node && node.tagName === "html")
   if (!html) return ""
@@ -68,6 +68,15 @@ export function extractHtmlText(source: string): string {
     if (!("childNodes" in node)) continue
     const tag = "tagName" in node ? node.tagName : ""
     if (hidden.has(tag)) continue
+    if (image && "tagName" in node && tag === "img") {
+      parts.push(image(attribute(node, "src") ?? ""))
+      hasBodyText = true
+    }
+    if (image && (tag === "svg" || tag === "canvas")) {
+      parts.push(image("data:unsupported"))
+      hasBodyText = true
+      continue
+    }
     if (paragraphs.has(tag)) {
       parts.push("\n")
       stack.push("\n")
