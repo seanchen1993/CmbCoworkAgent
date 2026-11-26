@@ -54,15 +54,17 @@ type RequirementSkillStatus =
   | { phase: "updating"; version: string }
   | { phase: "failed"; action: "install" | "update" }
 
-type BrowserControlState = "loading" | "enabled" | "restart-required" | "error"
+type BrowserControlState = "loading" | "enabled" | "disabled" | "restart-required" | "error"
 
 function BrowserControlTag({
   state,
   restarting,
+  onEnableAndRestart,
   onRestart
 }: {
   state: BrowserControlState
   restarting: boolean
+  onEnableAndRestart: () => void
   onRestart: () => void
 }): React.JSX.Element {
   if (state === "restart-required") {
@@ -87,15 +89,34 @@ function BrowserControlTag({
     )
   }
 
+  if (state === "disabled" || state === "error") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+        {state === "error" ? "内置浏览器开启失败" : "内置浏览器未开启"}
+        <button
+          type="button"
+          className="ml-0.5 inline-flex items-center gap-1 rounded-full bg-amber-600 px-2 py-0.5 text-white hover:bg-amber-700 disabled:opacity-60"
+          disabled={restarting}
+          onClick={onEnableAndRestart}
+        >
+          {restarting ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : (
+            <RefreshCw className="size-3" />
+          )}
+          开启并重启 App
+        </button>
+      </span>
+    )
+  }
+
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
         state === "enabled"
           ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-          : state === "error"
-            ? "border-red-200 bg-red-50 text-red-700"
-            : "border-border bg-muted/40 text-muted-foreground"
+          : "border-border bg-muted/40 text-muted-foreground"
       )}
     >
       {state === "enabled" ? (
@@ -103,11 +124,7 @@ function BrowserControlTag({
       ) : state === "loading" ? (
         <Loader2 className="size-3 animate-spin" />
       ) : null}
-      {state === "enabled"
-        ? "内置浏览器已开启"
-        : state === "error"
-          ? "内置浏览器开启失败"
-          : "正在检测内置浏览器"}
+      {state === "enabled" ? "内置浏览器已开启" : "正在检测内置浏览器"}
     </span>
   )
 }
@@ -285,25 +302,37 @@ export function NewRequirementDialog({
     setBrowserControlState("loading")
     window.api.browser
       .getCdpConfig()
-      .then(async (config) => {
-        if (config.enabled) return "enabled" as const
-        await window.api.browser.saveCdpConfig({ enabled: true })
-        return "restart-required" as const
-      })
+      .then((config) => (config.enabled ? ("enabled" as const) : ("disabled" as const)))
       .then((state) => {
         if (!cancelled) setBrowserControlState(state)
       })
       .catch((error) => {
-        console.error("[Requirement] 开启内置浏览器失败：", error)
+        console.error("[Requirement] 读取内置浏览器配置失败：", error)
         if (!cancelled) {
           setBrowserControlState("error")
-          toast.error("开启内置浏览器失败，请前往设置中手动开启")
+          toast.error("读取内置浏览器配置失败")
         }
       })
     return () => {
       cancelled = true
     }
   }, [open])
+
+  const enableBrowserControlAndRestart = (): void => {
+    setRestartingApp(true)
+    void window.api.browser
+      .saveCdpConfig({ enabled: true })
+      .then(() => {
+        setBrowserControlState("restart-required")
+        return window.api.app.restart()
+      })
+      .catch((error) => {
+        console.error("[Requirement] 开启内置浏览器并重启应用失败：", error)
+        setRestartingApp(false)
+        setBrowserControlState("error")
+        toast.error("开启内置浏览器并重启应用失败，请重试")
+      })
+  }
 
   const restartApp = (): void => {
     setRestartingApp(true)
@@ -318,6 +347,7 @@ export function NewRequirementDialog({
     <BrowserControlTag
       state={browserControlState}
       restarting={restartingApp}
+      onEnableAndRestart={enableBrowserControlAndRestart}
       onRestart={restartApp}
     />
   )
