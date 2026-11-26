@@ -197,6 +197,8 @@ function RequirementConversationSession({
   requirement,
   selectedThreadId: activeThreadId,
   requirements,
+  sidebarQuery,
+  onSidebarQueryChange,
   onSelectRequirement,
   onRequirementUpdated,
   onDeleteRequirement,
@@ -207,6 +209,8 @@ function RequirementConversationSession({
   requirement: RequirementRecord
   selectedThreadId: string | null
   requirements: RequirementRecord[]
+  sidebarQuery: string
+  onSidebarQueryChange: (query: string) => void
   onSelectRequirement: (requirement: RequirementRecord, threadId?: string) => Promise<void>
   onRequirementUpdated: (requirement: RequirementRecord) => void
   onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
@@ -1415,7 +1419,11 @@ function RequirementConversationSession({
           )}
         >
           <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-            <RequirementThreadSidebar mode={requirementSidebarMode} />
+            <RequirementThreadSidebar
+              mode={requirementSidebarMode}
+              query={sidebarQuery}
+              onQueryChange={onSidebarQueryChange}
+            />
           </aside>
 
           <main
@@ -1559,12 +1567,18 @@ export function RequirementConversationView({
   onNew: () => void
   autoGeneratePrd?: boolean
 }): React.JSX.Element {
+  // The session is intentionally keyed by thread so its thread-specific workspace state resets.
+  // Keep list filtering one level above it so selecting a conversation does not clear the search.
+  const [sidebarQuery, setSidebarQuery] = useState("")
+
   return (
     <RequirementConversationSession
       key={`${requirement.id}:${selectedThreadId ?? requirement.threadIds[0] ?? ""}`}
       requirement={requirement}
       selectedThreadId={selectedThreadId}
       requirements={requirements}
+      sidebarQuery={sidebarQuery}
+      onSidebarQueryChange={setSidebarQuery}
       onSelectRequirement={onSelectRequirement}
       onRequirementUpdated={onRequirementUpdated}
       onDeleteRequirement={onDeleteRequirement}

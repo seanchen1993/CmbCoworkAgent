@@ -15,7 +15,6 @@ import {
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import {
   Dialog,
@@ -72,7 +71,11 @@ export type RequirementSidebarMode = {
 const NEW_REQUIREMENT_CONVERSATION_PROMPT =
   "请基于当前需求规范的已有内容与完成进度，继续补充和完善需求规范。"
 
-type RequirementThreadSidebarProps = { mode: RequirementSidebarMode }
+type RequirementThreadSidebarProps = {
+  mode: RequirementSidebarMode
+  query: string
+  onQueryChange: (query: string) => void
+}
 
 let requirementSidebarScrollTop = 0
 
@@ -159,7 +162,9 @@ function getPrdStatusLabel(status: string): string {
 }
 
 export function RequirementThreadSidebar({
-  mode
+  mode,
+  query,
+  onQueryChange
 }: RequirementThreadSidebarProps): React.JSX.Element {
   const threads = useAppStore((state) => state.threads)
   const currentThreadId = useAppStore((state) => state.currentThreadId)
@@ -168,7 +173,6 @@ export function RequirementThreadSidebar({
   const updateThread = useAppStore((state) => state.updateThread)
   const allThreadStates = useAllThreadStates()
   const allStreamLoadingStates = useAllStreamLoadingStates()
-  const [query, setQuery] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(
     new Set(mode.requirements.map((item) => item.id))
   )
@@ -188,7 +192,7 @@ export function RequirementThreadSidebar({
   const [hoveredRequirementId, setHoveredRequirementId] = useState<string | null>(null)
   const [deleteMenuRequirementId, setDeleteMenuRequirementId] = useState<string | null>(null)
   const [refreshingRequirementId, setRefreshingRequirementId] = useState<string | null>(null)
-  const scrollAreaRef = useRef<HTMLDivElement>(null)
+  const scrollViewportRef = useRef<HTMLDivElement>(null)
   const initialTargetThreadIdRef = useRef(currentThreadId)
   const initialTargetScrolledRef = useRef(false)
   const hoverCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -397,17 +401,13 @@ export function RequirementThreadSidebar({
   }
 
   const rememberScrollPosition = (): void => {
-    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-      "[data-radix-scroll-area-viewport]"
-    )
+    const viewport = scrollViewportRef.current
     if (viewport) rememberRequirementSidebarScrollTop(viewport)
   }
 
   const restoreScrollPosition = (): void => {
     requestAnimationFrame(() => {
-      const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-        "[data-radix-scroll-area-viewport]"
-      )
+      const viewport = scrollViewportRef.current
       if (viewport) viewport.scrollTop = requirementSidebarScrollTop
     })
   }
@@ -422,9 +422,7 @@ export function RequirementThreadSidebar({
   }
 
   useEffect(() => {
-    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-      "[data-radix-scroll-area-viewport]"
-    )
+    const viewport = scrollViewportRef.current
     if (!viewport) return
     const restoreFrame = requestAnimationFrame(() => {
       viewport.scrollTop = requirementSidebarScrollTop
@@ -445,7 +443,7 @@ export function RequirementThreadSidebar({
     if (!targetThreadId) return
 
     const target = Array.from(
-      scrollAreaRef.current?.querySelectorAll<HTMLElement>("[data-requirement-thread-id]") ?? []
+      scrollViewportRef.current?.querySelectorAll<HTMLElement>("[data-requirement-thread-id]") ?? []
     ).find((element) => element.dataset.requirementThreadId === targetThreadId)
     if (!target) return
 
@@ -495,14 +493,22 @@ export function RequirementThreadSidebar({
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => onQueryChange(event.target.value)}
             placeholder="搜索需求名称"
             aria-label="搜索需求名称"
             className="h-8 pl-8 text-xs"
           />
         </label>
       </div>
-      <ScrollArea ref={scrollAreaRef} className="min-h-0 flex-1">
+      {/*
+        Keep this list on a native scroll container. Radix ScrollArea maintains several
+        DOM nodes in React state via callback refs and ResizeObserver. During the deferred
+        product -> project mode transition those nodes can detach while a resize callback
+        is still being committed, creating a ref/state feedback loop (React error #185).
+        This sidebar only needs vertical scrolling, so the native element avoids that
+        lifecycle race and also gives the scroll restoration code one stable viewport.
+      */}
+      <div ref={scrollViewportRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="space-y-1 p-2">
           {grouped.map(({ requirement, threads: requirementThreads }) => {
             const isExpanded = expanded.has(requirement.id)
@@ -774,7 +780,7 @@ export function RequirementThreadSidebar({
             <div className="px-3 py-8 text-center text-xs text-muted-foreground">暂无匹配需求</div>
           )}
         </div>
-      </ScrollArea>
+      </div>
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
