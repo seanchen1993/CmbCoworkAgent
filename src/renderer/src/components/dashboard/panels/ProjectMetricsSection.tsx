@@ -12,6 +12,7 @@ import {
   Loader2,
   Search
 } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -1004,8 +1005,23 @@ export function ProjectMetricsSection({
   return (
     <section className="rounded-lg border border-border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <h2 className="text-sm font-semibold text-foreground">研发智能化应用广度与先进性</h2>
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-auto shrink-0 px-0 py-0 text-xs"
+            onClick={() => {
+              void window.electron
+                .openExternal("https://doc.cmbchina.com/f/v?id=_4bmc9s")
+                .catch(() => {
+                  toast.error("无法打开口径说明，请稍后重试")
+                })
+            }}
+          >
+            口径说明
+          </Button>
         </div>
         <div className="flex items-center gap-3">
           <Button
