@@ -8,6 +8,7 @@ import {
 } from "electron"
 import Store from "electron-store"
 import { userIdentityKey } from "../../shared/user-identity"
+import { isBtwThreadId } from "../../shared/btw-chat"
 import { randomUUID } from "crypto"
 import { getPersistedThreadWorkspaceBindings, getThreadCore as getThreadCoreSync } from "../db"
 import * as fs from "fs/promises"
@@ -17,7 +18,7 @@ import { promisify } from "util"
 import { getWindowsSandboxMode } from "../storage"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import type { ModelConfig, Provider, WorkspaceSetParams, WorkspaceLoadParams } from "../types"
-import { isModelAvailable } from "../../shared/model-catalog"
+import { isModelAvailable, isModelSelectable } from "../../shared/model-catalog"
 import { getModelConnection } from "../models/connection"
 import { LocalSandbox } from "../agent/local-sandbox"
 import {
@@ -35,10 +36,15 @@ import {
   coordinatorWorkerManager,
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
-import { forgetCoordinatorThreadState, hasActiveAgentRun } from "./agent"
+import { forgetCoordinatorThreadState, getActiveAgentRunSettlement, hasActiveAgentRun } from "./agent"
+import { canRunSideThread, getSideThreadTeardown, hasRegisteredSideThread } from "./btw-chat"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
-import { collectSkippedUntrackedGitPanelDirs, registerGitPanelHandlers } from "./git-panel"
+import {
+  collectSkippedUntrackedGitPanelDirs,
+  recordGitCommitHistoryAsync,
+  registerGitPanelHandlers
+} from "./git-panel"
 import {
   discoverWorkspaceGitRepositories,
   type DiscoveredGitRepository,
@@ -58,6 +64,8 @@ import {
   readWorkspaceFileScanPage
 } from "../workspace-file-scan/manager"
 import { currentGitReadSignal, throwIfGitReadCancelled } from "../services/git-read-context"
+import { withoutGitRepositoryOverrides } from "../services/git-environment"
+import { prepareGitPanelWrite, type GitPanelWritePreparation } from "../services/git-worktree-write-gate"
 import { gitReadRequestCoordinator, type GitReadFamily } from "./git-read-request-coordinator"
 import {
   MAX_ATTACHMENT_FILE_BYTES,
@@ -174,6 +182,20 @@ interface ManualWorktreeCreateResult {
 
 const manualWorktreeCreateCoordinator = new CurrentRequestCoalescer<ManualWorktreeCreateResult>()
 
+function getWorktreeGuardWorkspaceBindings() {
+  // Closed auxiliary transcripts can stay durable after their tabs and runs
+  // settle. They have no workspace claim once all live use has ended.
+  return getPersistedThreadWorkspaceBindings().filter(({ threadId }) =>
+    !isBtwThreadId(threadId) ||
+    hasRegisteredSideThread(threadId) ||
+    getSideThreadTeardown(threadId) !== undefined ||
+    getActiveAgentRunSettlement(threadId) !== undefined ||
+    workflowRunManager.isActive(threadId) ||
+    coordinatorWorkerManager.hasUnsettledWorkersForThread(threadId) ||
+    LocalSandbox.hasActiveBackgroundTasks(threadId, { includeChildRuns: true })
+  )
+}
+
 function sanitizeManualWorktreeBranch(branch: string): string {
   return branch.replace(/[^a-zA-Z0-9\-_./]/g, "-")
 }
@@ -261,6 +283,7 @@ export interface GitPanelChangedFile {
 }
 
 interface GitPanelMetaStatePayload {
+  repositoryRoots?: string[]
   success: boolean
   isWorktree: boolean
   isGitRepo?: boolean
@@ -1174,6 +1197,13 @@ const summaryCache = new Map<string, TimedPromiseCacheEntry<GitPanelSummaryStats
 const branchCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
 const headCommitCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
 
+export function invalidateGitPanelHeadCaches(): void {
+  // These short-lived entries may be keyed by different subdirectories of the same worktree.
+  branchCache.clear()
+  headCommitCache.clear()
+  summaryCache.clear()
+}
+
 type ThreadGitContextCache = {
   isGitRepo: boolean
   isWorktreePath: boolean
@@ -1549,7 +1579,7 @@ function formatGitCommand(worktreePath: string, args: string[]): string {
 }
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
+  ...withoutGitRepositoryOverrides(process.env, "workspace"),
   // 避免内部状态查询为了可选锁阻塞用户正在执行的 Git 操作。
   GIT_OPTIONAL_LOCKS: "0",
   // 禁用 LFS smudge，避免与面板状态/差异无关的网络或大文件拉取开销。
@@ -1631,6 +1661,19 @@ async function runGit(
     if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
   }
+}
+
+function reserveGitPanelWrite(
+  worktreePath: string,
+  preparation: GitPanelWritePreparation
+): Promise<() => void> {
+  return preparation.reserve(
+    worktreePath,
+    runGit(worktreePath, ["rev-parse", "--git-dir"], {
+      silent: true,
+      timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+    })
+  )
 }
 
 async function runGitPushWithLfsCompat(
@@ -1777,28 +1820,34 @@ function logGitStep(threadId: string, action: string, detail: string): void {
   console.log(`[GitPanel][${threadId}][${action}] ${detail}`)
 }
 
+async function readCurrentBranch(worktreePath: string, silent: boolean): Promise<string | null> {
+  let ref: string
+  try {
+    ref = await runGit(worktreePath, ["symbolic-ref", "--quiet", "HEAD"], {
+      silent,
+      timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+    })
+  } catch (error) {
+    // `git symbolic-ref --quiet` uses 1 for a detached HEAD.
+    if ((error as ExecFileError).code === 1) return null
+    throw error
+  }
+  const branchRef = ref.replace(process.platform === "win32" ? /\r?\n$/ : /\n$/, "")
+  const localPrefix = "refs/heads/"
+  if (!branchRef.startsWith(localPrefix) || branchRef.length === localPrefix.length) {
+    throw new Error("无法确定当前 Git 分支")
+  }
+  return branchRef.slice(localPrefix.length)
+}
+
 async function getCurrentBranchCached(
   worktreePath: string,
-  options?: { silent?: boolean; forceRefresh?: boolean }
+  options?: { silent?: boolean }
 ): Promise<string | null> {
   const cacheKey = getCacheKeyForPath(worktreePath)
-  if (options?.forceRefresh) {
-    branchCache.delete(cacheKey)
-  }
-  // 1s 短缓存覆盖 UI 高频读取分支名场景（打开面板、提交后刷新、推送流程中多处读取）。
-  return getCachedPromise(branchCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
-    try {
-      const branch = (
-        await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"], {
-          silent: Boolean(options?.silent),
-          timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-        })
-      ).trim()
-      return branch && branch !== "HEAD" ? branch : null
-    } catch {
-      return null
-    }
-  })
+  return getCachedPromise(branchCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
+    readCurrentBranch(worktreePath, Boolean(options?.silent)).catch(() => null)
+  )
 }
 
 async function getHeadCommitCached(
@@ -3311,6 +3360,7 @@ export async function buildGitPanelMetaState(
   options?: {
     worktreePath?: string
     includeSummary?: boolean
+    refreshHead?: boolean
     includePushability?: boolean
   }
 ): Promise<GitPanelMetaStatePayload> {
@@ -3351,7 +3401,8 @@ export async function buildGitPanelMetaState(
         hasPushableCommit: false,
         pendingCommits: [],
         trackedFiles: getTrackedLlmFiles(context.metadata),
-        worktreeBranch: `${repos.length} 个仓库`
+        worktreeBranch: `${repos.length} 个仓库`,
+        repositoryRoots: repos.map((repo) => repo.gitRoot)
       }
     }
   }
@@ -3367,6 +3418,11 @@ export async function buildGitPanelMetaState(
   const workspacePath = target.worktreePath
   const tracked = getTrackedLlmFiles(context.metadata)
   const cacheKey = getCacheKeyForPath(workspacePath)
+  if (options?.refreshHead) {
+    // The branch menu can observe an external checkout before the panel cache expires.
+    branchCache.delete(cacheKey)
+    summaryCache.delete(cacheKey)
+  }
   const summaryPromise =
     options?.includeSummary === false
       ? Promise.resolve({ hasPendingDiff: false, changedFiles: 0 })
@@ -3379,9 +3435,9 @@ export async function buildGitPanelMetaState(
     ? Promise.resolve(context.isWorktree)
     : detectIsWorktreePath(workspacePath)
   const branchPromise =
-    options?.worktreePath || !targetMatchesContext
+    options?.refreshHead || options?.worktreePath || !targetMatchesContext
       ? getCurrentBranchCached(workspacePath, { silent: true })
-      : context.worktreeBranch
+      : context.isWorktree && context.worktreeBranch
         ? Promise.resolve(context.worktreeBranch)
         : getCurrentBranchCached(workspacePath, { silent: true })
 
@@ -3414,6 +3470,7 @@ export async function buildGitPanelMetaState(
     hasPushableCommit: pushability.hasPushableCommit,
     pendingCommits: pushability.pendingCommits,
     trackedFiles: tracked,
+    repositoryRoots: [target.gitRoot],
     worktreeBranch
   }
 }
@@ -3936,7 +3993,6 @@ function getResolvedStoredDefaultModelId(): string {
 }
 
 function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number]): ModelConfig {
-  const available = isModelAvailable(config)
   return {
     id: toModelRef(config),
     name: config.name,
@@ -3944,8 +4000,8 @@ function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number
     source: config.source,
     model: config.model,
     description: config.baseUrl,
-    available,
-    selectable: available,
+    available: isModelAvailable(config),
+    selectable: isModelSelectable(config),
     notice: config.notice,
     unavailableReason: config.unavailableReason,
     maxTokens: config.maxTokens,
@@ -4605,7 +4661,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           if (
             latestWorkspacePath &&
             normalizeWorkspacePathKey(path.resolve(latestWorkspacePath)) ===
-              normalizeWorkspacePathKey(path.resolve(page.workspacePath))
+              normalizeWorkspacePathKey(path.resolve(page.workspacePath)) &&
+            canRunSideThread(threadId)
           ) {
             await startWatching(threadId, page.workspacePath)
             if (page.directories) {
@@ -4644,7 +4701,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // (same-path calls are a no-op).
   ipcMain.handle("workspace:ensureWatching", async (_event, { threadId }: WorkspaceLoadParams) => {
     const workspacePath = await readThreadWorkspacePath(threadId)
-    if (!workspacePath) return { success: false }
+    if (!workspacePath || !canRunSideThread(threadId)) return { success: false }
     const watcherState = await startWatching(threadId, workspacePath)
     return {
       success: watcherState !== "failed" && watcherState !== "superseded",
@@ -4663,7 +4720,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       setActiveWatchedThread(threadId)
       if (!threadId) return { success: true, restarted: false, workspacePath: null }
       const workspacePath = await readThreadWorkspacePath(threadId)
-      if (!workspacePath) return { success: true, restarted: false, workspacePath: null }
+      if (!workspacePath || !canRunSideThread(threadId)) {
+        return { success: true, restarted: false, workspacePath: null }
+      }
       const watcherState = await startWatching(threadId, workspacePath)
       return {
         success: watcherState !== "failed" && watcherState !== "superseded",
@@ -4819,7 +4878,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           // cannot hide another task's binding. The scan is bounded and fails
           // closed on inaccessible paths. Because it awaits filesystem I/O,
           // repeat the DB snapshot synchronously immediately before deletion.
-          const bindingSnapshot = getPersistedThreadWorkspaceBindings()
+          const bindingSnapshot = getWorktreeGuardWorkspaceBindings()
           const bindingConflict = await findCanonicalPersistedWorkspaceBindingConflict(
             bindingSnapshot,
             target.path
@@ -4838,7 +4897,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           if (
             !persistedWorkspaceBindingSnapshotEquals(
               bindingSnapshot,
-              getPersistedThreadWorkspaceBindings()
+              getWorktreeGuardWorkspaceBindings()
             )
           ) {
             throw new Error("任务工作区绑定在删除前发生变化，请重试")
@@ -4919,7 +4978,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
                 // A failed/stale response is not permission to remove a checkout
                 // that this or another task now owns. Re-read all durable bindings
                 // under the repository lock immediately before rollback mutation.
-                const bindingSnapshot = getPersistedThreadWorkspaceBindings()
+                const bindingSnapshot = getWorktreeGuardWorkspaceBindings()
                 const durableBinding = await findCanonicalPersistedWorkspaceBindingConflict(
                   bindingSnapshot,
                   worktreePath,
@@ -4933,7 +4992,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
                 if (
                   !persistedWorkspaceBindingSnapshotEquals(
                     bindingSnapshot,
-                    getPersistedThreadWorkspaceBindings()
+                    getWorktreeGuardWorkspaceBindings()
                   )
                 ) {
                   throw new Error("任务工作区绑定在回滚前发生变化，拒绝自动删除")
@@ -5310,6 +5369,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         options?: {
           worktreePath?: string
           includeSummary?: boolean
+          refreshHead?: boolean
           includePushability?: boolean
         }
       }
@@ -5602,6 +5662,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         options?: { worktreePath?: string; agentInitiated?: boolean }
       }
     ) => {
+      const preparation = prepareGitPanelWrite()
+      let releaseWrite: (() => void) | undefined
       try {
         logGitStep(threadId, "commit", "开始提交")
         const commitEntryThread = getThreadCoreSync(threadId)
@@ -5623,6 +5685,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: target.error }
         }
         const worktreePath = target.worktreePath
+        releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
         const tracked = getTrackedLlmFiles(context.metadata)
         const explicitFilePaths = Array.isArray(filePaths)
           ? filePaths.filter(
@@ -5676,6 +5739,18 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             undefined
         } catch {
           // best-effort: adoption can still be measured without the SHA
+        }
+        if (options?.agentInitiated !== true) {
+          const branch = await readCurrentBranch(worktreePath, true).catch(() => null)
+          // The thread can move before the renderer receives this commit result.
+          void recordGitCommitHistoryAsync({
+            workspacePath: context.workspacePath,
+            branch,
+            commitSha,
+            fullMessage: message
+          }).catch((error) => {
+            console.warn("[GitPanel] failed to record commit history:", error)
+          })
         }
         // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
         void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(
@@ -5759,6 +5834,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "提交失败")}`
         )
         return { success: false, error: e instanceof Error ? e.message : "提交失败" }
+      } finally {
+        releaseWrite?.()
+        preparation.dispose()
       }
     }
   )
@@ -5771,6 +5849,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     ) => {
       logGitStep(threadId, "push", "开始推送流程")
       const steps: PushStepResult[] = []
+      const preparation = prepareGitPanelWrite()
+      let releaseWrite: (() => void) | undefined
       try {
         const context = await resolveThreadWorkspaceContext(threadId)
         if (!context.workspacePath || !context.isGitRepo) {
@@ -5785,12 +5865,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: target.error, steps }
         }
         const worktreePath = target.worktreePath
-
-        const branch = options?.worktreePath
-          ? (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
-          : context.worktreeBranch ||
-            (await getCurrentBranchCached(worktreePath, { silent: true })) ||
-            "HEAD"
+        releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
+        const currentBranch = await readCurrentBranch(worktreePath, true)
+        const branch = currentBranch ?? "HEAD"
 
         steps.push({
           step: "commit",
@@ -5823,8 +5900,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           "push",
           `准备完成 upstream=${upstreamRef || "none"} defaultPush=${useDefaultPush ? "yes" : "no"} 用时=${Date.now() - pushPrepStartedAt}ms`
         )
-        const pushArgs = useDefaultPush ? ["push"] : ["push", "-u", "origin", branch]
-        const pushLabel = useDefaultPush ? "push" : `push -u origin ${branch}`
+        const pushRef = currentBranch === null ? "HEAD" : `refs/heads/${currentBranch}`
+        const pushArgs = useDefaultPush ? ["push"] : ["push", "-u", "origin", pushRef]
+        const pushLabel = useDefaultPush ? "push" : `push -u origin ${pushRef}`
 
         // Step 2: Push
         try {
@@ -5931,6 +6009,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           error: detail || (e instanceof Error ? e.message : "推送失败"),
           steps
         }
+      } finally {
+        releaseWrite?.()
+        preparation.dispose()
       }
     }
   )
@@ -5941,6 +6022,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       _event,
       { threadId, options }: { threadId: string; options?: { worktreePath?: string } }
     ) => {
+      const preparation = prepareGitPanelWrite()
       try {
         logGitStep(threadId, "pull", "开始拉取远端代码")
         const context = await resolveThreadWorkspaceContext(threadId)
@@ -5953,33 +6035,43 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           worktreePath: string,
           label: string
         ): Promise<{ success: boolean; detail: string }> => {
-          const branch =
-            path.resolve(worktreePath) === path.resolve(context.workspacePath || "")
-              ? context.worktreeBranch ||
-                (await getCurrentBranchCached(worktreePath, { silent: true })) ||
-                "HEAD"
-              : (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
-          logGitStep(threadId, "pull", `[${label}] 执行 pull --rebase origin ${branch}`)
+          let releaseWrite: () => void
           try {
-            await runGit(worktreePath, ["pull", "--rebase", "origin", branch])
-            return { success: true, detail: `${label}: 拉取成功` }
-          } catch (pullError) {
-            if (isMissingRemoteBranchError(pullError)) {
-              logGitStep(threadId, "pull", `[${label}] 远端不存在分支 ${branch}，跳过`)
-              return { success: true, detail: `${label}: 远端不存在分支 ${branch}，无需拉取` }
-            }
+            releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
+          } catch (error) {
+            return { success: false, detail: `${label}: ${getExecErrorText(error) || "无法读取 Git 工作树"}` }
+          }
+          try {
+            const currentBranch = await readCurrentBranch(worktreePath, true)
+            const branch = currentBranch ?? "HEAD"
+            const pullRef = currentBranch === null ? "HEAD" : `refs/heads/${currentBranch}`
+            logGitStep(threadId, "pull", `[${label}] 执行 pull --rebase origin ${pullRef}`)
             try {
-              await runGit(worktreePath, ["rebase", "--abort"])
-            } catch {
-              // ignore
+              await runGit(worktreePath, ["pull", "--rebase", "origin", pullRef])
+              return { success: true, detail: `${label}: 拉取成功` }
+            } catch (pullError) {
+              if (isMissingRemoteBranchError(pullError)) {
+                logGitStep(threadId, "pull", `[${label}] 远端不存在分支 ${branch}，跳过`)
+                return { success: true, detail: `${label}: 远端不存在分支 ${branch}，无需拉取` }
+              }
+              try {
+                await runGit(worktreePath, ["rebase", "--abort"])
+              } catch {
+                // ignore
+              }
+              if (isGitRebaseConflictError(pullError)) {
+                logGitStep(threadId, "pull", `[${label}] 检测到代码冲突，已执行 rebase --abort`)
+                return { success: false, detail: `${label}: ${GIT_REBASE_CONFLICT_MESSAGE}` }
+              }
+              const detail = getExecErrorText(pullError) || "拉取失败"
+              logGitStep(threadId, "pull", `[${label}] 失败：${detail}`)
+              return { success: false, detail: `${label}: ${detail}` }
             }
-            if (isGitRebaseConflictError(pullError)) {
-              logGitStep(threadId, "pull", `[${label}] 检测到代码冲突，已执行 rebase --abort`)
-              return { success: false, detail: `${label}: ${GIT_REBASE_CONFLICT_MESSAGE}` }
-            }
-            const detail = getExecErrorText(pullError) || "拉取失败"
-            logGitStep(threadId, "pull", `[${label}] 失败：${detail}`)
+          } catch (error) {
+            const detail = getExecErrorText(error) || "无法确定当前 Git 分支"
             return { success: false, detail: `${label}: ${detail}` }
+          } finally {
+            releaseWrite()
           }
         }
 
@@ -6032,6 +6124,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           `异常：${detail || (e instanceof Error ? e.message : "拉取失败")}`
         )
         return { success: false, error: detail || (e instanceof Error ? e.message : "拉取失败") }
+      } finally {
+        preparation.dispose()
       }
     }
   )

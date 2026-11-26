@@ -1,11 +1,12 @@
 import { chatScrollInsets } from "@/lib/chat-scroll-insets"
+import { hasOpenModalDialog } from "@/lib/modal-dialog"
 import {
   finishThreadSearchNavigation,
   isCurrentThreadSearchNavigation,
   type DurableSearchNavigation
 } from "@/lib/thread-search-navigation"
 /* eslint-disable react-refresh/only-export-components -- colocated search contracts and bounded runtime primitives are tested directly */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
 import { ChevronUp, ChevronDown, X, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { findChatSearchLocationRange, mapChatSearchDom } from "@/lib/chat-search-dom"
@@ -67,9 +68,10 @@ export type SearchDurableMessages = (
 
 export type RevealDurableMessage = (
   match: DurableChatSearchMatch
-) => Promise<void> | void
+) => Promise<string | void> | string | void
 
 interface ChatSearchOverlayProps {
+  sideConversation?: boolean
   externalNavigation?: DurableSearchNavigation
   onExternalNavigationFinished?: (id: number, outcome: boolean | "cancelled") => void
   searchLocalCorpus?: (corpus: ChatSearchCorpus, query: string) => Promise<ChatSearchMatch[]>
@@ -84,6 +86,8 @@ interface ChatSearchOverlayProps {
   getSearchCorpus: (signal?: AbortSignal) => ChatSearchCorpus | Promise<ChatSearchCorpus>
   /** Ensures a virtualized message row is mounted before highlighting it. */
   onRevealMessage: (messageId: string) => void
+  /** Durable navigation validates the original ID before revealing its visible row. */
+  resolveDisplayMessageId?: (messageId: string) => string
   /** Searches durable pages beyond the currently loaded renderer window. */
   searchDurableMessages?: SearchDurableMessages
   /** Loads an unloaded durable result before the overlay asks to paint it. */
@@ -95,8 +99,46 @@ interface ChatSearchOverlayProps {
   recomputeKey: unknown
 }
 
+export function useChatSearchShortcut(
+  chatRoot: RefObject<HTMLElement | null>,
+  canOpen: () => boolean,
+  setOpen: (open: boolean) => void,
+  focusRequired = false
+): void {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.shiftKey || event.altKey || event.isComposing) return
+      if (!((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f")) return
+      const root = chatRoot.current
+      if (!root || root.offsetParent === null || !canOpen()) return
+      const path = event.composedPath()
+      // Radix renders popovers outside their chat. Its trigger keeps the content ID in aria-controls.
+      const popover = path.find(node => node instanceof HTMLElement && node.dataset.slot === "popover-content")
+      const targetChat = path.find(node => node instanceof HTMLElement && node.hasAttribute("data-chat-thread-id")) ??
+        (popover instanceof HTMLElement && popover.id
+          ? document.querySelector(`[aria-controls="${CSS.escape(popover.id)}"]`)?.closest("[data-chat-thread-id]")
+          : null)
+      const targetSidePane = path.find(node =>
+        node instanceof HTMLElement && node.hasAttribute("data-btw-pane"))
+      if (targetChat) {
+        if (targetChat !== root) return
+      } else if (targetSidePane instanceof HTMLElement) {
+        if (!focusRequired || !targetSidePane.contains(root)) return
+      } else if (focusRequired || path.some(node =>
+        node instanceof HTMLElement && node.hasAttribute("data-btw-tab-owner"))) return
+      event.preventDefault()
+      if (!hasOpenModalDialog()) setOpen(true)
+    }
+    // Capture the shortcut even when clicking the transcript moved focus to <body>.
+    window.addEventListener("keydown", handleKeyDown, true)
+    return () => window.removeEventListener("keydown", handleKeyDown, true)
+  }, [canOpen, chatRoot, focusRequired, setOpen])
+}
+
 const HIGHLIGHT_NAME = "chat-search"
 const ACTIVE_HIGHLIGHT_NAME = "chat-search-active"
+const SIDE_HIGHLIGHT_NAME = "side-chat-search"
+const SIDE_ACTIVE_HIGHLIGHT_NAME = "side-chat-search-active"
 const STYLE_ELEMENT_ID = "chat-search-highlight-style"
 const SEARCH_THROTTLE_MS = 120
 const SEARCH_THROTTLE_MAX_WAIT_MS = 480
@@ -520,23 +562,16 @@ function ensureHighlightStyle(): void {
   const style = document.createElement("style")
   style.id = STYLE_ELEMENT_ID
   style.textContent = `
-    ::highlight(${HIGHLIGHT_NAME}) {
+    ::highlight(${HIGHLIGHT_NAME}), ::highlight(${SIDE_HIGHLIGHT_NAME}) {
       background-color: rgba(250, 204, 21, 0.45);
       color: inherit;
     }
-    ::highlight(${ACTIVE_HIGHLIGHT_NAME}) {
+    ::highlight(${ACTIVE_HIGHLIGHT_NAME}), ::highlight(${SIDE_ACTIVE_HIGHLIGHT_NAME}) {
       background-color: #f97316;
       color: #ffffff;
     }
   `
   document.head.appendChild(style)
-}
-
-function clearHighlights(): void {
-  const registry = getHighlightRegistry()
-  if (!registry) return
-  registry.delete(HIGHLIGHT_NAME)
-  registry.delete(ACTIVE_HIGHLIGHT_NAME)
 }
 
 /** Keep the DOM Range corpus identical to the text projection used by the data index. */
@@ -576,12 +611,14 @@ export function formatChatSearchStatus(
 }
 
 export function ChatSearchOverlay({
+  sideConversation,
   externalNavigation,
   onExternalNavigationFinished,
   searchLocalCorpus,
   onRevealSearchContext,
   onCancelLocalSearch,
   validateSearchLocation,
+  resolveDisplayMessageId,
   open,
   onClose,
   getViewport,
@@ -593,6 +630,13 @@ export function ChatSearchOverlay({
   onCancelDurableReveal,
   recomputeKey
 }: ChatSearchOverlayProps): React.JSX.Element | null {
+  const highlightName = sideConversation ? SIDE_HIGHLIGHT_NAME : HIGHLIGHT_NAME
+  const activeHighlightName = sideConversation ? SIDE_ACTIVE_HIGHLIGHT_NAME : ACTIVE_HIGHLIGHT_NAME
+  const clearHighlights = useCallback(() => {
+    const registry = getHighlightRegistry()
+    registry?.delete(highlightName)
+    registry?.delete(activeHighlightName)
+  }, [highlightName, activeHighlightName])
   const [query, setQuery] = useState("")
   const [matchCount, setMatchCount] = useState(0)
   const [activeIndex, setActiveIndex] = useState(0)
@@ -625,12 +669,14 @@ export function ChatSearchOverlay({
   const validationAbortRef = useRef<AbortController | null>(null)
   const contextRevealRef = useRef<ChatSearchReveal | null>(null)
   const contextRefreshFrameRef = useRef<number | null>(null)
+  const loadedReplayTargetsRef = useRef(new Map<string, string>())
   const revealCallbacksRef = useRef({
     onRevealMessage,
     onRevealDurableMessage,
     onDurableRevealFinished,
     onRevealSearchContext,
-    validateSearchLocation
+    validateSearchLocation,
+    resolveDisplayMessageId
   })
   useLayoutEffect(() => {
     // A durable page replaces the parent's visible-index map. Async continuations must use
@@ -640,9 +686,16 @@ export function ChatSearchOverlay({
       onRevealDurableMessage,
       onDurableRevealFinished,
       onRevealSearchContext,
-      validateSearchLocation
+      validateSearchLocation,
+      resolveDisplayMessageId
     }
-  }, [onRevealMessage, onRevealDurableMessage, onDurableRevealFinished, onRevealSearchContext, validateSearchLocation])
+  }, [onRevealMessage, onRevealDurableMessage, onDurableRevealFinished, onRevealSearchContext,
+    validateSearchLocation, resolveDisplayMessageId])
+
+  const displayIdFor = useCallback((messageId: string): string => {
+    const target = loadedReplayTargetsRef.current.get(messageId) ?? messageId
+    return revealCallbacksRef.current.resolveDisplayMessageId?.(target) ?? target
+  }, [])
 
   const searchGenerationRef = useRef(0)
   const searchMatcherRef = useRef(createChatSearchMatcher(CHAT_SEARCH_RESULT_LIMIT + 1))
@@ -716,26 +769,28 @@ export function ChatSearchOverlay({
     }
 
     ensureHighlightStyle()
-    registry.set(HIGHLIGHT_NAME, new HighlightImpl(...ranges))
+    registry.set(highlightName, new HighlightImpl(...ranges))
 
     const activeRange = ranges[active]
     if (activeRange) {
       const activeHighlight = new HighlightImpl(activeRange)
       // Paint the active match on top of the base highlight.
       activeHighlight.priority = 1
-      registry.set(ACTIVE_HIGHLIGHT_NAME, activeHighlight)
+      registry.set(activeHighlightName, activeHighlight)
     } else {
-      registry.delete(ACTIVE_HIGHLIGHT_NAME)
+      registry.delete(activeHighlightName)
     }
-  }, [])
+  }, [highlightName, activeHighlightName, clearHighlights])
 
   const revealAndHighlight = useCallback(
     (match: OverlayChatSearchMatch, rawQuery: string, scroll: boolean): void => {
+      let messageId = match.messageId
       const findRow = (): { viewport: HTMLElement; row: HTMLElement } | null => {
         const viewport = getViewport()
+        const displayId = displayIdFor(messageId)
         const row = viewport
           ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")).find(
-              (candidate) => candidate.dataset.chatMessageId === match.messageId
+              (candidate) => candidate.dataset.chatMessageId === displayId
             )
           : undefined
         return viewport && row ? { viewport, row } : null
@@ -776,7 +831,7 @@ export function ChatSearchOverlay({
 
       const finish = (success = false): void => {
         if (!success) clearHighlights()
-        if (match.durableMatch) revealCallbacksRef.current.onDurableRevealFinished?.(match.messageId)
+        if (match.durableMatch) revealCallbacksRef.current.onDurableRevealFinished?.(messageId)
         if (request) {
           if (match.durableMatch) match.durableMatch.externalNavigation = undefined
           if (!success) externalMatchRef.current = null
@@ -823,7 +878,7 @@ export function ChatSearchOverlay({
           if (viewport && (viewport.scrollTop !== previousSeekTop || viewport.scrollHeight !== previousSeekHeight)) {
             previousSeekTop = viewport.scrollTop
             previousSeekHeight = viewport.scrollHeight
-            revealCallbacksRef.current.onRevealMessage(match.messageId)
+            revealCallbacksRef.current.onRevealMessage(messageId)
           }
           highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
           return
@@ -857,7 +912,7 @@ export function ChatSearchOverlay({
           : null
         if (match.location && !locationRange && !contextRequested) {
           contextRequested = true
-          const reveal = { messageId: match.messageId, location: match.location }
+          const reveal = { messageId: displayIdFor(messageId), location: match.location }
           contextRevealRef.current = reveal
           revealCallbacksRef.current.onRevealSearchContext?.(reveal)
           highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
@@ -900,10 +955,10 @@ export function ChatSearchOverlay({
 
       const revealMountedRow = (): void => {
         if (!isCurrent()) return
-        revealCallbacksRef.current.onRevealMessage(match.messageId)
+        revealCallbacksRef.current.onRevealMessage(messageId)
         const validate = revealCallbacksRef.current.validateSearchLocation
         if (match.location && validate) {
-          void validate({ messageId: match.messageId, location: match.location }, validation.signal)
+          void validate({ messageId: displayIdFor(messageId), location: match.location }, validation.signal)
             .then((valid) => {
               if (!isCurrent() || validation.signal.aborted) return
               if (valid) tryHighlight(0)
@@ -933,7 +988,15 @@ export function ChatSearchOverlay({
       if (match.durableMatch && revealDurable) {
         void Promise.resolve()
           .then(() => isCurrent() && revealDurable(match.durableMatch as DurableChatSearchMatch))
-          .then(revealMountedRow)
+          .then((canonical) => {
+            if (typeof canonical === "string") {
+              messageId = canonical
+              if (canonical !== match.messageId) loadedReplayTargetsRef.current.set(match.messageId, canonical)
+              if (request && externalMatchRef.current?.messageId === match.messageId)
+                externalMatchRef.current = { ...externalMatchRef.current, messageId }
+            }
+            revealMountedRow()
+          })
           .catch(() => {
             if (isCurrent()) {
               clearHighlights()
@@ -944,7 +1007,7 @@ export function ChatSearchOverlay({
       }
       revealMountedRow()
     },
-    [apiSupported, applyHighlights, getViewport]
+    [apiSupported, applyHighlights, clearHighlights, displayIdFor, getViewport]
   )
 
   const publishMatches = useCallback(
@@ -954,7 +1017,7 @@ export function ChatSearchOverlay({
       const merged = mergeChatSearchResults(
         localMatchesRef.current,
         durableMatchesRef.current.filter(
-          (match) => !localDocumentCoverageRef.current.get(match.messageId)
+          (match) => !localDocumentCoverageRef.current.get(displayIdFor(match.messageId))
         )
       )
       let explicitMatch = externalMatchRef.current
@@ -984,7 +1047,7 @@ export function ChatSearchOverlay({
             const controller = new AbortController()
             externalMatchValidation.current = controller
             const pinned = explicitMatch
-            void validate({ messageId: pinned.messageId, location }, controller.signal)
+            void validate({ messageId: displayIdFor(pinned.messageId), location }, controller.signal)
               .then((valid) => {
                 if (!valid && !controller.signal.aborted && externalMatchRef.current === pinned) {
                   clearExternalMatch()
@@ -1027,16 +1090,17 @@ export function ChatSearchOverlay({
         return
       }
       const previousContext = contextRevealRef.current
+      const activeDisplayId = displayIdFor(activeMatch.messageId)
       if (
         repaint &&
         previousContext &&
         activeMatch.location &&
         pendingNavigationRef.current === null &&
-        (previousContext.messageId !== activeMatch.messageId ||
+        (previousContext.messageId !== activeDisplayId ||
           chatSearchLocationKey(previousContext.location) !==
             chatSearchLocationKey(activeMatch.location))
       ) {
-        const reveal = { messageId: activeMatch.messageId, location: activeMatch.location }
+        const reveal = { messageId: activeDisplayId, location: activeMatch.location }
         contextRevealRef.current = reveal
         revealCallbacksRef.current.onRevealSearchContext?.(reveal)
         if (contextRefreshFrameRef.current !== null)
@@ -1058,7 +1122,7 @@ export function ChatSearchOverlay({
         revealAndHighlight(activeMatch, rawQuery, false)
       }
     },
-    [revealAndHighlight, setActive]
+    [clearHighlights, displayIdFor, revealAndHighlight, setActive]
   )
 
   useEffect(() => {
@@ -1171,6 +1235,7 @@ export function ChatSearchOverlay({
     autoRevealedQueryRef.current = ""
     externalMatchRef.current = null
     externalMatchValidation.current?.abort()
+    loadedReplayTargetsRef.current.clear()
     localMatchesRef.current = []
     localOccurrenceCountsRef.current = new Map()
     localDocumentCoverageRef.current = new Map()
@@ -1200,8 +1265,8 @@ export function ChatSearchOverlay({
         ),
         shouldContinue: () => active && searchGenerationRef.current === generation,
         getLocalCoverage: (messageId) => ({
-          occurrenceCount: localOccurrenceCountsRef.current.get(messageId) ?? 0,
-          authoritative: localDocumentCoverageRef.current.get(messageId) ?? false
+          occurrenceCount: localOccurrenceCountsRef.current.get(displayIdFor(messageId)) ?? 0,
+          authoritative: localDocumentCoverageRef.current.get(displayIdFor(messageId)) ?? false
         }),
         onProgress: ({ addedMatches }) => {
           if (!active || searchGenerationRef.current !== generation) return
@@ -1233,7 +1298,7 @@ export function ChatSearchOverlay({
       window.clearTimeout(timer)
       externalMatchValidation.current?.abort()
     }
-  }, [normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
+  }, [clearHighlights, displayIdFor, normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
 
   // Leading/trailing max-wait throttling guarantees progress during an
   // uninterrupted token stream while still coalescing the hot path.
@@ -1299,7 +1364,7 @@ export function ChatSearchOverlay({
       highlightFrameRef.current = null
     }
     clearHighlights()
-  }, [open])
+  }, [clearHighlights, open])
 
   useEffect(() => {
     return () => {
@@ -1313,7 +1378,7 @@ export function ChatSearchOverlay({
       }
       clearHighlights()
     }
-  }, [])
+  }, [clearHighlights])
 
   const goToMatch = useCallback(
     (direction: 1 | -1): void => {
@@ -1334,9 +1399,9 @@ export function ChatSearchOverlay({
   )
 
   const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    (event: React.KeyboardEvent<HTMLDivElement>): void => {
       if (event.nativeEvent.isComposing) return
-      if (event.key === "Enter") {
+      if (event.key === "Enter" && event.target === inputRef.current) {
         event.preventDefault()
         goToMatch(event.shiftKey ? -1 : 1)
       } else if (event.key === "Escape") {
@@ -1364,10 +1429,16 @@ export function ChatSearchOverlay({
   return (
     <div
       data-chat-search-overlay
-      className="absolute right-4 top-3 z-30 flex max-w-[34rem] flex-col rounded-xl border border-border/70 bg-background/95 px-2 py-1.5 shadow-lg shadow-black/10 backdrop-blur-sm"
+      onKeyDown={handleKeyDown}
+      className={cn(
+        "absolute top-3 z-30 flex flex-col rounded-xl border border-border/70 bg-background/95 px-2 py-1.5 shadow-lg shadow-black/10 backdrop-blur-sm",
+        sideConversation ? "right-3 w-[calc(100%-1.5rem)] max-w-[26rem]" : "right-4 max-w-[34rem]"
+      )}
     >
-      <div className="flex items-center gap-1.5">
-        <Search className="ml-1 size-4 shrink-0 text-muted-foreground" />
+      <div className={sideConversation
+        ? "grid grid-cols-[minmax(0,1fr)_repeat(3,auto)] items-center gap-x-0.5"
+        : "flex items-center gap-1.5"}>
+        {!sideConversation && <Search className="ml-1 size-4 shrink-0 text-muted-foreground" />}
         <input
           ref={inputRef}
           value={query}
@@ -1375,14 +1446,19 @@ export function ChatSearchOverlay({
             if (externalRef.current) externalCallback.current?.(externalRef.current.id, "cancelled")
             setQuery(event.target.value)
           }}
-          onKeyDown={handleKeyDown}
           placeholder="在当前会话中搜索"
-          className="w-44 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+          className={cn(
+            "bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground",
+            sideConversation ? "min-w-0 w-full" : "w-44"
+          )}
           spellCheck={false}
         />
         <span
           aria-live="polite"
-          className="min-w-[5rem] shrink-0 text-center text-xs tabular-nums text-muted-foreground"
+          className={cn(
+            "text-xs tabular-nums text-muted-foreground",
+            sideConversation ? "order-last col-span-full break-words" : "min-w-[5rem] shrink-0 text-center"
+          )}
         >
           {statusText}
         </span>

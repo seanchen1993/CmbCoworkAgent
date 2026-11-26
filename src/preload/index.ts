@@ -1,17 +1,14 @@
-import type { DesignUrlImportApi } from "../shared/design-url-import"
-import type { DesignSessionApi, DesignSessionChange, DesignSessionSnapshot } from "../shared/managed-design-session"
+import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
+import type { GitGraphPage } from "../shared/git-graph"
 import type {
-  DesignArtifactPackageRef,
-  DesignAssetPreviewTicket,
-  DesignPackageCommitParams,
-  DesignPackageStageResult
-} from "../shared/design-package"
-import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
-import {
-  DESIGN_SYSTEM_EXTRACTION_PROGRESS,
-  type DesignSystemLibraryApi,
-  type DesignSystemInfo
-} from "../shared/design-system"
+  GitBranchKind,
+  GitBranchListResult,
+  GitBranchMenuCursor,
+  GitBranchMenuPage,
+  GitBranchMenuResult,
+  GitBranchMutationResult,
+  GitCurrentBranchResult
+} from "../shared/git-branches"
 import { MARKET_SKILL_CATALOG_CHANGED, type MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import { localBotsApi } from "./bots"
 import { createBotWorkStreamPreview } from "./bot-work-stream-preview"
@@ -35,6 +32,11 @@ import type {
   RunAnalysisStages,
   RunAnalysisSessions
 } from "../shared/project-run-analysis"
+import type { PersonalEfficiencyExportOptions } from "../shared/personal-efficiency-export"
+import type {
+  PersonalEfficiencyData,
+  PersonalEfficiencyFilters
+} from "../shared/personal-efficiency"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -67,7 +69,6 @@ import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
-import { requirementsApi } from "./requirements-api"
 import {
   isWindowCloseBehavior,
   type CloseToTrayPromptAction,
@@ -272,7 +273,30 @@ import type {
   WorkflowWorktreeActionResponse
 } from "../main/ipc/workflow-worktree-payload"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
-import { createBrowserApi } from "./browser"
+import { BROWSER_PANEL_REQUEST_CHANNEL, BROWSER_SESSION_ID } from "../shared/browser-types"
+import type {
+  BrowserRecordingSession,
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
+  BrowserScreenshotResult,
+  ScriptRecordingStartOptions,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserRecordingDraftUpdateInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
+  BrowserState
+} from "../shared/browser-types"
+import { BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL } from "../shared/browser-types"
 import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
   APP_ATTENTION_CHANNEL,
@@ -448,6 +472,132 @@ const electronAPI = {
   process: {
     platform: process.platform,
     versions: process.versions
+  }
+}
+
+function createBrowserApi() {
+  return {
+    attach: (options?: BrowserAttachOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:attach", options) as Promise<BrowserState>
+    },
+    detach: (): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:detach") as Promise<BrowserState>
+    },
+    setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
+    },
+    setZoomFactor: (zoomFactor: number): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setZoomFactor", zoomFactor) as Promise<BrowserState>
+    },
+    navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
+    },
+    goBack: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goBack") as Promise<BrowserState>,
+    goForward: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goForward") as Promise<BrowserState>,
+    reload: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:reload") as Promise<BrowserState>,
+    stop: (): Promise<BrowserState> => ipcRenderer.invoke("browser:stop") as Promise<BrowserState>,
+    clearConsole: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
+    getState: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke(
+        "browser:startScriptRecording",
+        options
+      ) as Promise<BrowserRecordingSession>,
+    pauseScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:pauseScriptRecording") as Promise<BrowserRecordingSession>,
+    updateScriptRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke(
+        "browser:updateScriptRecordingDraft",
+        input
+      ) as Promise<BrowserRecordingSession>,
+    resumeScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:resumeScriptRecording") as Promise<BrowserRecordingSession>,
+    stopScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:stopScriptRecording") as Promise<BrowserRecordingSession>,
+    getScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:getScriptRecording") as Promise<BrowserRecordingSession>,
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ): Promise<BrowserScriptLibraryEntry> =>
+      ipcRenderer.invoke(
+        "browser:saveScriptLibraryEntry",
+        input
+      ) as Promise<BrowserScriptLibraryEntry>,
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ): Promise<BrowserScriptLibraryEntry[]> =>
+      ipcRenderer.invoke("browser:listScriptLibraryEntries", options) as Promise<
+        BrowserScriptLibraryEntry[]
+      >,
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput): Promise<string> =>
+      ipcRenderer.invoke("browser:readScriptLibraryScript", input) as Promise<string>,
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput): Promise<void> =>
+      ipcRenderer.invoke("browser:updateScriptLibraryEntry", input) as Promise<void>,
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput): Promise<void> =>
+      ipcRenderer.invoke("browser:deleteScriptLibraryEntry", input) as Promise<void>,
+    executeRecordingScript: (input: BrowserScriptExecutionInput): Promise<void> =>
+      ipcRenderer.invoke("browser:executeRecordingScript", input) as Promise<void>,
+    getScriptExecutionState: (): Promise<BrowserScriptExecutionState> =>
+      ipcRenderer.invoke("browser:getScriptExecutionState") as Promise<BrowserScriptExecutionState>,
+    cancelRecordingScriptExecution: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:cancelRecordingScriptExecution") as Promise<boolean>,
+    getCdpConfig: (): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
+    isProfileImportRuntimeEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:isProfileImportRuntimeEnabled") as Promise<boolean>,
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:saveCdpConfig", updates) as Promise<BrowserCdpConfig>,
+    captureScreenshot: (): Promise<BrowserScreenshotResult> =>
+      ipcRenderer.invoke("browser:captureScreenshot") as Promise<BrowserScreenshotResult>,
+    importProfileData: (
+      options: BrowserProfileImportOptions
+    ): Promise<BrowserProfileImportResult> =>
+      ipcRenderer.invoke(
+        "browser:importProfileData",
+        options
+      ) as Promise<BrowserProfileImportResult>,
+    disposeAllForRendererUnload: (): void => {
+      ipcRenderer.send("browser:disposeAllForRendererUnload")
+    },
+    onState: (callback: (state: BrowserState) => void): (() => void) => {
+      const channel = `browser:state:${BROWSER_SESSION_ID}`
+      const handler = (_: unknown, state: BrowserState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void): (() => void) => {
+      const handler = (_: unknown, request: BrowserPanelRequest): void => {
+        callback(request)
+      }
+      ipcRenderer.on(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      }
+    },
+    onScriptExecutionState: (
+      callback: (state: BrowserScriptExecutionState) => void
+    ): (() => void) => {
+      const handler = (_: unknown, state: BrowserScriptExecutionState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
+      }
+    }
   }
 }
 
@@ -1329,6 +1479,11 @@ const api = {
       }
     }
   },
+  btw: {
+    create: (request: BtwRequest): Promise<{ id: string; ordinal: number; thread: Thread }> =>
+      ipcRenderer.invoke("btw:create", request),
+    close: (id: string): Promise<void> => ipcRenderer.invoke("btw:close", id)
+  },
   models: {
     getCatalog: (): Promise<{
       models: ModelConfig[]
@@ -1851,6 +2006,7 @@ const api = {
       options?: {
         worktreePath?: string
         includeSummary?: boolean
+        refreshHead?: boolean
         includePushability?: boolean
       }
     ): Promise<{
@@ -1863,6 +2019,7 @@ const api = {
       hasPushableCommit: boolean
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
+      repositoryRoots?: string[]
       worktreeBranch?: string | null
       error?: string
     }> => {
@@ -1876,6 +2033,7 @@ const api = {
         hasPushableCommit: boolean
         pendingCommits?: Array<{ hash: string; message: string; date: string }>
         trackedFiles?: string[]
+        repositoryRoots?: string[]
         worktreeBranch?: string | null
         error?: string
       }>
@@ -2288,24 +2446,7 @@ const api = {
     },
     supportedExtensions: (): Promise<string[]> => {
       return ipcRenderer.invoke("file:supportedExtensions")
-    },
-    selectCode: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
-      ipcRenderer.invoke("file:select-code"),
-    selectPrototypeZip: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
-      ipcRenderer.invoke("file:select-prototype-zip"),
-    readText: (
-      filePath: string
-    ): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> =>
-      ipcRenderer.invoke("file:read-text", filePath),
-    readDataUrl: (
-      filePath: string
-    ): Promise<{
-      success: boolean
-      filename?: string
-      dataUrl?: string
-      size?: number
-      error?: string
-    }> => ipcRenderer.invoke("file:read-data-url", filePath)
+    }
   },
   marketSkillShortcut: {
     get: (): Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>> =>
@@ -3011,8 +3152,8 @@ const api = {
         ipcRenderer.removeListener("skill:intentRequest", handler)
       }
     },
-    intentResponse: (requestId: string, accepted: boolean): Promise<void> =>
-      ipcRenderer.invoke("skill:intentResponse", { requestId, accepted }) as Promise<void>,
+    intentResponse: (requestId: string, accepted: boolean): Promise<boolean> =>
+      ipcRenderer.invoke("skill:intentResponse", { requestId, accepted }) as Promise<boolean>,
     retryGeneration: (
       threadId: string,
       retryContext: { context: unknown; intentMode: string }
@@ -3028,6 +3169,7 @@ const api = {
       callback: (req: {
         threadId?: string
         requestId: string
+        source?: "proposal"
         skillId: string
         name: string
         description: string
@@ -3039,6 +3181,7 @@ const api = {
         req: {
           threadId?: string
           requestId: string
+          source?: "proposal"
           skillId: string
           name: string
           description: string
@@ -3058,12 +3201,17 @@ const api = {
         approved,
         content
       }) as Promise<void>,
+    onBtwRequestClosed: (callback: (request: BtwSkillRequestClosed) => void): (() => void) => {
+      const handler = (_event: unknown, request: BtwSkillRequestClosed): void => callback(request)
+      ipcRenderer.on("skill:btwRequestClosed", handler)
+      return () => ipcRenderer.removeListener("skill:btwRequestClosed", handler)
+    },
 
     // ── Streaming generation progress ──────────────────────────
     onGenerating: (
       callback: (event: {
         threadId?: string
-        phase: "start" | "token" | "done" | "error"
+        phase: "start" | "token" | "done" | "error" | "settled"
         text: string
       }) => void
     ): (() => void) => {
@@ -3071,7 +3219,7 @@ const api = {
         _: unknown,
         evt: {
           threadId?: string
-          phase: "start" | "token" | "done" | "error"
+          phase: "start" | "token" | "done" | "error" | "settled"
           text: string
         }
       ): void => {
@@ -4070,6 +4218,24 @@ const api = {
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
+    personalEfficiency: (
+      filters: PersonalEfficiencyFilters,
+      sapId?: string
+    ): Promise<{ success: boolean; data?: PersonalEfficiencyData; error?: string }> =>
+      ipcRenderer.invoke("dashboard:personalEfficiency", filters, sapId),
+    personalEfficiencyExport: (
+      filters: PersonalEfficiencyFilters,
+      options?: PersonalEfficiencyExportOptions
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke("dashboard:personalEfficiencyExport", filters, options),
+    projectMetricOverview: (
+      filters: ProjectMetricFilters
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricOverview", filters),
+    projectMetricIndicatorExport: (
+      filters: ProjectMetricFilters
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricIndicatorExport", filters),
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -4781,486 +4947,6 @@ const api = {
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
     }
   },
-  design: {
-    importTemplate: ((source, designSystemKey) =>
-      ipcRenderer.invoke(
-        "design:import-template",
-        source,
-        designSystemKey
-      )) satisfies DesignTemplateApi["importTemplate"],
-    updateTemplateAssociation: ((reference, designSystemKey) =>
-      ipcRenderer.invoke("design:update-template-association", reference, designSystemKey)
-    ) satisfies DesignTemplateApi["updateTemplateAssociation"],
-    listImportedTemplates: (() =>
-      ipcRenderer.invoke(
-        "design:list-imported-templates"
-      )) satisfies DesignTemplateApi["listImportedTemplates"],
-    readTemplate: ((reference) =>
-      ipcRenderer.invoke(
-        "design:read-template",
-        reference
-      )) satisfies DesignTemplateApi["readTemplate"],
-    readSystem: ((id) =>
-      ipcRenderer.invoke("design:read-system", id)) satisfies DesignSystemLibraryApi["readSystem"],
-    saveSystem: ((draft) =>
-      ipcRenderer.invoke(
-        "design:save-system",
-        draft
-      )) satisfies DesignSystemLibraryApi["saveSystem"],
-    selectSystemFile: (() =>
-      ipcRenderer.invoke(
-        "design:select-system-file"
-      )) satisfies DesignSystemLibraryApi["selectSystemFile"],
-    exportSystem: ((content) =>
-      ipcRenderer.invoke(
-        "design:export-system",
-        content
-      )) satisfies DesignSystemLibraryApi["exportSystem"],
-    extractSystem: ((request) =>
-      ipcRenderer.invoke(
-        "design:extract-system",
-        request
-      )) satisfies DesignSystemLibraryApi["extractSystem"],
-    cancelSystemExtraction: ((requestId) =>
-      ipcRenderer.invoke(
-        "design:cancel-system-extraction",
-        requestId
-      )) satisfies DesignSystemLibraryApi["cancelSystemExtraction"],
-    onSystemExtractionProgress: ((callback) => {
-      const listener = (
-        _event: Electron.IpcRendererEvent,
-        progress: Parameters<typeof callback>[0]
-      ) => callback(progress)
-      ipcRenderer.on(DESIGN_SYSTEM_EXTRACTION_PROGRESS, listener)
-      return () => ipcRenderer.removeListener(DESIGN_SYSTEM_EXTRACTION_PROGRESS, listener)
-    }) satisfies DesignSystemLibraryApi["onSystemExtractionProgress"],
-    sessions: {
-      inspectEditable: (id) => ipcRenderer.invoke("design:inspect-editable", id),
-      edit: (id, command) => ipcRenderer.invoke("design:direct-edit", { id, command }),
-      tweak: (id, command) => ipcRenderer.invoke("design:session-tweak", { id, command }),
-      patchHistory: (id, operation, revision) =>
-        ipcRenderer.invoke("design:patch-history", { id, operation, revision }),
-      previewVisible: (id, runId, revision) =>
-        ipcRenderer.invoke("design:preview-visible", { id, runId, revision }),
-      migrate: (seeds) => ipcRenderer.invoke("design:sessions-migrate", seeds),
-      list: () => ipcRenderer.invoke("design:sessions-list"),
-      create: (seed) => ipcRenderer.invoke("design:session-create", seed),
-      open: (id) => ipcRenderer.invoke("design:session-open", id),
-      close: (id) => ipcRenderer.invoke("design:session-close", id),
-      patch: (id, patch, meta) => ipcRenderer.invoke("design:session-patch", { id, patch, meta }),
-      patchUi: (id, patch) => ipcRenderer.invoke("design:session-ui-patch", { id, patch }),
-      start: (request) => ipcRenderer.invoke("design:session-start", request),
-      stop: (id) => ipcRenderer.invoke("design:session-stop", id),
-      setWorkspace: (id, path) => ipcRenderer.invoke("design:session-workspace", { id, path }),
-      retry: (id, requestId) => ipcRenderer.invoke("design:session-retry", { id, requestId }),
-      delete: (id) => ipcRenderer.invoke("design:session-delete", id),
-      markRead: (id, seq) => ipcRenderer.invoke("design:session-read", { id, seq }),
-      onChange: (listener) => {
-        const handler = (_event: unknown, change: DesignSessionChange) => listener(change)
-        ipcRenderer.on("design:sessions-changed", handler)
-        return () => ipcRenderer.removeListener("design:sessions-changed", handler)
-      }
-    } satisfies DesignSessionApi,
-    generate: (
-      sessionId: string,
-      prompt: string,
-      onEvent: (event: {
-        type: string
-        token?: string
-        html?: string
-        error?: string
-        event?: unknown
-        artifactPath?: string
-        metadata?: unknown
-      }) => void,
-      modelId?: string,
-      history?: Array<{ role: "user" | "assistant"; content: string }>,
-      tabId?: string
-    ): (() => void) => {
-      const channel = `design:stream:${sessionId}`
-      const handler = (
-        _: unknown,
-        data: {
-          type: string
-          token?: string
-          html?: string
-          error?: string
-          event?: unknown
-          artifactPath?: string
-          metadata?: unknown
-        }
-      ): void => {
-        onEvent(data)
-        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
-          if (data.type === "error") {
-            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
-          }
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-      ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:generate", { sessionId, prompt, modelId, history, tabId })
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
-    storeHtml: (tabId: string, html: string): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke("design:store-html", tabId, html),
-    saveArtifact: (
-      tabId: string,
-      html: string,
-      workspacePath?: string,
-      metadata?: Record<string, unknown>
-    ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("design:save-artifact", {
-        tabId,
-        html,
-        workspacePath,
-        metadata
-      }) as Promise<{
-        success: boolean
-        filePath?: string
-        error?: string
-      }>,
-    saveArtifactFile: (
-      filePath: string,
-      html: string,
-      workspacePath?: string,
-      metadata?: Record<string, unknown>
-    ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("design:save-artifact-file", {
-        filePath,
-        html,
-        workspacePath,
-        metadata
-      }) as Promise<{
-        success: boolean
-        filePath?: string
-        error?: string
-      }>,
-    importFromUrl: ((request) =>
-      ipcRenderer.invoke(
-        "design:import-url",
-        request
-      )) satisfies DesignUrlImportApi["importFromUrl"],
-    cancelUrlImport: ((requestId) =>
-      ipcRenderer.invoke(
-        "design:cancel-url-import",
-        requestId
-      )) satisfies DesignUrlImportApi["cancelUrlImport"],
-    finishUrlImport: ((requestId, keep) =>
-      ipcRenderer.invoke(
-        "design:finish-url-import",
-        requestId,
-        keep
-      )) satisfies DesignUrlImportApi["finishUrlImport"],
-    prepareUrlImportForEditing: ((requestId, sessionId) =>
-      ipcRenderer.invoke(
-        "design:prepare-url-import-for-editing",
-        requestId,
-        sessionId
-      )) satisfies DesignUrlImportApi["prepareUrlImportForEditing"],
-    openImportBrowser: ((url) =>
-      ipcRenderer.invoke(
-        "design:open-import-browser",
-        url
-      )) satisfies DesignUrlImportApi["openImportBrowser"],
-    controlImportInteractions: ((action) =>
-      ipcRenderer.invoke("design:control-import-interactions", action)
-    ) satisfies DesignUrlImportApi["controlImportInteractions"],
-    onUrlImportProgress: ((callback) => {
-      const listener = (_event: unknown, progress: Parameters<typeof callback>[0]) =>
-        callback(progress)
-      ipcRenderer.on("design:import-url-progress", listener)
-      return () => ipcRenderer.removeListener("design:import-url-progress", listener)
-    }) satisfies DesignUrlImportApi["onUrlImportProgress"],
-    pickImportHtmlOrZip: (): Promise<{
-      canceled: boolean
-      filePath?: string
-      error?: string
-    }> => ipcRenderer.invoke("design:pick-import-html-or-zip"),
-    stageImportPackage: (
-      filePath: string,
-      workspacePath?: string
-    ): Promise<DesignPackageStageResult> =>
-      ipcRenderer.invoke("design:stage-import-package", { filePath, workspacePath }),
-    cancelImportPackage: (stageId: string): Promise<{ canceled: boolean }> =>
-      ipcRenderer.invoke("design:cancel-import-package", { stageId }),
-    commitImportPackage: (
-      params: DesignPackageCommitParams
-    ): Promise<{
-      success: boolean
-      snapshot?: DesignSessionSnapshot
-      artifactPackage?: DesignArtifactPackageRef | null
-      missingAssets?: string[]
-      outOfScopeAssets?: string[]
-      warnings?: string[]
-      error?: string
-    }> => ipcRenderer.invoke("design:commit-import-package", params),
-    acquirePreviewUrl: (
-      sessionId: string,
-      kind: "canvas" | "draft",
-      runId?: string
-    ): Promise<{
-      success: boolean
-      ticket?: DesignAssetPreviewTicket
-      error?: string
-    }> => ipcRenderer.invoke("design:acquire-preview-url", { sessionId, kind, runId }),
-    releasePreviewUrl: (token: string): Promise<{ released: boolean }> =>
-      ipcRenderer.invoke("design:release-preview-url", { token }),
-    importPrototypeZip: (
-      filePath: string,
-      options?: {
-        workspacePath?: string
-        sessionId?: string | null
-        createNew?: boolean
-        designSystemId?: string | null
-      }
-    ): Promise<{
-      success: boolean
-      html?: string
-      title?: string
-      imageCount?: number
-      metadataCount?: number
-      snapshot?: DesignSessionSnapshot
-      artifactPackage?: DesignArtifactPackageRef | null
-      error?: string
-    }> =>
-      ipcRenderer.invoke("design:import-prototype-zip", { filePath, ...options }) as Promise<{
-        success: boolean
-        html?: string
-        title?: string
-        imageCount?: number
-        metadataCount?: number
-        snapshot?: DesignSessionSnapshot
-        artifactPackage?: DesignArtifactPackageRef | null
-        error?: string
-      }>,
-    syncContextFiles: (params: {
-      workspacePath?: string
-      designSessionId?: string
-      kind: "attachments" | "code"
-      files: Array<{ filename: string; sourcePath?: string; content?: string }>
-    }): Promise<{
-      success: boolean
-      dirPath?: string
-      files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
-      error?: string
-    }> =>
-      ipcRenderer.invoke("design:sync-context-files", params) as Promise<{
-        success: boolean
-        dirPath?: string
-        files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
-        error?: string
-      }>,
-    readArtifact: (
-      tabId: string,
-      workspacePath?: string
-    ): Promise<{ success: boolean; filePath?: string; html?: string; error?: string }> =>
-      ipcRenderer.invoke("design:read-artifact", { tabId, workspacePath }) as Promise<{
-        success: boolean
-        filePath?: string
-        html?: string
-        error?: string
-      }>,
-    readArtifactFile: (
-      filePath: string,
-      workspacePath?: string
-    ): Promise<{ success: boolean; filePath?: string; html?: string; error?: string }> =>
-      ipcRenderer.invoke("design:read-artifact-file", { filePath, workspacePath }) as Promise<{
-        success: boolean
-        filePath?: string
-        html?: string
-        error?: string
-      }>,
-    getArtifactPackageInfo: (
-      filePath: string,
-      workspacePath?: string,
-      sessionId?: string
-    ): Promise<{
-      success: boolean
-      filePath?: string
-      dirPath?: string
-      entryRelativePath?: string
-      relatedFileCount?: number
-      isPackage?: boolean
-      error?: string
-    }> =>
-      ipcRenderer.invoke("design:get-artifact-package-info", {
-        filePath,
-        workspacePath,
-        sessionId
-      }) as Promise<{
-        success: boolean
-        filePath?: string
-        dirPath?: string
-        entryRelativePath?: string
-        relatedFileCount?: number
-        isPackage?: boolean
-        error?: string
-      }>,
-    exportArtifactPackage: (
-      filePath: string,
-      workspacePath?: string,
-      options?: { sessionId?: string; suggestedName?: string; saveDialog?: boolean }
-    ): Promise<{
-      success: boolean
-      fileName?: string
-      savedPath?: string
-      canceled?: boolean
-      buffer?: ArrayBuffer
-      relatedFileCount?: number
-      error?: string
-    }> =>
-      ipcRenderer.invoke("design:export-artifact-package", {
-        filePath,
-        workspacePath,
-        ...options
-      }) as Promise<{
-        success: boolean
-        fileName?: string
-        savedPath?: string
-        canceled?: boolean
-        buffer?: ArrayBuffer
-        relatedFileCount?: number
-        error?: string
-      }>,
-    listSystems: (): Promise<DesignSystemInfo[]> => ipcRenderer.invoke("design:list-systems"),
-    listTemplates: (): Promise<DesignTemplateInfo[]> => ipcRenderer.invoke("design:list-templates"),
-    /**
-     * Full Agent Runtime path — gives Design access to Skills, MCP tools,
-     * Hooks, Approvals and context summarisation.
-     * Uses tabId as the LangGraph thread ID so multi-turn is handled natively
-     * by the checkpoint store (no manual apiHistory management needed).
-     */
-    agentGenerate: (
-      sessionId: string,
-      prompt: string,
-      onEvent: (event: {
-        type: string
-        token?: string
-        html?: string
-        error?: string
-        event?: unknown
-        artifactPath?: string
-        metadata?: unknown
-      }) => void,
-      tabId: string,
-      modelId?: string,
-      imageData?: string,
-      mimeType?: string,
-      currentHtml?: string,
-      skill?: { name: string; path: string },
-      workspacePath?: string,
-      artifactId?: string,
-      sourceArtifactPath?: string,
-      designSessionId?: string,
-      designSystemId?: string
-    ): (() => void) => {
-      const channel = `design:stream:${sessionId}`
-      const handler = (
-        _: unknown,
-        data: {
-          type: string
-          token?: string
-          html?: string
-          error?: string
-          event?: unknown
-          artifactPath?: string
-          metadata?: unknown
-        }
-      ): void => {
-        onEvent(data)
-        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
-          if (data.type === "error") {
-            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
-          }
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-      ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:agent-generate", {
-        sessionId,
-        prompt,
-        modelId,
-        tabId,
-        imageData,
-        mimeType,
-        currentHtml,
-        skill,
-        workspacePath,
-        artifactId,
-        sourceArtifactPath,
-        designSessionId,
-        designSystemId
-      })
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
-    askQuestions: (
-      sessionId: string,
-      prompt: string,
-      onEvent: (event: {
-        type: string
-        question?: unknown
-        questions?: unknown[]
-        error?: string
-      }) => void,
-      modelId?: string,
-      designSystemId?: string
-    ): (() => void) => {
-      const channel = `design:questions:${sessionId}`
-      const handler = (
-        _: unknown,
-        data: { type: string; question?: unknown; questions?: unknown[]; error?: string }
-      ): void => {
-        onEvent(data)
-        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
-          if (data.type === "error") {
-            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
-          }
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-      ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:ask-questions", { sessionId, prompt, modelId, designSystemId })
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
-    generateFromImage: (
-      sessionId: string,
-      prompt: string,
-      imageData: string,
-      mimeType: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
-      modelId?: string,
-      designSystemId?: string
-    ): (() => void) => {
-      const channel = `design:image-stream:${sessionId}`
-      const handler = (
-        _: unknown,
-        data: { type: string; token?: string; html?: string; error?: string }
-      ): void => {
-        onEvent(data)
-        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
-          if (data.type === "error") {
-            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
-          }
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-      ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:generate-from-image", {
-        sessionId,
-        prompt,
-        imageData,
-        mimeType,
-        modelId,
-        designSystemId
-      })
-      return () => ipcRenderer.removeListener(channel, handler)
-    },
-    cancel: (sessionId: string): Promise<void> => ipcRenderer.invoke("design:cancel", sessionId),
-    saveVariant: (variantId: string, html: string): Promise<{ filePath: string }> =>
-      ipcRenderer.invoke("design:save-variant", variantId, html)
-  },
-  requirements: requirementsApi,
   app: {
     restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
   },
@@ -5384,62 +5070,51 @@ const api = {
         projectPath: string | null
         records: GitCommitHistoryRecord[]
         error?: string
-      }>,
-    recordCommitHistory: (
-      threadId: string,
-      fullMessage: string
-    ): Promise<{
-      success: boolean
-      record: GitCommitHistoryRecord | null
-      error?: string
-    }> =>
-      ipcRenderer.invoke("git-panel:recordCommitHistory", { threadId, fullMessage }) as Promise<{
-        success: boolean
-        record: GitCommitHistoryRecord | null
-        error?: string
       }>
   },
   git: {
-    currentBranch: (
-      cwd?: string
-    ): Promise<{
-      isGitRepo: boolean
-      branch: string | null
-      isWorktree: boolean
-      isMultiRepo?: boolean
-      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
-      error?: string
-    }> =>
-      ipcRenderer.invoke("git:currentBranch", cwd) as Promise<{
-        isGitRepo: boolean
-        branch: string | null
-        isWorktree: boolean
-        isMultiRepo?: boolean
-        repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
-        error?: string
-      }>,
+    currentBranch: (cwd?: string, forSwitcher?: true): Promise<GitCurrentBranchResult> =>
+      ipcRenderer.invoke("git:currentBranch", cwd, forSwitcher),
+    cancelBranchProbe: (): Promise<void> => ipcRenderer.invoke("git:cancelBranchProbe"),
+    readBranchHead: (gitDir: string): Promise<string | null | undefined> =>
+      ipcRenderer.invoke("git:readBranchHead", gitDir),
+    cancelBranchHead: (): Promise<void> => ipcRenderer.invoke("git:cancelBranchHead"),
+    cancelCommitGraph: (): Promise<void> => ipcRenderer.invoke("git:cancelCommitGraph"),
+    getCommitGraph: (cwd?: string, skip = 0, snapshot?: string, forDialog?: true): Promise<GitGraphPage> =>
+      ipcRenderer.invoke("git:getCommitGraph", { cwd, skip, snapshot, forDialog }),
+    cancelBranchList: (): Promise<void> => ipcRenderer.invoke("git:cancelBranchList"),
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }
-    ): Promise<{ success: boolean; branches: string[]; error?: string }> =>
+    ): Promise<GitBranchListResult> =>
       ipcRenderer.invoke("git:listBranches", {
         cwd,
-        refreshRemote: Boolean(options?.refreshRemote)
-      }) as Promise<{
-        success: boolean
-        branches: string[]
-        error?: string
-      }>,
-    switchBranch: (branch: string, cwd?: string): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("git:switchBranch", { branch, cwd }) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    createBranch: (branch: string, cwd?: string): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke("git:createBranch", { branch, cwd }) as Promise<{
-        success: boolean
-        error?: string
-      }>
+        refreshRemote: Boolean(options?.refreshRemote),
+        forBranchMenu: true
+      }),
+    listBranchMenu: (
+      cwd?: string,
+      options?: { refreshRemote?: boolean; paged?: true }
+    ): Promise<GitBranchMenuResult> =>
+      ipcRenderer.invoke("git:listBranches", {
+        cwd,
+        refreshRemote: Boolean(options?.refreshRemote),
+        forBranchMenu: true,
+        format: "menu",
+        paged: options?.paged
+      }),
+    readBranchMenuPage: (cursor: GitBranchMenuCursor): Promise<GitBranchMenuPage> =>
+      ipcRenderer.invoke("git:readBranchMenuPage", cursor),
+    getChangedFileCount: (cwd?: string, branch?: string | null): Promise<number> =>
+      ipcRenderer.invoke("git:getChangedFileCount", cwd, branch),
+    switchBranch: (
+      branch: string,
+      cwd?: string,
+      kind?: GitBranchKind
+    ): Promise<GitBranchMutationResult> =>
+      ipcRenderer.invoke("git:switchBranch", { branch, cwd, kind }),
+    createBranch: (branch: string, cwd?: string): Promise<GitBranchMutationResult> =>
+      ipcRenderer.invoke("git:createBranch", { branch, cwd })
   }
 }
 

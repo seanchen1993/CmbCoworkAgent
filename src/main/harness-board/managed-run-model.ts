@@ -1,7 +1,8 @@
 import { getThreadCore } from "../db"
 import { getModelConfigByRef } from "../models/registry"
-import { IDLE_MODEL_NAME, isModelAvailable } from "../../shared/model-catalog"
-import { MANAGED_IDLE_MODEL_REF } from "../../shared/managed-run-model"
+import { isModelAvailable } from "../../shared/model-catalog"
+import { assertIdleModelServiceHours } from "../../shared/idle-model-service-window"
+import { getManagedRunModelOption } from "../../shared/managed-run-model"
 import { managedRunStore } from "./managed-run-store"
 import { readHarnessFeatureMetadata } from "./service"
 
@@ -26,18 +27,19 @@ export function getManagedRunModelOverride(
     runId: feature.runId
   })
   const run = record.snapshot
-  if (record.corrupt || run?.status !== "running" || run.modelSelection !== "ultra") {
-    return undefined
-  }
+  if (record.corrupt || run?.status !== "running") return undefined
+  const { ref, name } = getManagedRunModelOption(run.modelSelection)
+  if (!ref) return undefined
   if (run.currentSession?.threadId !== threadId && !managedExecution) return undefined
   // A new session is already bound to the run before currentSession is updated.
   // The existing managedExecution launch marker covers that first turn only.
-  const config = getModelConfigByRef(MANAGED_IDLE_MODEL_REF)
+  const config = getModelConfigByRef(ref)
+  assertIdleModelServiceHours(config)
   const unavailableReason = config?.unavailableReason
   if (!isModelAvailable(config)) {
     throw new Error(
-      `${IDLE_MODEL_NAME}不可用：${unavailableReason || "请检查内置模型配置和登录用户信息"}`
+      `${name}不可用：${unavailableReason || "请检查内置模型配置和登录用户信息"}`
     )
   }
-  return MANAGED_IDLE_MODEL_REF
+  return ref
 }

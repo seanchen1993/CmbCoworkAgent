@@ -300,7 +300,7 @@ export function ConversationTaskControls({
   return (
     <>
       <div
-        className="shrink-0 border-b border-border/60 px-4 py-2 text-xs text-muted-foreground"
+        className="shrink-0 border-border/60 px-4 py-2 text-xs text-muted-foreground data-[bot-task-header]:border-b"
         data-bot-task-header={link ? "" : undefined}
       >
         {link ? (

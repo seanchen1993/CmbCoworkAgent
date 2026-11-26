@@ -65,6 +65,40 @@ afterEach(async () => {
   )
 })
 
+it("keeps a cancelled worker unsettled until its runner and writes finish", async () => {
+  const workspacePath = await mkdtemp(path.join(tmpdir(), "coordinator-worker-settlement-"))
+  temporaryDirectories.push(workspacePath)
+  const manager = new CoordinatorWorkerManager({ restoreIndexStore: new ProbeRestoreIndexStore() })
+  const threadId = "settling-worker-thread"
+  const runnerStarted = deferred<void>()
+  const run = deferred<CoordinatorWorkerRunResult>()
+  manager.startWorker({
+    parentThreadId: threadId,
+    workspacePath,
+    role: "implementer",
+    workload: "write",
+    description: "Hold the worktree while unwinding",
+    prompt: "wait",
+    runner: () => {
+      runnerStarted.resolve(undefined)
+      return run.promise
+    }
+  })
+  try {
+    await runnerStarted.promise
+    manager.cancelWorkersForThread(threadId)
+    expect(manager.readWorkers(threadId)).toEqual([expect.objectContaining({ status: "cancelled" })])
+    expect(manager.hasRunningWorkersForThread(threadId)).toBe(false)
+    expect(manager.hasUnsettledWorkersForThread(threadId)).toBe(true)
+    run.resolve({ summary: "done", rawText: "done" })
+    await manager.waitForWorkerCleanup(threadId)
+    expect(manager.hasUnsettledWorkersForThread(threadId)).toBe(false)
+  } finally {
+    run.resolve({ summary: "done", rawText: "done" })
+    manager.clear()
+  }
+})
+
 describe("coordinator worker parent cache", () => {
   it("hard-bounds active restores and retained waiters across many parents", async () => {
     const workspacePath = await mkdtemp(path.join(tmpdir(), "coordinator-restore-pressure-"))

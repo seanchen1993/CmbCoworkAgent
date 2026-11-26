@@ -1,6 +1,8 @@
 import { createHash } from "crypto"
+import { setTimeout as delay } from "node:timers/promises"
 import { join } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
+import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser-mcp-tools"
 import { buildMcpServerConfig } from "../ipc/mcp"
 import { getEnabledMcpConnectors, getPlugins, getUserInfo, parseMcpJsonFile } from "../storage"
 import type { PluginMcpServerConfig } from "../types"
@@ -65,9 +67,7 @@ function toPluginSources(): CapabilitySource[] {
   return sources
 }
 
-function normalizeFallbackPolicy(
-  policy: PluginMcpServerConfig["fallback"]
-): McpFallbackPolicy | undefined {
+function normalizeFallbackPolicy(policy: PluginMcpServerConfig["fallback"]): McpFallbackPolicy | undefined {
   if (!policy?.enabled || policy.safeToRetry !== true) return undefined
   return {
     enabled: true,
@@ -166,23 +166,28 @@ function buildFingerprint(sources: CapabilitySource[]): string {
 function shouldRetryMcpInvocationError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return (
-    message.includes("terminated") || message.includes("disconnected") || message.includes("ECONN")
+    message.includes("terminated") ||
+    message.includes("disconnected") ||
+    message.includes("ECONN")
   )
 }
 
 async function invokeToolWithRetry(
   callTool: (request: { name: string; arguments: Record<string, unknown> }) => Promise<unknown>,
   request: { name: string; arguments: Record<string, unknown> },
+  signal?: AbortSignal,
   retries = 1
 ): Promise<unknown> {
+  signal?.throwIfAborted()
   try {
     return await callTool(request)
   } catch (error) {
+    signal?.throwIfAborted()
     if (retries <= 0 || !shouldRetryMcpInvocationError(error)) {
       throw error
     }
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    return invokeToolWithRetry(callTool, request, retries - 1)
+    await delay(500, undefined, { signal })
+    return invokeToolWithRetry(callTool, request, signal, retries - 1)
   }
 }
 
@@ -191,22 +196,15 @@ async function listServerTools(
   providerKey: string
 ): Promise<Array<Record<string, unknown>>> {
   const serverClient = await client.getClient(providerKey)
-  if (!serverClient) {
-    console.warn(`[MCP] No connected client is available for provider "${providerKey}"`)
-    return []
-  }
+  if (!serverClient) return []
 
   const tools: Array<Record<string, unknown>> = []
   let cursor: string | undefined
 
   do {
-    const response = await (
-      serverClient as {
-        listTools(input?: {
-          cursor?: string
-        }): Promise<{ tools?: Array<Record<string, unknown>>; nextCursor?: string }>
-      }
-    ).listTools(cursor ? { cursor } : undefined)
+    const response = await (serverClient as {
+      listTools(input?: { cursor?: string }): Promise<{ tools?: Array<Record<string, unknown>>; nextCursor?: string }>
+    }).listTools(cursor ? { cursor } : undefined)
 
     tools.push(...(response.tools ?? []))
     cursor = response.nextCursor
@@ -239,8 +237,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     return this.resolveTool(idOrAlias)
   }
 
-  async invoke(idOrAlias: string, args: Record<string, unknown>): Promise<McpInvocationResult> {
+  async invoke(
+    idOrAlias: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<McpInvocationResult> {
+    signal?.throwIfAborted()
     await this.ensureInitialized()
+    signal?.throwIfAborted()
 
     const tool = this.resolveTool(idOrAlias)
     if (!tool) {
@@ -258,16 +262,26 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     }
 
     const raw = await invokeToolWithRetry(
-      (
-        serverClient as {
-          callTool(request: { name: string; arguments: Record<string, unknown> }): Promise<unknown>
+      async (request) => {
+        if (!signal) return serverClient.callTool(request)
+        // The SDK retains its abort listener after a request settles. Give
+        // each attempt its own signal and disconnect it from the side at settlement.
+        const requestController = new AbortController()
+        const abortRequest = () => requestController.abort(signal.reason)
+        signal.addEventListener("abort", abortRequest, { once: true })
+        try {
+          return await serverClient.callTool(request, undefined, { signal: requestController.signal })
+        } finally {
+          signal.removeEventListener("abort", abortRequest)
         }
-      ).callTool.bind(serverClient),
+      },
       {
         name: tool.toolName,
         arguments: args
-      }
+      },
+      signal
     )
+    signal?.throwIfAborted()
 
     const result = normalizeMcpInvocationResult(tool.capabilityId, raw)
 
@@ -345,11 +359,6 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     const sources = this.readSources()
     const fingerprint = buildFingerprint(sources)
 
-    console.log(
-      "[MCP] capability sources",
-      sources.map((source) => source.providerDisplayName)
-    )
-
     if (sources.length === 0) {
       await this.invalidate("no_sources")
       return
@@ -363,9 +372,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
     const client = new MultiServerMCPClient({
       throwOnLoadError: false,
-      onConnectionError: ({ serverName, error }) => {
-        console.error(`[MCP] failed to connect "${serverName}":`, error)
-      },
+      onConnectionError: "ignore",
       useStandardContentBlocks: true,
       mcpServers
     })
@@ -376,10 +383,17 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
       for (const source of sources) {
         const serverTools = await listServerTools(client, source.providerKey)
-        console.log(`[MCP] "${source.providerDisplayName}" returned ${serverTools.length} tools`)
         for (const rawTool of serverTools) {
           const toolName = typeof rawTool.name === "string" ? rawTool.name : ""
           if (!toolName) continue
+          if (
+            shouldSuppressInAppBrowserMcpTool({
+              providerDisplayName: source.providerDisplayName,
+              toolName
+            })
+          ) {
+            continue
+          }
 
           seeds.push({
             capabilityId:
@@ -432,7 +446,6 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
       console.log(`[MCP] capability service ready with ${tools.length} tools`)
     } catch (error) {
-      console.error("[MCP] capability rebuild failed:", error)
       try {
         await client.close()
       } catch {

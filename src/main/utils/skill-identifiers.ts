@@ -1,5 +1,16 @@
 export const DEFAULT_SKILL_VERSION = "v1.0.0"
 
+/** Convert a generated skill name or ID into a directory name. */
+export function sanitizeSkillId(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\-_]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 64)
+}
+
 const SKILL_VERSION_SUFFIX_RE = /^(.*?)-(v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?)$/
 const SKILL_VERSION_QUERY_SUFFIX_RE = /-v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?$/i
 const SKILL_PACKAGE_EXTENSION_RE = /\.(zip|tar\.gz|tgz|md)$/i

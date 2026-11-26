@@ -159,10 +159,10 @@ describe("Playwright MCP in-app browser bridge", () => {
     ).toBe(false)
   })
 
-  it("rejects when the Browser tab has not created a browser target", async () => {
+  it("reports a timeout when the native browser target stalls", async () => {
     vi.useFakeTimers()
-    const getState = vi.fn().mockReturnValue(browserState(false, false))
-    const prepareTarget = vi.fn()
+    const getState = vi.fn()
+    const prepareTarget = vi.fn(() => new Promise<BrowserState>(() => {}))
     const requestPanel = vi.fn()
 
     try {
@@ -171,9 +171,7 @@ describe("Playwright MCP in-app browser bridge", () => {
         threadId: "thread-1",
         service: { getState, prepareTarget, requestPanel }
       })
-      const expectation = expect(promise).rejects.toThrow(
-        '已尝试自动打开右侧"浏览器"Tab，但内置浏览器未及时就绪，请稍后重试。'
-      )
+      const expectation = expect(promise).rejects.toThrow("内置浏览器未及时就绪，请稍后重试。")
 
       await vi.advanceTimersByTimeAsync(5_000)
       await expectation
@@ -181,8 +179,7 @@ describe("Playwright MCP in-app browser bridge", () => {
       vi.useRealTimers()
     }
 
-    expect(getState).toHaveBeenCalled()
-    expect(prepareTarget).not.toHaveBeenCalled()
+    expect(prepareTarget).toHaveBeenCalledWith({ workspacePath: "/workspace", visible: false })
     expect(requestPanel).toHaveBeenCalledWith("thread-1")
   })
 
@@ -204,35 +201,98 @@ describe("Playwright MCP in-app browser bridge", () => {
     expect(requestPanel).toHaveBeenCalledWith("thread-1")
   })
 
-  it("waits for a Browser tab that is still attaching", async () => {
-    vi.useFakeTimers()
-    let stateReadCount = 0
-    const getState = vi.fn(() => {
-      stateReadCount += 1
-      return stateReadCount < 3 ? browserState(false, stateReadCount > 1) : browserState(true)
-    })
-    const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
+  it("prepares a cold browser for a hidden side conversation before invoking its tool", async () => {
+    let state = browserState(false, false)
+    const getState = () => state
+    const target = Promise.withResolvers<BrowserState>()
+    const prepareTarget = vi.fn(() => target.promise)
     const requestPanel = vi.fn()
+    const invoke = vi.fn().mockResolvedValue(mcpResult("ok"))
+    const threadId = "btw-664ca507-02b0-4c22-907f-ab9b6a91427e-facc2390-3206-4c05-98f5-0ea4b1e8ad19"
+    const result = invokeMcpToolWithPlaywrightInAppBrowserSupport({
+      tool: inAppBrowserTool,
+      workspacePath: "/workspace",
+      threadId,
+      invoke,
+      browserService: { getState, prepareTarget, requestPanel }
+    })
 
-    try {
-      const promise = preparePlaywrightInAppBrowser({
-        workspacePath: "/workspace",
-        threadId: "thread-1",
-        service: { getState, prepareTarget, requestPanel }
-      })
-      const expectation = expect(promise).resolves.toBeUndefined()
-
-      await vi.advanceTimersByTimeAsync(200)
-      await expectation
-    } finally {
-      vi.useRealTimers()
-    }
-
+    expect(requestPanel).toHaveBeenCalledExactlyOnceWith(threadId)
     expect(prepareTarget).toHaveBeenCalledWith({
       workspacePath: "/workspace",
       visible: false
     })
-    expect(requestPanel).toHaveBeenCalledWith("thread-1")
+    expect(invoke).not.toHaveBeenCalled()
+    state = browserState(false)
+    target.resolve(state)
+
+    await expect(result).resolves.toEqual(mcpResult("ok"))
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(requestPanel).toHaveBeenNthCalledWith(2, threadId)
+  })
+
+  it("does not invoke the browser tool when the side closes during target preparation", async () => {
+    const side = new AbortController()
+    const target = Promise.withResolvers<BrowserState>()
+    const service = {
+      getState: () => browserState(false),
+      prepareTarget: vi.fn(() => target.promise),
+      requestPanel: vi.fn()
+    }
+    const invoke = vi.fn().mockResolvedValue(mcpResult("ok"))
+    const threadId = "btw-664ca507-02b0-4c22-907f-ab9b6a91427e-facc2390-3206-4c05-98f5-0ea4b1e8ad19"
+    const result = invokeMcpToolWithPlaywrightInAppBrowserSupport({
+      tool: inAppBrowserTool,
+      workspacePath: "/workspace",
+      threadId,
+      signal: side.signal,
+      invoke,
+      browserService: service
+    })
+
+    expect(service.prepareTarget).toHaveBeenCalledOnce()
+    const outcome = result.then(() => "completed", (error: Error) => error.name)
+    side.abort()
+    const beforeTargetReady = await Promise.race([
+      outcome,
+      new Promise<string>(resolve => setImmediate(() => resolve("pending")))
+    ])
+    target.resolve(browserState(false))
+    await outcome
+
+    expect(invoke).not.toHaveBeenCalled()
+    expect(service.requestPanel).toHaveBeenCalledExactlyOnceWith(threadId)
+    expect(beforeTargetReady).toBe("AbortError")
+  })
+
+  it("does not select a browser tab when the side closes while listing tabs", async () => {
+    const side = new AbortController()
+    const listingStarted = Promise.withResolvers<void>()
+    const listing = Promise.withResolvers<McpInvocationResult>()
+    const invoke = vi.fn(async () => {
+      listingStarted.resolve()
+      return listing.promise
+    })
+    const result = autoSelectPlaywrightInAppBrowserTab({
+      tool: inAppBrowserTool,
+      tabsTool: inAppBrowserTabsTool,
+      workspacePath: "/workspace",
+      signal: side.signal,
+      capabilityService: { invoke },
+      browserService: {
+        getState: () => browserState(false),
+        prepareTarget: async () => browserState(false),
+        requestPanel: vi.fn()
+      }
+    })
+
+    await listingStarted.promise
+    side.abort()
+    listing.resolve(mcpResult("- 0: (current) [Other](https://example.com)\n- 1: [](about:blank)"))
+
+    const outcome = await result.then(() => "completed", (error: Error) => error.name)
+    expect(invoke).toHaveBeenCalledExactlyOnceWith(inAppBrowserTabsTool.capabilityId, { action: "list" }, side.signal)
+    expect(outcome).toBe("AbortError")
   })
 
   it("prepares the target when the Browser panel is already visible", async () => {
@@ -246,7 +306,6 @@ describe("Playwright MCP in-app browser bridge", () => {
       service: { getState, prepareTarget, requestPanel }
     })
 
-    expect(getState).toHaveBeenCalled()
     expect(prepareTarget).toHaveBeenCalledWith({
       workspacePath: "/workspace",
       visible: false
@@ -271,7 +330,6 @@ describe("Playwright MCP in-app browser bridge", () => {
       service
     })
 
-    expect(getState).toHaveBeenCalledTimes(2)
     expect(prepareTarget).toHaveBeenNthCalledWith(1, {
       workspacePath: "/workspace-a",
       visible: false

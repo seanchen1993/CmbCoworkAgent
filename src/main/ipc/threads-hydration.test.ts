@@ -2,6 +2,7 @@ import { readFileSync } from "fs"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import type { ThreadDeleteOptions } from "../types"
+import { getBtwParentId } from "../../shared/btw-chat"
 import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-deletion-busy"
 
 const source = readFileSync(new URL("./threads.ts", import.meta.url), "utf8")
@@ -33,6 +34,7 @@ function loadThreadDeletionHandler({
   const hasExternalThreadRunOwner = vi.fn(() => externalOwner)
   const hasActiveBackgroundTasks = vi.fn(() => backgroundShell)
   const dependencies = {
+    getBtwParentId,
     normalizeThreadDeleteOptions: (options?: ThreadDeleteOptions) => options,
     requireThreadMutationLease: (threadId: string) => threadId,
     withThreadMutationLeaseLock: (_lease: string, run: (row: { metadata: string }) => unknown) =>
@@ -189,7 +191,7 @@ describe("threads:get hydration contract", () => {
     expect(handler).toContain("if (options?.requireIdle)")
     expect(handler.indexOf("isThreadDeletionBusy(")).toBeLessThan(
       handler.indexOf(
-        "performThreadDeletion(event, threadId, metadata, options, assertOwnership)"
+        "performThreadDeletion(event, threadId, metadata, options, assertOwnership,"
       )
     )
     expect(handler).toContain("isThreadDeletionBusy(threadId, runtime)")
@@ -212,7 +214,7 @@ describe("threads:get hydration contract", () => {
     const lockIndex = handler.indexOf("withThreadMutationLeaseLock(lease")
     const selectionIndex = handler.indexOf("assertThreadDeletionGroup(threadRow, metadata")
     const deletionIndex = handler.indexOf(
-      "performThreadDeletion(event, threadId, metadata, options, assertOwnership)"
+      "performThreadDeletion(event, threadId, metadata, options, assertOwnership,"
     )
     const groupCheck = source.slice(
       source.indexOf("function assertThreadDeletionGroup("),
@@ -248,19 +250,22 @@ describe("threads:get hydration contract", () => {
     const start = source.indexOf("const performThreadDeletion = async")
     const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
-    const finalSelectionCheck = deletion.indexOf("assertThreadDeletionGroup(latestThread")
-    const finalOwnershipCheck = deletion.indexOf("assertOwnership(latestThread")
-    const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
-
-    expect(finalSelectionCheck).toBeGreaterThanOrEqual(0)
-    expect(finalOwnershipCheck).toBeGreaterThan(finalSelectionCheck)
-    expect(finalOwnershipCheck).toBeLessThan(databaseCommit)
-    expect(deletion.slice(finalSelectionCheck, databaseCommit)).not.toContain("await ")
+    const checkStart = deletion.indexOf("const assertCanCommitDeletion = () => {")
+    const checkEnd = deletion.indexOf("\n      }", checkStart)
+    const check = deletion.slice(checkStart, checkEnd)
+    expect(checkStart).toBeGreaterThanOrEqual(0)
+    expect(check).toContain("assertThreadDeletionGroup(latestThread, latestMetadata, groupGuard)")
+    expect(check).toContain("assertOwnership(latestThread, latestMetadata)")
+    expect(check).not.toMatch(/\bawait\b/)
+    const commit = deletion.indexOf("dbDeleteThread(threadId)")
+    const finalCheck = deletion.lastIndexOf("assertCanCommitDeletion()", commit)
+    expect(finalCheck).toBeGreaterThan(checkEnd)
+    expect(deletion.slice(finalCheck, commit)).not.toMatch(/\bawait\b/)
   })
 
   it("routes an owned thread by durable work identity and skips busy bulk items before stopping them", () => {
     const start = source.indexOf("const deleteThreadFromRenderer = async")
-    const handler = source.slice(start, source.indexOf('ipcMain.handle("threads:history"', start))
+    const handler = source.slice(start, source.indexOf("\n  }", start) + 4)
     const owner = handler.indexOf("findBotWorkThreadOwner(threadId)")
     const group = handler.indexOf("assertThreadDeletionGroup(row, metadata")
     const busy = handler.indexOf('["queued", "running", "waiting_user"].includes')
@@ -296,12 +301,14 @@ describe("threads:get hydration contract", () => {
     const start = source.indexOf("const performThreadDeletion = async")
     const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
-    const finalBusyCheck = deletion.lastIndexOf("isExternallyManagedThreadRunBusy(")
-    const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
-
-    expect(finalBusyCheck).toBeGreaterThanOrEqual(0)
-    expect(finalBusyCheck).toBeLessThan(databaseCommit)
-    expect(deletion.slice(finalBusyCheck, databaseCommit)).not.toContain("await ")
+    const checkStart = deletion.indexOf("const assertCanCommitDeletion = () => {")
+    const checkEnd = deletion.indexOf("\n      }", checkStart)
+    const check = deletion.slice(checkStart, checkEnd)
+    expect(check).toContain("isExternallyManagedThreadRunBusy(threadId, latestMetadata)")
+    const commit = deletion.indexOf("dbDeleteThread(threadId)")
+    const finalCheck = deletion.lastIndexOf("assertCanCommitDeletion()", commit)
+    expect(finalCheck).toBeGreaterThan(checkEnd)
+    expect(deletion.slice(finalCheck, commit)).not.toMatch(/\bawait\b/)
   })
 
   it("does not turn post-commit artifact cleanup failures into deletion failures", () => {

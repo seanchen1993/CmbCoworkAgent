@@ -1,7 +1,8 @@
 import type { DatabaseSync } from "node:sqlite"
 import { matchesThreadIncarnationSnapshot } from "../../shared/thread-incarnation"
 import { threadSearchIdentitySql, threadSearchRouteFromRow } from "../thread-search/reader"
-import { sameThreadSearchRoute } from "../../shared/thread-search-scope"
+import { isRegularChatThread, sameThreadSearchRoute } from "../../shared/thread-search-scope"
+import { isRemoteInboxMetadata } from "../../shared/remote-inbox-workspace"
 import {
   isVisibleGoalUserEventMessage,
   isStaleCheckpointBoundaryNoticeMessage
@@ -23,7 +24,7 @@ import type {
 } from "./protocol"
 import type { ThreadGitMetadataProjection } from "./protocol"
 import { THREAD_METADATA_HYDRATION_CANCELLED } from "./protocol"
-import { THREAD_SUMMARY_METADATA_SQL } from "./summary-sql"
+import { THREAD_DIRECTORY_VISIBLE_SQL, THREAD_SUMMARY_METADATA_SQL } from "./summary-sql"
 import { THREAD_LIST_PRIORITY_KEYS } from "../../shared/thread-directory-metadata"
 
 interface ThreadProjectionRow {
@@ -404,6 +405,22 @@ export function readThreadHydrationProjection(
   throwIfCancelled(cancellation)
   if (!row) return { thread: null, stats: stats(startedAt, 0, 0) }
   const thread = rowToThread(row, cancellation, true)
+  if (request.sideParent && thread) {
+    const metadata = thread.metadata
+    if (!isRegularChatThread(thread) || !metadata || metadata.botId || metadata.remoteReadOnly ||
+        metadata.remoteState || isRemoteInboxMetadata(metadata) ||
+        typeof metadata.workspacePath !== "string" || !metadata.workspacePath.trim()) {
+      return { thread: null, stats: stats(startedAt, 0, 0) }
+    }
+    thread.metadata = {
+      workspacePath: metadata.workspacePath,
+      model: typeof metadata.model === "string" ? metadata.model : undefined,
+      subagentsEnabled: metadata.subagentsEnabled !== false,
+      memoryEnabled: typeof metadata.memoryEnabled === "boolean" ? metadata.memoryEnabled : undefined,
+      outputStyle: typeof metadata.outputStyle === "string" ? metadata.outputStyle : undefined,
+      conciseModeEnabled: typeof metadata.conciseModeEnabled === "boolean" ? metadata.conciseModeEnabled : undefined
+    }
+  }
   return { thread, stats: stats(startedAt, thread ? 1 : 0, rowSourceBytes(row)) }
 }
 
@@ -534,12 +551,13 @@ export function readThreadSummaryPage(
       ? `SELECT thread_id, created_at, updated_at, ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
                 status, title
          FROM threads
-         WHERE updated_at < ? OR (updated_at = ? AND thread_id < ?)
+         WHERE ${THREAD_DIRECTORY_VISIBLE_SQL} AND (updated_at < ? OR (updated_at = ? AND thread_id < ?))
          ORDER BY updated_at DESC, thread_id DESC
          LIMIT ?`
       : `SELECT thread_id, created_at, updated_at, ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
                 status, title
          FROM threads
+         WHERE ${THREAD_DIRECTORY_VISIBLE_SQL}
          ORDER BY updated_at DESC, thread_id DESC
          LIMIT ?`
   )
@@ -649,7 +667,7 @@ export function readThreadGroupIds(
               ELSE NULL
             END AS incarnation_token
      FROM threads
-     WHERE (${selectorSql})
+     WHERE ${THREAD_DIRECTORY_VISIBLE_SQL} AND (${selectorSql})
      ORDER BY thread_id
      LIMIT ?`
   )

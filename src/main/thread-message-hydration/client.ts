@@ -1,7 +1,8 @@
 import type { ResourceLimits, Worker } from "node:worker_threads"
-import { getDbPath, getThreadCheckpointDir } from "../storage"
-import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../types"
+import { getDbPath, peekThreadCheckpointDir } from "../storage"
+import type { ThreadMessagesPage } from "../types"
 import type {
+  ThreadMessageHydrationPageOptions,
   ThreadMessageHydrationWorkerResponse,
   ThreadMessageHydrationWorkerStats
 } from "./protocol"
@@ -193,7 +194,7 @@ export class ThreadMessageHydrationClient {
 
   async readPage(
     threadId: string,
-    options: ThreadMessagesPageOptions = {},
+    options: ThreadMessageHydrationPageOptions = {},
     webContentsId?: number
   ): Promise<ThreadMessagesPage> {
     if (this.closing) {
@@ -270,7 +271,7 @@ export class ThreadMessageHydrationClient {
             type: "read-page",
             requestId,
             databasePath: this.databasePath(),
-            checkpointDirectory: options.includeVisibleMessagePresence ? this.checkpointDirectory?.() : undefined,
+            checkpointDirectory: this.checkpointDirectory?.(),
             threadId,
             options: {
               beforeOrdinal: options.beforeOrdinal,
@@ -283,7 +284,11 @@ export class ThreadMessageHydrationClient {
               includeVisibleMessagePresence: options.includeVisibleMessagePresence,
               notAfterCreatedAt: options.notAfterCreatedAt,
               recoveryCheckpointId: options.recoveryCheckpointId,
-              recoveryTranscriptRevision: options.recoveryTranscriptRevision
+              recoveryTranscriptRevision: options.recoveryTranscriptRevision,
+              ...(webContentsId === undefined && {
+                userOrdinalFloor: options.userOrdinalFloor,
+                sideContextTextByteBudget: options.sideContextTextByteBudget
+              })
             },
             cancellationBuffer
           })
@@ -361,7 +366,7 @@ function closeDefaultClientAtProcessExit(): void {
 }
 
 function getDefaultClient(): ThreadMessageHydrationClient {
-  defaultClient ??= new ThreadMessageHydrationClient(createBundledWorker, getDbPath, getThreadCheckpointDir)
+  defaultClient ??= new ThreadMessageHydrationClient(createBundledWorker, getDbPath, peekThreadCheckpointDir)
   if (!defaultShutdownHookRegistered) {
     defaultShutdownHookRegistered = true
     process.once("beforeExit", closeDefaultClientAtProcessExit)
@@ -371,7 +376,7 @@ function getDefaultClient(): ThreadMessageHydrationClient {
 
 export function readThreadMessagesPageInWorker(
   threadId: string,
-  options: ThreadMessagesPageOptions = {},
+  options: ThreadMessageHydrationPageOptions = {},
   webContentsId?: number
 ): Promise<ThreadMessagesPage> {
   return getDefaultClient().readPage(threadId, options, webContentsId)

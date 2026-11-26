@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef } from "react"
 import { BUILTIN_BROWSER_LOG_PREFIX, BROWSER_SESSION_ID } from "../../../../shared/browser-types"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { useAppStore } from "@/lib/store"
-import { BROWSER_PANEL_RESTORE_WIDTH_EVENT } from "@/components/panels/useRightPanelLayout"
 
 const HIDDEN_BROWSER_BOUNDS = { x: 0, y: 0, width: 0, height: 0 }
 const BROWSER_APP_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[App]`
@@ -14,17 +13,19 @@ function formatBrowserViewLifecycleError(error: unknown): string {
 interface UseBrowserViewLifecycleOptions {
   currentThreadId: string | null
   harnessSessionThreadId: string | null
+  visibleBtwThreadId?: string | null
   mainView: string
   rightPanelCollapsed: boolean
   isAgentFocusActive: boolean
   overlayModule?: "preview" | "git" | "browser" | null
   overlayThreadId?: string | null
-  onRequestBrowserPanel: () => void
+  onRequestBrowserPanel: (threadId: string | null) => void
 }
 
 export function useBrowserViewLifecycle({
   currentThreadId,
   harnessSessionThreadId,
+  visibleBtwThreadId = null,
   mainView,
   rightPanelCollapsed,
   isAgentFocusActive,
@@ -43,12 +44,10 @@ export function useBrowserViewLifecycle({
       !isAgentFocusActive &&
       ((mainView === "thread" && Boolean(currentThreadId)) ||
         (mainView === "harness" && Boolean(harnessSessionThreadId)))) ||
-    overlayModule === "browser"
+    (overlayModule === "browser" && Boolean(overlayThreadId))
 
   const hideBrowserSession = useCallback((reason: string) => {
-    console.info(
-      `${BROWSER_APP_LOG_PREFIX} Hiding Browser session ${BROWSER_SESSION_ID} because ${reason}.`
-    )
+    void reason
     void window.api.browser.setBounds(HIDDEN_BROWSER_BOUNDS, false).catch((error) => {
       console.error(
         `${BROWSER_APP_LOG_PREFIX} Browser session ${BROWSER_SESSION_ID} hide failed: ${formatBrowserViewLifecycleError(error)}.`
@@ -77,16 +76,10 @@ export function useBrowserViewLifecycle({
   useEffect(() => {
     if (isBrowserPanelVisible) {
       wasBrowserPanelVisibleRef.current = true
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Browser panel became visible; session=${BROWSER_SESSION_ID}.`
-      )
       return
     }
 
     if (!wasBrowserPanelVisibleRef.current) {
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Browser panel hidden with no visible Browser session to hide.`
-      )
       return
     }
     wasBrowserPanelVisibleRef.current = false
@@ -119,7 +112,7 @@ export function useBrowserViewLifecycle({
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["aria-hidden", "data-state", "role", "data-cmb-modal-dialog"]
+      attributeFilter: ["aria-hidden", "data-state", "role"]
     })
     scheduleModalDialogStateSync()
 
@@ -131,23 +124,18 @@ export function useBrowserViewLifecycle({
 
   useEffect(() => {
     return window.api.browser.onPanelRequest((request) => {
+      if (mainView !== "thread" && mainView !== "harness") return
       const requestedThreadId = request.threadId ?? null
-      // Non-thread surfaces such as the requirement workbench host their task's
-      // Browser panel in ResourcePanelOverlay. Use that overlay's thread id so
-      // an MCP browser request is not discarded merely because mainView is
-      // "design" instead of "thread".
-      const activeThreadId =
-        mainView === "harness" ? harnessSessionThreadId : (currentThreadId ?? overlayThreadId)
-      if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
-      if (requestedThreadId && !activeThreadId) return
-      if (request.panelWidth !== undefined || request.restoreDefaultPanelWidth) {
-        window.dispatchEvent(
-          new CustomEvent(BROWSER_PANEL_RESTORE_WIDTH_EVENT, {
-            detail: { panelWidth: request.panelWidth }
-          })
-        )
-      }
-      onRequestBrowserPanel()
+      const activeThreadId = mainView === "harness" ? harnessSessionThreadId : currentThreadId
+      const isVisibleBtwRequest = mainView === "thread" && requestedThreadId === visibleBtwThreadId
+      if (requestedThreadId && (!activeThreadId || (requestedThreadId !== activeThreadId && !isVisibleBtwRequest))) return
+      onRequestBrowserPanel(requestedThreadId)
     })
-  }, [currentThreadId, harnessSessionThreadId, mainView, onRequestBrowserPanel, overlayThreadId])
+  }, [
+    currentThreadId,
+    harnessSessionThreadId,
+    mainView,
+    onRequestBrowserPanel,
+    visibleBtwThreadId
+  ])
 }

@@ -1,218 +1,140 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { RightPanel } from "@/components/panels/RightPanel"
 import { OverlayDrawer } from "@/components/panels/OverlayDrawer"
-import { BROWSER_PANEL_RESTORE_WIDTH_EVENT } from "@/components/panels/useRightPanelLayout"
 import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
+import { useBtwChat } from "@/lib/btw-chat"
 import { useAppStore } from "@/lib/store"
-import { getBrowserPageConfirmation } from "@/lib/browser-page-confirmation"
 import {
   onOpenResourcePanelOverlay,
-  onCloseResourcePanelOverlay,
-  onDestroyOpenBrowserResourcePanel,
-  type ResourcePanelInlinePreview,
   type ResourcePanelOverlayMode
 } from "@/lib/resource-panel-overlay-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
-import {
-  createOpenResourcePreviewDetail,
-  emitOpenResourcePreview,
-  type OpenResourcePreviewDetail,
-  type OpenResourcePreviewRequest
-} from "@/lib/resource-preview-events"
+import type { OpenResourcePreviewDetail } from "@/lib/resource-preview-events"
 
 interface ResourcePanelOverlayProps {
   isAgentFocusActive: boolean
   renderedMainView: string
   renderedPanelThreadId: string | null
+  btwPaneVisible?: boolean
 }
 
 export function ResourcePanelOverlay({
   isAgentFocusActive,
   renderedMainView,
-  renderedPanelThreadId
+  renderedPanelThreadId,
+  btwPaneVisible = false
 }: ResourcePanelOverlayProps): React.JSX.Element | null {
   const rightPanelCollapsed = useAppStore((state) => state.rightPanelCollapsed)
   const setRightModule = useAppStore((state) => state.setRightModule)
   const activeThreadId = renderedPanelThreadId
+  const btwThreadId = useBtwChat(state => {
+    if (!btwPaneVisible || !activeThreadId) return null
+    const selected = state.selected[activeThreadId]
+    return state.tabs.find(tab => tab.id === selected && tab.parentId === activeThreadId && !tab.closeState)?.id ?? null
+  })
   const standardRightPanelMounted =
     !isAgentFocusActive &&
     !rightPanelCollapsed &&
     (renderedMainView === "thread" || renderedMainView === "harness") &&
     Boolean(renderedPanelThreadId)
+  const usePreviewDrawer = !standardRightPanelMounted || btwPaneVisible
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
-  const [browserUrl, setBrowserUrl] = useState<string | null>(null)
-  const [inlinePreview, setInlinePreview] = useState<ResourcePanelInlinePreview | null>(null)
-  const [filePreview, setFilePreview] = useState<OpenResourcePreviewDetail | null>(null)
-  const [filePreviewThreadId, setFilePreviewThreadId] = useState<string | null>(null)
-  const handlePreviewRequest = useCallback((): void => {
+  const [drawerOwner, setDrawerOwner] = useState<string | null>(null)
+  const latestPreviewIntent = useRef(0)
+  const handlePreviewRequest = useCallback((request: OpenResourcePreviewDetail): void => {
+    if (request.intentId <= latestPreviewIntent.current) return
+    latestPreviewIntent.current = request.intentId
+    setDrawerOwner(request.threadId)
     setMode("preview")
-    setBrowserUrl(null)
-    setInlinePreview(null)
-    setFilePreview(null)
-    setFilePreviewThreadId(null)
     setOpen(true)
   }, [])
-  const { request: previewRequest, clear: clearPreviewRequest } = useResourcePreviewRequest(
+  const parentPreview = useResourcePreviewRequest(
     activeThreadId,
-    !standardRightPanelMounted,
+    usePreviewDrawer,
     handlePreviewRequest
   )
-  const overlayThreadId = filePreviewThreadId ?? renderedPanelThreadId
+  const sidePreview = useResourcePreviewRequest(btwThreadId, btwPaneVisible, handlePreviewRequest)
+  const drawerFromSide = btwPaneVisible && drawerOwner !== null && drawerOwner === btwThreadId
+  const drawerInScope = drawerOwner === null || drawerOwner === activeThreadId || drawerFromSide
+  const drawerVisible = open && drawerInScope
+  const overlayThreadId = drawerFromSide ? btwThreadId : activeThreadId
+  const preview = drawerFromSide ? sidePreview : parentPreview
 
-  const detachBrowser = useCallback(() => {
-    if (mode !== "browser") return
-    void window.api.browser.detach().catch((error) => {
-      console.error("[ResourcePanelOverlay] Failed to detach Browser panel:", error)
-    })
-  }, [mode])
   const close = useCallback(() => {
     setOpen(false)
-    setFilePreview(null)
-    setFilePreviewThreadId(null)
-    clearPreviewRequest()
-    detachBrowser()
-  }, [clearPreviewRequest, detachBrowser])
-  const closeFromUser = useCallback(() => {
-    if (mode === "browser") getBrowserPageConfirmation()?.onCancel()
-    close()
-  }, [close, mode])
-  const clearHandledPreviewRequest = useCallback(() => {
-    // Keep an explicitly supplied overlay preview alive for the lifetime of the
-    // drawer. RightPanel stores the selected path locally after handling the
-    // request, but clearing the parent request here can race with mounting the
-    // panel for a different thread (notably from the requirement design page),
-    // leaving an open drawer with its empty preview state.
-    clearPreviewRequest()
-  }, [clearPreviewRequest])
-
-  useEffect(
-    () =>
-      onCloseResourcePanelOverlay((requestedMode) => {
-        if (!requestedMode || requestedMode === mode) close()
-      }),
-    [close, mode]
-  )
-
-  useEffect(
-    () =>
-      window.api.browser.onPanelCloseRequest(() => {
-        if (open && mode === "browser") close()
-      }),
-    [close, mode, open]
-  )
-
-  useEffect(
-    () =>
-      onDestroyOpenBrowserResourcePanel(() => {
-        if (!open || mode !== "browser") return
-        getBrowserPageConfirmation()?.onCancel()
-        setOpen(false)
-        setBrowserUrl(null)
-        setInlinePreview(null)
-        setFilePreview(null)
-        setFilePreviewThreadId(null)
-        clearPreviewRequest()
-        detachBrowser()
-      }),
-    [clearPreviewRequest, detachBrowser, mode, open]
-  )
+    setDrawerOwner(null)
+    parentPreview.clear()
+    sidePreview.clear()
+  }, [parentPreview.clear, sidePreview.clear])
 
   useEffect(() => {
-    if (!standardRightPanelMounted) return
-    close()
-  }, [close, standardRightPanelMounted])
+    if (!usePreviewDrawer || !drawerInScope) close()
+  }, [close, drawerInScope, usePreviewDrawer])
 
   const selectMode = useCallback(
-    (
-      nextMode: ResourcePanelOverlayMode,
-      options?: {
-        browserUrl?: string
-        inlinePreview?: ResourcePanelInlinePreview
-        filePreview?: OpenResourcePreviewRequest
-      }
-    ) => {
-      if (standardRightPanelMounted) {
-        if (mode === "browser") detachBrowser()
-        setOpen(false)
+    (nextMode: ResourcePanelOverlayMode) => {
+      if (standardRightPanelMounted && !(btwPaneVisible && nextMode === "preview")) {
+        close()
         setRightModule(nextMode)
-        if (options?.filePreview) emitOpenResourcePreview(options.filePreview)
         return
       }
-      if (mode === "browser" && nextMode !== "browser") detachBrowser()
+      setDrawerOwner(null)
       setMode(nextMode)
-      setBrowserUrl(options?.browserUrl ?? null)
-      setInlinePreview(options?.inlinePreview ?? null)
-      const nextFilePreview = options?.filePreview
-        ? createOpenResourcePreviewDetail(options.filePreview)
-        : null
-      setFilePreview(nextFilePreview)
-      setFilePreviewThreadId(nextFilePreview?.threadId ?? null)
       setOpen(true)
     },
-    [detachBrowser, mode, setRightModule, standardRightPanelMounted]
+    [btwPaneVisible, close, setRightModule, standardRightPanelMounted]
   )
 
   useEffect(() => {
-    return onOpenResourcePanelOverlay((detail) =>
-      selectMode(detail.mode, {
-        browserUrl: detail.browserUrl,
-        inlinePreview: detail.inlinePreview,
-        filePreview: detail.filePreview
-      })
-    )
+    return onOpenResourcePanelOverlay(selectMode)
   }, [selectMode])
 
-  const handleBrowserPanelRequest = useCallback(() => {
-    selectMode("browser")
-  }, [selectMode])
-
-  const handlePreviewModeRequest = useCallback(() => {
-    // A file request has already selected preview mode and supplied the
-    // thread/path context. Running selectMode("preview") again would clear
-    // that context and make RightPanel reset the path it just accepted.
-    if (mode === "preview") return
-    selectMode("preview")
-  }, [mode, selectMode])
+  const handleBrowserPanelRequest = useCallback((threadId: string | null) => {
+    if (!btwPaneVisible) {
+      selectMode("browser")
+      return
+    }
+    // Automatic parent requests must leave the foreground side pane in place.
+    if (!threadId || threadId !== btwThreadId) return
+    setDrawerOwner(threadId)
+    setMode("browser")
+    setOpen(true)
+  }, [btwPaneVisible, btwThreadId, selectMode])
 
   useBrowserViewLifecycle({
     currentThreadId: renderedMainView === "thread" ? activeThreadId : null,
     harnessSessionThreadId: renderedMainView === "harness" ? activeThreadId : null,
+    visibleBtwThreadId: btwPaneVisible ? btwThreadId : null,
     mainView: renderedMainView,
     rightPanelCollapsed,
     isAgentFocusActive,
-    overlayModule: open ? mode : null,
+    overlayModule: drawerVisible ? mode : null,
     overlayThreadId,
     onRequestBrowserPanel: handleBrowserPanelRequest
   })
 
-  // The overlay is the panel surface for non-thread views (e.g. the design
-  // creation page). It must stay available even when no task thread is active,
-  // so it only defers to the mounted standard right panel.
-  if (standardRightPanelMounted) return null
+  if (!overlayThreadId || !usePreviewDrawer) return null
 
   return (
     <OverlayDrawer
-      open={open}
+      open={drawerVisible}
       title={mode === "git" ? "Git 面板" : mode === "browser" ? "内置浏览器" : "文件预览"}
-      onClose={closeFromUser}
-      defaultWidth={mode === "browser" ? "55%" : 720}
-      widthRestoreEvent={mode === "browser" ? BROWSER_PANEL_RESTORE_WIDTH_EVENT : undefined}
+      onClose={close}
     >
-      <RightPanel
-        threadId={overlayThreadId}
-        moduleMode={mode}
-        showSystemConstraints={renderedMainView === "harness"}
-        browserInitialUrl={mode === "browser" ? browserUrl : null}
-        inlinePreview={mode === "preview" ? inlinePreview : null}
-        resourcePreviewRequest={
-          mode === "preview" || mode === "browser" ? (filePreview ?? previewRequest) : null
-        }
-        onResourcePreviewRequestHandled={clearHandledPreviewRequest}
-        listenForResourcePreview={false}
-        onRequestPreviewMode={handlePreviewModeRequest}
-        onRequestWorkMode={closeFromUser}
-      />
+      {(mode !== "browser" || drawerVisible) && (
+        <RightPanel
+          threadId={overlayThreadId}
+          moduleMode={mode}
+          showSystemConstraints={renderedMainView === "harness"}
+          resourcePreviewRequest={mode === "preview" || mode === "browser" ? preview.request : null}
+          onResourcePreviewRequestHandled={preview.clear}
+          listenForResourcePreview={false}
+          observeCompletedResources={!(btwPaneVisible && standardRightPanelMounted && overlayThreadId === activeThreadId)}
+          onRequestPreviewMode={() => setMode("preview")}
+          onRequestWorkMode={close}
+        />
+      )}
     </OverlayDrawer>
   )
 }

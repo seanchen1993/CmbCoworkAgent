@@ -20,6 +20,7 @@
 
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
 import { randomUUID } from "crypto"
+import { deserialize, serialize } from "node:v8"
 import {
   closeSync,
   existsSync,
@@ -726,6 +727,43 @@ function openAdoptionDatabase(
          ON event_outbox(status, next_attempt_at, created_at)`
     )
 
+    // Only unresolved Git checks use this table. Store the original bounded
+    // baseline and immutable envelope(s), without exporting a second DB image.
+    db.run(`CREATE TABLE IF NOT EXISTS pending_gen_repos (
+      id TEXT PRIMARY KEY, file_path TEXT NOT NULL, created_at INTEGER NOT NULL,
+      next_check_at INTEGER NOT NULL, generation BLOB NOT NULL, generated_lines_blob BLOB
+    )`)
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_pending_gen_repo_due ON pending_gen_repos(next_check_at)"
+    )
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_pending_gen_repo_file ON pending_gen_repos(file_path, created_at)"
+    )
+
+    // Keep enforcement on every write independent of the size of a Git outage
+    // backlog. SQLite also rolls back the byte counter if promotion fails.
+    db.run(`CREATE TABLE IF NOT EXISTS pending_gen_source_budget (
+              id INTEGER PRIMARY KEY CHECK (id = 1), bytes INTEGER NOT NULL);
+            INSERT INTO pending_gen_source_budget
+              SELECT 1, (SELECT COALESCE(SUM(length(generated_lines_blob)),0) FROM pending_gen_repos)
+              WHERE NOT EXISTS (SELECT 1 FROM pending_gen_source_budget);
+            CREATE TRIGGER IF NOT EXISTS pending_source_insert AFTER INSERT ON pending_gen_repos
+              WHEN NEW.generated_lines_blob IS NOT NULL BEGIN
+                UPDATE pending_gen_source_budget SET bytes = bytes + length(NEW.generated_lines_blob);
+              END;
+            CREATE TRIGGER IF NOT EXISTS pending_source_delete AFTER DELETE ON pending_gen_repos
+              WHEN OLD.generated_lines_blob IS NOT NULL BEGIN
+                UPDATE pending_gen_source_budget SET bytes = bytes - length(OLD.generated_lines_blob);
+              END;
+            CREATE TRIGGER IF NOT EXISTS pending_source_update AFTER UPDATE OF generated_lines_blob ON pending_gen_repos
+              BEGIN
+                UPDATE pending_gen_source_budget SET bytes = bytes - COALESCE(length(OLD.generated_lines_blob),0)
+                                                           + COALESCE(length(NEW.generated_lines_blob),0);
+              END;`)
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_pending_gen_source_age ON pending_gen_repos(created_at,id) WHERE generated_lines_blob IS NOT NULL"
+    )
+
     // Durable commit measurement queue. repo_path + commit_sha is enough to
     // reconstruct the committed blobs after restart, so large snapshots never
     // need to be copied into this sqlite file.
@@ -1137,7 +1175,8 @@ export function listPendingGenPaths(
 ): { event_id: string; file_path: string }[] {
   if (!db) return []
   const stmt = db.prepare(
-    `SELECT event_id, file_path FROM gen_events WHERE measured = 0 AND created_at >= ?`
+    `SELECT event_id, file_path FROM gen_events WHERE measured = 0 AND created_at >= ?1
+      UNION ALL SELECT id AS event_id, file_path FROM pending_gen_repos WHERE created_at >= ?1`
   )
   stmt.bind([minCreatedAt])
   try {
@@ -1160,6 +1199,7 @@ export function updateGenFilePath(eventId: string, newFilePath: string): void {
   if (!db) return
   try {
     db.run(`UPDATE gen_events SET file_path = ? WHERE event_id = ?`, [newFilePath, eventId])
+    db.run("UPDATE pending_gen_repos SET file_path=? WHERE id=?", [newFilePath, eventId])
     scheduleSave()
   } catch (e) {
     console.warn("[AdoptionIndex] updateGenFilePath failed:", e)
@@ -1240,13 +1280,140 @@ function insertOutboxEventUnsafe(event: EventOutboxInput): boolean {
   }
 }
 
+interface DeferredGeneration {
+  baseline?: GenIndexRow
+  events: EventOutboxInput[]
+}
+
+export function deferRepoGeneration(
+  file: string,
+  events: EventOutboxInput[],
+  baseline?: GenIndexRow
+): boolean {
+  if (!db) return false
+  db.run("INSERT INTO pending_gen_repos VALUES (?, ?, ?, ?, ?, ?)", [
+    baseline?.event_id ?? events[0].eventId,
+    file,
+    events[0].createdAt,
+    Date.now() + 1000,
+    serialize({ baseline: baseline && { ...baseline, generated_lines_blob: null }, events }),
+    baseline?.generated_lines_blob ?? null
+  ])
+  scheduleSave()
+  return true
+}
+
+export function listDueGenerationRepoChecks(
+  now: number,
+  limit: number
+): { id: string; file: string }[] {
+  if (!db) return []
+  return (
+    db.exec(
+      "SELECT id,file_path FROM pending_gen_repos WHERE next_check_at <= ? ORDER BY next_check_at LIMIT ?",
+      [now, limit]
+    )[0]?.values ?? []
+  ).map(([id, file]) => ({ id: String(id), file: String(file) }))
+}
+
+export const GENERATION_REPO_BATCH_SIZE = 8
+
+export function settleGenerationRepoCheck(
+  file: string,
+  state: "inside" | "outside" | "unknown",
+  through: number,
+  id?: string
+): number {
+  if (!db) return 0
+  // The periodic worker touches a bounded number of individual envelopes.
+  // A known commit can confirm all eligible generations of its exact file.
+  const where = id ? "file_path=? AND created_at<=? AND id=?" : "file_path=? AND created_at<=?"
+  const args = id ? [file, through, id] : [file, through]
+  // Disappearance after the write cannot disprove membership at generation time.
+  // Keep the original evidence available to a later commit during normal retention.
+  if (state !== "inside") {
+    db.run(`UPDATE pending_gen_repos SET next_check_at=? WHERE ${where}`, [
+      Date.now() + 60_000,
+      ...args
+    ])
+    // Only the retry clock changed. A restart may retry earlier. Avoid a full
+    // sql.js export on every backoff during a prolonged Git outage.
+    return 0
+  }
+  db.run("BEGIN")
+  try {
+    const restored: string[] = []
+    const stmt = db.prepare(
+      `SELECT id, generation, generated_lines_blob FROM pending_gen_repos WHERE ${where} ORDER BY created_at, rowid LIMIT ${GENERATION_REPO_BATCH_SIZE}`
+    )
+    try {
+      stmt.bind(args)
+      while (stmt.step()) {
+        const [rowId, payload, source] = stmt.get()
+        const { baseline, events } = deserialize(payload as Uint8Array) as DeferredGeneration
+        if (
+          baseline &&
+          !insertGenEvent({
+            ...baseline,
+            file_path: file,
+            generated_lines_blob: source as Uint8Array | null
+          })
+        )
+          throw new Error("Could not restore generation baseline")
+        restored.push(String(rowId))
+        // The envelope retains the write time. Its delivery retry window starts at confirmation.
+        for (const event of events) insertOutboxEventUnsafe({ ...event, createdAt: Date.now() })
+      }
+    } finally {
+      stmt.free()
+    }
+    if (restored.length) {
+      const marks = restored.map(() => "?").join(",")
+      db.run(`DELETE FROM pending_gen_repos WHERE id IN (${marks})`, restored)
+    }
+    db.run("COMMIT")
+    if (restored.length) scheduleSave()
+    return restored.length
+  } catch (error) {
+    db.run("ROLLBACK")
+    throw error
+  }
+}
+
+// Normal commits have no uncertain generations; defer path normalization and
+// allocation until the indexed queue actually contains something to match.
+export function pendingGenerationRepoPaths(
+  paths: () => Iterable<string>,
+  since: number,
+  through: number
+): string[] {
+  if (!db || !db.exec("SELECT 1 FROM pending_gen_repos LIMIT 1").length) return []
+  const files = Array.from(paths())
+  const found: string[] = []
+  for (let start = 0; start < files.length; start += 200) {
+    const chunk = files.slice(start, start + 200)
+    const marks = chunk.map(() => "?").join(",")
+    const rows = db.exec(
+      `SELECT DISTINCT file_path FROM pending_gen_repos WHERE file_path IN (${marks}) AND created_at BETWEEN ? AND ?`,
+      [...chunk, since, through]
+    )
+    for (const [file] of rows[0]?.values ?? []) found.push(String(file))
+  }
+  return found
+}
+
 /**
  * Atomically persist a measurable generation baseline and its immutable
  * `code_gen` envelope. Disk export remains debounced: the outbox worker flushes
  * the shared sql.js image before it sends any queued event, so rapid edits are
  * coalesced without ever publishing an unpersisted baseline.
  */
-export function insertGenEventWithOutbox(row: GenIndexRow, event: EventOutboxInput): boolean {
+export function insertGenEventWithOutbox(
+  row: GenIndexRow,
+  event: EventOutboxInput,
+  pendingRepoPath?: string
+): boolean {
+  if (pendingRepoPath) return deferRepoGeneration(pendingRepoPath, [event], row)
   if (!db) return false
   try {
     db.run("BEGIN TRANSACTION")
@@ -1682,6 +1849,7 @@ export function cleanupAdoptionDeliveryRecords(cutoff: number): void {
 export function deleteOlderThan(cutoff: number): number {
   if (!db) return 0
   try {
+    db.run("DELETE FROM pending_gen_repos WHERE created_at < ?", [cutoff])
     db.run(`DELETE FROM gen_events WHERE created_at < ?`, [cutoff])
     scheduleSave()
     // sql.js doesn't expose rowsAffected on run(); return 0 — callers use this for logging only.
@@ -1723,50 +1891,46 @@ export function deleteAdoptLineDetailsOlderThan(cutoff: number): void {
  */
 export function trimGeneratedSourceTextToByteCap(maxBytes: number): void {
   if (!db || !Number.isFinite(maxBytes) || maxBytes < 0) return
+  // Keep a single source-text budget while Git is unavailable. Lengths and
+  // timestamps suffice; never read the source BLOBs to enforce this limit.
   const stats = readBlobStats(
-    `SELECT COUNT(*) AS count,
-            COALESCE(SUM(length(generated_lines_blob)), 0) AS bytes
-       FROM gen_events
-      WHERE generated_lines_blob IS NOT NULL`
+    `SELECT (SELECT COALESCE(SUM(length(generated_lines_blob)), 0) FROM gen_events)
+          + (SELECT bytes FROM pending_gen_source_budget WHERE id = 1) AS bytes`
   )
-  if (!stats) return
-  if (stats.bytes <= maxBytes) return
+  if (!stats || stats.bytes <= maxBytes) return
+  const sources = `SELECT event_id AS id, created_at, length(generated_lines_blob) AS bytes, 0 AS deferred
+                     FROM gen_events WHERE generated_lines_blob IS NOT NULL
+                   UNION ALL
+                   SELECT id, created_at, length(generated_lines_blob) AS bytes, 1 AS deferred
+                     FROM pending_gen_repos WHERE generated_lines_blob IS NOT NULL`
   let stmt: ReturnType<SqlJsDatabase["prepare"]> | null = null
   try {
-    stmt = db.prepare(
-      `SELECT length(generated_lines_blob) AS bytes
-         FROM gen_events
-        WHERE generated_lines_blob IS NOT NULL
-        ORDER BY created_at ASC, event_id ASC`
-    )
-    const sizes: number[] = []
-    let totalBytes = 0
-    while (stmt.step()) {
-      const row = stmt.getAsObject() as unknown as { bytes: number }
-      const bytes = Number(row.bytes) || 0
-      sizes.push(bytes)
-      totalBytes += bytes
+    stmt = db.prepare(`SELECT bytes, deferred FROM (${sources}) ORDER BY created_at, id`)
+    let total = stats.bytes
+    let confirmedCount = 0
+    let deferredCount = 0
+    while (total > maxBytes && stmt.step()) {
+      const [bytes, deferred] = stmt.get()
+      total -= Number(bytes)
+      if (deferred) deferredCount++
+      else confirmedCount++
     }
-    if (totalBytes <= maxBytes) return
-
-    let trimCount = 0
-    while (trimCount < sizes.length && totalBytes > maxBytes) {
-      totalBytes -= sizes[trimCount]
-      trimCount++
-    }
-    if (trimCount === 0) return
-    db.run(
-      `UPDATE gen_events
-          SET generated_lines_blob = NULL
-        WHERE event_id IN (
-          SELECT event_id
-            FROM gen_events
-           WHERE generated_lines_blob IS NOT NULL
-           ORDER BY created_at ASC, event_id ASC
-           LIMIT ?
-        )`,
-      [trimCount]
-    )
+    stmt.free()
+    stmt = null
+    if (confirmedCount)
+      db.run(
+        `UPDATE gen_events SET generated_lines_blob = NULL WHERE event_id IN
+          (SELECT event_id FROM gen_events WHERE generated_lines_blob IS NOT NULL
+            ORDER BY created_at, event_id LIMIT ?)`,
+        [confirmedCount]
+      )
+    if (deferredCount)
+      db.run(
+        `UPDATE pending_gen_repos SET generated_lines_blob = NULL WHERE id IN
+          (SELECT id FROM pending_gen_repos WHERE generated_lines_blob IS NOT NULL
+            ORDER BY created_at, id LIMIT ?)`,
+        [deferredCount]
+      )
     scheduleSave()
   } catch (e) {
     console.warn("[AdoptionIndex] trimGeneratedSourceTextToByteCap failed:", e)

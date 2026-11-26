@@ -252,6 +252,13 @@ export class TimedOutPredecessorFence {
   hasPending(threadId: string): boolean {
     return (this.pending.get(threadId)?.size ?? 0) > 0
   }
+
+  settlement(threadId: string, active?: Promise<void>): Promise<void> | undefined {
+    const pending = this.pending.get(threadId)
+    if (!pending?.size) return active
+    const settlements = active && !pending.has(active) ? [...pending, active] : pending
+    return Promise.all(settlements).then(() => undefined)
+  }
 }
 
 export function canUseBoundedCheckpointRecovery(

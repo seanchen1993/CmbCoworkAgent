@@ -1,13 +1,18 @@
 import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
 import { createBotDispatchFeedbackMiddleware } from "./bot-dispatch-feedback"
 import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
+import { getSideThreadContext, getSideThreadLifetimeSignal } from "../ipc/btw-chat"
+import { createSideConversationMiddleware } from "./side-conversation-context"
 import { BOT_COMMUNICATION_PROMPT } from "./bot-communication-prompt"
 import { createForegroundWorkBudgetMiddleware, type ForegroundWorkBudget } from "./foreground-work-budget"
 import {
   withCoordinatorNotificationDelivery,
   type CoordinatorNotificationDelivery
 } from "./coordinator-notification-delivery"
-import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import {
+  INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
 import { pinForegroundCheckpointOpen, preemptBackgroundThreadMutation } from "../ipc/thread-run-mutation-lock"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import { createOpeningReplyReminderMiddleware } from "./opening-reply-reminder"
@@ -59,8 +64,8 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { getModelClientOptions } from "../models/connection"
-import type { ModelTransport } from "../../shared/model-catalog"
+import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../models/connection"
+import type { IdleModelEnvironment, ModelTransport } from "../../shared/model-catalog"
 import {
   createCmbSummarizationMiddleware,
   isGatewayContextOverflow
@@ -210,6 +215,7 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import {
   flushStrict,
+  getLegacyImportedToolOccurrenceSources,
   getThreadCore,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
@@ -335,6 +341,7 @@ export function createPhysicalScopedGateRecoveryMessage(
       ? parent.id
       : parent.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
   if (typeof durableParentId !== "string" || !durableParentId) return new HumanMessage(prompt)
+  const initialNotificationId = parent.additional_kwargs[INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]
 
   return new HumanMessage({
     content: prompt,
@@ -342,6 +349,9 @@ export function createPhysicalScopedGateRecoveryMessage(
     additional_kwargs: {
       ...(goalBoundary && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
       ...(notificationBoundary && { [NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: true }),
+      ...(notificationBoundary && typeof initialNotificationId === "string" && {
+        [INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: initialNotificationId
+      }),
       [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
     }
   })
@@ -401,7 +411,8 @@ import {
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import {
   autoSelectPlaywrightInAppBrowserTab,
-  invokeMcpToolWithPlaywrightInAppBrowserSupport
+  invokeMcpToolWithPlaywrightInAppBrowserSupport,
+  shouldPreparePlaywrightInAppBrowser
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   DeepSeekChatOpenAICompletions,
@@ -420,7 +431,7 @@ import {
   getActionStationarityHaltError
 } from "./action-stationarity"
 import { createLspTool } from "./tools/lsp-tool"
-import { createInAppBrowserAgentTools } from "./tools/in-app-browser-tools"
+import { createInAppBrowserTools } from "./tools/in-app-browser-tools"
 import { detectJavaProject } from "../lsp"
 import {
   buildAgentsPromptLoadStatusItems,
@@ -1313,7 +1324,7 @@ Use concise, high-information bullets. Preserve exact user corrections, file pat
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
   tools: McpCapabilityTool[],
-  context: { workspacePath: string; threadId?: string }
+  context: { workspacePath: string; threadId?: string; inAppBrowserSignal?: AbortSignal }
 ): DynamicStructuredTool[] {
   return tools.map((tool) =>
     createEagerMcpTool(
@@ -1326,6 +1337,7 @@ function createEagerMcpTools(
             tool,
             workspacePath: context.workspacePath,
             threadId: context.threadId,
+            signal: context.inAppBrowserSignal,
             args,
             invoke: () => capabilityService.invoke(tool.capabilityId, args)
           }),
@@ -1388,6 +1400,7 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
+    inAppBrowserSignal?: AbortSignal
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1681,7 +1694,8 @@ export function createScopedMcpCapabilityService(
         tabsTool,
         capabilityService: service,
         workspacePath: baseContext.workspacePath,
-        threadId: baseContext.threadId
+        threadId: baseContext.threadId,
+        signal: baseContext.inAppBrowserSignal
       })
 
       if (pluginId) hookScope.activatePlugin(pluginId)
@@ -1689,21 +1703,28 @@ export function createScopedMcpCapabilityService(
         tool,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
+        signal: baseContext.inAppBrowserSignal,
         args: effectiveArgs,
         prepareBeforeInvoke: false,
-        invoke: async () => {
+        invoke: async (signal) => {
+          const invokeTool = async (target: McpCapabilityTool) => {
+            const dispatchSignal = signal ?? (shouldPreparePlaywrightInAppBrowser(target)
+              ? baseContext.inAppBrowserSignal
+              : undefined)
+            if (!dispatchSignal) return service.invoke(target.capabilityId, effectiveArgs)
+            dispatchSignal.throwIfAborted()
+            const invocation = await service.invoke(target.capabilityId, effectiveArgs, dispatchSignal)
+            dispatchSignal.throwIfAborted()
+            return invocation
+          }
           try {
-            return await service.invoke(tool.capabilityId, effectiveArgs)
+            return await invokeTool(tool)
           } catch (error) {
             const fallbackTool = shouldFallbackMcpError(error)
               ? findFallbackTool(tool, snapshot.tools)
               : null
             if (!fallbackTool) throw error
-            return appendFallbackNotice(
-              await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-              tool,
-              fallbackTool
-            )
+            return appendFallbackNotice(await invokeTool(fallbackTool), tool, fallbackTool)
           }
         }
       })
@@ -2417,6 +2438,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     tools = [],
     systemPrompt,
     middleware: customMiddleware = [],
+    sideConversationMiddleware,
     subagents = [],
     responseFormat,
     contextSchema,
@@ -2429,7 +2451,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     skills,
     allowedSkillRootDirs,
     filesystemSystemPrompt,
-    mainFilesystemToolDescriptions,
     summarizationTrigger,
     summarizationKeep,
     toolTokenLimitBeforeEvict,
@@ -2655,8 +2676,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
   const createFsMiddleware = (
     fsSystemPrompt = filesystemSystemPrompt,
-    fsToolStrategy = toolStrategy,
-    toolDescriptions?: Record<string, string>
+    fsToolStrategy = toolStrategy
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
@@ -2674,11 +2694,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
-      ...((fsToolStrategy !== "standard" || toolDescriptions) && {
-        customToolDescriptions: {
-          ...(fsToolStrategy !== "standard" ? SHELL_FIRST_TOOL_DESCRIPTIONS : {}),
-          ...toolDescriptions
-        }
+      ...(fsToolStrategy !== "standard" && {
+        customToolDescriptions: SHELL_FIRST_TOOL_DESCRIPTIONS
       }),
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
@@ -2688,7 +2705,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       middleware: mw,
       filesystemBackend,
       toolTokenLimitBeforeEvict,
-      description: toolDescriptions?.read_file,
       ...(soloTaskTraceManager
         ? {
             resolveTraceContextForAgent: (agentId: string) =>
@@ -3283,9 +3299,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled
-        ? [createFsMiddleware("\n", mainToolStrategy, mainFilesystemToolDescriptions)]
-        : []),
+      ...(mainFilesystemEnabled ? [createFsMiddleware("\n", mainToolStrategy)] : []),
       ...postFsToolDocStripMiddleware,
       // The filesystem middleware appends execute documentation dynamically;
       // run the transport denylist after it so the docs and tool disappear
@@ -3378,7 +3392,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...systemPromptPreviewCaptureMiddleware,
       ...(mainAllowedToolNames !== undefined
         ? [createRuntimeToolAllowlistMiddleware(mainAllowedToolNames)]
-        : [])
+        : []),
+      ...(sideConversationMiddleware ? [sideConversationMiddleware] : [])
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
@@ -3945,6 +3960,8 @@ async function getCheckpointerInternal(
         : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
       maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
       maxNonRootCheckpoints: 1,
+      readLegacyToolReplaySources: isSubThreadCheckpoint ? undefined : (id) =>
+        new Set(getLegacyImportedToolOccurrenceSources(id, true).keys()),
       recoverMissingCheckpointMessages: isSubThreadCheckpoint
         ? undefined
         : recoverMainCheckpointMessages
@@ -4308,7 +4325,8 @@ function normalizeLailasInputOverflow(response: Response, rawBody: string): Resp
 export function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
-  capture?: { threadId?: string }
+  capture?: { threadId?: string },
+  beforeAttempt?: () => Response | undefined
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -4336,6 +4354,13 @@ export function createRetryingFetch(
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+      // Backoff can cross the closing boundary even on an already created model.
+      const rejection = beforeAttempt?.()
+      if (rejection) {
+        const response = await prepareErrorResponse(rejection)
+        if (attempt > 1) hooks?.onRetrySuccess?.()
+        return response
+      }
 
       // Per-attempt controller: fresh each iteration so a timeout on attempt N
       // does not leak into attempt N+1. Parent (user cancel) is forwarded in
@@ -4673,6 +4698,7 @@ export function getModelInstance(
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
     transport?: ModelTransport
+    idleModelEnvironment?: IdleModelEnvironment
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -4705,9 +4731,14 @@ export function getModelInstance(
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
-  const modelFetch = createRetryingFetch(retryHooks, maxRetryAttempts, {
-    threadId: captureThreadId
-  })
+  const modelFetch = createRetryingFetch(
+    retryHooks,
+    maxRetryAttempts,
+    { threadId: captureThreadId },
+    customConfig.transport === "idle-gateway"
+      ? () => getIdleModelServiceHoursRejection(customConfig)
+      : undefined
+  )
 
   const baseFields = {
     model: resolvedModel,
@@ -4866,12 +4897,6 @@ export interface CreateAgentRuntimeOptions {
   worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
-  /** Domain-owned base instructions, replacing generic coding guidance only. */
-  baseSystemPrompt?: string
-  /** Domain-specific guidance for main-agent file tools; never inherited by Task subagents. */
-  mainFilesystemToolDescriptions?: Record<string, string>
-  /** Domain-specific middleware for the main agent only. */
-  mainMiddleware?: Array<ReturnType<typeof createMiddleware>>
   /** Trusted host main-Bot role; never inherited by independent/project executors. */
   botCommunication?: boolean
   /** Host-only result event gate; preserves the main Bot's model-visible tool definitions. */
@@ -5043,8 +5068,6 @@ export interface CreateAgentRuntimeOptions {
   skillUseTracker?: SkillUseTracker
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
-  /** Optional domain check on effective write_file/edit_file content before any write. */
-  validateFileWrite?: (filePath: string, content: string) => string | undefined
   /** Extra tools appended to the runtime tool list (e.g. a workflow subagent's structured_output). */
   additionalTools?: DynamicStructuredTool[]
   /** Main-chat-only foreground admission; never inherited by child runtimes. */
@@ -5456,7 +5479,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     projectCode,
     projectDir,
     onFileMutation,
-    validateFileWrite: options.validateFileWrite,
     // Shell file telemetry follows Bash First exactly where the prompts apply
     // it (same snapshot, readonly-sandbox downgrade and role limits); standard
     // keeps the old file-tool-only path.
@@ -5698,7 +5720,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // The prompt must name the directory the agent actually works in, or an isolated
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
-  let systemPrompt = options.baseSystemPrompt ?? getSystemPrompt(fileRoot, windowsSandbox, {
+  let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
     botCommunication: options.botCommunication,
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     filesystemAccess: options.filesystemAccess,
@@ -5903,6 +5925,10 @@ The workspace root is: ${fileRoot}`
     console.log("[Runtime] Memory disabled for this session")
   }
 
+  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
+  const sideConversationSignal = sideConversationLifetime && options.abortSignal
+    ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
+    : sideConversationLifetime
   const capabilityService = createScopedMcpCapabilityService(
     options.capabilityService ??
       (disableMcpTools
@@ -5923,6 +5949,7 @@ The workspace root is: ${fileRoot}`
     {
       workspacePath,
       threadId,
+      inAppBrowserSignal: sideConversationSignal,
       agentId,
       pluginOutputDir,
       systemId,
@@ -5983,7 +6010,8 @@ The workspace root is: ${fileRoot}`
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
       workspacePath,
-      threadId: options.threadId
+      threadId: options.threadId,
+      inAppBrowserSignal: sideConversationSignal
     })
     console.log(
       "[Runtime] Constrained coordinator worker: keeping",
@@ -6000,7 +6028,8 @@ The workspace root is: ${fileRoot}`
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
       workspacePath,
-      threadId: options.threadId
+      threadId: options.threadId,
+      inAppBrowserSignal: sideConversationSignal
     })
     toolSearchTools = await createToolSearchTools(
       capabilityService,
@@ -6052,7 +6081,7 @@ The workspace root is: ${fileRoot}`
     )
   }
   if (!options.noSkillEvolutionTool) {
-    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
+    extraTools.push(createSkillEvolutionTool({ threadId, abortSignal: sideConversationSignal }))
   }
 
   // Conditionally inject Java LSP tool
@@ -6069,10 +6098,10 @@ The workspace root is: ${fileRoot}`
 
   if (!disableMcpTools && !isConstrainedCoordinatorWorker) {
     extraTools.push(
-      ...(await createInAppBrowserAgentTools(allMcpTools, {
+      ...(await createInAppBrowserTools(allMcpTools, {
         workspacePath,
         threadId: options.threadId,
-        abortSignal: options.abortSignal
+        abortSignal: sideConversationSignal ?? options.abortSignal
       }))
     )
   }
@@ -7113,6 +7142,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             selectedSkill: input.selectedSkill,
             runner: coordinatorWorkerRunner,
             notificationOwner: backgroundNotificationOwner,
+            admissionSignal: sideConversationLifetime,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           }),
@@ -7140,6 +7170,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             // started it changes hands: the summary is owed to whoever is
             // driving now, not to whoever launched the first turn.
             notificationOwner: backgroundNotificationOwner,
+            admissionSignal: sideConversationLifetime,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           })
@@ -7348,11 +7379,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     ? resolvedProjectContextPrompt
     : combinedAgentsPrompt
 
+  const inherited = getSideThreadContext(threadId)
   const agent = createDeepAgent({
-    middleware: [
-      ...(traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : []),
-      ...(options.mainMiddleware ?? [])
-    ],
+    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
+    sideConversationMiddleware: inherited?.length
+      ? createSideConversationMiddleware(inherited, mainModelInputBudget)
+      : undefined,
     subagentLifecycleMiddleware: options.subagentLifecycle
       ? createSubagentLifecycleMiddleware(options.subagentLifecycle)
       : undefined,
@@ -7378,7 +7410,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
-    mainFilesystemToolDescriptions: options.mainFilesystemToolDescriptions,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled:

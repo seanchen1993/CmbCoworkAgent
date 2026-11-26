@@ -8,6 +8,7 @@ import { BUILTIN_BROWSER_PROMPT_PREFIX, BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PRE
 
 import {
   buildSlashPopoverMode,
+  findInlineSlashQuery,
   isBareGoalSlashCommandInput,
   isGoalSlashCommandInput,
   isGoalSlashControlCommandInput,
@@ -183,6 +184,49 @@ function testUnknownSlashKeepsOpenWithNoMatches(): void {
 
   assertEqual(mode.commands.length, 0, "unknown slash should not match commands")
   assertEqual(mode.skills.length, 0, "unknown slash should not match skills")
+}
+
+function inlineSlashMode(input: string, caret = input.length) {
+  return buildSlashPopoverMode({
+    input: findInlineSlashQuery(input, caret)?.query ?? "",
+    skills,
+    skillSelected: false,
+    generalCommands: [BUILTIN_BROWSER_COMMAND],
+    showEmptyResults: false
+  })
+}
+
+function testInlineSlashKeepsPathsAndUnknownWordsAsText(): void {
+  assertEqual(inlineSlashMode("请检查 /tmp").kind, "closed", "an inline path should stay in text mode")
+  assertEqual(inlineSlashMode("/does-not-exist").kind, "closed", "an unknown slash word should stay in text mode")
+  assertEqual(
+    inlineSlashMode("请检查 /tmp", "请检查 /".length).kind,
+    "closed",
+    "moving the caret into a path should not open the picker"
+  )
+  assertEqual(
+    inlineSlashMode("请检查 /browser/data", "请检查 /browser".length).kind,
+    "closed",
+    "a matching path segment should not open the picker"
+  )
+}
+
+function testInlineSlashShowsMatchingCommandsAndSkills(): void {
+  const root = inlineSlashMode("请检查 /")
+  const browser = inlineSlashMode("请检查 /bro 之后继续", "请检查 /bro".length)
+  const skill = inlineSlashMode("请检查 /document")
+
+  assertEqual(root.kind, "slash", "a bare inline slash should open the picker")
+  assertEqual(
+    browser.kind === "slash" ? browser.commands[0]?.id : undefined,
+    BUILTIN_BROWSER_COMMAND_ID,
+    "a matching command should open the picker"
+  )
+  assertEqual(
+    skill.kind === "slash" ? skill.skills[0]?.name : undefined,
+    "Documents",
+    "a matching skill should open the picker"
+  )
 }
 
 function testSelectedSkillKeepsPopoverClosed(): void {
@@ -600,6 +644,8 @@ function main(): void {
     testSkillFilteringIsCaseInsensitive,
     testWhitespaceClosesPopoverForCommandSubmission,
     testUnknownSlashKeepsOpenWithNoMatches,
+    testInlineSlashKeepsPathsAndUnknownWordsAsText,
+    testInlineSlashShowsMatchingCommandsAndSkills,
     testSelectedSkillKeepsPopoverClosed,
     testSelectedBrowserKeepsPopoverClosed,
     testBuiltinBrowserPromptFormatting,

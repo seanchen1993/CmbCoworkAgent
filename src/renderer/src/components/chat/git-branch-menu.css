@@ -1,0 +1,22 @@
+@layer components {
+  .git-branch-menu {
+    position: fixed;
+    box-sizing: border-box;
+    contain: content;
+    will-change: transform;
+    inset: auto;
+    position-area: top span-all;
+    position-try-fallbacks: flip-block, --git-branch-fit, --git-branch-fit flip-block;
+    align-self: end;
+    justify-self: start;
+    left: clamp(0px, anchor(left), calc(100% - min(18rem, 100%)));
+    width: min(18rem, 100%);
+    margin: 0 0 6px;
+    padding: 0;
+    overflow-y: auto;
+  }
+
+  @position-try --git-branch-fit {
+    max-height: calc(100% - 6px);
+  }
+}

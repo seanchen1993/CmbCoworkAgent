@@ -243,6 +243,15 @@ function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined
 }
 
+function workerCleanupPromises(record: CoordinatorWorkerRecord): Promise<unknown>[] {
+  return [
+    record.currentRun,
+    record.terminalPersistPromise,
+    record.statePersistPromise,
+    record.notificationEnqueuePromise
+  ].filter(isDefined)
+}
+
 function waitOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted || ms <= 0) return Promise.resolve()
   return new Promise((resolve) => {
@@ -298,6 +307,7 @@ interface StartWorkerOptions {
   /** Defaults to "desktop"; see CoordinatorWorkerSnapshot.notification_owner. */
   notificationOwner?: BackgroundNotificationOwner
   parentSignal?: AbortSignal
+  admissionSignal?: AbortSignal
   onUpdate?: CoordinatorWorkerUpdateCallback
   onUpdateKey?: string
 }
@@ -313,6 +323,7 @@ interface ContinueWorkerOptions {
   runner: CoordinatorWorkerRunner
   notificationOwner?: BackgroundNotificationOwner
   parentSignal?: AbortSignal
+  admissionSignal?: AbortSignal
   onUpdate?: CoordinatorWorkerUpdateCallback
   onUpdateKey?: string
 }
@@ -1413,6 +1424,7 @@ export class CoordinatorWorkerManager {
   }
 
   startWorker(options: StartWorkerOptions): CoordinatorWorkerSnapshot {
+    options.admissionSignal?.throwIfAborted()
     const parentThreadId = normalizeThreadId(options.parentThreadId)
     const workspacePath = normalizeNonEmpty(
       options.workspacePath,
@@ -1492,7 +1504,9 @@ export class CoordinatorWorkerManager {
   }
 
   async continueWorker(options: ContinueWorkerOptions): Promise<CoordinatorWorkerSnapshot> {
+    options.admissionSignal?.throwIfAborted()
     const record = await this.getWorkerForOperation(options.parentThreadId, options.workerId)
+    options.admissionSignal?.throwIfAborted()
     const prompt = normalizeNonEmpty(options.prompt, "Coordinator worker continuation prompt")
     if (!record) {
       throw new Error(`Unknown coordinator worker: ${options.workerId}`)
@@ -1596,6 +1610,11 @@ export class CoordinatorWorkerManager {
             record.currentRun = undefined
             return
           }
+          if (options.admissionSignal?.aborted) {
+            record.currentRun = undefined
+            this.cancelRecord(record, "Side conversation closed.", true, true)
+            return
+          }
           this.launch(record, prompt, options.runner, options.parentSignal)
         })
       record.currentRun = restartPromise
@@ -1658,6 +1677,18 @@ export class CoordinatorWorkerManager {
       if (record.status === "running") return true
     }
     return false
+  }
+
+  /** Cancellation marks workers terminal before their runners and writes finish. */
+  hasUnsettledWorkersForThread(parentThreadId: string): boolean {
+    const normalized = normalizeThreadId(parentThreadId)
+    const records = this.workersByParent.get(normalized)
+    for (const record of records?.values() ?? []) {
+      if (record.status === "running" || workerCleanupPromises(record).length > 0) return true
+    }
+    const workspacePath = this.workspacePathByParent.get(normalized)
+    return workspacePath !== undefined &&
+      !this.restoreIndexStore.isIdle(workerStateDirectory(workspacePath, normalized))
   }
 
   /** A worker that is terminal (so hasRunningWorkersForThread is already false —
@@ -2300,14 +2331,7 @@ export class CoordinatorWorkerManager {
         if (!normalizedWorkerIds || normalizedWorkerIds.length === 0) return true
         return normalizedWorkerIds.includes(record.workerId)
       })
-      return filteredRecords.flatMap((record) =>
-        [
-          record.currentRun,
-          record.terminalPersistPromise,
-          record.statePersistPromise,
-          record.notificationEnqueuePromise
-        ].filter(isDefined)
-      )
+      return filteredRecords.flatMap(workerCleanupPromises)
     }
     const startedAt = Date.now()
     const workspacePath = this.workspacePathByParent.get(normalizeThreadId(parentThreadId))
@@ -2354,6 +2378,19 @@ export class CoordinatorWorkerManager {
     throw new Error(
       `Timed out waiting for coordinator worker cleanup${workerLabel} in thread ${normalizeThreadId(parentThreadId)}.`
     )
+  }
+
+  /** Once admissions are fenced, follow the outstanding worker and writer promises. */
+  async waitForWorkerSettlement(parentThreadId: string): Promise<void> {
+    let pending = this.readWorkerRecords(parentThreadId).flatMap(workerCleanupPromises)
+    while (pending.length > 0) {
+      await Promise.allSettled(pending)
+      pending = this.readWorkerRecords(parentThreadId).flatMap(workerCleanupPromises)
+    }
+    const workspacePath = this.workspacePathByParent.get(normalizeThreadId(parentThreadId))
+    if (workspacePath) {
+      await this.restoreIndexStore.waitForIdle(workerStateDirectory(workspacePath, parentThreadId))
+    }
   }
 
   async restoreWorkersForThread(
@@ -2424,8 +2461,10 @@ export class CoordinatorWorkerManager {
           !this.workspacePathByParent.has(parentThreadId)
         ) {
           this.restoreGenerationByParent.delete(parentThreadId)
+          this.parentCacheLru.delete(parentThreadId)
+        } else {
+          this.touchParentCache(parentThreadId)
         }
-        this.touchParentCache(parentThreadId)
       }
       this.restoreOperationCount = Math.max(0, this.restoreOperationCount - 1)
       const nextDepth = (this.restoreQueueDepthByParent.get(parentThreadId) ?? 1) - 1
@@ -2686,10 +2725,15 @@ export class CoordinatorWorkerManager {
 
   forgetThread(parentThreadId: string): void {
     const normalized = normalizeThreadId(parentThreadId)
-    this.restoreGenerationByParent.set(
-      normalized,
-      (this.restoreGenerationByParent.get(normalized) ?? 0) + 1
-    )
+    // The generation only fences restores already in the serialized queue.
+    if (this.restoreQueueByParent.has(normalized)) {
+      this.restoreGenerationByParent.set(
+        normalized,
+        (this.restoreGenerationByParent.get(normalized) ?? 0) + 1
+      )
+    } else {
+      this.restoreGenerationByParent.delete(normalized)
+    }
     const records = this.workersByParent.get(normalized)
     if (records) {
       for (const record of records.values()) {
@@ -2954,7 +2998,8 @@ export class CoordinatorWorkerManager {
     options: WorkerRestoreOptions = {}
   ): Promise<CoordinatorWorkerRecord | undefined> {
     const workspacePath = this.workspacePathByParent.get(parentThreadId)
-    if (!workspacePath) return undefined
+    const incarnation = this.restoreDirectoryIncarnationByParent.get(parentThreadId)
+    if (!workspacePath || !incarnation?.valid) return undefined
     const statePath = path.resolve(
       workspacePath,
       COORDINATOR_BASE_DIR,
@@ -2966,6 +3011,9 @@ export class CoordinatorWorkerManager {
       const snapshot = JSON.parse(
         await readFile(statePath, "utf8")
       ) as Partial<CoordinatorWorkerSnapshot>
+      if (!incarnation.valid || this.restoreDirectoryIncarnationByParent.get(parentThreadId) !== incarnation) {
+        return undefined
+      }
       const record = this.recordFromSnapshot(snapshot, workspacePath)
       if (!record || record.parentThreadId !== parentThreadId || record.workerId !== workerId) {
         return undefined

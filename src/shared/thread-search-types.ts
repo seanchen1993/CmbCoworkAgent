@@ -116,6 +116,7 @@ export type ThreadSearchWindow =
       page: ThreadMessagesPage
       structureEpoch: number
       goalEvent?: ThreadGoalHydrationEvent
+      canonicalMessageId?: string
     }
   | {
       status: "threadOnly" | "notFound" | "staleIdentity" | "changed" | "failed" |

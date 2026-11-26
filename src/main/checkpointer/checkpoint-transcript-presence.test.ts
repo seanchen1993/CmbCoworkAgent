@@ -1,13 +1,26 @@
 import { DatabaseSync } from "node:sqlite"
+import { EventEmitter } from "node:events"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   bootstrapLegacyCheckpointTranscript,
   hasVisibleCheckpointTranscript
 } from "./runtime-projection-store"
-import { bootstrapLegacyCheckpointTranscriptInWorker } from "./runtime-projection-client"
+import {
+  bootstrapLegacyCheckpointTranscriptInWorker,
+  closeCheckpointRuntimeProjectionWorker,
+  readLatestCheckpointTupleInWorker,
+  restoreSideConversationParentTranscript
+} from "./runtime-projection-client"
+import type {
+  CheckpointRuntimeProjectionWorkerRequest,
+  CheckpointRuntimeProjectionWorkerResponse
+} from "./runtime-projection-protocol"
+
+const createProjectionWorker = vi.hoisted(() => vi.fn())
+vi.mock("./runtime-projection-worker?nodeWorker", () => ({ default: createProjectionWorker }))
 
 const temporaryDirectories: string[] = []
 
@@ -322,6 +335,70 @@ describe("checkpoint transcript presence", () => {
       runtimeTuple: null,
       stats: { checkpointId: null, totalMessages: 0, migratedMessages: 0 }
     })
+    await restoreSideConversationParentTranscript(
+      checkpointDatabasePath, join(directory, "unused-messages.sqlite"), "new-thread", new AbortController().signal
+    )
+    expect(createProjectionWorker).not.toHaveBeenCalled()
     expect(existsSync(checkpointDatabasePath)).toBe(false)
+  })
+
+  it("isolates side recovery from a busy foreground checkpoint worker and waits for shutdown", async () => {
+    function projectionWorker() {
+      const request = Promise.withResolvers<Exclude<CheckpointRuntimeProjectionWorkerRequest, { type: "shutdown" }>>()
+      const worker = Object.assign(new EventEmitter(), {
+        unref: vi.fn(),
+        terminate: vi.fn().mockResolvedValue(0),
+        postMessage(message: CheckpointRuntimeProjectionWorkerRequest) {
+          if (message.type === "shutdown") {
+            worker.emit("message", { type: "shutdown-complete" } satisfies CheckpointRuntimeProjectionWorkerResponse)
+          } else {
+            request.resolve(message)
+          }
+        }
+      })
+      return { worker, request: request.promise }
+    }
+
+    const foregroundWorker = projectionWorker()
+    const recoveryWorker = projectionWorker()
+    createProjectionWorker.mockReturnValueOnce(foregroundWorker.worker).mockReturnValueOnce(recoveryWorker.worker)
+    const workerExited = Promise.withResolvers<number>()
+    recoveryWorker.worker.terminate.mockReturnValue(workerExited.promise)
+    const controller = new AbortController()
+    const foregroundPath = createCheckpointDatabase("foreground", [])
+    const recoveryPath = createCheckpointDatabase("legacy-parent", [])
+    const messagePath = createMessageDatabase("legacy-parent")
+    const foreground = readLatestCheckpointTupleInWorker(foregroundPath, "foreground")
+    try {
+      const foregroundRequest = await foregroundWorker.request
+      expect(foregroundRequest.type).toBe("read-latest-tuple")
+      let recoverySettled = false
+      const recovery = restoreSideConversationParentTranscript(
+        recoveryPath, messagePath, "legacy-parent", controller.signal
+      ).catch(() => { recoverySettled = true })
+      try {
+        await vi.waitFor(() => expect(createProjectionWorker).toHaveBeenCalledTimes(2))
+        const request = await recoveryWorker.request
+        expect(request.type).toBe("bootstrap-legacy-transcript")
+        if (request.type !== "bootstrap-legacy-transcript") throw new Error("Expected a side recovery request")
+        controller.abort()
+        await vi.waitFor(() => expect(recoveryWorker.worker.terminate).toHaveBeenCalledOnce())
+        expect(Atomics.load(new Int32Array(request.cancellationBuffer), 0)).toBe(1)
+        expect(recoverySettled).toBe(false)
+        expect(foregroundWorker.worker.terminate).not.toHaveBeenCalled()
+      } finally {
+        controller.abort()
+        workerExited.resolve(0)
+        await recovery
+      }
+      expect(recoverySettled).toBe(true)
+      foregroundWorker.worker.emit("message", {
+        type: "read-latest-tuple-result", requestId: foregroundRequest.requestId, ok: true, tuple: null
+      } satisfies CheckpointRuntimeProjectionWorkerResponse)
+      await expect(foreground).resolves.toBeNull()
+    } finally {
+      await closeCheckpointRuntimeProjectionWorker()
+      await foreground.catch(() => undefined)
+    }
   })
 })

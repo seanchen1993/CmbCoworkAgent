@@ -15,7 +15,7 @@ import { generateProjectThreadTitle } from "../services/project-thread-title"
 import { getDisabledSkills } from "../storage"
 import type { AgentInvokeParams, SkillMetadata, Thread } from "../types"
 import { getHarnessProjectAdapterSnapshot } from "./service"
-import { MANAGED_IDLE_MODEL_REF, type ManagedRunModelSelection } from "../../shared/managed-run-model"
+import { getManagedRunModelOption, type ManagedRunModelSelection } from "../../shared/managed-run-model"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
 import {
@@ -376,6 +376,7 @@ export async function createManagedHarnessSession(
   skillName?: string,
   skillDescription?: string
 ): Promise<{ threadId: string; thread: Thread }> {
+  const model = getManagedRunModelOption(input.modelSelection).ref
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const title = titleSource
     ? await generateProjectThreadTitle(
@@ -388,7 +389,7 @@ export async function createManagedHarnessSession(
   const thread = await createThreadService(
     {
       workspacePath: input.workspacePath,
-      ...(input.modelSelection === "ultra" ? { model: MANAGED_IDLE_MODEL_REF } : {}),
+      ...(model ? { model } : {}),
       ...(title ? { title } : {}),
       harnessFeature: {
         projectId: input.projectId,

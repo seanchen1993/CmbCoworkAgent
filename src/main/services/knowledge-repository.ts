@@ -9,7 +9,7 @@ import { knowledgeDirectory } from "./knowledge-base-state"
 
 const execFileAsync = promisify(execFile)
 const GIT_TIMEOUT_MS = 120_000
-const HTTPS_CLONE_TIMEOUT_MS = 20_000
+const HTTPS_TIMEOUT_MS = 20_000
 const BRANCH_VALIDATION_TIMEOUT_MS = 10_000
 
 export interface KnowledgeRepositorySource {
@@ -34,6 +34,16 @@ export class KnowledgeRepositoryLocalChangesError extends Error {
   constructor(message = "本地知识库存在未提交或未推送的改动，已暂停更新") {
     super(message)
     this.name = "KnowledgeRepositoryLocalChangesError"
+  }
+}
+
+export class KnowledgeRepositoryFallbackError extends AggregateError {
+  constructor(
+    message: string,
+    primaryError: unknown,
+    readonly sshError: unknown
+  ) {
+    super([primaryError, sshError], message)
   }
 }
 
@@ -68,12 +78,22 @@ async function git(
 ): Promise<string> {
   const { stdout } = await execFileAsync(
     "git",
-    ["-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`, ...args],
+    [
+      "-c",
+      `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
+      "-c",
+      "core.askPass=",
+      ...args
+    ],
     {
       cwd,
       env: {
         ...withoutGitRepositoryOverrides(process.env),
-        GIT_TERMINAL_PROMPT: "0"
+        GCM_INTERACTIVE: "never",
+        GIT_ASKPASS: "",
+        GIT_TERMINAL_PROMPT: "0",
+        SSH_ASKPASS: "",
+        SSH_ASKPASS_REQUIRE: "never"
       },
       timeout,
       maxBuffer: 1024 * 1024,
@@ -86,6 +106,41 @@ async function git(
 
 function isAborted(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error as Error).name === "AbortError"
+}
+
+async function withPreferredRemote<T>(
+  source: KnowledgeRepositorySource,
+  operation: "远端检查" | "克隆",
+  run: (url: string, timeout: number) => Promise<T>,
+  signal?: AbortSignal,
+  prepareFallback?: () => Promise<void>
+): Promise<T> {
+  const https = source.url.toLowerCase().startsWith("https://")
+  const primaryTimeout = https ? HTTPS_TIMEOUT_MS : GIT_TIMEOUT_MS
+  if (!source.sshUrl || source.sshUrl === source.url) return run(source.url, primaryTimeout)
+
+  try {
+    return await run(source.sshUrl, GIT_TIMEOUT_MS)
+  } catch (sshError) {
+    if (isAborted(sshError, signal)) throw sshError
+    const fallback = https ? "HTTPS" : "配置的仓库地址"
+    console.log(`[knowledge_manage] SSH ${operation}失败或超时，回退使用 ${fallback} 重试`, {
+      ref: source.ref
+    })
+    await prepareFallback?.()
+    signal?.throwIfAborted()
+    try {
+      return await run(source.url, primaryTimeout)
+    } catch (primaryError) {
+      if (isAborted(primaryError, signal)) throw primaryError
+      // The existing error formatter uses the configured primary URL's error.
+      throw new KnowledgeRepositoryFallbackError(
+        `知识库 SSH 和 ${fallback} ${operation}均失败`,
+        primaryError,
+        sshError
+      )
+    }
+  }
 }
 
 export async function validateKnowledgeRepositorySource(
@@ -164,17 +219,12 @@ async function getReusableLocalCommit(
 
 async function getRemoteCommit(
   source: KnowledgeRepositorySource & { ref: string },
-  root: string,
+  runGit: (args: string[], timeout: number) => Promise<string>,
   signal?: AbortSignal
 ): Promise<string> {
   const branch = `refs/heads/${source.ref}`
   const probe = async (url: string, timeout: number): Promise<string> => {
-    const output = await git(
-      ["ls-remote", "--exit-code", "--heads", "--", url, branch],
-      root,
-      signal,
-      timeout
-    )
+    const output = await runGit(["ls-remote", "--exit-code", "--heads", "--", url, branch], timeout)
     const match = output.split("\n").find((line) => line.endsWith(`\t${branch}`))
     const commit = match?.split("\t", 1)[0]
     if (!commit || !/^[0-9a-f]{40,64}$/i.test(commit)) {
@@ -183,21 +233,7 @@ async function getRemoteCommit(
     return commit
   }
 
-  const https = source.url.toLowerCase().startsWith("https://")
-  try {
-    return await probe(source.url, https ? HTTPS_CLONE_TIMEOUT_MS : GIT_TIMEOUT_MS)
-  } catch (error) {
-    if (isAborted(error, signal) || !https || !source.sshUrl) throw error
-    console.log("[knowledge_manage] HTTPS 远端检查失败或超时，回退使用 sshUrl 重试", {
-      ref: source.ref
-    })
-    try {
-      return await probe(source.sshUrl, GIT_TIMEOUT_MS)
-    } catch (sshError) {
-      if (isAborted(sshError, signal)) throw sshError
-      throw new AggregateError([error, sshError], "知识库 HTTPS 远端检查失败，SSH 兜底也失败")
-    }
-  }
+  return withPreferredRemote(source, "远端检查", probe, signal)
 }
 
 export async function knowledgeWorkspaceHasChanges(
@@ -224,8 +260,10 @@ export async function syncKnowledgeRepository(
   const destination = knowledgeDirectory(normalized.idKey, normalized.role)
   await mkdir(join(root, normalized.idKey), { recursive: true })
   const localCommit = await getReusableLocalCommit(destination, normalized, options.signal)
+  const runGit = (args: string[], timeout: number): Promise<string> =>
+    git(args, root, options.signal, timeout)
   if (localCommit) {
-    const remoteCommit = await getRemoteCommit(normalized, root, options.signal)
+    const remoteCommit = await getRemoteCommit(normalized, runGit, options.signal)
     if (remoteCommit === localCommit) {
       options.signal?.throwIfAborted()
       return { ...normalized, path: destination, commit: localCommit, updated: false }
@@ -237,31 +275,14 @@ export async function syncKnowledgeRepository(
   let hadPrevious = false
   let preserveBackup = false
   const clone = (url: string, timeout: number): Promise<string> =>
-    git(
+    runGit(
       ["clone", "--depth", "1", "--single-branch", "--branch", normalized.ref, "--", url, checkout],
-      root,
-      options.signal,
       timeout
     )
   try {
-    const https = normalized.url.toLowerCase().startsWith("https://")
-    try {
-      await clone(normalized.url, https ? HTTPS_CLONE_TIMEOUT_MS : GIT_TIMEOUT_MS)
-    } catch (error) {
-      // Cancellation is intentional and must not start another network request.
-      if (isAborted(error, options.signal)) throw error
-      if (!https || !normalized.sshUrl) throw error
-      console.log("[knowledge_manage] HTTPS 克隆失败或超时，回退使用 sshUrl 重试", {
-        ref: normalized.ref
-      })
-      await rm(checkout, { recursive: true, force: true })
-      try {
-        await clone(normalized.sshUrl, GIT_TIMEOUT_MS)
-      } catch (sshError) {
-        if (isAborted(sshError, options.signal)) throw sshError
-        throw new AggregateError([error, sshError], "知识库 HTTPS 克隆失败，SSH 兜底也失败")
-      }
-    }
+    await withPreferredRemote(normalized, "克隆", clone, options.signal, () =>
+      rm(checkout, { recursive: true, force: true })
+    )
     // --branch also accepts tags; this API deliberately requires a branch.
     const commit = await git(
       ["rev-parse", "--verify", `refs/heads/${normalized.ref}^{commit}`],

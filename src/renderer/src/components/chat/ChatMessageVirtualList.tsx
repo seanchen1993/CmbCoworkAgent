@@ -57,10 +57,13 @@ export function getChatHistoryAnchorTop(row: HTMLElement): number {
 export type ChatMessageVirtualInitialLocation = FlatIndexLocationWithAlign | number
 
 // eslint-disable-next-line react-refresh/only-export-components
-export const shouldVirtualizeChatMessageList = (visibleMessageCount: number): boolean => {
+export const shouldVirtualizeChatMessageList = (
+  visibleMessageCount: number,
+  mountWhenEmpty = false
+): boolean => {
   // Keep one list implementation for the whole lifetime of a non-empty conversation. Switching
   // from plain DOM to Virtuoso at message 101 loses the user's anchor while streaming or paging.
-  return visibleMessageCount > 0
+  return visibleMessageCount > 0 || mountWhenEmpty
 }
 
 function clampVirtualItemIndex(index: number, itemCount: number): number {
@@ -111,10 +114,13 @@ export function resolveChatScrollVirtualRangeSnapshot(
 export interface ChatMessageVirtualListProps {
   /** Bot-only entry presentation. Ordinary workbench rows retain their existing rendering. */
   historyReady?: boolean
+  /** Mount the virtual list on a confirmed empty workbench thread before the first send. */
+  mountWhenEmpty?: boolean
   canAnimateMessages?: boolean
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
   messages: Message[]
+  assistantReplayContent?: ReadonlyMap<string, Message["content"]>
   visibleMessageIndexes: readonly number[]
   lastUserMessageIndex: number
   contentVersion: number
@@ -365,6 +371,7 @@ VirtuosoMessageListWrapper.displayName = "VirtuosoMessageListWrapper"
 interface ChatVirtualListContext {
   header: React.ReactNode
   footer: React.ReactNode
+  anchorUpwardResize: true
 }
 
 function ChatVirtualListHeader({
@@ -391,9 +398,11 @@ const chatVirtualListComponents = {
 
 export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList({
   historyReady = true,
+  mountWhenEmpty = false,
   canAnimateMessages = true,
   messageAttempts,
   messages,
+  assistantReplayContent,
   visibleMessageIndexes,
   lastUserMessageIndex,
   contentVersion,
@@ -455,7 +464,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     entranceIds,
     presentation === "bot" && historyReady && canAnimateMessages
   )
-  const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
+  const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length, mountWhenEmpty)
   const reasoningExpansion = useMemo<{
     threadId: string
     choices: NonNullable<React.ContextType<typeof ReasoningExpansionContext>>
@@ -496,7 +505,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   )
 
   const handleItemsRendered = (): void => {
-    if (initialVirtualItemsRenderedThreadRef.current === threadId) return
+    if (!visibleMessageIndexes.length || initialVirtualItemsRenderedThreadRef.current === threadId) return
     initialVirtualItemsRenderedThreadRef.current = threadId
     onInitialVirtualItemsRendered()
   }
@@ -534,8 +543,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
 
   const renderMessage = useCallback(
     (visibleIndex: number, messageIndex: number): React.JSX.Element | null => {
-      const message = messages[messageIndex]
-      if (!message) return null
+      const row = messages[messageIndex]
+      if (!row) return null
+      const content = assistantReplayContent?.get(row.id)
+      const message = content === undefined ? row : { ...row, content }
       const startsAfterReleasedHistory = message.id === historyGapBeforeMessageId
       const previousMessageIndex = visibleMessageIndexes[visibleIndex - 1]
       const previousMessage =
@@ -590,6 +601,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     },
     [
       assistantDurationMsById,
+      assistantReplayContent,
       autoApproveGitPush,
       contentMessageRefs,
       contentVersion,
@@ -734,7 +746,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         itemsRendered={handleItemsRendered}
         rangeChanged={handleVirtualRangeChanged}
         totalListHeightChanged={onContentHeightChanged}
-        context={{ header: historyHeader, footer: footerContent }}
+        context={{ header: historyHeader, footer: footerContent, anchorUpwardResize: true }}
         components={chatVirtualListComponents}
         itemContent={(visibleIndex, messageIndex) => renderMessage(visibleIndex, messageIndex)}
       />

@@ -20,15 +20,30 @@ function getPlatform(): string {
 }
 
 export function normalizeWorkspacePathKey(workspacePath: string | null | undefined): string {
-  let normalized = (workspacePath || "")
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/\/+$/, "")
   const platform = getPlatform()
+  return normalizePathSpelling((workspacePath || "").trim().replace(/\\/g, "/"), platform)
+}
+
+function normalizePathSpelling(path: string, platform: string): string {
+  let normalized = path.replace(/\/+$/, "")
   if (platform === "darwin") {
     normalized = normalized.replace(/^\/private\/var\//, "/var/")
   }
   return platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+export function normalizeGitWorkspacePathKey(workspacePath: string): string {
+  const platform = getPlatform()
+  // On POSIX, both a trailing space and a backslash can belong to the directory name.
+  const path = platform === "win32" ? workspacePath.replace(/\\/g, "/") : workspacePath
+  return normalizePathSpelling(path, platform)
+}
+
+export function isSameGitWorkspacePath(
+  left: string | null | undefined,
+  right: string | null | undefined
+): boolean {
+  return Boolean(left && right && normalizeGitWorkspacePathKey(left) === normalizeGitWorkspacePathKey(right))
 }
 
 export function isSameWorkspacePath(

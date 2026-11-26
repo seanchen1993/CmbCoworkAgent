@@ -54,6 +54,7 @@ import {
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
 import { prepareStandardUserPrompt, resolveNamedBotSkill, validateExplicitSkillReference } from "./standard-thread-turn"
+import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import { createHookScope } from "../hooks/scope"
 import { createSkillUseTracker } from "./skill-lifecycle/tracker"
 import { extractErrorDetail } from "./failover"
@@ -65,7 +66,7 @@ import {
   HarnessSessionContextLimitError
 } from "../harness-board/context-integrity"
 
-describe("managed model routing", () => {
+describe("model routing", () => {
   beforeEach(() => {
     routingMocks.managedModel.mockReset()
     routingMocks.resolveModel.mockReset()
@@ -107,6 +108,27 @@ describe("managed model routing", () => {
     )
   })
 
+  it.each([undefined, "resume", "interrupt"] as const)(
+    "uses the auxiliary conversation's selected model under global auto routing for continuation %s",
+    async (continuation) => {
+      const threadId = "btw-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002"
+      routingMocks.resolveModel.mockResolvedValue({
+        resolvedModelId: "custom:side-model",
+        resolvedTier: "premium",
+        layer: "pinned"
+      })
+      const request = { taskSource: "chat", requestedModelId: "custom:side-model", continuation } as const
+
+      await resolveStandardTurnRouting({ ...request, threadId, routingMode: "auto" })
+      expect(routingMocks.resolveModel).toHaveBeenLastCalledWith({ ...request, threadId, routingMode: "pinned", message: undefined })
+
+      await resolveStandardTurnRouting({ ...request, threadId: "ordinary", routingMode: "auto" })
+      expect(routingMocks.resolveModel).toHaveBeenLastCalledWith({
+        ...request, threadId: "ordinary", routingMode: "auto", message: undefined
+      })
+    }
+  )
+
   it("surfaces an unavailable Pro error without falling back to ordinary routing", async () => {
     routingMocks.managedModel.mockImplementation(() => {
       throw new Error("码豆模型PRO不可用")
@@ -115,6 +137,14 @@ describe("managed model routing", () => {
       resolveStandardTurnRouting({ taskSource: "chat", threadId: "managed" })
     ).rejects.toThrow("码豆模型PRO不可用")
     expect(routingMocks.resolveModel).not.toHaveBeenCalled()
+  })
+
+  it("preserves the service-hours denial when resolving an ordinary pinned turn", async () => {
+    const error = new IdleModelServiceHoursError()
+    routingMocks.resolveModel.mockRejectedValue(error)
+    await expect(
+      resolveStandardTurnRouting({ taskSource: "chat", threadId: "ordinary", routingMode: "pinned" })
+    ).rejects.toBe(error)
   })
 })
 

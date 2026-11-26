@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadSummaryPage } from "../../../main/types"
 import type { Thread } from "../types"
-import { adoptThreadSearchSummary, initializeStartupWorkspace, useAppStore } from "./store"
+import {
+  adoptThreadSearchSummary,
+  initializeStartupWorkspace,
+  registerSideThreadSummary,
+  retireRendererThread,
+  useAppStore
+} from "./store"
 import { useChatSourceNavigation } from "./chat-source-navigation"
+import * as threadDirectoryPagination from "./thread-directory-pagination"
+import { collectChangedStreamingThreadIds } from "./thread-stream-activity"
 
 function createThread(threadId: string): Thread {
   return {
@@ -45,6 +53,54 @@ describe("app store thread-directory loading", () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it("keeps an incoming directory row when its stream starts before the first page arrives", async () => {
+    const thread = createThread("loading-outside-directory")
+    let resolvePage!: (page: ThreadSummaryPage) => void
+    const page = new Promise<ThreadSummaryPage>((resolve) => { resolvePage = resolve })
+    vi.stubGlobal("window", { api: { threads: { listPage: () => page } } })
+
+    const loading = useAppStore.getState().loadThreads()
+    useAppStore.getState().touchThreadSummaries([thread.thread_id], new Date(10))
+    resolvePage(createPage([thread]))
+    await loading
+
+    expect(useAppStore.getState().threads).toEqual([thread])
+  })
+
+  it("does not record side-tab stream activity as an ordinary directory mutation", async () => {
+    const parentId = "10000000-0000-4000-8000-000000000001"
+    const sideId = `btw-${parentId}-10000000-0000-4000-8000-000000000002`
+    const parent = createThread(parentId)
+    const listPage = vi.fn().mockResolvedValue(createPage([parent]))
+    vi.stubGlobal("window", { api: { threads: { listPage } }, localStorage: { removeItem: vi.fn() } })
+    await useAppStore.getState().loadThreads()
+    registerSideThreadSummary({ ...createThread(sideId), metadata: { btwParentId: parentId } })
+
+    let previous: Record<string, boolean> = {}
+    const publishLoading = (loading: Record<string, boolean>, timestamp: number) => {
+      const changed = collectChangedStreamingThreadIds(previous, loading)
+      useAppStore.getState().touchThreadSummaries(changed, new Date(timestamp))
+      previous = loading
+    }
+    publishLoading({ [parentId]: true, [sideId]: true }, 10)
+    publishLoading({ [parentId]: true, [sideId]: false }, 20)
+    expect(useAppStore.getState().threads[0].updated_at).toEqual(new Date(10))
+    retireRendererThread(sideId)
+    publishLoading({ [parentId]: false }, 30)
+    expect(useAppStore.getState().sideThreads.has(sideId)).toBe(false)
+    expect(useAppStore.getState().threads[0].updated_at).toEqual(new Date(30))
+
+    let recordedIds: string[] | undefined
+    const mergeFirstPage = threadDirectoryPagination.mergeThreadDirectoryFirstPage
+    vi.spyOn(threadDirectoryPagination, "mergeThreadDirectoryFirstPage")
+      .mockImplementation((current, incoming, options) => {
+        recordedIds = [...options.mutationEpochById.keys()]
+        return mergeFirstPage(current, incoming, options)
+      })
+    await useAppStore.getState().loadThreads()
+    expect(recordedIds).toEqual([parentId])
   })
 
   it("adopts an updated search summary without discarding local file history", () => {

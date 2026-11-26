@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { resolveLegacyBotWorkModelRef } from "../../shared/bots/model-policy"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../shared/idle-model-service-window"
 
 const state = vi.hoisted(() => ({
   manifest: {} as Record<string, unknown>,
@@ -12,7 +13,9 @@ const state = vi.hoisted(() => ({
   sapId: "12345678" as string | undefined,
   idleModelUseUat: false,
   fetchGate: null as Promise<void> | null,
-  send: vi.fn()
+  send: vi.fn(),
+  powerOn: vi.fn<(_event: string, listener: () => void) => void>(),
+  powerOff: vi.fn()
 }))
 
 vi.mock("electron", () => ({
@@ -23,7 +26,8 @@ vi.mock("electron", () => ({
         webContents: { isDestroyed: () => false, send: state.send }
       }
     ]
-  }
+  },
+  powerMonitor: { on: state.powerOn, removeListener: state.powerOff }
 }))
 
 vi.mock("../storage", () => ({
@@ -80,6 +84,7 @@ import {
   getModelConfigByRef,
   getModelConfigs,
   getModelByTier,
+  getSelectableModelConfigOrDefault,
   refreshBuiltinModelCatalog,
   resetBuiltinModelOverride,
   startBuiltinModelCatalogRefresh,
@@ -106,7 +111,10 @@ beforeEach(() => {
   state.fetchGate = null
   vi.restoreAllMocks()
   vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(new Date("2026-11-03T22:30:00+08:00"))
   state.send.mockClear()
+  state.powerOn.mockClear()
+  state.powerOff.mockClear()
 })
 
 afterEach(() => {
@@ -165,7 +173,7 @@ describe("builtin model registry", () => {
     })
     state.idleModelUseUat = false
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBe("idle-test-key")
-    expect(getModelConfigByRef("ultra")?.ref).toBe("builtin:idle-ultra")
+    expect(getModelConfigByRef("ultra")?.ref).toBe("builtin:maodou-ultra")
   })
 
   it("keeps saved Pro thinking overrides", () => {
@@ -204,7 +212,7 @@ describe("builtin model registry", () => {
     expect(getModelConfigByRef("builtin:idle-ultra")).toBeNull()
   })
 
-  it("retains the independent idle model alongside remote models with fixed pro and 128k", async () => {
+  it("publishes distinct managed Pro and Ultra configs with locked production context", async () => {
     configureIdleModel()
     state.manifest = {
       modelCatalog: {
@@ -230,10 +238,22 @@ describe("builtin model registry", () => {
         origin: "local"
       })
     ])
-    const idle = getBuiltinModelPublicConfigs().find((item) => item.id === "idle-ultra")!
-    expect(idle.lockedFields).toContain("maxTokens")
-    expect(idle.notice).toBeUndefined()
-    expect(idle).not.toHaveProperty("apiKey")
+    const configs = getBuiltinModelPublicConfigs()
+    const pro = configs.find((item) => item.id === "idle-ultra")!
+    const ultra = configs.find((item) => item.id === "maodou-ultra")!
+    expect(pro.lockedFields).toContain("maxTokens")
+    expect(pro.notice).toBeUndefined()
+    expect(pro).not.toHaveProperty("apiKey")
+    expect(ultra).toMatchObject({
+      name: "闲时模型 Ultra",
+      model: "ultra",
+      maxTokens: 128_000,
+      enableThinking: true,
+      enableThinkingEffort: true,
+      thinkingEffort: "high",
+      lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"],
+      notice: expect.stringContaining("北京时间 22:00 至次日 07:00")
+    })
     expect(() => updateBuiltinModelOverride("idle-ultra", { maxTokens: 256_000 })).toThrow(
       "固定为 128k"
     )
@@ -262,6 +282,7 @@ describe("builtin model registry", () => {
     ).toThrow("compaction trigger")
     updateBuiltinModelOverride(id, { maxTokens: 256_000 })
     expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
+    expect(getModelConfigByRef("builtin:maodou-ultra")?.maxTokens).toBe(200_000)
 
     state.idleModelUseUat = false
     expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)).toMatchObject({
@@ -285,7 +306,11 @@ describe("builtin model registry", () => {
     const proRef = "builtin:idle-ultra"
     const minimaxRef = "builtin:minimax-m2p5-229b-w8a8"
 
-    expect(getBuiltinModelPublicConfigs().map((model) => model.ref)).toEqual([proRef, minimaxRef])
+    expect(getBuiltinModelPublicConfigs().map((model) => model.ref)).toEqual([
+      proRef,
+      "builtin:maodou-ultra",
+      minimaxRef
+    ])
     expect(getModelConfigs()[0]?.ref).toBe(proRef)
     expect(getDefaultModelConfig()?.ref).toBe(proRef)
     expect(getModelByTier("premium")?.ref).toBe(proRef)
@@ -301,13 +326,75 @@ describe("builtin model registry", () => {
     expect(getModelByTier("premium")?.ref).toBe(minimaxRef)
   })
 
-  it.each([false, true])("keeps Pro available all day with a valid SAP identity (UAT %s)", (useUat) => {
+  it("keeps production Pro available when Ultra closes and preserves saved pins", () => {
     configureIdleModel()
-    state.idleModelUseUat = useUat
+    const proRef = "builtin:idle-ultra"
+    const ultraRef = "builtin:maodou-ultra"
+    state.sapId = "ABCDEFGH"
+    state.storedDefault = ultraRef
+    expect(getAvailableModelConfigOrDefault(ultraRef)?.ref).toBe(ultraRef)
+
+    vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00"))
+    expect(getBuiltinModelPublicConfigs().find((item) => item.ref === ultraRef)).toMatchObject({
+      unavailableReason: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+    })
+    expect(() => getAvailableModelConfigOrDefault(ultraRef)).toThrow(IDLE_MODEL_OUTSIDE_HOURS_MESSAGE)
+    expect(getAvailableModelConfigOrDefault(proRef)?.ref).toBe(proRef)
+    expect(getAvailableModelConfigOrDefault()?.ref).toBe(proRef)
+    expect(getModelByTier("premium")?.ref).toBe(proRef)
+    expect(getDefaultModelConfig()?.ref).toBe(ultraRef)
+  })
+
+  it("selects a configured Ultra for an idle conversation outside service hours", () => {
+    configureIdleModel()
+    vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+    const ultraRef = "builtin:maodou-ultra"
+    state.storedDefault = ultraRef
+
+    expect(getSelectableModelConfigOrDefault(ultraRef)).toMatchObject({
+      ref: ultraRef,
+      maxTokens: 128_000,
+      unavailableReason: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+    })
+    expect(getSelectableModelConfigOrDefault()?.ref).toBe("builtin:idle-ultra")
+    expect(() => getAvailableModelConfigOrDefault(ultraRef)).toThrow(IDLE_MODEL_OUTSIDE_HOURS_MESSAGE)
+
+    state.sapId = undefined
+    expect(getSelectableModelConfigOrDefault(ultraRef)?.ref).toBe("builtin:minimax-m2p5-229b-w8a8")
+  })
+
+  it("notifies the UI at closing and on resume, then releases the timer and listener", async () => {
+    configureIdleModel()
+    vi.useRealTimers()
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] })
+    vi.setSystemTime(new Date("2026-11-04T06:59:59.990+08:00"))
+    await startBuiltinModelCatalogRefresh()
+    state.send.mockClear()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(state.send).toHaveBeenCalledWith("models:changed")
+    expect(getModelConfigByRef("builtin:maodou-ultra")?.unavailableReason).toBe(IDLE_MODEL_OUTSIDE_HOURS_MESSAGE)
+
+    state.send.mockClear()
+    vi.setSystemTime(new Date("2026-11-04T22:00:00+08:00"))
+    const resume = state.powerOn.mock.calls.find(([event]) => event === "resume")![1]
+    resume()
+    expect(state.send).toHaveBeenCalledTimes(1)
+    expect(getModelConfigByRef("builtin:maodou-ultra")?.unavailableReason).toBeUndefined()
+
+    stopBuiltinModelCatalogRefresh()
+    expect(state.powerOff).toHaveBeenCalledWith("resume", resume)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("keeps both UAT models available all day with a letter-only SAP ID", () => {
+    configureIdleModel()
+    state.idleModelUseUat = true
+    state.sapId = "ABCDEFGH"
     state.storedDefault = "builtin:idle-ultra"
     for (const hour of ["00", "07", "12", "21", "22"]) {
       vi.setSystemTime(new Date(`2026-10-28T${hour}:00:00+08:00`))
       expect(getAvailableModelConfigOrDefault("builtin:idle-ultra")?.model).toBe("pro")
+      expect(getAvailableModelConfigOrDefault("builtin:maodou-ultra")?.model).toBe("ultra")
       expect(getAvailableModelConfigOrDefault()?.id).toBe("idle-ultra")
       expect(getModelByTier("premium")?.id).toBe("idle-ultra")
     }

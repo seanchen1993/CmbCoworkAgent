@@ -2,7 +2,7 @@ import { THREAD_LIST_PRIORITY_KEYS } from "../../shared/thread-directory-metadat
 import { SEARCH_BACKFILL_METADATA_BYTE_LIMIT } from "../checkpointer/runtime-projection-protocol"
 import { THREAD_SEARCH_GOAL_EVENT_SQL, threadSearchGoalScopeSql } from "./goal-event"
 import { SEARCH_VISIBLE_MESSAGE_ID_SQL } from "./message-visibility-sql"
-import { THREAD_SUMMARY_METADATA_SQL } from "../thread-metadata-hydration/summary-sql"
+import { THREAD_DIRECTORY_VISIBLE_SQL, THREAD_SUMMARY_METADATA_SQL } from "../thread-metadata-hydration/summary-sql"
 import type { DatabaseSync, SQLOutputValue, StatementSync } from "node:sqlite"
 import { hasThreadMessageFragmentGenerations, publishedThreadMessageFragmentsSql } from "../db/thread-message-fragment-storage"
 import {
@@ -177,7 +177,7 @@ const candidateSql = (goalPresence: string, scope = "", physical = false) => `
   FROM threads
   ${physical
     ? "JOIN physical ON threads.thread_id = physical.physical_id"
-    : `WHERE ${ordinaryThreadPredicate} ${scope}`}
+    : `WHERE ${THREAD_DIRECTORY_VISIBLE_SQL} AND ${ordinaryThreadPredicate} ${scope}`}
   ORDER BY updated_at DESC, thread_id DESC`
 
 const compactMetadata = `COALESCE(${THREAD_SUMMARY_METADATA_SQL}, '{}')`
@@ -201,7 +201,7 @@ export function threadSearchIdentitySql(includeSummary: boolean, project: boolea
     ${includeSummary ? `, ${boundedText("title", 8192)} AS title,
       COALESCE(${boundedText(compactMetadata, 22 * 1024)}, ${boundedText(essentialMetadata, 22 * 1024)})
       AS summary_metadata` : ""}
-    FROM threads WHERE thread_id = ? ${project ? "" : `AND ${ordinaryThreadPredicate}`}`
+    FROM threads WHERE thread_id = ? AND ${THREAD_DIRECTORY_VISIBLE_SQL} ${project ? "" : `AND ${ordinaryThreadPredicate}`}`
 }
 
 export const THREAD_SEARCH_IDENTITY_SQL = threadSearchIdentitySql(true, false)
@@ -225,6 +225,7 @@ function threadSearchBackfillSql(project: boolean): string {
     ON migration.thread_id = threads.thread_id
   LEFT JOIN thread_search_occurrence_versions AS occurrence ON occurrence.thread_id = threads.thread_id
   WHERE threads.thread_id = ?
+    AND ${THREAD_DIRECTORY_VISIBLE_SQL}
     AND CASE WHEN ${oversizedBackfillMetadata} THEN 0
              ELSE ${project ? "1" : ordinaryThreadPredicate} END`
 }
@@ -273,7 +274,7 @@ export function createThreadSearchReader(database: DatabaseSync) {
   const preparePhysical = (later: boolean) => database.prepare(`
     WITH physical AS MATERIALIZED (
       SELECT thread_id AS physical_id, updated_at AS physical_time FROM threads
-      ${later ? "WHERE (updated_at, thread_id) < (?, ?)" : ""}
+      WHERE ${THREAD_DIRECTORY_VISIBLE_SQL} ${later ? "AND (updated_at, thread_id) < (?, ?)" : ""}
       ORDER BY updated_at DESC, thread_id DESC LIMIT ${physicalBatchSize}
     )
     ${candidateSql(goalPresence, "", true)}`)

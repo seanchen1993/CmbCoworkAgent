@@ -33,44 +33,34 @@ export function canCancelThreadMessageWindowIntent(
 
 /**
  * Per-thread latest-wins fence for every async mutation of the resident transcript window.
- * The monotonic sequence is retained after completion so an old promise can never become current
- * again when a later request finishes or is cancelled.
+ * Only an active request owns a slot. A new sequence is unique even after a slot is released.
  */
 export function createThreadMessageWindowIntentCoordinator(): ThreadMessageWindowIntentCoordinator {
-  const sequences = new Map<string, number>()
-  const activeKinds = new Map<string, ThreadMessageWindowIntentKind>()
-
-  const advance = (threadId: string): number => {
-    const sequence = (sequences.get(threadId) ?? 0) + 1
-    sequences.set(threadId, sequence)
-    return sequence
-  }
-
+  const active = new Map<string, ThreadMessageWindowIntentToken>()
+  let sequence = 0
   const isCurrent = (token: ThreadMessageWindowIntentToken): boolean =>
-    sequences.get(token.threadId) === token.sequence &&
-    activeKinds.get(token.threadId) === token.kind
+    active.get(token.threadId)?.sequence === token.sequence && active.get(token.threadId)?.kind === token.kind
 
   return {
     begin(threadId, kind) {
-      const token = { threadId, sequence: advance(threadId), kind }
-      activeKinds.set(threadId, kind)
+      const token = { threadId, sequence: ++sequence, kind }
+      active.set(threadId, token)
       return token
     },
     isCurrent,
     finish(token) {
       if (!isCurrent(token)) return false
-      activeKinds.delete(token.threadId)
+      active.delete(token.threadId)
       return true
     },
     cancel(threadId, expectedKind) {
-      const activeKind = activeKinds.get(threadId)
+      const activeKind = active.get(threadId)?.kind
       if (!activeKind || (expectedKind && activeKind !== expectedKind)) return false
-      advance(threadId)
-      activeKinds.delete(threadId)
+      active.delete(threadId)
       return true
     },
     activeKind(threadId) {
-      return activeKinds.get(threadId) ?? null
+      return active.get(threadId)?.kind ?? null
     }
   }
 }

@@ -6,7 +6,7 @@ import { useCurrentThread, useThreadStream } from "@/lib/thread-context"
 import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
 import {
   releaseSubmitInFlightLock,
-  sharedSubmitInFlightLockRef,
+  submitInFlightLockStore,
   tryAcquireSubmitInFlightLock
 } from "@/lib/submit-in-flight-lock"
 import { buildVisualEditPrompt } from "./visual-context-builder"
@@ -87,7 +87,7 @@ export function useVisualEditSubmit(threadId: string): {
         return false
       }
 
-      if (!tryAcquireSubmitInFlightLock(sharedSubmitInFlightLockRef, true, threadId)) {
+      if (!tryAcquireSubmitInFlightLock(submitInFlightLockStore, true, threadId)) {
         toast.warning("当前线程已有提交正在处理中，请稍后再试。")
         return false
       }
@@ -171,7 +171,7 @@ export function useVisualEditSubmit(threadId: string): {
         return false
       } finally {
         setActiveTurnStartTime(null)
-        releaseSubmitInFlightLock(sharedSubmitInFlightLockRef, true, threadId)
+        releaseSubmitInFlightLock(submitInFlightLockStore, true, threadId)
       }
     },
     [

@@ -162,11 +162,15 @@ export function getOptimizerCandidatesPath(): string {
 }
 
 export function getThreadCheckpointDir(): string {
-  const dir = join(getOpenworkDir(), "threads")
+  const dir = peekThreadCheckpointDir()
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }
   return dir
+}
+
+export function peekThreadCheckpointDir(): string {
+  return join(OPENWORK_DIR, "threads")
 }
 
 const SAFE_ID_RE = /^[a-zA-Z0-9_-]+$/
@@ -391,7 +395,7 @@ function deleteIndexedCheckpointArtifacts(
 /** Resolve a history lookup without creating directories or registering a checkpoint. */
 export function peekThreadCheckpointPath(threadId: string): string {
   assertSafeThreadCheckpointId(threadId)
-  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
+  return threadCheckpointPath(peekThreadCheckpointDir(), threadId)
 }
 
 export function getThreadCheckpointPath(threadId: string): string {

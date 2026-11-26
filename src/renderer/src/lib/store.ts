@@ -16,9 +16,6 @@ import { THREAD_LIST_PRIORITY_KEYS } from "../../../shared/thread-directory-meta
 import { THREAD_INCARNATION_METADATA_KEY, matchesThreadIncarnationSnapshot, type ThreadIncarnationSnapshot } from "../../../shared/thread-incarnation"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
-// Relative, not "@/": store.ts is loaded by tsx-run specs (via electron-transport)
-// where the "@/" alias isn't resolvable, and this is a runtime (non-type) import.
-import { clearVisualEditAnnotationsForThread } from "../components/visual-edit/visual-edit-store"
 import type {
   Thread,
   ModelConfig,
@@ -55,6 +52,7 @@ import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache
 import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
 import { DEFAULT_STARTUP_VIEW, type StartupView } from "../../../shared/startup-view"
 import { useChatSourceNavigation } from "./chat-source-navigation"
+import { isBtwThreadId } from "../../../shared/btw-chat"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -63,11 +61,12 @@ const rendererRetiredThreadIds = new Set<string>()
 
 /** Prevent delayed renderer work from touching a Thread once deletion starts. */
 export function isThreadDeletionPending(threadId: string): boolean {
-  return rendererDeletingThreadIds.has(threadId) || rendererRetiredThreadIds.has(threadId)
+  return rendererDeletingThreadIds.has(threadId) || isThreadRetired(threadId)
 }
 
 /** A successful backend delete permanently retires this renderer incarnation. */
 export function isThreadRetired(threadId: string): boolean {
+  if (isBtwThreadId(threadId)) return !useAppStore.getState().sideThreads.has(threadId)
   return rendererRetiredThreadIds.has(threadId)
 }
 
@@ -81,12 +80,10 @@ export function applyCommittedBotWorkDeletion(work: NonNullable<BotConversationD
   ])
 }
 
-/** Apply the renderer side of an acknowledged native thread deletion. */
-export function applyCommittedThreadDeletion(threadId: string, deferDirectoryUpdate = false): void {
+/** Release renderer resources when an execution surface has been retired. */
+export function retireRendererThread(threadId: string, deferDirectoryUpdate = false): void {
   rendererDeletingThreadIds.delete(threadId)
-  rendererRetiredThreadIds.add(threadId)
-  // Advance the epoch again at commit so a stale page cannot resurrect the row.
-  markThreadDirectoryMutation(threadId)
+  if (!isBtwThreadId(threadId)) rendererRetiredThreadIds.add(threadId)
   // The durable queue, projection and scroll caches outlive the database row.
   runBestEffortCommittedDeletionCleanups([
     {
@@ -106,8 +103,8 @@ export function applyCommittedThreadDeletion(threadId: string, deferDirectoryUpd
       run: () => chatScrollSessionStore.delete(threadId)
     },
     {
-      label: "Failed to clear deleted thread visual edit annotations",
-      run: () => clearVisualEditAnnotationsForThread(threadId)
+      label: "Failed to clear deleted thread skill generation",
+      run: () => useAppStore.getState().setSkillGenerationPhase(null, undefined, threadId)
     },
     ...(deferDirectoryUpdate
       ? []
@@ -118,6 +115,22 @@ export function applyCommittedThreadDeletion(threadId: string, deferDirectoryUpd
           }
         ])
   ])
+}
+
+/** Apply the renderer side of an acknowledged native thread deletion. */
+export function applyCommittedThreadDeletion(
+  threadId: string,
+  deferDirectoryUpdate = false,
+  deletedSideThreadIds: readonly string[] = []
+): void {
+  // Advance the epoch again at commit so a stale page cannot resurrect the row.
+  if (!isBtwThreadId(threadId)) markThreadDirectoryMutation(threadId)
+  const retiredChildren = new Set(deletedSideThreadIds)
+  for (const child of useAppStore.getState().sideThreads.values()) {
+    if (child.metadata?.btwParentId === threadId) retiredChildren.add(child.thread_id)
+  }
+  for (const id of retiredChildren) retireRendererThread(id)
+  retireRendererThread(threadId, deferDirectoryUpdate)
 }
 const THREAD_DIRECTORY_PAGE_LIMIT = 128
 const THREAD_DIRECTORY_PAGE_BYTE_BUDGET = 512 * 1024
@@ -943,7 +956,6 @@ type MainView =
   | "scheduled"
   | "market"
   | "kanban"
-  | "design"
   | "harness"
   | "claudecode"
   | "dashboard"
@@ -1001,11 +1013,11 @@ export interface SubagentFocusView {
 
 export interface RightPanelWorkRequest {
   id: number
-  target: "systemConstraints" | "agents"
+  target: "files" | "systemConstraints" | "agents"
   threadId: string
 }
 
-export type RightModule = "work" | "preview" | "git" | "browser"
+export type RightModule = "work" | "preview" | "git" | "browser" | "btw"
 
 /** Focus on one dynamic-workflow subagent's live tool stream. Keyed by the PARENT
  * threadId (the live panel's thread) + the run's agentIndex. Display-only. */
@@ -1024,6 +1036,7 @@ interface AppState {
 
   // Threads
   threads: Thread[]
+  sideThreads: ReadonlyMap<string, Thread>
   currentThreadId: string | null
   threadDirectoryHasMore: boolean
   threadDirectoryLoadingMore: boolean
@@ -1158,6 +1171,7 @@ interface AppState {
   setSidebarCollapsed: (collapsed: boolean) => void
   toggleRightPanel: () => void
   setRightPanelCollapsed: (collapsed: boolean) => void
+  requestOpenRightPanelSection: (threadId: string, target: RightPanelWorkRequest["target"]) => void
   requestOpenRightPanelSystemConstraints: (threadId: string) => void
   requestOpenRightPanelAgents: (threadId: string) => void
   consumeRightPanelWorkRequest: (requestId: number) => void
@@ -1165,9 +1179,6 @@ interface AppState {
   // Kanban actions
   setShowKanbanView: (show: boolean) => void
   setShowSubagentsInKanban: (show: boolean) => void
-  //design actions
-  showDesignView: boolean
-  setShowDesignView: (show: boolean) => void
 
   // Harness board actions
   setShowHarnessBoardView: (show: boolean) => void
@@ -1201,13 +1212,13 @@ interface AppState {
       errorText: string
     }
   >
-  setSkillGenerationPhase: (phase: "generating" | "done" | "error" | null, text?: string) => void
-  appendSkillGenerationToken: (token: string) => void
+  setSkillGenerationPhase: (phase: "generating" | "done" | "error" | null, text?: string, owner?: string) => void
+  appendSkillGenerationToken: (token: string, owner?: string) => void
 
   // Per-thread retry context — cached when the user accepts the intent banner so that
   // the retry button can replay the generation without re-running the full proposal flow.
   skillRetryContextByThread: Map<string, { context: unknown; intentMode: string }>
-  setSkillRetryContext: (retryContext: { context: unknown; intentMode: string } | null) => void
+  setSkillRetryContext: (retryContext: { context: unknown; intentMode: string } | null, owner?: string) => void
 
   // Evolution UI state — persists while switching customize submenus
   evolutionTab: EvolutionTab
@@ -1249,6 +1260,7 @@ interface AppState {
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   threads: [],
+  sideThreads: new Map(),
   currentThreadId: null,
   threadDirectoryHasMore: false,
   threadDirectoryLoadingMore: false,
@@ -1275,7 +1287,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
-  showDesignView: false,
   showHarnessBoardView: false,
   showClaudeCodeView: false,
   showDashboardView: false,
@@ -1422,15 +1433,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   touchThreadSummaries: (threadIds, updatedAt) => {
-    const uniqueIds = new Set(threadIds)
+    const uniqueIds = new Set<string>()
+    // A side run has no directory row and never needs a pagination fence.
+    for (const threadId of threadIds) {
+      if (!isBtwThreadId(threadId)) uniqueIds.add(threadId)
+    }
     if (uniqueIds.size === 0) return
-    for (const threadId of uniqueIds) markThreadDirectoryMutation(threadId)
     set((state) => {
       const indexById = getThreadDirectoryIndex(state.threads)
       let threads: Thread[] | null = null
       for (const threadId of uniqueIds) {
         const index = indexById.get(threadId)
         if (index === undefined) continue
+        markThreadDirectoryMutation(threadId)
         threads ??= [...state.threads]
         threads[index] = { ...threads[index], updated_at: updatedAt }
       }
@@ -1439,6 +1454,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addThreadSummary: (thread) => {
+    if (isBtwThreadId(thread.thread_id)) {
+      if (isThreadDeletionPending(thread.thread_id)) return
+      registerSideThreadSummary(thread)
+      return
+    }
     markThreadDirectoryMutation(thread.thread_id)
     set((state) => ({
       threads: adoptThreadDirectorySnapshot([
@@ -1465,7 +1485,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? {}
         : {
             showKanbanView: false,
-            showDesignView: false,
             showHarnessBoardView: false,
             showCustomizeView: false,
             showClaudeCodeView: false,
@@ -1525,7 +1544,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? {}
         : {
             showKanbanView: false,
-            showDesignView: false,
             showHarnessBoardView: false,
             showCustomizeView: false,
             showClaudeCodeView: false,
@@ -1558,8 +1576,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           ? undefined
           : { requireIdle: options?.requireIdle, groupGuard: options?.groupGuard }
       )
+      if (result?.deletionError !== undefined) {
+        for (const id of result.deletedSideThreadIds ?? []) retireRendererThread(id)
+        throw new Error(result.deletionError)
+      }
       console.log("[Store] Thread deleted from backend")
-      applyCommittedThreadDeletion(threadId, options?.deferDirectoryUpdate)
+      applyCommittedThreadDeletion(threadId, options?.deferDirectoryUpdate, result?.deletedSideThreadIds)
       if (result?.deletedWork) applyCommittedBotWorkDeletion(result.deletedWork)
     } catch (error) {
       rendererDeletingThreadIds.delete(threadId)
@@ -1572,8 +1594,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     const deletedIds = new Set(threadIds)
     if (deletedIds.size === 0) return
     set((state) => {
-      const threads = state.threads.filter((thread) => !deletedIds.has(thread.thread_id))
+      const touchesDirectory = [...deletedIds].some(id => !isBtwThreadId(id))
+      const threads = touchesDirectory ? state.threads.filter(thread => !deletedIds.has(thread.thread_id)) : state.threads
       const directoryChanged = threads.length !== state.threads.length
+      let sideThreads: Map<string, Thread> | undefined
+      for (const id of deletedIds) {
+        if (!state.sideThreads.has(id)) continue
+        sideThreads ??= new Map(state.sideThreads)
+        sideThreads.delete(id)
+      }
       const currentThreadDeleted =
         state.currentThreadId !== null && deletedIds.has(state.currentThreadId)
       const previousThreadDeleted =
@@ -1588,7 +1617,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         state.workflowAgentFocusView && deletedIds.has(state.workflowAgentFocusView.threadId)
       )
       if (
-        !directoryChanged &&
+        !directoryChanged && !sideThreads &&
         !currentThreadDeleted &&
         !previousThreadDeleted &&
         !workerFocusDeleted &&
@@ -1602,6 +1631,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return {
         ...(directoryChanged ? { threads: adoptThreadDirectorySnapshot(threads) } : {}),
+        ...(sideThreads ? { sideThreads } : {}),
         currentThreadId: currentThreadDeleted
           ? state.mainView === "harness"
             ? null
@@ -1623,6 +1653,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateThread: async (threadId: string, updates: Partial<Thread>) => {
     if (isThreadDeletionPending(threadId)) return
+    if (isBtwThreadId(threadId)) {
+      const updated = await window.api.threads.update(threadId, updates)
+      if (get().sideThreads.has(threadId)) get().addThreadSummary(updated)
+      return
+    }
     markThreadDirectoryMutation(threadId)
     const updated = await window.api.threads.update(threadId, updates)
     if (isThreadDeletionPending(threadId)) return
@@ -1636,6 +1671,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   patchThreadMetadata: async (threadId: string, patch: ThreadMetadataPatch) => {
+    if (isBtwThreadId(threadId)) {
+      if (isThreadDeletionPending(threadId)) return
+      const updated = await window.api.threads.patchMetadata(threadId, patch)
+      if (get().sideThreads.has(threadId)) get().addThreadSummary(updated)
+      return
+    }
     markThreadDirectoryMutation(threadId)
     const updated = await window.api.threads.patchMetadata(threadId, patch)
     set((state) => {
@@ -1758,35 +1799,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ rightPanelCollapsed: collapsed })
   },
 
-  requestOpenRightPanelSystemConstraints: (threadId: string) => {
+  requestOpenRightPanelSection: (threadId, target) => {
     set((state) => {
       const requestId = state.rightPanelWorkRequestSequence + 1
       return {
         rightPanelCollapsed: false,
         rightPanelWorkRequestSequence: requestId,
-        rightPanelWorkRequest: {
-          id: requestId,
-          target: "systemConstraints",
-          threadId
-        }
+        rightPanelWorkRequest: { id: requestId, target, threadId }
       }
     })
   },
 
-  requestOpenRightPanelAgents: (threadId: string) => {
-    set((state) => {
-      const requestId = state.rightPanelWorkRequestSequence + 1
-      return {
-        rightPanelCollapsed: false,
-        rightPanelWorkRequestSequence: requestId,
-        rightPanelWorkRequest: {
-          id: requestId,
-          target: "agents",
-          threadId
-        }
-      }
-    })
-  },
+  requestOpenRightPanelSystemConstraints: (threadId) => get().requestOpenRightPanelSection(threadId, "systemConstraints"),
+  requestOpenRightPanelAgents: (threadId) => get().requestOpenRightPanelSection(threadId, "agents"),
 
   consumeRightPanelWorkRequest: (requestId: number) => {
     set((state) =>
@@ -2262,7 +2287,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         showClaudeCodeView: true,
         showKanbanView: false,
-        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         showDashboardView: false,
@@ -2318,7 +2342,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: true,
         showClaudeCodeView: false,
         showKanbanView: false,
-        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         mainView: "dashboard",
@@ -2349,7 +2372,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       const prev = get().previousThreadId || get().currentThreadId
       set({
         showKanbanView: true,
-        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
@@ -2379,45 +2401,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ showSubagentsInKanban: show })
   },
 
-  setShowDesignView: (show) => {
-    if (show) {
-      const prev = get().previousThreadId || get().currentThreadId
-      set({
-        mainView: "design",
-        showDesignView: true,
-        showCustomizeView: false,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        rightPanelCollapsed: true,
-        previousThreadId: prev,
-        currentThreadId: null,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
-    } else {
-      const restored = get().previousThreadId
-      const chatThreadId = resolveChatThreadId(get().threads, restored)
-      set({
-        mainView: "thread",
-        showDesignView: false,
-        currentThreadId: chatThreadId,
-        previousThreadId: null
-      })
-    }
-  },
-
   // Harness board actions
   setShowHarnessBoardView: (show: boolean) => {
     if (show) {
       const prev = get().previousThreadId || get().currentThreadId
       set({
         showHarnessBoardView: true,
-        showDesignView: false,
         showKanbanView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
@@ -2501,7 +2490,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "kanban",
         showKanbanView: true,
-        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
@@ -2526,33 +2514,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       return
     }
 
-    if (view === "design") {
-      const prev = get().previousThreadId || get().currentThreadId
-      set({
-        mainView: "design",
-        showDesignView: true,
-        showCustomizeView: false,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        previousThreadId: prev,
-        currentThreadId: null,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
-      return
-    }
     if (view === "dashboard") {
       if (get().dashboardAllowed !== true) return
       const prev = get().previousThreadId || get().currentThreadId
       set({
         mainView: "dashboard",
         showDashboardView: true,
-        showDesignView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showHarnessBoardView: false,
@@ -2573,7 +2540,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "claudecode",
         showClaudeCodeView: true,
-        showDesignView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showHarnessBoardView: false,
@@ -2594,7 +2560,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "harness",
         showHarnessBoardView: true,
-        showDesignView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showClaudeCodeView: false,
@@ -2616,7 +2581,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       mainView: "thread",
       showCustomizeView: false,
       showKanbanView: false,
-      showDesignView: false,
       showHarnessBoardView: false,
       showClaudeCodeView: false,
       showDashboardView: false,
@@ -2637,32 +2601,31 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Per-thread skill generation state — keyed by threadId.
   skillGenerationByThread: new Map(),
 
-  setSkillGenerationPhase: (phase, text = "") =>
+  setSkillGenerationPhase: (phase, text = "", owner) =>
     set((state) => {
-      const threadId = state.currentThreadId
-      if (!threadId) return {}
-      const next = new Map(state.skillGenerationByThread)
+      const threadId = owner ?? state.currentThreadId
+      if (!threadId || (phase !== null && isThreadRetired(threadId))) return state
       if (phase === null) {
+        if (!state.skillGenerationByThread.has(threadId) && !state.skillRetryContextByThread.has(threadId)) return state
+        const next = new Map(state.skillGenerationByThread)
         next.delete(threadId)
         // Also clear the retry context when the card is dismissed
         const retryNext = new Map(state.skillRetryContextByThread)
         retryNext.delete(threadId)
         return { skillGenerationByThread: next, skillRetryContextByThread: retryNext }
-      } else if (phase === "error") {
-        next.set(threadId, { phase: "error", streamedText: "", errorText: text })
-      } else {
-        next.set(threadId, { phase, streamedText: "", errorText: "" })
       }
+      const next = new Map(state.skillGenerationByThread)
+      next.set(threadId, { phase, streamedText: "", errorText: phase === "error" ? text : "" })
       return { skillGenerationByThread: next }
     }),
 
   // Per-thread retry context — cached on intent accept, cleared on dismiss.
   skillRetryContextByThread: new Map(),
 
-  setSkillRetryContext: (retryContext) =>
+  setSkillRetryContext: (retryContext, owner) =>
     set((state) => {
-      const threadId = state.currentThreadId
-      if (!threadId) return {}
+      const threadId = owner ?? state.currentThreadId
+      if (!threadId || isThreadRetired(threadId)) return state
       const next = new Map(state.skillRetryContextByThread)
       if (retryContext) {
         next.set(threadId, retryContext)
@@ -2672,10 +2635,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { skillRetryContextByThread: next }
     }),
 
-  appendSkillGenerationToken: (token) =>
+  appendSkillGenerationToken: (token, owner) =>
     set((state) => {
-      const threadId = state.currentThreadId
-      if (!threadId) return {}
+      const threadId = owner ?? state.currentThreadId
+      if (!threadId || isThreadRetired(threadId)) return state
       const current = state.skillGenerationByThread.get(threadId) ?? {
         phase: "generating" as const,
         streamedText: "",
@@ -2771,6 +2734,17 @@ export function selectSkillRetryContext(
 ): { context: unknown; intentMode: string } | null {
   if (!threadId) return null
   return state.skillRetryContextByThread.get(threadId) ?? null
+}
+
+/** Only an acknowledged side-tab creation or a still-open tab may admit a new ID. */
+export function registerSideThreadSummary(thread: Thread): void {
+  useAppStore.setState(state => ({ sideThreads: new Map(state.sideThreads).set(thread.thread_id, thread) }))
+}
+
+export function selectThreadSummary(state: Pick<AppState, "threads" | "sideThreads">, threadId: string): Thread | undefined {
+  if (isBtwThreadId(threadId)) return state.sideThreads.get(threadId)
+  const index = getThreadDirectoryIndex(state.threads).get(threadId)
+  return index === undefined ? undefined : state.threads[index]
 }
 
 export function adoptThreadSearchSummary(thread: Thread, identity: ThreadIncarnationSnapshot): boolean {

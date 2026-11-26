@@ -42,7 +42,7 @@ export interface McpCapabilityService {
   listTools(): Promise<McpCapabilityTool[]>
   getSnapshot?(): Promise<{ fingerprint: string; tools: McpCapabilityTool[] }>
   getTool(idOrAlias: string): Promise<McpCapabilityTool | null>
-  invoke(idOrAlias: string, args: Record<string, unknown>): Promise<McpInvocationResult>
+  invoke(idOrAlias: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpInvocationResult>
   invalidate(reason?: string): Promise<void>
   close(): Promise<void>
 }

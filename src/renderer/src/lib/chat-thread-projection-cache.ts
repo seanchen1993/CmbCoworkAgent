@@ -1,6 +1,6 @@
 import type { Message } from "@/types"
 import type { HookLogBucket } from "@/lib/thread-context"
-import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import { createChatMessageProjector, createChatReplayAliasProjector } from "@/lib/chat-message-projection"
 import {
   createDynamicLiveVisibilityProjector,
   createLiveDisplayMessageProjector
@@ -23,6 +23,7 @@ export interface StableMessageIndexProjection {
 export interface ChatThreadProjectionRuntime {
   projectLiveDisplayMessages: ReturnType<typeof createLiveDisplayMessageProjector>
   chatMessageProjectors: WeakMap<Message[], ReturnType<typeof createChatMessageProjector>>
+  projectReplayAliases: ReturnType<typeof createChatReplayAliasProjector>
   projectChatScrollQuestionRevision: ReturnType<
     typeof createChatScrollQuestionRevisionProjector
   >
@@ -119,6 +120,7 @@ function createChatThreadProjectionRuntime(): ChatThreadProjectionRuntime {
   return {
     projectLiveDisplayMessages: createLiveDisplayMessageProjector(),
     chatMessageProjectors: new WeakMap(),
+    projectReplayAliases: createChatReplayAliasProjector(),
     projectChatScrollQuestionRevision: createChatScrollQuestionRevisionProjector(),
     projectDynamicLiveVisibility: createDynamicLiveVisibilityProjector(),
     projectToolDerivationMessages: createIncrementalToolDerivationProjector(),

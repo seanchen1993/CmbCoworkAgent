@@ -67,10 +67,10 @@ describe("ManagedRunStore", () => {
     expect(store.listEvents(run).events[0].endReason).toEqual(endReason)
   })
 
-  it("persists the model selection and accepts older snapshots without it", () => {
+  it.each(["ultra", "idle-ultra"] as const)("persists model choice %s and accepts older snapshots", (selection) => {
     const store = makeStore()
-    const run = store.createRun("project-1", "feature-1", "/workspace", "ultra")
-    expect(store.getRun(run).snapshot?.modelSelection).toBe("ultra")
+    const run = store.createRun("project-1", "feature-1", "/workspace", selection)
+    expect(store.getRun(run).snapshot?.modelSelection).toBe(selection)
     const oldSnapshot = { ...run }
     delete oldSnapshot.modelSelection
     writeFileSync(runPath(store, run.runId), JSON.stringify(oldSnapshot))

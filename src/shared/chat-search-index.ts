@@ -11,6 +11,7 @@ import {
   type MarkdownSearchSpan
 } from "./markdown-visible-text"
 import { getSystemNoticePresentation, parseGoalNoticeText } from "./goal-notice-presentation"
+import { splitBotInlineReasoning } from "./bots/inline-reasoning"
 import { stripThinkBlocksForDisplay } from "./think-block-display"
 import { cleanUserAttachmentContentForDisplay } from "./user-attachment-display"
 import { THREAD_SEARCH_QUERY_LIMIT } from "./thread-search-types"
@@ -64,7 +65,7 @@ function projectChatSearchSegments(
   const joined = joinSearchSourceSegments(plan)
   if (plan.role === "user" && joined.filter((source) => source.kind === "body").length > 1) {
     const body = joined.filter((source) => source.kind === "body")
-    const text = projectChatSearchUserBlocks(body.map((source) => source.raw))
+    const text = projectChatSearchUserBlocks(body.map((source) => source.raw), Boolean(plan.sideUserContent))
     const summary = projectChatSearchPlan(
       {
         ...plan,
@@ -87,7 +88,10 @@ function projectChatSearchSegments(
   }
   const projected = joined.flatMap<ProjectedChatSearchSegment>(({ raw, ...source }) => {
     if (source.stripThink && source.kind === "body") {
-      const visiblePlan = createChatSearchPlan(plan.role, stripThinkBlocksForDisplay(raw))
+      const body = source.stripThink === "leading"
+        ? splitBotInlineReasoning(raw).body
+        : stripThinkBlocksForDisplay(raw)
+      const visiblePlan = createChatSearchPlan(plan.role, body)
       const segments = projectChatSearchPlan(visiblePlan, deferRevision).map((segment) => ({
         ...segment,
         blockIndex: source.blockIndex
@@ -101,7 +105,10 @@ function projectChatSearchSegments(
         : raw
     const projection: MarkdownSearchProjection = source.kind === "summary"
       ? { text: raw, truncated: false }
-      : projectChatSearchFragment(plan.role, visible, source.sourceLength > MAX_STREAMING_MARKDOWN_RENDER_CHARS)
+      : projectChatSearchFragment(plan.role, visible, {
+        trackSource: source.sourceLength > MAX_STREAMING_MARKDOWN_RENDER_CHARS,
+        sideUserContent: plan.sideUserContent
+      })
     const { text, truncated, sourceSpans } = projection
     plan.truncated ||= truncated
     return { ...source, text, ...(sourceSpans ? { sourceSpans } : {}),

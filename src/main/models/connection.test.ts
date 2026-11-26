@@ -9,6 +9,7 @@ vi.mock("../storage", () => ({ getUserInfo: () => ({ sapId: state.sapId }) }))
 const config = {
   baseUrl: "http://idle.example.test/pattern/llm/v1",
   apiKey: "gateway-test-key",
+  model: "pro",
   transport: "idle-gateway" as const
 }
 
@@ -29,7 +30,7 @@ function jsonReply() {
 beforeEach(() => {
   state.sapId = "12345678"
   vi.useFakeTimers({ toFake: ["Date"] })
-  vi.setSystemTime(new Date("2026-11-04T12:00:00+08:00"))
+  vi.setSystemTime(new Date("2026-11-04T06:30:00+08:00"))
 })
 
 afterEach(() => {
@@ -38,21 +39,50 @@ afterEach(() => {
 })
 
 describe("idle gateway OpenAI transport", () => {
-  it("allows a reused connection across the former service boundaries", async () => {
-    const send = vi.fn(async () => jsonReply())
+  it("rechecks a reused production Ultra connection at closing and reopening", async () => {
+    const send = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body)).model).toBe("ultra")
+      return jsonReply()
+    })
     const model = new ChatOpenAI({
       model: "pro",
       apiKey: config.apiKey,
-      ...getModelClientOptions(config, { sessionId: "same-thread", fetch: send })
+      ...getModelClientOptions({ ...config, model: "ultra" }, { sessionId: "same-thread", fetch: send })
     })
-    for (const hour of ["06", "07", "12", "22"]) {
+    await expect(model.invoke("before closing")).resolves.toBeDefined()
+    vi.setSystemTime(new Date("2026-11-04T07:00:00+08:00"))
+    await expect(model.invoke("next tool round")).rejects.toMatchObject({
+      status: 400,
+      code: "idle_model_outside_service_hours"
+    })
+    expect(send).toHaveBeenCalledTimes(1)
+    vi.setSystemTime(new Date("2026-11-04T22:00:00+08:00"))
+    await expect(model.invoke("after reopening")).resolves.toBeDefined()
+    expect(send).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    { mode: "pro", environment: "production" },
+    { mode: "ultra", environment: "uat" }
+  ] as const)("allows $environment $mode tool rounds throughout the Ultra closure", async ({ mode, environment }) => {
+    const send = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body)).model).toBe(mode)
+      return jsonReply()
+    })
+    const model = new ChatOpenAI({
+      model: "pro",
+      apiKey: config.apiKey,
+      ...getModelClientOptions({ ...config, model: mode, idleModelEnvironment: environment }, { fetch: send })
+    })
+    for (const hour of ["07", "12", "21"]) {
       vi.setSystemTime(new Date(`2026-11-04T${hour}:00:00+08:00`))
       await expect(model.invoke("next tool round")).resolves.toBeDefined()
     }
-    expect(send).toHaveBeenCalledTimes(4)
+    expect(send).toHaveBeenCalledTimes(3)
   })
 
-  it("sends Pro, employee identity and gateway key with stable per-thread sessions", async () => {
+  it.each(["12345678", "IT123456", "ABCDEFGH", "IT-12345"])("forwards SAP ID %s", async (sapId) => {
+    state.sapId = ` ${sapId} `
     const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = []
     const send = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       requests.push({
@@ -82,7 +112,7 @@ describe("idle gateway OpenAI transport", () => {
     ])
     expect(new Set(requests.map((item) => item.headers.get("x-request-id"))).size).toBe(3)
     for (const { headers } of requests) {
-      expect(headers.get("x-spaid")).toBe("12345678")
+      expect(headers.get("x-spaid")).toBe(sapId)
       expect(headers.get("x-gateway-key")).toBe(config.apiKey)
       expect(headers.has("authorization")).toBe(false)
     }
@@ -149,7 +179,7 @@ describe("idle gateway OpenAI transport", () => {
     expect(sessionIds[2]).not.toBe(sessionIds[0])
   })
 
-  it.each([undefined, "", "123456", "abcdefgh"])(
+  it.each([undefined, "", "ABCDEFG", "ABCDEFGHI"])(
     "blocks missing or invalid SAP identity %s before sending",
     (sapId) => {
       state.sapId = sapId

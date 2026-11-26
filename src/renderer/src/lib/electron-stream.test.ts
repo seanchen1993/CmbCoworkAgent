@@ -56,6 +56,48 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
+  it.each([false, true])("only acknowledges admitted user prompts (accepted=%s)", async accepted => {
+    const receipt = vi.fn()
+    const stream = createElectronStream({
+      threadId: "test",
+      transport: {
+        async stream() {
+          return (async function* () {
+            if (accepted) yield { event: "custom", data: { type: "user_prompt_accepted", workspacePath: "/project" } }
+            else yield { event: "error", data: { error: "WORKSPACE_REQUIRED" } }
+          })()
+        }
+      }
+    })
+    await stream.submit(null, { onPromptAccepted: receipt })
+    expect(receipt).toHaveBeenCalledTimes(accepted ? 1 : 0)
+    if (accepted) expect(receipt).toHaveBeenCalledWith("/project")
+  })
+
+  it("revises authoritative interior order while leaving token deltas at the same order revision", async () => {
+    const revisions: number[] = []
+    const first = [ai("start", ""), ai("a", "A"), ai("b", "B"), ai("end", "")]
+    const second = [first[0], first[2], first[1], first[3]]
+    const transport: UseStreamTransport = {
+      async stream() {
+        return (async function* () {
+          yield values(first)
+          revisions.push(stream.messageOrderRevision)
+          yield chunk(ai("end", "more"))
+          revisions.push(stream.messageOrderRevision)
+          yield values(second)
+          revisions.push(stream.messageOrderRevision)
+          yield values(second.map((message) => ({ ...message })))
+          revisions.push(stream.messageOrderRevision)
+        })()
+      }
+    }
+    const stream = createElectronStream({ transport, threadId: "order" })
+    await stream.submit(null)
+    expect(revisions).toEqual([2, 2, 3, 3])
+    expect(stream.messages.map(({ id }) => id)).toEqual(["start", "b", "a", "end"])
+  })
+
   it.each(["values", "messages", "authoritative snapshot"] as const)(
     "clears the completion retry on the first visible reply delivered as %s",
     async (mode) => {

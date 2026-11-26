@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react"
 import { create } from "zustand"
 import type { ModelConfig } from "../../src/renderer/src/types"
+import { isBtwThreadId } from "../../src/shared/btw-chat"
 
 export const localModels: ModelConfig[] = [
   {
@@ -24,11 +25,18 @@ export const localModels: ModelConfig[] = [
 ]
 
 type Metadata = Record<string, unknown>
+type ThreadSummary = { thread_id: string; metadata: Metadata }
 export const useAppStore = create(() => ({
   models: localModels,
-  threads: [{ thread_id: "imported", metadata: {} as Metadata }],
+  threads: [] as ThreadSummary[],
+  sideThreads: new Map<string, ThreadSummary>(),
   loadModels: async () => {}
 }))
+export function selectThreadSummary(state: ReturnType<typeof useAppStore.getState>, threadId: string) {
+  return isBtwThreadId(threadId)
+    ? state.sideThreads.get(threadId)
+    : state.threads.find(thread => thread.thread_id === threadId)
+}
 const listeners = new Set<() => void>()
 let currentModel = ""
 let catalog: { routingMode: "auto" | "pinned"; defaultModelId: string } | null = null
@@ -77,8 +85,13 @@ export function useThreadStateSelector<T>(
 }
 export const CustomModelDialog = () => null
 
-export function setMetadata(metadata: Metadata): void {
-  useAppStore.setState({ threads: [{ thread_id: "imported", metadata }] })
+export function setMetadata(metadata: Metadata, threadId = "imported"): void {
+  const thread = { thread_id: threadId, metadata }
+  const side = isBtwThreadId(threadId)
+  useAppStore.setState({
+    threads: side ? [] : [thread],
+    sideThreads: side ? new Map([[threadId, thread]]) : new Map()
+  })
 }
 export function setModels(
   models: ModelConfig[],
@@ -93,12 +106,13 @@ export function reset(
   metadata: Metadata,
   ready = true,
   initialModel = "",
-  routingMode: "auto" | "pinned" = "pinned"
+  routingMode: "auto" | "pinned" = "pinned",
+  threadId = "imported"
 ): void {
   writes.length = 0
   routingWrites.length = 0
   currentModel = initialModel
-  setMetadata(metadata)
+  setMetadata(metadata, threadId)
   setModels(ready ? localModels : [], ready, routingMode)
 }
 export const readSelection = () => ({ currentModel, writes: [...writes] })

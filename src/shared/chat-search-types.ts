@@ -1,5 +1,5 @@
 export interface ChatSearchSourceSegment {
-  stripThink?: boolean
+  stripThink?: true | "leading"
   kind: "body" | "summary"
   blockIndex: number
   start: number
@@ -10,6 +10,7 @@ export interface ChatSearchSourceSegment {
 
 export interface ChatSearchPlan {
   role: string
+  sideUserContent?: "text" | "blocks"
   stripThink?: boolean
   cleanAttachments?: boolean
   segments: ChatSearchSourceSegment[]
@@ -56,6 +57,7 @@ export function areChatSearchPlansEqual(
   return Boolean(
     left &&
     left.role === right.role &&
+    left.sideUserContent === right.sideUserContent &&
     left.stripThink === right.stripThink &&
     left.cleanAttachments === right.cleanAttachments &&
     left.segments.length === right.segments.length &&
