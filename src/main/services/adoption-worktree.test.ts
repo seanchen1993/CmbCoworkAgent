@@ -11,12 +11,16 @@ import {
   flushAdoptionIndex,
   setAdoptionIndexSnapshotFsyncForTest,
   listDueGenerationRepoChecks,
+  rememberAdoptionPush,
   trimGeneratedSourceTextToByteCap
 } from "./adoption-index"
 import {
   flushAdoptionEventOutbox,
   hasPendingGenerationsForCommit,
   initializeAdoptionTracker,
+  readLocalCommitAdoptionLines,
+  getCommitMeasurementStatus,
+  wasEmptyTransferProbe,
   measureForCommit,
   recordGen,
   retryGenerationRepoChecks,
@@ -275,4 +279,270 @@ it("limits failed background retries and restores a multi-batch backlog when the
   const gens = report.mock.calls.map(([e]) => e).filter((e) => e.eventName === "code_gen")
   expect(gens).toHaveLength(25)
   expect(new Set(gens.map((e) => e.eventId)).size).toBe(25)
+})
+
+async function createTransferFixture() {
+  const main = await registeredRepo()
+  git(["-C", main, "config", "user.name", "fixture"])
+  git(["-C", main, "config", "user.email", "fixture@example.invalid"])
+  git(["-C", main, "commit", "--allow-empty", "-qm", "base"])
+  const base = git(["-C", main, "rev-parse", "HEAD"])
+  const linked = (name: string, from = base) => {
+    const root = join(fixture.root, name)
+    git(["-C", main, "worktree", "add", "--detach", "-q", root, from])
+    return root
+  }
+  expect(await initializeAdoptionTracker()).toBe(true)
+  const commit = async (root: string, lines: string[], generate?: string[]) => {
+    const absPath = join(root, "sample.py")
+    const content = lines.join("\n") + "\n"
+    await writeFile(absPath, content)
+    if (generate) {
+      recordGen({
+        tool: "write_file",
+        threadId: "transfer",
+        filePath: absPath,
+        workspacePath: root,
+        generatedContent: generate.join("\n") + "\n"
+      })
+      await waitForAdoptionRecordGenIdleForTest()
+    }
+    git(["-C", root, "add", "sample.py"])
+    git(["-C", root, "commit", "-qm", "sample " + root])
+    const sha = git(["-C", root, "rev-parse", "HEAD"])
+    const snap = [{ absPath, stagedContent: Buffer.from(content) }]
+    const time = Number(git(["-C", root, "show", "-s", "--format=%ct", sha])) * 1000
+    await getCommitMeasurementStatus(root, sha)
+    const pending = hasPendingGenerationsForCommit(snap, time, root)
+    const measurementSnapshots = generate ? snap : [{ absPath, stagedContent: undefined }]
+    expect(await measureForCommit(measurementSnapshots, sha, time, root)).toBe(true)
+    await flushAdoptionEventOutbox()
+    return { sha, snap, time, pending }
+  }
+  const events = () => [
+    ...new Map(report.mock.calls.map(([event]) => [event.eventId, event])).values()
+  ]
+  const byCommit = (sha: string, name: string) =>
+    events().filter((e) => e.eventName === name && e.properties?.commitSha === sha)
+  return { main, linked, commit, events, byCommit }
+}
+
+it("moves only the 50 independently added lines out of 80, persists the correction and keeps push attribution per SHA", async () => {
+  const { main, linked, commit, events, byCommit } = await createTransferFixture()
+  const lines = Array.from({ length: 80 }, (_, i) => `result_${i} = transform_${i}(payload)`)
+  const source = linked("task")
+  const a = await commit(source, lines, lines)
+  const original = byCommit(a.sha, "code_adopt")[0]
+  expect(original.properties?.adoptedLineCount).toBe(80)
+  rememberAdoptionPush([a.sha], {
+    pushOperationId: "push-a",
+    pushedAt: new Date().toISOString(),
+    remoteUrl: "origin",
+    repositoryHost: "h",
+    repositoryName: "r",
+    repositoryFullName: "g/r",
+    repositoryWebUrl: "https://h/g/r",
+    commitUrlTemplate: "https://h/g/r/commit/{sha}"
+  })
+  shutdownAdoptionTracker()
+  expect(await initializeAdoptionTracker()).toBe(true)
+  git(["-C", main, "worktree", "remove", source])
+  const b = await commit(main, lines.slice(0, 50))
+  expect(b.pending).toBe(true)
+  expect(wasEmptyTransferProbe(main, b.sha)).toBe(false)
+  expect(await measureForCommit(b.snap, b.sha, b.time, main)).toBe(true)
+  await flushAdoptionEventOutbox()
+  expect(events().filter((e) => e.eventName === "code_gen")).toHaveLength(1)
+  for (const [sha, count, ranges] of [
+    [a.sha, 30, ["51-80"]],
+    [b.sha, 50, ["1-50"]]
+  ] as const) {
+    const rows = byCommit(sha, "code_adopt")
+    expect(rows).toHaveLength(1)
+    expect(rows[0].properties).toMatchObject({
+      adoptedLineCount: count,
+      effectiveGeneratedLineCount: count,
+      generatedLineCount: count
+    })
+    const files = byCommit(sha, "code_commit_file")
+    expect(files).toHaveLength(1)
+    expect(files[0].properties).toMatchObject({
+      agentLineCount: count,
+      agentLineRanges: ranges,
+      fileDeleted: false
+    })
+    const [detail] = await readLocalCommitAdoptionLines(sha, [
+      String(original.properties?.genEventId)
+    ])
+    expect(detail).toMatchObject({
+      available: true,
+      matchedLineCount: count,
+      generatedLineCount: count
+    })
+  }
+  expect(byCommit(a.sha, "code_adopt")[0]).toMatchObject({
+    eventId: original.eventId,
+    properties: { pushed: true, commitUrl: `https://h/g/r/commit/${a.sha}` }
+  })
+  expect(byCommit(b.sha, "code_adopt")[0].properties?.pushed).toBeUndefined()
+  // A later commit retains the first 50 unchanged and adds the remaining 30.
+  // It must only receive the new 30, even when the source has since disappeared.
+  const later = await commit(main, lines)
+  expect(byCommit(later.sha, "code_adopt")[0].properties?.adoptedLineCount).toBe(30)
+  expect(byCommit(b.sha, "code_adopt")[0].properties?.adoptedLineCount).toBe(50)
+  expect(byCommit(a.sha, "code_adopt")[0].properties?.adoptedLineCount).toBe(0)
+  expect(
+    (await readLocalCommitAdoptionLines(a.sha, [String(original.properties?.genEventId)]))[0]
+      .matchedLineCount
+  ).toBe(0)
+})
+
+it("keeps inherited lines with the ancestor and rejects multiple possible source worktrees", async () => {
+  const { main, linked, commit, byCommit } = await createTransferFixture()
+  const lines = [
+    "keep_one = transform_one()",
+    "keep_two = transform_two()",
+    "keep_three = transform_three()"
+  ]
+  const a = await commit(linked("source"), lines, lines)
+  // A normal checkout based on A inherits all three lines, even if it later
+  // deletes and independently reintroduces them in a new diff.
+  const child = linked("child", a.sha)
+  await commit(child, ["unrelated_value = 42"])
+  const inherited = await commit(child, lines)
+  expect(wasEmptyTransferProbe(child, inherited.sha)).toBe(true)
+  expect(byCommit(inherited.sha, "code_adopt")).toEqual([])
+  const other = await commit(linked("other"), lines, lines)
+  const b = await commit(main, lines)
+  expect(byCommit(b.sha, "code_adopt")).toEqual([])
+  expect(wasEmptyTransferProbe(main, b.sha)).toBe(true)
+  for (const sha of [a.sha, other.sha])
+    expect(byCommit(sha, "code_adopt")[0].properties?.adoptedLineCount).toBe(3)
+})
+
+it("gives a receiver's own generation priority and never claims the same physical lines twice", async () => {
+  const { main, linked, commit, byCommit } = await createTransferFixture()
+  const lines = [
+    "first_value = first()",
+    "second_value = second()",
+    "third_value = third()",
+    "fourth_value = fourth()"
+  ]
+  const a = await commit(linked("source"), lines, lines)
+  const b = await commit(main, lines, lines.slice(2))
+  expect(byCommit(a.sha, "code_adopt")[0].properties?.adoptedLineCount).toBe(2)
+  expect(byCommit(b.sha, "code_adopt").map((e) => e.properties?.adoptedLineCount)).toEqual([2, 2])
+  expect(byCommit(b.sha, "code_commit_file")[0].properties).toMatchObject({
+    agentLineCount: 4,
+    agentLineRanges: ["1-4"]
+  })
+})
+
+it("ignores an identical file in a separate repository and a merge importing A as its second parent", async () => {
+  const { main, linked, commit, byCommit } = await createTransferFixture()
+  const lines = ["ledger_value = read_ledger()", "return_value = format_ledger(ledger_value)"]
+  const a = await commit(linked("source"), lines, lines)
+  const unrelated = join(fixture.root, "separate")
+  git(["clone", "-q", main, unrelated])
+  git(["-C", unrelated, "config", "user.name", "fixture"])
+  git(["-C", unrelated, "config", "user.email", "fixture@example.invalid"])
+  const copy = await commit(unrelated, lines)
+  expect(copy.pending).toBe(false)
+  expect(byCommit(copy.sha, "code_adopt")).toHaveLength(0)
+  git(["-C", main, "merge", "--no-ff", "-qm", "merge source", a.sha])
+  const merge = git(["-C", main, "rev-parse", "HEAD"])
+  const snapshots = [
+    { absPath: join(main, "sample.py"), stagedContent: Buffer.from(lines.join("\n") + "\n") }
+  ]
+  expect(await measureForCommit(snapshots, merge, undefined, main)).toBe(true)
+  await flushAdoptionEventOutbox()
+  expect(byCommit(merge, "code_adopt")).toHaveLength(0)
+  expect(byCommit(a.sha, "code_adopt")[0].properties?.adoptedLineCount).toBe(2)
+})
+
+it("locates repeated statements by unique adjacent lines but leaves isolated or edited lines at A", async () => {
+  const { main, linked, commit, byCommit } = await createTransferFixture()
+  const lines = [
+    "if read_primary():",
+    "    return done",
+    "if read_secondary():",
+    "    return done",
+    "isolated_value = 123"
+  ]
+  const a = await commit(linked("source"), lines, lines)
+  const b = await commit(main, [...lines.slice(0, 4), "edited_value = 999", "isolated_value = 123"])
+  expect(byCommit(b.sha, "code_commit_file")[0].properties).toMatchObject({
+    agentLineCount: 4,
+    agentLineRanges: ["1-4"]
+  })
+  expect(byCommit(a.sha, "code_commit_file")[0].properties).toMatchObject({
+    agentLineCount: 1,
+    agentLineRanges: ["5-5"]
+  })
+})
+
+it("does not transfer a pair of common imports without a distinctive code anchor", async () => {
+  const { main, linked, commit, byCommit } = await createTransferFixture()
+  const imports = ["import os", "import sys"]
+  const a = await commit(linked("source"), imports, imports)
+  const b = await commit(main, imports)
+  expect(byCommit(b.sha, "code_adopt")).toHaveLength(0)
+  expect(byCommit(a.sha, "code_adopt")[0].properties?.adoptedLineCount).toBe(2)
+})
+
+it("handles a multi-file transfer with one patch, one ancestry check and no per-file Git blob reads", async () => {
+  const { main, linked, byCommit } = await createTransferFixture()
+  const source = linked("batch")
+  const names = Array.from({ length: 12 }, (_, i) => `batch_${i}.py`)
+  const snapshots = await Promise.all(
+    names.map(async (name, i) => {
+      const content = `batch_${i} = calculate_${i}()\noutput_${i} = format_result(batch_${i})\n`
+      const absPath = join(source, name)
+      await Promise.all([writeFile(absPath, content), writeFile(join(main, name), content)])
+      recordGen({
+        tool: "write_file",
+        threadId: "batch",
+        workspacePath: source,
+        filePath: absPath,
+        generatedContent: content
+      })
+      return { absPath, stagedContent: Buffer.from(content) }
+    })
+  )
+  await waitForAdoptionRecordGenIdleForTest()
+  for (const [root, subject] of [
+    [source, "source"],
+    [main, "receiver"]
+  ]) {
+    git(["-C", root, "add", "."])
+    git(["-C", root, "commit", "-qm", subject])
+  }
+  const a = git(["-C", source, "rev-parse", "HEAD"])
+  const b = git(["-C", main, "rev-parse", "HEAD"])
+  expect(await measureForCommit(snapshots, a, undefined, source)).toBe(true)
+  for (let batch = 0; batch < 3; batch++) await flushAdoptionEventOutbox()
+  const trace = join(fixture.root, "transfer-git-processes.jsonl")
+  vi.stubEnv("GIT_TRACE2_EVENT", trace)
+  expect(
+    await measureForCommit(
+      names.map((name) => ({ absPath: join(main, name), stagedContent: undefined })),
+      b,
+      undefined,
+      main
+    )
+  ).toBe(true)
+  for (let batch = 0; batch < 3; batch++) await flushAdoptionEventOutbox()
+  const starts = (await readFile(trace, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((e) => e.event === "start")
+    .map((e) => e.argv as string[])
+  expect(starts.filter((args) => args.includes("diff-tree"))).toHaveLength(1)
+  expect(starts.filter((args) => args.includes("merge-base"))).toHaveLength(1)
+  expect(
+    starts.filter((args) => args.includes("show") && args.some((arg) => arg.startsWith(b + ":")))
+  ).toEqual([])
+  expect(byCommit(b, "code_adopt")).toHaveLength(names.length)
+  expect(byCommit(a, "code_adopt").every((e) => e.properties?.adoptedLineCount === 0)).toBe(true)
 })

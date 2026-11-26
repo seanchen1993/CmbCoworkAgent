@@ -29,6 +29,9 @@ export const MAX_AGENT_LINE_RANGES = 5000
 export interface CommitFileDiff {
   /** New-side line ranges the commit added, 1-based and inclusive, ascending. */
   addedRanges: Array<[number, number]>
+  /** Exact added text, collected only for worktree ownership matching. */
+  addedText?: Map<number, string>
+  removedText?: Set<string>
   addedLineCount: number
   deletedLineCount: number
   /** git printed "Binary files … differ": the diff carries no line information. */
@@ -116,13 +119,19 @@ function parseHeaderPath(rest: string, prefix: "a/" | "b/"): string | null {
  * (the old path for a deleted file). Content lines are skipped by count, so code
  * that happens to look like a header is never misread.
  */
-export function parseUnifiedZeroDiff(output: string): Map<string, CommitFileDiff> {
+export function parseUnifiedZeroDiff(
+  output: string,
+  collectText: boolean | ReadonlySet<string> = false
+): Map<string, CommitFileDiff> {
   const files = new Map<string, CommitFileDiff>()
   let current: CommitFileDiff | null = null
   let oldPath: string | null = null
   let newPath: string | null = null
   let pendingOld = 0
   let pendingNew = 0
+  let newLine = 0
+  let capture = false
+  let textLinesRemaining = 80_000
 
   const finish = (): void => {
     const key = newPath ?? oldPath
@@ -136,10 +145,18 @@ export function parseUnifiedZeroDiff(output: string): Map<string, CommitFileDiff
     if (pendingOld > 0 || pendingNew > 0) {
       if (line.startsWith("\\")) continue
       if (line.startsWith("-") && pendingOld > 0) {
+        if (capture && current) {
+          current.removedText ??= new Set()
+          current.removedText.add(line.slice(1).replace(/\r$/, ""))
+        }
         pendingOld--
         continue
       }
       if (line.startsWith("+") && pendingNew > 0) {
+        if (capture && current) {
+          current.addedText ??= new Map()
+          current.addedText.set(newLine++, line.slice(1).replace(/\r$/, ""))
+        }
         pendingNew--
         continue
       }
@@ -173,6 +190,20 @@ export function parseUnifiedZeroDiff(output: string): Map<string, CommitFileDiff
         const oldCount = hunk[2] === undefined ? 1 : Number(hunk[2])
         const newStart = Number(hunk[3])
         const newCount = hunk[4] === undefined ? 1 : Number(hunk[4])
+        const path = newPath ?? oldPath
+        capture =
+          !!path &&
+          (collectText === true || (collectText !== false && collectText.has(path))) &&
+          current.addedLineCount + current.deletedLineCount + newCount + oldCount <= 20_000 &&
+          oldCount + newCount <= textLinesRemaining
+        // Once a file overflowed, a later small hunk must not reopen partial evidence.
+        if (capture) textLinesRemaining -= oldCount + newCount
+        else if (collectText) {
+          if (oldCount + newCount > textLinesRemaining) textLinesRemaining = 0
+          delete current.addedText
+          delete current.removedText
+        }
+        newLine = newStart
         if (newCount > 0) current.addedRanges.push([newStart, newStart + newCount - 1])
         current.addedLineCount += newCount
         current.deletedLineCount += oldCount
@@ -206,6 +237,7 @@ function isFatalGitError(error: unknown): boolean {
 export async function readCommitFileDiffs(args: {
   cwd: string
   commitSha: string
+  collectText?: boolean
   relPaths: readonly string[]
 }): Promise<Map<string, CommitFileDiff> | null> {
   const pathspecs = args.relPaths.length <= MAX_DIFF_PATHSPECS ? ["--", ...args.relPaths] : []
@@ -231,7 +263,7 @@ export async function readCommitFileDiffs(args: {
       maxBuffer: DIFF_MAX_BUFFER_BYTES,
       windowsHide: true
     })
-    return parseUnifiedZeroDiff(stdout)
+    return parseUnifiedZeroDiff(stdout, args.collectText ? new Set(args.relPaths) : false)
   }
 
   try {

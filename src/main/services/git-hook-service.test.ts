@@ -43,6 +43,8 @@ vi.mock("../storage", () => ({
   getOpenworkDir: () => openworkDir
 }))
 vi.mock("./adoption-tracker", () => ({
+  getWorktreeTransferPathsForCommit: vi.fn(() => new Set<string>()),
+  wasEmptyTransferProbe: vi.fn(() => false),
   getCommitMeasurementStatus: vi.fn(async (): Promise<string | null> => null),
   hasPendingGenerationsForCommit: vi.fn(() => false),
   isCodeFile: vi.fn(() => true),
@@ -73,6 +75,8 @@ vi.mock("fs/promises", async (importOriginal) => {
 })
 
 import {
+  wasEmptyTransferProbe,
+  getWorktreeTransferPathsForCommit,
   getCommitMeasurementStatus,
   hasPendingGenerationsForCommit,
   measureForCommit
@@ -243,6 +247,25 @@ describe("reconcile backstop vs in-app commits", () => {
     expect(events[0].commitSha).toBe(sha)
     expect(events[0].repoPath).toBe(resolvedRoot)
     expect(events[0].triggeredBy).toBe("external-reconcile")
+  })
+
+  it("does not emit an external commit event when the path matches a worktree but its lines do not", async () => {
+    vi.mocked(trackEvent).mockClear()
+    const { repoRoot } = makeRepo()
+    expect(await syncGitHookEvents(repoRoot)).toBe("synced")
+    const sha = commitChange(repoRoot, "export const unrelated = true\n")
+    vi.mocked(getWorktreeTransferPathsForCommit).mockImplementationOnce(
+      (snapshots) => new Set(snapshots.map((s) => s.absPath))
+    )
+    vi.mocked(wasEmptyTransferProbe).mockReturnValueOnce(true)
+    expect(await syncGitHookEvents(repoRoot)).toBe("synced")
+    expect(vi.mocked(measureForCommit).mock.calls.find(([, id]) => id === sha)?.[0]).toEqual([
+      {
+        absPath: join(git(repoRoot, "rev-parse", "--show-toplevel"), "a.ts"),
+        stagedContent: undefined
+      }
+    ])
+    expect(commitEvents()).toEqual([])
   })
 
   it("does not duplicate an in-app commit, even when the marker's file write was lost", async () => {

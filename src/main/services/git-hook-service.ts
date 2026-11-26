@@ -15,8 +15,11 @@ import { parseGitRemoteInfo } from "../utils/git-remote"
 import {
   getCommitMeasurementStatus,
   hasPendingGenerationsForCommit,
+  wasEmptyTransferProbe,
+  getWorktreeTransferPathsForCommit,
   isCodeFile,
   measureForCommit,
+  type CommitMeasurementSnapshot,
   type StagedSnapshot
 } from "./adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "./code-adoption-push-updater"
@@ -1490,7 +1493,8 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
   )
   if (
     !existingJobStatus &&
-    (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots, commitTimeMs))
+    (snapshots.length === 0 ||
+      !hasPendingGenerationsForCommit(snapshots, commitTimeMs, meta.gitRoot))
   ) {
     console.log(
       `[GitHook] skip commit snapshot without pending code_gen: commitSha=${meta.commitSha} files=${snapshots.length}`
@@ -1512,6 +1516,13 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     console.warn(
       `[GitHook] adoption measurement not durable yet; keeping ready snapshot: commitSha=${meta.commitSha}`
     )
+    return
+  }
+
+  if (wasEmptyTransferProbe(meta.gitRoot, meta.commitSha)) {
+    processed.add(meta.commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    await moveEventDir(snapshotDir, join(repoDir, "skipped"), name)
     return
   }
 
@@ -1942,18 +1953,25 @@ async function reconcileOneCommit(
   // sha into processed-commits.json (checked at the top of this function).
   const commitTimeMs = await getCommitTimeMs(gitRoot, commitSha)
   const existingJobStatus = await getCommitMeasurementStatus(gitRoot, commitSha)
-  if (
-    !existingJobStatus &&
-    (probe.length === 0 || !hasPendingGenerationsForCommit(probe, commitTimeMs))
-  ) {
-    processed.add(commitSha)
-    await saveProcessedCommitSet(repoDir, processed)
-    return
+  let transferPaths: Set<string> | undefined
+  if (!existingJobStatus && !hasPendingGenerationsForCommit(probe, commitTimeMs)) {
+    transferPaths = getWorktreeTransferPathsForCommit(probe, gitRoot, commitTimeMs)
+    if (!transferPaths.size) {
+      processed.add(commitSha)
+      await saveProcessedCommitSet(repoDir, processed)
+      return
+    }
   }
 
-  const snapshots: StagedSnapshot[] = []
+  const snapshots: CommitMeasurementSnapshot[] = []
   for (const entry of entries) {
     const absPath = resolvePath(gitRoot, entry.relPath)
+    // Transfers read their added lines from one bounded diff for the commit.
+    if (transferPaths) {
+      if (transferPaths.has(absPath))
+        snapshots.push({ absPath, stagedContent: entry.status.startsWith("D") ? null : undefined })
+      continue
+    }
     if (entry.status.startsWith("D")) {
       snapshots.push({ absPath, stagedContent: null })
       continue
@@ -1976,6 +1994,11 @@ async function reconcileOneCommit(
 
   const measurementCompleted = await measureForCommit(snapshots, commitSha, commitTimeMs, gitRoot)
   if (!measurementCompleted) return
+  if (wasEmptyTransferProbe(gitRoot, commitSha)) {
+    processed.add(commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    return
+  }
 
   const [stats, branch, remoteUrl] = await Promise.all([
     getCommitStats(gitRoot, commitSha),

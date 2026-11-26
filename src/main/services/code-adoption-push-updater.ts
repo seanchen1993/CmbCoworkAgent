@@ -219,6 +219,19 @@ export function scheduleMarkCodeAdoptionCommitsPushed(args: MarkCodeAdoptionPush
     return
   }
 
+  // A revised adoption can be delivered after the server's push marking.
+  // Store the confirmed SHAs locally, yielding between batches on large pushes.
+  void import("./adoption-index")
+    .then(async ({ rememberAdoptionPush }) => {
+      for (let i = 0; i < commitShas.length; i += 128) {
+        rememberAdoptionPush(commitShas.slice(i, i + 128), args)
+        if (i + 128 < commitShas.length) await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+    })
+    .catch((error) =>
+      console.warn("[CodeAdoptionPushUpdater] failed to retain push receipt:", error)
+    )
+
   console.log(
     `[CodeAdoptionPushUpdater] scheduling push marking: commits=${commitShas.length} shas=${commitShas.join(",")} retryDelays=[${RETRY_DELAYS_MS.join(",")}]`
   )
