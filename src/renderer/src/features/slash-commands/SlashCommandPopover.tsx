@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react"
-import { Flag, MessageSquareText, Package2 } from "lucide-react"
+import { Flag, Package2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { normalizeSkillId } from "@/lib/skill-ids"
 import type { SkillMetadata } from "@/types"
@@ -104,7 +104,6 @@ export function SlashCommandPopover({
                     />
                   )
                 } else {
-                  const Icon = command.id === "btw" ? MessageSquareText : Flag
                   return (
                     <button
                       key={command.id}
@@ -113,14 +112,13 @@ export function SlashCommandPopover({
                       role="option"
                       aria-selected={isSelected}
                       onMouseEnter={() => onHoverIdx(idx)}
-                      onMouseDown={command.id === "btw" ? e => { if (e.button === 0) e.preventDefault() } : undefined}
                       onClick={() => onSelectCommand(command)}
                       className={cn(
                         "w-full text-left px-4 py-2 flex items-center gap-3 transition-colors",
                         isSelected ? "bg-muted" : "hover:bg-muted/60"
                       )}
                     >
-                      <Icon className="size-4 text-muted-foreground shrink-0" />
+                      <Flag className="size-4 text-muted-foreground shrink-0" />
                       <span className="text-sm font-medium text-foreground shrink-0">
                         {command.title}
                       </span>

@@ -9,7 +9,6 @@ export interface WorkspaceFileTreeNode {
   name: string
   path: string
   is_dir: boolean
-  revision: number
   file?: WorkspaceFileTreeFile
   children: WorkspaceFileTreeNode[]
 }
@@ -73,8 +72,7 @@ export function createWorkspaceFileTreeProjectionBuilder(
 
 function upsertProjectionFile(
   projection: WorkspaceFileTreeProjection,
-  file: WorkspaceFileTreeFile,
-  insertInOrder = false
+  file: WorkspaceFileTreeFile
 ): void {
   const normalizedPath = normalizePath(file.path)
   if (!normalizedPath) return
@@ -92,13 +90,11 @@ function upsertProjectionFile(
         name: part,
         path: `/${currentPath}`,
         is_dir: isLeaf ? file.is_dir === true : true,
-        revision: 0,
         ...(isLeaf ? { file } : {}),
         children: []
       }
       projection.nodesByPath.set(currentPath, node)
-      if (insertInOrder) parentChildren.splice(findInsertIndex(parentChildren, node), 0, node)
-      else parentChildren.push(node)
+      parentChildren.push(node)
     } else if (isLeaf) {
       node.is_dir = file.is_dir === true
       node.file = file
@@ -272,19 +268,8 @@ function findExistingNodeIndex(
   return -1
 }
 
-function markProjectionPathChanged(projection: WorkspaceFileTreeProjection, path: string): void {
-  while (path) {
-    const node = projection.nodesByPath.get(path)
-    if (node) node.revision += 1
-    const separator = path.lastIndexOf("/")
-    if (separator < 0) break
-    path = path.slice(0, separator)
-  }
-}
-
 function removeProjectionPath(projection: WorkspaceFileTreeProjection, filePath: string): void {
-  const removedPath = normalizePath(filePath)
-  let normalizedPath = removedPath
+  let normalizedPath = normalizePath(filePath)
   let node = projection.nodesByPath.get(normalizedPath)
   if (!node) return
   while (node) {
@@ -301,7 +286,6 @@ function removeProjectionPath(projection: WorkspaceFileTreeProjection, filePath:
     node = projection.nodesByPath.get(parentPath)
     if (!node || node.file || node.children.length > 0) break
   }
-  markProjectionPathChanged(projection, removedPath)
 }
 
 export function patchWorkspaceFileTreeProjection(
@@ -317,15 +301,20 @@ export function patchWorkspaceFileTreeProjection(
     const normalizedPath = normalizePath(file.path)
     const existing = projection.nodesByPath.get(normalizedPath)
     if (existing) {
-      const isDirectory = file.is_dir === true
-      const rowChanged = existing.is_dir !== isDirectory || existing.file?.size !== file.size
       existing.file = file
-      existing.is_dir = isDirectory
-      if (rowChanged) markProjectionPathChanged(projection, normalizedPath)
+      existing.is_dir = file.is_dir === true
       continue
     }
-    upsertProjectionFile(projection, file, true)
-    markProjectionPathChanged(projection, normalizedPath)
+    upsertProjectionFile(projection, file)
+    const inserted = projection.nodesByPath.get(normalizedPath)
+    if (!inserted) continue
+    const separator = normalizedPath.lastIndexOf("/")
+    const parentPath = separator < 0 ? "" : normalizedPath.slice(0, separator)
+    const siblings = parentPath ? projection.nodesByPath.get(parentPath)?.children : projection.tree
+    if (!siblings) continue
+    const appendedIndex = siblings[siblings.length - 1] === inserted ? siblings.length - 1 : -1
+    if (appendedIndex >= 0) siblings.splice(appendedIndex, 1)
+    siblings.splice(findInsertIndex(siblings, inserted), 0, inserted)
   }
   projections.set(nextFiles, projection)
 }

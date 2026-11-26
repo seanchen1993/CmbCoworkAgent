@@ -1,6 +1,3 @@
-import { formatSkillUseBlock } from "../../../../shared/skill-use-block"
-import { formatBuiltinBrowserTranscriptMessage } from "@/features/builtin-browser/chat-integration"
-import { appendBtwReferences } from "../../../../shared/btw-references"
 import React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -104,20 +101,6 @@ function message(
 }
 
 describe("chat scroll navigator virtualization bridge", () => {
-  it("summarizes side selections while preserving identical text in an ordinary conversation", () => {
-    const quotes = [{ text: "选中的段落" }]
-    const withSelection = appendBtwReferences("这个函数做什么？", quotes)
-    const messages = [
-      { ...message("q1", "user"), content: withSelection },
-      { ...message("q2", "user"), content: appendBtwReferences("", quotes) },
-      { ...message("q3", "user"), content: formatBuiltinBrowserTranscriptMessage(withSelection, true) + "\n\n" +
-        formatSkillUseBlock({ name: "test", path: "/project/SKILL.md" }) }
-    ]
-    expect(createChatScrollQuestionProjector(true)(messages, 1).questions.map(q => q.preview))
-      .toEqual(["这个函数做什么？", "1 条注释", "这个函数做什么？"])
-    expect(createChatScrollQuestionProjector()(messages, 1).questions[0].preview).toContain("userselect")
-  })
-
   it("does not publish navigation markers for quiet turns and refreshes visibility without new tokens", () => {
     const project = createChatScrollQuestionProjector()
     const messages = [

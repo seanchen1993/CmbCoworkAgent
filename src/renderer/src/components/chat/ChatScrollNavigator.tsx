@@ -1,6 +1,3 @@
-import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
-import { stripBuiltinBrowserPrompt } from "@/features/builtin-browser/chat-integration"
-import { readBtwReferences } from "../../../../shared/btw-references"
 import { chatScrollInsets } from "@/lib/chat-scroll-insets"
 import type { Message } from "@/types"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
@@ -49,7 +46,6 @@ export interface ChatScrollNavigatorRenderProps {
 }
 
 interface ChatScrollNavigatorProps {
-  sideComposer?: boolean
   messages: Message[]
   questionStructureRevision: number
   historyGapBeforeMessageId: string | null
@@ -303,14 +299,8 @@ function getMessageText(content: Message["content"]): string {
     .join("\n")
 }
 
-function getQuestionPreview(content: Message["content"], sideComposer: boolean): string {
-  let body = getMessageText(content)
-  if (sideComposer && typeof content === "string") {
-    const visible = stripBuiltinBrowserPrompt(parseSkillUseBlock(body)?.rest ?? body)
-    const parsed = readBtwReferences(visible)
-    body = parsed.body.trim() || (parsed.quotes.length ? `${parsed.quotes.length} 条注释` : visible)
-  }
-  const text = body
+function getQuestionPreview(content: Message["content"]): string {
+  const text = getMessageText(content)
     .replace(/<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, "📎 $1")
     .replace(/<CMBDEVCLAW-SKILL-USE-V1>[\s\S]*?<\/CMBDEVCLAW-SKILL-USE-V1>/g, "")
     .replace(/\s+/g, " ")
@@ -393,7 +383,6 @@ function parseUserInputRequestResponse(
 
 function getChatScrollQuestions(
   messages: Message[],
-  sideComposer: boolean,
   hidden?: ReadonlySet<string>
 ): {
   questions: ChatScrollQuestion[]
@@ -436,7 +425,7 @@ function getChatScrollQuestions(
       userMessageIndexes.push(messageIndex)
       questions.push({
         id: message.id,
-        preview: getQuestionPreview(message.content, sideComposer),
+        preview: getQuestionPreview(message.content),
         userInputRequests: []
       })
       continue
@@ -477,7 +466,7 @@ interface ChatScrollQuestionProjection {
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
-export function createChatScrollQuestionProjector(sideComposer = false): (
+export function createChatScrollQuestionProjector(): (
   messages: Message[],
   revision: number,
   gapBeforeMessageId?: string | null,
@@ -497,7 +486,7 @@ export function createChatScrollQuestionProjector(sideComposer = false): (
     ) {
       return projection
     }
-    const { questions, userMessageIndexes } = getChatScrollQuestions(messages, sideComposer, hidden)
+    const { questions, userMessageIndexes } = getChatScrollQuestions(messages, hidden)
     previousHidden = hidden
     const userMessageIds = questions.map((question) => question.id)
     const questionIndexByMessageId = new Map(
@@ -949,7 +938,6 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
 }, areChatScrollMarkerRailPropsEqual)
 
 export function ChatScrollNavigator({
-  sideComposer = false,
   messages,
   questionStructureRevision,
   historyGapBeforeMessageId,
@@ -969,7 +957,7 @@ export function ChatScrollNavigator({
   const pendingRevealFrameRef = useRef<number | null>(null)
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(-1)
 
-  const projectChatScrollQuestions = useMemo(() => createChatScrollQuestionProjector(sideComposer), [sideComposer])
+  const [projectChatScrollQuestions] = useState(createChatScrollQuestionProjector)
   const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
   const questionProjection = projectChatScrollQuestions(
     messages,
@@ -1030,7 +1018,6 @@ export function ChatScrollNavigator({
         : undefined
     )
     if (renderedQuestionIndexes.length === 0) return rangeQuestionIndex
-    if (userMessageIndexes.length === 1 && rangeQuestionIndex === 0) return 0
 
     const { scrollTop, scrollHeight, clientHeight } = viewport
     const nearBottom = scrollHeight - scrollTop - clientHeight < 80
@@ -1177,15 +1164,10 @@ export function ChatScrollNavigator({
   const hasQuestions = questions.length > 0
   const hasNavigationMarkers = hasQuestions || gapBeforeQuestionIndex !== null
   const reserveLeftSpace = hasNavigationMarkers && !rightPanelCollapsed
-  // A scroll-only marker update does not change the transcript or the composer.
-  const content = useMemo(
-    () => children({ hasQuestions, reserveLeftSpace, setMessageRef, virtualRangeRef }),
-    [children, hasQuestions, reserveLeftSpace, setMessageRef]
-  )
 
   return (
     <>
-      {content}
+      {children({ hasQuestions, reserveLeftSpace, setMessageRef, virtualRangeRef })}
       {hasNavigationMarkers && (
         <ChatScrollMarkerRail
           questions={questions}

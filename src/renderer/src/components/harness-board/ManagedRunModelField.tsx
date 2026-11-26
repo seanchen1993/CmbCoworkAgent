@@ -1,8 +1,7 @@
 import { useId } from "react"
 import { Info } from "lucide-react"
-import { MANAGED_RUN_MODEL_OPTIONS, type ManagedRunModelSelection } from "../../../../shared/managed-run-model"
-import { IDLE_MODEL_SERVICE_HOURS } from "../../../../shared/idle-model-service-window"
-import { IDLE_ULTRA_MODEL_NAME } from "../../../../shared/model-catalog"
+import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
+import { IDLE_MODEL_NAME } from "../../../../shared/model-catalog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ManagedRunRadioOption } from "./ManagedRunRadioOption"
 
@@ -32,13 +31,18 @@ export function ManagedRunModelField({
               </button>
             </TooltipTrigger>
             <TooltipContent side="top" className="z-[70] max-w-72 text-xs leading-5">
-              {IDLE_ULTRA_MODEL_NAME}的生产环境服务时间为{IDLE_MODEL_SERVICE_HOURS}。
+              托管可沿用默认模型，也可固定使用{IDLE_MODEL_NAME}。
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </div>
       <div role="radiogroup" aria-labelledby={groupId} className="min-w-0 flex flex-wrap gap-x-5">
-        {MANAGED_RUN_MODEL_OPTIONS.map((option) => (
+        {(
+          [
+            { value: "default", label: "默认模型" },
+            { value: "ultra", label: IDLE_MODEL_NAME }
+          ] as const
+        ).map((option) => (
           <ManagedRunRadioOption
             key={option.value}
             name={groupId}
@@ -47,7 +51,7 @@ export function ManagedRunModelField({
             onChange={() => onChange(option.value)}
             disabled={disabled}
           >
-            {option.name}
+            {option.label}
           </ManagedRunRadioOption>
         ))}
       </div>

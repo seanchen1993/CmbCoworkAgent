@@ -49,8 +49,6 @@ function projectLiveDisplayMessage(
     id,
     role,
     content: normalizeLiveStreamMessageContent(streamMessage.content),
-    ...(streamMessage.provider_source_id ? { provider_source_id: streamMessage.provider_source_id } : {}),
-    ...(streamMessage.provider_occurrence ? { provider_occurrence: streamMessage.provider_occurrence } : {}),
     ...(role === "assistant" && streamMessage.reasoning
       ? { reasoning: streamMessage.reasoning }
       : {}),
@@ -59,7 +57,6 @@ function projectLiveDisplayMessage(
       ? { tool_call_id: streamMessage.tool_call_id }
       : {}),
     ...(role === "tool" && streamMessage.name ? { name: streamMessage.name } : {}),
-    ...(role === "tool" && streamMessage.status ? { status: streamMessage.status } : {}),
     ...(role === "tool" && streamMessage.is_error !== undefined
       ? { is_error: streamMessage.is_error }
       : {}),

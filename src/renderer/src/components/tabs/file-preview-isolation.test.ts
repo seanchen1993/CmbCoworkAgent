@@ -173,13 +173,11 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).not.toContain("htmlPreviewPolicy=")
     expect(rightPanel).not.toContain("onRequestBrowserMode")
     expect(rightPanel).not.toContain("browserPreviewUrl")
-    const filePreviewRequest = resourcePanelOverlay.match(/const handlePreviewRequest = useCallback\(([\s\S]*?)\}, \[\]\)/)?.[1]
-    expect(filePreviewRequest).toContain('setMode("preview")')
-    expect(filePreviewRequest).not.toContain('setMode("browser")')
+    expect(resourcePanelOverlay).not.toContain('setMode("browser")')
     expect(htmlPreview).toContain("buildHtmlPreviewDocument")
-    expect(htmlPreview).toContain('sandbox="allow-scripts"')
+    expect(htmlPreview).toContain('visualEditEnabled ? "allow-same-origin" : "allow-scripts"')
     expect(htmlPreview).not.toContain("setSrcDocContent(content)")
-    expect(htmlPreview).not.toContain("allow-same-origin")
+    expect(htmlPreview).not.toContain("allow-modals")
     expect(htmlSrcDoc).toContain("\"default-src 'none'\"")
     expect(htmlSrcDoc).toContain("iframe, frame, fencedframe, object, embed")
     expect(htmlSrcDoc).toContain('content.replace(/<\\/style/gi, "\\\\3C /style")')
@@ -199,6 +197,28 @@ describe("persisted active file preview isolation", () => {
       "overflow-y-auto overflow-x-hidden right-panel-scroll bg-background flex-1 min-h-0"
     )
     expect(rightPanel).toContain("{onFullscreenChange ? (")
+  })
+
+  it("keeps an explicit overlay file request until the drawer closes", () => {
+    const handledRequest = resourcePanelOverlay.match(
+      /const clearHandledPreviewRequest = useCallback\(\(\) => \{([\s\S]*?)\n  \}, \[clearPreviewRequest\]\)/
+    )?.[1]
+    const closeOverlay = resourcePanelOverlay.match(
+      /const close = useCallback\(\(\) => \{([\s\S]*?)\n  \}, \[clearPreviewRequest, detachBrowser\]\)/
+    )?.[1]
+
+    expect(handledRequest).toBeDefined()
+    expect(handledRequest).not.toContain("setFilePreview(null)")
+    expect(handledRequest).toContain("clearPreviewRequest()")
+    expect(closeOverlay).toContain("setFilePreview(null)")
+    expect(closeOverlay).toContain("setFilePreviewThreadId(null)")
+    expect(resourcePanelOverlay).toContain('if (mode === "preview") return')
+    expect(resourcePanelOverlay).toContain(
+      "onRequestPreviewMode={handlePreviewModeRequest}"
+    )
+    expect(resourcePanelOverlay).not.toContain(
+      'onRequestPreviewMode={() => selectMode("preview")}'
+    )
   })
 
   it("requires a trusted-source grant instead of exposing renderer path-to-token minting", () => {
@@ -229,7 +249,7 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).toContain("toolCallId: latestResourceEvent.toolCallId")
     expect(rightPanel).toContain("isCurrentOpenResourcePreviewIntent(")
     expect(resourcePreviewRequestHook).toContain("isCurrentOpenResourcePreviewIntent(")
-    expect(resourcePreviewRequestHook).toContain("invalidateOpenResourcePreviewIntent(previousThreadId)")
+    expect(resourcePreviewRequestHook).toContain("beginOpenResourcePreviewIntent(previousThreadId)")
     expect(resourcePanelOverlay).toContain('setMode("preview")')
     expect(rightPanel).toContain("const canRevealInFolder = !botDeliveryMarkdown")
     expect(rightPanel).toContain("if (!resolved.inWorkspace)")
@@ -251,10 +271,15 @@ describe("persisted active file preview isolation", () => {
   })
 
   it("keeps collapsed resource drawers from inheriting standard right-panel state", () => {
-    expect(resourcePanelOverlay).toContain("if (!usePreviewDrawer || !drawerInScope) close()")
-    const directModeSelection = resourcePanelOverlay.match(/if \(standardRightPanelMounted[^\n]*\{([^}]+)\}/)?.[1]
-    expect(directModeSelection).toContain("close()")
-    expect(directModeSelection).toContain("setRightModule(nextMode)")
+    expect(resourcePanelOverlay).toContain("if (!standardRightPanelMounted) return")
+    expect(resourcePanelOverlay).toContain("setOpen(false)")
+    expect(resourcePanelOverlay).toContain("clearPreviewRequest()")
+    expect(resourcePanelOverlay).toMatch(
+      /if \(standardRightPanelMounted\) \{[\s\S]*?setOpen\(false\)\s*setRightModule\(nextMode\)/
+    )
+    expect(resourcePanelOverlay).toMatch(
+      /const close = useCallback\(\(\) => \{[\s\S]*?setOpen\(false\)[\s\S]*?detachBrowser\(\)/
+    )
   })
 
   it("keeps the resource drawer resizable and closes it only from the close button", () => {

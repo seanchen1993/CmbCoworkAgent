@@ -36,10 +36,6 @@ const RESOURCE_PREVIEW_THREAD_INTENT_LIMIT = 5_000
 let nextResourcePreviewIntentId = 0
 const latestResourcePreviewIntentByThread = new Map<string, number>()
 
-export function invalidateOpenResourcePreviewIntent(threadId: string): void {
-  latestResourcePreviewIntentByThread.delete(threadId)
-}
-
 export function beginOpenResourcePreviewIntent(threadId: string): number {
   nextResourcePreviewIntentId += 1
   if (

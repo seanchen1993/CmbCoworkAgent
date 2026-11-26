@@ -4,12 +4,14 @@ import { getCurrentBrowserCdpPort } from "../../cdp/browser-cdp"
 import { getGlobalBrowserService } from "../../core/browser-service-registry"
 import {
   applyScriptRecordingVariableValues,
-  buildScriptExecutableScript
+  buildScriptExecutableScript,
+  extractScriptRecordingDeviceViewport
 } from "../../../../shared/browser-script-recording"
 import type {
   BrowserScriptExecutionInput,
   BrowserScriptExecutionState,
-  BrowserState
+  BrowserState,
+  BrowserDeviceSize
 } from "../../../../shared/browser-types"
 
 const BROWSER_SCRIPT_EXECUTION_LOG_PREFIX = "[内置浏览器][BrowserScriptExecution]"
@@ -58,6 +60,8 @@ const browserScriptExecutionStateListeners = new Set<(state: BrowserScriptExecut
 
 let browserScriptExecutionState: BrowserScriptExecutionState = EMPTY_BROWSER_SCRIPT_EXECUTION_STATE
 let activeBrowserScriptExecution: ActiveBrowserScriptExecution | null = null
+let sharedBrowserConnection: { cdpPort: number; browser: PlaywrightBrowser } | null = null
+let sharedBrowserConnectionDisposal: Promise<void> = Promise.resolve()
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -317,6 +321,7 @@ async function waitForBrowserPanelPage(
 async function connectInAppBrowser(options: {
   threadId?: string | null
   workspacePath?: string | null
+  deviceViewport?: BrowserDeviceSize
   isCancelled: () => boolean
 }): Promise<{
   browser: PlaywrightBrowser
@@ -333,20 +338,22 @@ async function connectInAppBrowser(options: {
     throw new Error("Browser CDP endpoint is not configured")
   }
 
-  browserService.requestPanel(options.threadId ?? undefined)
+  browserService.requestPanel(
+    options.threadId ?? undefined,
+    undefined,
+    true,
+    options.deviceViewport
+  )
   const targetState = await browserService.prepareTarget({
     workspacePath: options.workspacePath ?? undefined,
     visible: true
   })
+  await browserService.waitForDeviceViewport(options.deviceViewport, options.isCancelled)
   if (options.isCancelled()) {
     throw new BrowserScriptExecutionCancelledError()
   }
 
-  const { chromium } = await import("playwright")
-  if (options.isCancelled()) {
-    throw new BrowserScriptExecutionCancelledError()
-  }
-  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`)
+  const browser = await getSharedBrowserConnection(cdpPort)
   try {
     const { context, page } = await waitForBrowserPanelPage(
       browser,
@@ -355,9 +362,58 @@ async function connectInAppBrowser(options: {
     )
     return { browser, context, page }
   } catch (error) {
-    await closeBrowserConnection(browser)
+    await invalidateSharedBrowserConnection(browser)
     throw error
   }
+}
+
+async function getSharedBrowserConnection(cdpPort: number): Promise<PlaywrightBrowser> {
+  await sharedBrowserConnectionDisposal
+  const current = sharedBrowserConnection
+  if (
+    current?.cdpPort === cdpPort &&
+    typeof current.browser.isConnected === "function" &&
+    current.browser.isConnected()
+  ) {
+    return current.browser
+  }
+
+  if (current) {
+    sharedBrowserConnection = null
+    await closeBrowserConnection(current.browser)
+  }
+
+  const { chromium } = await import("playwright")
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`)
+  sharedBrowserConnection = { cdpPort, browser }
+  if (typeof browser.once === "function") {
+    browser.once("disconnected", () => {
+      if (sharedBrowserConnection?.browser === browser) {
+        sharedBrowserConnection = null
+      }
+    })
+  }
+  return browser
+}
+
+async function invalidateSharedBrowserConnection(browser: PlaywrightBrowser): Promise<void> {
+  if (sharedBrowserConnection?.browser === browser) {
+    sharedBrowserConnection = null
+  }
+  await closeBrowserConnection(browser)
+}
+
+export async function disposeSharedBrowserScriptExecutionConnection(): Promise<void> {
+  const current = sharedBrowserConnection
+  if (!current) {
+    await sharedBrowserConnectionDisposal
+    return
+  }
+  sharedBrowserConnection = null
+  sharedBrowserConnectionDisposal = closeBrowserConnection(current.browser).catch((error) => {
+    console.warn(`${BROWSER_SCRIPT_EXECUTION_LOG_PREFIX} failed to close shared connection`, error)
+  })
+  await sharedBrowserConnectionDisposal
 }
 
 function buildExecutionScript(
@@ -467,9 +523,11 @@ export async function executeRecordingScriptInBuiltinBrowser(
   }
 
   try {
+    const deviceViewport = extractScriptRecordingDeviceViewport(script)
     const { browser, context, page } = await connectInAppBrowser({
       threadId: input.threadId,
       workspacePath: input.workspacePath,
+      deviceViewport,
       isCancelled: () => executionController.cancelled
     })
     const wrapPlaybackValue = createUploadAwarePlaybackWrapper(input.workspacePath)
@@ -479,9 +537,6 @@ export async function executeRecordingScriptInBuiltinBrowser(
     }
 
     const { expect } = await import("playwright/test")
-    if (executionController.cancelled) {
-      throw new BrowserScriptExecutionCancelledError()
-    }
     const runner = new AsyncFunction(
       "page",
       "browser",
@@ -542,8 +597,11 @@ export async function executeRecordingScriptInBuiltinBrowser(
     )
     throw error
   } finally {
-    if (browserConnection) {
-      await closeBrowserConnection(browserConnection)
+    // Cancelling must also abort any Playwright operation still in flight. Successful
+    // replays keep the CDP connection alive so the target does not accumulate a new
+    // Playwright utility world for every run.
+    if (browserConnection && executionController.cancelled) {
+      await invalidateSharedBrowserConnection(browserConnection)
     }
     if (activeBrowserScriptExecution === executionController) {
       activeBrowserScriptExecution = null

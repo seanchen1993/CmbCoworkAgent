@@ -12,7 +12,6 @@ import {
   Loader2,
   Search
 } from "lucide-react"
-import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -25,9 +24,6 @@ import {
 } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { ProjectMetricOverview } from "./ProjectMetricOverview"
-import { PROJECT_CALENDAR_NOTE } from "../../../../../shared/project-metric-calendar"
-import { PROJECT_METRIC_INDICATORS } from "../../../../../shared/project-metric-indicators"
 import { ProjectMetricTrend } from "./ProjectMetricTrend"
 import { projectMetricExportSheet } from "./project-metric-export"
 import {
@@ -85,11 +81,36 @@ function formatCompact(value: number | null): string {
 
 function formatDays(value: number | null): string {
   const metric = formatMetric(value)
-  return metric === "—" ? metric : `${metric} 工作日`
+  return metric === "—" ? metric : `${metric} 天`
 }
 
 function formatSourceDateTime(value: string | null): string {
   return value ? value.replace("T", " ").replace(/\.\d+$/, "") : "—"
+}
+
+function TimeScopeTip(): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
+            aria-label="查看项目指标时间口径"
+          >
+            <Info className="size-3.5" />
+            口径说明
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-[420px] text-xs leading-relaxed">
+          日期、室组仅用于筛选项目；缺陷数、功能点均为 T-1 数据；非功能问题数取项目索引中的累计值，
+          日期不截断问题检出时间。代码行数取所选 CMBDevClaw 项目截至查询时的累计已 Push
+          采纳行数；输入/输出 Token 取所选 CMBDevClaw 项目截至查询时的累计 trace
+          Token。日期不用于截断代码行数或 Token。
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
 }
 
 function MetricHint({
@@ -133,7 +154,7 @@ function SummaryValue({
   tone
 }: {
   value: number | null
-  sample?: React.ReactNode
+  sample?: number
   formatter?: (value: number | null) => string
   tone: "devclaw" | "non_devclaw"
 }): React.JSX.Element {
@@ -149,7 +170,9 @@ function SummaryValue({
       >
         {formatter(value)}
       </div>
-      {sample}
+      {sample === undefined ? null : (
+        <div className="text-[10px] text-muted-foreground">有效样本 {sample}</div>
+      )}
     </div>
   )
 }
@@ -162,7 +185,7 @@ function SummaryTokenPerLineValue({
 }: {
   input: number | null
   output: number | null
-  sample?: React.ReactNode
+  sample?: number
   tone: "devclaw" | "non_devclaw"
 }): React.JSX.Element {
   if (input === null && output === null) {
@@ -181,7 +204,9 @@ function SummaryTokenPerLineValue({
         <div>输入 Token/行 {formatCompact(input)}</div>
         <div>输出 Token/行 {formatCompact(output)}</div>
       </div>
-      {sample}
+      {sample === undefined ? null : (
+        <div className="text-[10px] text-muted-foreground">有效样本 {sample}</div>
+      )}
     </div>
   )
 }
@@ -194,38 +219,17 @@ interface SummaryMetricRow {
   sample?: keyof ProjectMetricSummaryGroup["samples"]
   formatter?: (value: number | null) => string
 }
-interface ProjectMetricSampleSelection {
-  key: NonNullable<ProjectMetricListOptions["metricSample"]>
-  label: string
-  developmentMode: "devclaw" | "non_devclaw"
-}
 
 function SummaryMetricValue({
   row,
   group,
-  tone,
-  onSelectSample,
-  sampleDisabled
+  tone
 }: {
   row: SummaryMetricRow
   group: ProjectMetricSummaryGroup | null
   tone: "devclaw" | "non_devclaw"
-  onSelectSample: (sample: ProjectMetricSampleSelection) => void
-  sampleDisabled: boolean
 }): React.JSX.Element {
-  const sampleKey = row.sample
-  const sample =
-    sampleKey && group ? (
-      <button
-        type="button"
-        className="block text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:no-underline disabled:opacity-50"
-        disabled={sampleDisabled}
-        aria-label={`查看${row.label}的${tone === "devclaw" ? "CMBDevClaw" : "非CMBDevClaw"}有效样本`}
-        onClick={() => onSelectSample({ key: sampleKey, label: row.label, developmentMode: tone })}
-      >
-        有效样本 {group.samples[sampleKey]}
-      </button>
-    ) : undefined
+  const sample = row.sample && group ? group.samples[row.sample] : undefined
   if (row.readPair) {
     const pair = group ? row.readPair(group) : { input: null, output: null }
     return (
@@ -251,30 +255,18 @@ function SummaryMetricCell({
   row,
   group,
   tone,
-  issueGroups,
-  onSelectSample,
-  sampleDisabled
+  issueGroups
 }: {
   row: SummaryMetricRow
   group: ProjectMetricSummaryGroup | null
   tone: "devclaw" | "non_devclaw"
   issueGroups: ProjectMetricSummaryGroup[]
-  onSelectSample: (sample: ProjectMetricSampleSelection) => void
-  sampleDisabled: boolean
 }): React.JSX.Element {
   const cellClassName =
     tone === "devclaw"
       ? "border-l border-sky-500/10 bg-sky-500/[0.025]"
       : "border-l border-amber-500/10 bg-amber-500/[0.025]"
-  const value = (
-    <SummaryMetricValue
-      row={row}
-      group={group}
-      tone={tone}
-      onSelectSample={onSelectSample}
-      sampleDisabled={sampleDisabled}
-    />
-  )
+  const value = <SummaryMetricValue row={row} group={group} tone={tone} />
   if (row.sample !== "kenanIssue") {
     return <td className={`${cellClassName} px-4 py-2.5`}>{value}</td>
   }
@@ -305,15 +297,13 @@ function SummaryComparison({
   loading,
   error,
   adapterName,
-  tokenConsumptionFiltered,
-  onSelectSample
+  tokenConsumptionFiltered
 }: {
   data: ProjectMetricSummaryData | null
   loading: boolean
   error: string | null
   adapterName: string
   tokenConsumptionFiltered: boolean
-  onSelectSample: (sample: ProjectMetricSampleSelection) => void
 }): React.JSX.Element {
   const devclaw = summaryGroup(data, "devclaw")
   const nonDevclaw = summaryGroup(data, "non_devclaw")
@@ -321,21 +311,6 @@ function SummaryComparison({
     (group): group is ProjectMetricSummaryGroup => group !== null
   )
   const rows: SummaryMetricRow[] = [
-    ...PROJECT_METRIC_INDICATORS.slice(0, 4).map(
-      (metric): SummaryMetricRow => ({
-        label: metric.label,
-        hint:
-          metric.unit === "工作日"
-            ? metric.formula
-            : `${metric.formula} ${metric.online ? "按首次上线日期选样本，不叠加立项或开发完成日期条件。" : "按所选项目日期口径选样本。"}`,
-        read: (group) => group[metric.key],
-        sample: metric.sample,
-        formatter:
-          metric.unit === "工作日"
-            ? formatDays
-            : (value) => (value === null ? "—" : `${formatMetric(value)} ${metric.unit}`)
-      })
-    ),
     {
       label: "平均缺陷数",
       hint: "无缺陷的项目按 0 计算",
@@ -449,12 +424,7 @@ function SummaryComparison({
           <thead className="text-left text-xs">
             <tr>
               <th className="w-[38%] bg-muted/40 px-4 py-3 font-medium text-muted-foreground">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span>对比指标</span>
-                  <span className="text-[10px] font-normal text-muted-foreground">
-                    点击有效样本可查看对应明细
-                  </span>
-                </div>
+                对比指标
               </th>
               <th className="border-l border-sky-500/15 bg-sky-500/10 px-4 py-3">
                 <div className="flex items-center gap-2 font-semibold text-sky-800 dark:text-sky-200">
@@ -489,16 +459,12 @@ function SummaryComparison({
                   group={devclaw}
                   tone="devclaw"
                   issueGroups={issueGroups}
-                  onSelectSample={onSelectSample}
-                  sampleDisabled={loading || Boolean(error)}
                 />
                 <SummaryMetricCell
                   row={row}
                   group={nonDevclaw}
                   tone="non_devclaw"
                   issueGroups={issueGroups}
-                  onSelectSample={onSelectSample}
-                  sampleDisabled={loading || Boolean(error)}
                 />
               </tr>
             ))}
@@ -660,45 +626,6 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
         <div>{item.roomName || "—"}</div>
         <div className="mt-0.5 text-[10px] text-muted-foreground">{item.groupName || "—"}</div>
       </td>
-      <td className="px-3 py-2 text-xs">
-        {item.features.length
-          ? item.features.map((feature) => (
-              <div key={feature.featureCode} className="mb-1">
-                <div className="font-mono text-[10px]">{feature.featureCode}</div>
-                <div
-                  className="max-w-60 truncate text-muted-foreground"
-                  title={feature.featureName ?? "名称暂不可用"}
-                >
-                  {feature.featureName ?? "名称暂不可用"}
-                </div>
-              </div>
-            ))
-          : "—"}
-      </td>
-      <td className="px-3 py-2 text-right tabular-nums">{formatMetric(item.devWorkHours)} 小时</td>
-      <td className="px-3 py-2 text-right">
-        <ProjectDateMetric
-          value={item.approvalDevelopmentDays}
-          label="特性审批完成到开发完成耗时"
-          dates={[
-            { label: "最早特性审批", value: item.approvedDate },
-            {
-              label: item.firstStStartDate ? "ST发起" : "UAT发起",
-              value: item.firstStStartDate || item.firstUatStartDate
-            }
-          ]}
-        />
-      </td>
-      <td className="px-3 py-2 text-right">
-        <ProjectDateMetric
-          value={item.approvalCreationDays}
-          label="特性审批完成到立项完成耗时"
-          dates={[
-            { label: "最早特性审批", value: item.approvedDate },
-            { label: "立项", value: item.createDate }
-          ]}
-        />
-      </td>
       <td className="px-3 py-2 text-right tabular-nums">{formatCount(item.bugNum)}</td>
       <td className="px-3 py-2 text-right tabular-nums">
         <TooltipProvider delayDuration={150}>
@@ -728,7 +655,7 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           label="发起 ST 耗时"
           dates={[
             { label: "ST 发起时间", value: item.firstStStartDate },
-            { label: "立项日期", value: item.createDate }
+            { label: "立项时间", value: item.createDate }
           ]}
         />
       </td>
@@ -738,7 +665,7 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           label="发起 UAT 耗时"
           dates={[
             { label: "UAT 发起时间", value: item.firstUatStartDate },
-            { label: "立项日期", value: item.createDate }
+            { label: "立项时间", value: item.createDate }
           ]}
         />
       </td>
@@ -774,16 +701,14 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
 export function ProjectMetricsSection({
   range,
   upperOrgLv1,
-  refreshKey,
-  dateBasis
+  groupNames,
+  refreshKey
 }: {
   range: { from: string; to: string }
   upperOrgLv1: string[]
+  groupNames: string[]
   refreshKey: number
-  dateBasis: NonNullable<ProjectMetricFilters["dateBasis"]>
 }): React.JSX.Element {
-  const [indicatorExporting, setIndicatorExporting] = useState(false)
-  const [retry, setRetry] = useState(0)
   const [phaseStatuses, setPhaseStatuses] = useState<string[]>([])
   const [functionPointMin, setFunctionPointMin] = useState("")
   const [functionPointMax, setFunctionPointMax] = useState("")
@@ -795,18 +720,11 @@ export function ProjectMetricsSection({
   const [debouncedTokenConsumptionMax, setDebouncedTokenConsumptionMax] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [developmentMode, setDevelopmentMode] = useState<"all" | "devclaw" | "non_devclaw">("all")
-  const [activeSample, setActiveSample] = useState<ProjectMetricSampleSelection | null>(null)
-  const detailRef = useRef<HTMLDivElement>(null)
   const [keyword, setKeyword] = useState("")
   const [debouncedKeyword, setDebouncedKeyword] = useState("")
   const [departmentKeyword, setDepartmentKeyword] = useState("")
   const [debouncedDepartmentKeyword, setDebouncedDepartmentKeyword] = useState("")
   const [page, setPage] = useState(1)
-  const [previousDateBasis, setPreviousDateBasis] = useState(dateBasis)
-  if (previousDateBasis !== dateBasis) {
-    setPreviousDateBasis(dateBasis)
-    setPage(1)
-  }
   const [pageSize, setPageSize] = useState<20 | 50 | 100>(20)
   const [sortBy, setSortBy] = useState<ProjectMetricSortKey>("deliveryDays")
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc")
@@ -842,7 +760,7 @@ export function ProjectMetricsSection({
   const trendFilters = useMemo<ProjectMetricTrendFilters>(
     () => ({
       upperOrgLv1,
-      dateBasis,
+      groupNames,
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
       functionPointMax: nullableNumber(debouncedFunctionPointMax),
@@ -857,7 +775,7 @@ export function ProjectMetricsSection({
       debouncedTokenConsumptionMax,
       debouncedTokenConsumptionMin,
       phaseStatuses,
-      dateBasis,
+      groupNames,
       upperOrgLv1
     ]
   )
@@ -868,7 +786,6 @@ export function ProjectMetricsSection({
   const listOptions = useMemo<ProjectMetricListOptions>(
     () => ({
       developmentMode,
-      metricSample: activeSample?.key,
       keyword: debouncedKeyword,
       departmentKeyword: debouncedDepartmentKeyword,
       page,
@@ -877,7 +794,6 @@ export function ProjectMetricsSection({
       sortOrder
     }),
     [
-      activeSample,
       debouncedDepartmentKeyword,
       debouncedKeyword,
       developmentMode,
@@ -906,10 +822,7 @@ export function ProjectMetricsSection({
       }
     }
     void loadSummary()
-    return () => {
-      summaryRequestId.current = requestId + 1
-    }
-  }, [filters, refreshKey, retry])
+  }, [filters, refreshKey])
 
   useEffect(() => {
     const requestId = ++projectsRequestId.current
@@ -934,22 +847,10 @@ export function ProjectMetricsSection({
       }
     }
     void loadProjects()
-    return () => {
-      projectsRequestId.current = requestId + 1
-    }
-  }, [filters, listOptions, refreshKey, retry])
+  }, [filters, listOptions, refreshKey])
 
   const totalPages = Math.max(1, Math.ceil((projects?.total ?? 0) / pageSize))
-  const selectSample = (sample: ProjectMetricSampleSelection): void => {
-    setActiveSample(sample)
-    setDevelopmentMode(sample.developmentMode)
-    setKeyword("")
-    setDebouncedKeyword("")
-    setDepartmentKeyword("")
-    setDebouncedDepartmentKeyword("")
-    setPage(1)
-    detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
-  }
+  const truncated = summary?.truncated || projects?.truncated
   const exportProjects = async (): Promise<void> => {
     setExporting(true)
     setExportError(null)
@@ -974,19 +875,6 @@ export function ProjectMetricsSection({
       setExporting(false)
     }
   }
-  const exportIndicators = async (): Promise<void> => {
-    const exportFilters = { ...filters, upperOrgLv1: [] }
-    setIndicatorExporting(true)
-    setExportError(null)
-    try {
-      const saved = await window.api.dashboard.projectMetricIndicatorExport(exportFilters)
-      if (!saved.success && !saved.canceled) throw new Error(saved.error || "导出指标失败")
-    } catch (error) {
-      setExportError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setIndicatorExporting(false)
-    }
-  }
   const cycleSort = (key: ProjectMetricSortKey): void => {
     setPage(1)
     if (sortBy !== key) {
@@ -1005,39 +893,11 @@ export function ProjectMetricsSection({
   return (
     <section className="rounded-lg border border-border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <h2 className="text-sm font-semibold text-foreground">研发智能化应用广度与先进性</h2>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            className="h-auto shrink-0 px-0 py-0 text-xs"
-            onClick={() => {
-              void window.electron
-                .openExternal("https://doc.cmbchina.com/f/v?id=_4bmc9s")
-                .catch(() => {
-                  toast.error("无法打开口径说明，请稍后重试")
-                })
-            }}
-          >
-            口径说明
-          </Button>
+        <div>
+          <h2 className="text-sm font-semibold text-foreground">项目质量与交付</h2>
         </div>
         <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 text-xs"
-            disabled={indicatorExporting}
-            onClick={() => void exportIndicators()}
-          >
-            {indicatorExporting ? (
-              <Loader2 className="mr-1.5 size-3.5 animate-spin" />
-            ) : (
-              <Download className="mr-1.5 size-3.5" />
-            )}
-            导出组织效能明细
-          </Button>
+          <TimeScopeTip />
           {summaryLoading || projectsLoading ? (
             <div className="flex items-center text-xs text-muted-foreground">
               <Loader2 className="mr-1.5 size-3.5 animate-spin" />
@@ -1047,25 +907,6 @@ export function ProjectMetricsSection({
         </div>
       </div>
 
-      <ProjectMetricOverview filters={filters} refreshKey={refreshKey} />
-      <ProjectMetricTrend filters={trendFilters} refreshKey={refreshKey} />
-      {summaryError || projectsError ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="mt-2 text-xs"
-          onClick={() => setRetry((value) => value + 1)}
-        >
-          重试项目数据
-        </Button>
-      ) : null}
-      {summary?.warnings
-        .filter((warning) => warning !== PROJECT_CALENDAR_NOTE)
-        .map((warning) => (
-          <p key={warning} className="mt-2 text-[10px] text-muted-foreground">
-            {warning}
-          </p>
-        ))}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <PhaseFilter
           value={phaseStatuses}
@@ -1159,6 +1000,15 @@ export function ProjectMetricsSection({
         />
       </div>
 
+      {truncated ? (
+        <div className="mt-3 rounded-md bg-status-warning/10 px-3 py-2 text-xs leading-relaxed text-status-warning-foreground">
+          项目关联或派生指标排序样本超过 10,000
+          条，当前结果基于截断数据，可能存在统计不完整或开发方式误分类。
+        </div>
+      ) : null}
+
+      <ProjectMetricTrend filters={trendFilters} refreshKey={refreshKey} />
+
       <div className="mt-5">
         <SummaryComparison
           data={summary}
@@ -1169,19 +1019,10 @@ export function ProjectMetricsSection({
             nullableNumber(debouncedTokenConsumptionMin) !== null ||
             nullableNumber(debouncedTokenConsumptionMax) !== null
           }
-          onSelectSample={selectSample}
         />
       </div>
 
-      {projects?.warnings
-        .filter((warning) => warning.includes("不可用"))
-        .map((warning) => (
-          <p key={warning} className="mt-2 text-xs text-destructive">
-            {warning}
-          </p>
-        ))}
-
-      <div ref={detailRef} className="mt-6 scroll-mt-4 border-t border-border pt-4">
+      <div className="mt-6 border-t border-border pt-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-xs font-semibold text-foreground">项目明细</h3>
           <div className="flex flex-wrap items-center gap-2">
@@ -1202,7 +1043,6 @@ export function ProjectMetricsSection({
             <Select
               value={developmentMode}
               onValueChange={(value: "all" | "devclaw" | "non_devclaw") => {
-                setActiveSample(null)
                 setDevelopmentMode(value)
                 if (value === "non_devclaw") {
                   setAdapterName("")
@@ -1250,27 +1090,6 @@ export function ProjectMetricsSection({
           </div>
         </div>
 
-        {activeSample ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>
-              有效样本：{activeSample.label} ·{" "}
-              {activeSample.developmentMode === "devclaw" ? "CMBDevClaw" : "非 CMBDevClaw 项目"}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              onClick={() => {
-                setActiveSample(null)
-                setDevelopmentMode("all")
-                setPage(1)
-              }}
-            >
-              清除样本筛选
-            </Button>
-          </div>
-        ) : null}
-
         {exportError ? (
           <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
             <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
@@ -1286,15 +1105,11 @@ export function ProjectMetricsSection({
         ) : null}
 
         <div className="mt-3 overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[2410px] table-fixed text-xs">
+          <table className="w-full min-w-[1690px] table-fixed text-xs">
             <colgroup>
               <col className="w-[250px]" />
               <col className="w-[190px]" />
               <col className="w-[190px]" />
-              <col className="w-[240px]" />
-              <col className="w-[120px]" />
-              <col className="w-[180px]" />
-              <col className="w-[180px]" />
               <col className="w-[90px]" />
               <col className="w-[115px]" />
               <col className="w-[90px]" />
@@ -1311,10 +1126,6 @@ export function ProjectMetricsSection({
                 <th className="px-3 py-2 font-medium">项目编号 / 名称</th>
                 <th className="px-3 py-2 font-medium">CMBDevClaw 插件</th>
                 <th className="px-3 py-2 font-medium">部门</th>
-                <th className="px-3 py-2 text-left font-medium">关联特性编号及名称</th>
-                <th className="px-3 py-2 text-right font-medium">开发报工工时</th>
-                <th className="px-3 py-2 text-right font-medium">特性审批完成到开发完成耗时</th>
-                <th className="px-3 py-2 text-right font-medium">特性审批完成到立项完成耗时</th>
                 <SortableProjectMetricTh
                   label="缺陷数"
                   sortKey="bugNum"
@@ -1369,14 +1180,14 @@ export function ProjectMetricsSection({
             <tbody>
               {projectsLoading && !projects ? (
                 <tr>
-                  <td colSpan={17} className="h-28 text-center text-muted-foreground">
+                  <td colSpan={13} className="h-28 text-center text-muted-foreground">
                     <Loader2 className="mr-2 inline size-4 animate-spin" />
                     正在加载项目明细
                   </td>
                 </tr>
               ) : (projects?.items.length ?? 0) === 0 ? (
                 <tr>
-                  <td colSpan={17} className="h-28 text-center text-muted-foreground">
+                  <td colSpan={13} className="h-28 text-center text-muted-foreground">
                     暂无符合条件的项目
                   </td>
                 </tr>

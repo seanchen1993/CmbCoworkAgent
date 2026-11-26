@@ -2,26 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { readFileSync } from "node:fs"
 import {
   continueWorkspaceFilesDeduped,
-  getWorkspaceFilePathIndex,
-  isWorkspaceFileScanSnapshot,
   loadWorkspaceFilesDeduped,
   hydrateInitialWorkspaceFiles,
   markWorkspaceFilesStale,
-  mergeWorkspaceStreamFiles,
-  reconcileWorkspaceFilePatch,
-  subscribeWorkspaceFileResults,
   readWorkspacePathWithFallback,
-  refreshWorkspaceFilesFromChangeBatch,
   resumeWorkspaceFilesDeduped,
   retainWorkspaceFilesForPathChange,
   setWorkspaceFileScanTimeoutForTests
 } from "./workspace-file-load"
-
-import {
-  buildWorkspaceFileTreeProjection,
-  getWorkspaceFileTreeProjection,
-  type WorkspaceFileTreeNode
-} from "./workspace-file-tree-projection"
 
 type WorkspaceApi = Window["api"]["workspace"]
 
@@ -92,152 +80,7 @@ describe("workspace file loading", () => {
     expect(rightPanelSource).toMatch(/setWorkspaceFiles\?\.\(files\)/)
     expect(rightPanelSource).toMatch(/requestFenceRef\.current\.observe\(threadId, workspacePath\)/)
     expect(rightPanelSource).toMatch(/requestFenceRef\.current\.isCurrent\(requestToken\)/)
-    expect(rightPanelSource).toMatch(/\}, \[threadId, workspaceKey, visible\]\)/)
-  })
-
-  it("loads the side conversation file index for @ completion or direct @path submission", () => {
-    const source = readFileSync(new URL("../components/chat/ChatContainer.tsx", import.meta.url), "utf8")
-
-    const suggestions = source.slice(source.indexOf("const loadMoreWorkspaceMentionFiles"), source.indexOf("const atFileMentions"))
-    expect(suggestions).toContain("loadWorkspaceFilesDeduped(threadId, workspacePath, sideComposer ? { signal } : undefined)")
-    const pickerIndex = source.slice(source.indexOf("const needsSideFileIndex"), source.indexOf("const slashPopoverKind"))
-    expect(pickerIndex).toContain('sideComposer && atFileMentions.mode.kind === "at-file"')
-    expect(pickerIndex).toContain("!isWorkspaceFileScanSnapshot(workspacePath, workspaceFiles)")
-    expect(pickerIndex).toMatch(/if \(!needsSideFileIndex[\s\S]*hydrateInitialWorkspaceFiles\(threadId, workspacePath/)
-    const submission = source.slice(source.indexOf("let filesForSubmission"), source.indexOf("workspaceFiles: filesForSubmission"))
-    expect(submission).toContain("!isWorkspaceFileScanSnapshot(workspacePath, workspaceFiles)")
-    expect(submission).toMatch(/knownMentions\.length < mentionPaths\.length\) \{\s+const result = await loadBtwWorkspaceFiles\(threadId, workspacePath\)/)
-  })
-
-  it("distinguishes an initial scan snapshot from files reported by tools", async () => {
-    const workspacePath = "C:/side-workspace"
-    const reported = [{ path: "/changed.ts", is_dir: false }]
-    const loadFromDisk = vi.fn().mockResolvedValue({
-      success: true,
-      files: [...reported, { path: "/another.ts", is_dir: false }],
-      workspacePath
-    })
-    installWorkspaceApi({ loadFromDisk })
-    try {
-      expect(isWorkspaceFileScanSnapshot(workspacePath, reported)).toBe(false)
-      const snapshot = await loadWorkspaceFilesDeduped("parent", workspacePath)
-      expect(isWorkspaceFileScanSnapshot("c:\\SIDE-WORKSPACE", snapshot.files)).toBe(true)
-      expect(isWorkspaceFileScanSnapshot("C:/different-workspace", snapshot.files)).toBe(false)
-      expect(isWorkspaceFileScanSnapshot(workspacePath, reported)).toBe(false)
-      expect(await loadWorkspaceFilesDeduped("side", workspacePath)).toBe(snapshot)
-      expect(loadFromDisk).toHaveBeenCalledOnce()
-    } finally {
-      markWorkspaceFilesStale("parent", workspacePath)
-    }
-  })
-
-  it("keeps a streamed file available until the watcher publishes it to all workspace tabs", async () => {
-    const workspacePath = "C:/side-workspace-patch"
-    const candidates = ["parent", "side"].map(threadId => ({ threadId, workspacePath }))
-    const original = { path: "/dir/original.ts", is_dir: false, size: 5 }
-    const added = { path: "/added.ts", is_dir: false as const, size: 20 }
-    const loadFromDisk = vi.fn().mockResolvedValue({ success: true, files: [original], workspacePath })
-    installWorkspaceApi({ loadFromDisk })
-    try {
-      const snapshot = await loadWorkspaceFilesDeduped("parent", workspacePath)
-      const sideFiles = mergeWorkspaceStreamFiles(snapshot.files, [{ ...original, size: 1 }, added])!
-      expect(sideFiles).toEqual([original, added])
-      expect(isWorkspaceFileScanSnapshot(workspacePath, sideFiles)).toBe(true)
-      expect(mergeWorkspaceStreamFiles(sideFiles, [added])).toBe(sideFiles)
-      expect(getWorkspaceFilePathIndex(sideFiles)?.get(added.path)).toEqual(added)
-      expect(getWorkspaceFilePathIndex(snapshot.files)?.has(added.path)).toBe(false)
-      expect(snapshot.files).toEqual([original])
-      expect(snapshot.files[0].size).toBe(5)
-
-      const temporary = { ...added, path: "/temporary.ts" }
-      let visible = mergeWorkspaceStreamFiles(sideFiles, [temporary])!
-      const visibleTree = await buildWorkspaceFileTreeProjection(visible)
-      const rightPanel = readFileSync(new URL("../components/panels/RightPanel.tsx", import.meta.url), "utf8")
-        .replace(/\r\n/g, "\n")
-      const revision = rightPanel.match(/<FileTreeNode\s[\s\S]*?\brevision=\{([^}\n]+)\}/)?.[1]
-      const compareRows = rightPanel.match(/const FileTreeNode = memo\([\s\S]*?\n  \(prevProps, nextProps\) => \{([\s\S]*?)\n  \}\n\)/)?.[1]
-      expect(revision).toBeDefined()
-      expect(compareRows).toBeDefined()
-      const readRevision = new Function("node", "expanded", `return ${revision}`) as (
-        node: WorkspaceFileTreeNode, expanded: ReadonlySet<string>
-      ) => number | boolean
-      const rowProps = (node: WorkspaceFileTreeNode, expanded: ReadonlySet<string>) => ({
-        node, revision: readRevision(node, expanded), expanded, depth: 0, workspacePath
-      })
-      const memoEqual = new Function("prevProps", "nextProps", compareRows!) as (
-        previous: ReturnType<typeof rowProps>, next: ReturnType<typeof rowProps>
-      ) => boolean
-      const expanded = new Set(["/dir"])
-      const collapsed = new Set<string>()
-      const previousFile = rowProps(visibleTree.nodesByPath.get("added.ts")!, expanded)
-      const previousOpenDir = rowProps(visibleTree.nodesByPath.get("dir")!, expanded)
-      const previousClosedDir = rowProps(previousOpenDir.node, collapsed)
-      const previousUnchangedFile = rowProps(visibleTree.nodesByPath.get("dir/original.ts")!, expanded)
-      expect(previousFile.node.file?.size).toBe(20)
-
-      const unsubscribe = subscribeWorkspaceFileResults((_key, files, _result, patch) => {
-        visible = reconcileWorkspaceFilePatch(visible, files, patch)
-      })
-      try {
-        const watchedFile = { ...added, size: 55, modified_at: "2026-11-25T00:00:00.000Z" }
-        const newChild = { ...watchedFile, path: "/dir/new.ts" }
-        await refreshWorkspaceFilesFromChangeBatch({
-          threadIds: ["parent", "side"], workspacePath, changeType: "file",
-          update: { kind: "patch", upserts: [watchedFile, newChild], deletes: [] }
-        }, candidates)
-        expect(visible).toEqual([original, watchedFile, newChild, temporary])
-        expect(getWorkspaceFileTreeProjection(visible)).toBe(visibleTree)
-        const file = visibleTree.nodesByPath.get("added.ts")!
-        const dir = visibleTree.nodesByPath.get("dir")!
-        expect(file).toBe(previousFile.node)
-        expect(file.file).toEqual(watchedFile)
-        expect(memoEqual(previousFile, rowProps(file, expanded))).toBe(false)
-        expect(dir).toBe(previousOpenDir.node)
-        expect(dir.children.map(child => child.path)).toContain("/dir/new.ts")
-        expect(memoEqual(previousOpenDir, rowProps(dir, expanded))).toBe(false)
-        expect(memoEqual(previousClosedDir, rowProps(dir, collapsed))).toBe(true)
-        expect(memoEqual(previousUnchangedFile, rowProps(visibleTree.nodesByPath.get("dir/original.ts")!, expanded))).toBe(true)
-        expect(getWorkspaceFilePathIndex(snapshot.files)?.has(added.path)).toBe(false)
-        const confirmed = (await loadWorkspaceFilesDeduped("parent", workspacePath)).files
-        expect(confirmed).toEqual([original, watchedFile, newChild])
-
-        await refreshWorkspaceFilesFromChangeBatch({
-          threadIds: ["parent", "side"], workspacePath, changeType: "file",
-          update: { kind: "patch", upserts: [], deletes: [temporary.path] }
-        }, candidates)
-        expect(visible).toBe(confirmed)
-        expect(loadFromDisk).toHaveBeenCalledOnce()
-      } finally {
-        unsubscribe()
-      }
-    } finally {
-      markWorkspaceFilesStale("parent", workspacePath)
-    }
-  })
-
-  it("keeps implicit directories ordered and prunes them after a streamed file is deleted", async () => {
-    const diskFiles = [{ path: "/z-existing.txt", is_dir: false }]
-    const pending = { path: "/pending.txt", is_dir: false }
-    const nested = { path: "/new-directory/subdirectory/new.txt", is_dir: false }
-    const first = mergeWorkspaceStreamFiles(diskFiles, [pending])!
-    const projection = await buildWorkspaceFileTreeProjection(first)
-
-    const added = mergeWorkspaceStreamFiles(first, [nested])!
-    expect(getWorkspaceFileTreeProjection(added)).toBe(projection)
-    expect(projection.tree.map((node) => node.path)).toEqual([
-      "/new-directory",
-      "/pending.txt",
-      "/z-existing.txt"
-    ])
-
-    const removed = reconcileWorkspaceFilePatch(added, diskFiles, {
-      upserts: [],
-      deletes: new Set([nested.path])
-    })
-    expect(removed).toEqual([...diskFiles, pending])
-    expect(getWorkspaceFileTreeProjection(removed)).toBe(projection)
-    expect(projection.tree.map((node) => node.path)).toEqual(["/pending.txt", "/z-existing.txt"])
-    expect(projection.nodesByPath.has("new-directory/subdirectory")).toBe(false)
+    expect(rightPanelSource).toMatch(/\}, \[threadId, workspaceKey\]\)/)
   })
 
   it("uses the current ThreadState path when workspace metadata IPC never settles", async () => {

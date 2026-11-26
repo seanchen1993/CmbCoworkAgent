@@ -37,7 +37,6 @@ export interface GitCommitRepositoryOption {
 interface GitCommitDialogProps {
   open: boolean
   running: boolean
-  submitDisabled?: boolean
   branch: string
   fileCount: number
   additions: number
@@ -63,7 +62,6 @@ interface GitCommitDialogProps {
 export function GitCommitDialog({
   open,
   running,
-  submitDisabled = false,
   branch,
   fileCount,
   additions,
@@ -345,7 +343,7 @@ export function GitCommitDialog({
             id="git-commit-button"
             type="button"
             className="w-full h-9"
-            disabled={running || submitDisabled || noSelectedFiles}
+            disabled={running || noSelectedFiles}
             onClick={() => {
               setSubmitAttempted(true)
               if (commitBlocked) return

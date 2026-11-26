@@ -14,7 +14,6 @@ const BROWSER_FULLSCREEN_MAX_PANEL_PERCENT = 80
 
 interface UseRightPanelLayoutOptions {
   rightModule: RightModule
-  sidebarWidth?: number
 }
 
 interface RightPanelLayout {
@@ -35,7 +34,7 @@ interface RightPanelLayout {
   setBrowserFullscreen: (isFullscreen: boolean) => void
 }
 
-export function useRightPanelLayout({ rightModule, sidebarWidth = 0 }: UseRightPanelLayoutOptions): RightPanelLayout {
+export function useRightPanelLayout({ rightModule }: UseRightPanelLayoutOptions): RightPanelLayout {
   const rightPanelSplitRef = useRef<HTMLDivElement>(null)
   const rightPanelMainRef = useRef<HTMLElement>(null)
   const rightPanelContainerRef = useRef<HTMLDivElement>(null)
@@ -46,9 +45,6 @@ export function useRightPanelLayout({ rightModule, sidebarWidth = 0 }: UseRightP
   const previewCollapsedWidthRef = useRef<number | null>(null)
 
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
-  const [sideWidth, setSideWidth] = useState<number | null>(null)
-  const sideWidthRef = useRef(sideWidth)
-  const defaultSideWidth = rightModule === "btw" ? `calc(45% - ${sidebarWidth * 0.45}px)` : ""
   const [browserRightWidth, setBrowserRightWidth] = useState<number | null>(null)
   const [browserFullscreenRightPercent, setBrowserFullscreenRightPercent] = useState(
     BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT
@@ -78,15 +74,12 @@ export function useRightPanelLayout({ rightModule, sidebarWidth = 0 }: UseRightP
       ? undefined
       : {
           width:
-            rightModule === "btw" ? (sideWidth ?? defaultSideWidth) :
-            rightModule === "browser" ? (browserRightWidth ?? BROWSER_DEFAULT_WIDTH) : rightWidth,
-          maxWidth: rightModule === "btw" ? `calc(65% - ${sidebarWidth * 0.65}px)` : undefined
+            rightModule === "browser" ? (browserRightWidth ?? BROWSER_DEFAULT_WIDTH) : rightWidth
         }
 
   const applyNormalPanelWidth = useCallback((width: number | string) => {
     const panel = rightPanelContainerRef.current
-    const cssWidth = typeof width === "number" ? `${width}px` : width
-    if (panel) panel.style.width = cssWidth
+    if (panel) panel.style.width = typeof width === "number" ? `${width}px` : width
   }, [])
 
   const applyBrowserFullscreenSplit = useCallback((rightPercent: number) => {
@@ -104,8 +97,6 @@ export function useRightPanelLayout({ rightModule, sidebarWidth = 0 }: UseRightP
   const handleRightResizeEnd = useCallback(() => {
     if (browserFullscreen) {
       setBrowserFullscreenRightPercent(browserFullscreenRightPercentRef.current)
-    } else if (rightModule === "btw") {
-      setSideWidth(sideWidthRef.current)
     } else if (rightModule === "browser") {
       setBrowserRightWidth(browserRightWidthRef.current)
     } else {
@@ -135,7 +126,6 @@ export function useRightPanelLayout({ rightModule, sidebarWidth = 0 }: UseRightP
 
       if (rightDragStartRef.current === null) {
         rightDragStartRef.current =
-          rightModule === "btw" ? (rightPanelContainerRef.current?.getBoundingClientRect().width ?? RIGHT_DEFAULT) :
           rightModule === "browser"
             ? (browserRightWidthRef.current ??
               (rightPanelSplitRef.current?.clientWidth || window.innerWidth) * 0.5)
@@ -145,9 +135,7 @@ export function useRightPanelLayout({ rightModule, sidebarWidth = 0 }: UseRightP
         RIGHT_MAX,
         Math.max(RIGHT_MIN, rightDragStartRef.current - totalDelta)
       )
-      if (rightModule === "btw") {
-        sideWidthRef.current = nextWidth
-      } else if (rightModule === "browser") {
+      if (rightModule === "browser") {
         browserRightWidthRef.current = nextWidth
       } else {
         rightWidthRef.current = nextWidth
@@ -181,18 +169,12 @@ export function useRightPanelLayout({ rightModule, sidebarWidth = 0 }: UseRightP
       handlePreviewCollapse()
       return
     }
-    if (rightModule === "btw") {
-      setPreviewFullscreen(false)
-      setBrowserFullscreen(false)
-      applyNormalPanelWidth(sideWidthRef.current ?? defaultSideWidth)
-      return
-    }
     if (rightModule === "browser") {
       applyNormalPanelWidth(browserRightWidthRef.current ?? BROWSER_DEFAULT_WIDTH)
       return
     }
     handlePreviewExpand()
-  }, [applyNormalPanelWidth, handlePreviewCollapse, handlePreviewExpand, rightModule, defaultSideWidth])
+  }, [applyNormalPanelWidth, handlePreviewCollapse, handlePreviewExpand, rightModule])
 
   useEffect(() => {
     const restoreBrowserPanelWidth = (event: Event): void => {

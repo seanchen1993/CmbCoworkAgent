@@ -1,5 +1,4 @@
 import { normalizeWorkspacePathKey } from "../../../shared/workspace-path"
-import type { FileInfo } from "../types"
 import type {
   WorkspaceFilePatchEntry,
   WorkspaceFilesChangedPayload
@@ -17,7 +16,6 @@ import {
   buildWorkspaceFileTreeProjection,
   createWorkspaceFileTreeProjectionBuilder,
   finalizeWorkspaceFileTreeProjection,
-  getWorkspaceFileTreeProjection,
   patchWorkspaceFileTreeProjection,
   type WorkspaceFileTreeProjection
 } from "./workspace-file-tree-projection"
@@ -84,18 +82,13 @@ interface InFlightScan {
 
 const inFlight = new Map<string, InFlightScan>()
 const cachedResults = new Map<string, CachedWorkspaceResult>()
-const scannedFilesByWorkspaceKey = new WeakMap<readonly { path: string }[], string>()
-const pendingStreamFiles = new WeakMap<FileInfo[], { diskFiles: FileInfo[]; reported: ReadonlyMap<string, FileInfo> }>()
 let cachedWorkspaceBytes = 0
-type PublishedFilePatch = { upserts: readonly WorkspaceFile[]; deletes: ReadonlySet<string> }
-type PathIndex<T> = Pick<ReadonlyMap<string, T>, "get" | "has" | "size">
-const pathIndexesByFiles = new WeakMap<object, PathIndex<unknown>>()
+const pathIndexesByFiles = new WeakMap<object, Map<string, unknown>>()
 const resultSubscribers = new Set<
   (
     workspaceKey: string,
     files: WorkspaceLoadResult["files"],
-    result?: WorkspaceLoadResult,
-    patch?: PublishedFilePatch
+    result?: WorkspaceLoadResult
   ) => void
 >()
 const patchSubscribersByWorkspace = new Map<string, Map<string, Set<() => void>>>()
@@ -293,12 +286,8 @@ function removeCachedWorkspaceResult(key: string): CachedWorkspaceResult | undef
   return cached
 }
 
-function publishWorkspaceFileResult(key: string, result: WorkspaceLoadResult, patch?: PublishedFilePatch): void {
-  scannedFilesByWorkspaceKey.set(result.files, key)
-  for (const subscriber of resultSubscribers) {
-    if (patch) subscriber(key, result.files, result, patch)
-    else subscriber(key, result.files, result)
-  }
+function publishWorkspaceFileResult(key: string, result: WorkspaceLoadResult): void {
+  resultSubscribers.forEach((subscriber) => subscriber(key, result.files, result))
 }
 
 function cancelWorkspaceContinuationByKey(key: string): void {
@@ -580,62 +569,15 @@ function cacheResult(
 
 export function getWorkspaceFilePathIndex<T extends { path: string }>(
   files: T[]
-): PathIndex<T> | undefined {
-  return pathIndexesByFiles.get(files) as PathIndex<T> | undefined
+): Map<string, T> | undefined {
+  return pathIndexesByFiles.get(files) as Map<string, T> | undefined
 }
 
-/** Overlay reported files without mutating the shared disk snapshot or its index. */
-export function mergeWorkspaceStreamFiles(files: FileInfo[], reported: readonly FileInfo[]): FileInfo[] | undefined {
-  const pending = pendingStreamFiles.get(files)
-  const diskFiles = pending?.diskFiles ?? files
-  const scannedKey = scannedFilesByWorkspaceKey.get(diskFiles)
-  const diskIndex = getWorkspaceFilePathIndex(diskFiles)
-  if (!diskIndex && diskFiles.length > 1_024) return undefined
-  const index = diskIndex ?? new Map(diskFiles.map(file => [file.path, file]))
-  let changes: Map<string, FileInfo> | undefined
-  for (const { path, is_dir, size } of reported) {
-    const onDisk = index.get(path)
-    if (onDisk && scannedKey) continue
-    const existing = changes?.get(path) ?? pending?.reported.get(path) ?? onDisk
-    if (!existing || existing.is_dir !== is_dir || existing.size !== size) {
-      changes ??= new Map(pending?.reported)
-      changes.set(path, { ...existing, path, is_dir, size })
-    }
-  }
-  if (!changes) return files
-  const updates = changes
-  // Watcher-owned files stay shared. Copying their indexed entries for every
-  // streamed addition would make typing and tool updates compete for the renderer.
-  const additions = [...updates.values()].filter(file => !index.has(file.path))
-  const base = scannedKey ? diskFiles : diskFiles.map(file => updates.get(file.path) ?? file)
-  const nextFiles = base.concat(additions)
-  pathIndexesByFiles.set(nextFiles, {
-    size: nextFiles.length,
-    get: path => updates.get(path) ?? index.get(path),
-    has: path => updates.has(path) || index.has(path)
-  })
-  if (pending && getWorkspaceFileTreeProjection(files)) {
-    patchWorkspaceFileTreeProjection(files, nextFiles, reported.filter(file => updates.has(file.path)), [])
-  }
-  pendingStreamFiles.set(nextFiles, { diskFiles, reported: updates })
-  if (scannedKey) scannedFilesByWorkspaceKey.set(nextFiles, scannedKey)
-  return nextFiles
-}
-
-/** A watcher patch only settles the reported paths. A complete rescan supersedes the overlay. */
-export function reconcileWorkspaceFilePatch(
-  current: FileInfo[], diskFiles: FileInfo[], patch: PublishedFilePatch | undefined
-): FileInfo[] {
-  const pending = pendingStreamFiles.get(current)
-  if (!patch || !pending) return diskFiles
-  const { deletes } = patch
-  if (diskFiles === pending.diskFiles && ![...deletes].some(path => pending.reported.has(path))) return current
-  const diskIndex = getWorkspaceFilePathIndex(diskFiles)
-  const remaining = [...pending.reported.values()].filter(file => !deletes.has(file.path) && !diskIndex?.has(file.path))
-  if (!remaining.length) return diskFiles
-  const next = mergeWorkspaceStreamFiles(diskFiles, remaining) ?? diskFiles
-  if (next !== diskFiles) patchWorkspaceFileTreeProjection(current, next, patch.upserts, [...deletes])
-  return next
+export function registerWorkspaceFilePathIndex<T extends { path: string }>(
+  files: T[],
+  index: Map<string, T>
+): void {
+  pathIndexesByFiles.set(files, index as Map<string, unknown>)
 }
 
 export function setWorkspaceFileCacheByteLimitForTests(byteLimit: number): void {
@@ -663,8 +605,7 @@ export function subscribeWorkspaceFileResults(
   subscriber: (
     workspaceKey: string,
     files: WorkspaceLoadResult["files"],
-    result?: WorkspaceLoadResult,
-    patch?: PublishedFilePatch
+    result?: WorkspaceLoadResult
   ) => void
 ): () => void {
   resultSubscribers.add(subscriber)
@@ -747,13 +688,11 @@ async function applyWorkspaceFilePatch(
     if (cached.filesByPath.get(filePath)?.is_dir) return "requires-rescan"
   }
 
-  const insertedFiles = new Map<string, WorkspaceFile>()
-  const removed = new Set(deletes)
   let structuralChange = false
   let byteDelta = 0
   const metadataPaths: string[] = []
   for (const entry of upserts) {
-    const existing = insertedFiles.get(entry.path) ?? cached.filesByPath.get(entry.path)
+    const existing = cached.filesByPath.get(entry.path)
     if (existing) {
       if (
         existing.size !== entry.size ||
@@ -770,14 +709,14 @@ async function applyWorkspaceFilePatch(
       continue
     }
     const inserted = { ...entry }
-    insertedFiles.set(entry.path, inserted)
+    cached.filesByPath.set(entry.path, inserted)
     byteDelta += workspaceFileByteLength(inserted)
     structuralChange = true
   }
-  for (const filePath of removed) {
-    const deleted = insertedFiles.get(filePath) ?? cached.filesByPath.get(filePath)
-    if (deleted) {
-      byteDelta -= workspaceFileByteLength(deleted)
+  for (const filePath of deletes) {
+    const deleted = cached.filesByPath.get(filePath)
+    if (cached.filesByPath.delete(filePath)) {
+      if (deleted) byteDelta -= workspaceFileByteLength(deleted)
       structuralChange = true
     }
   }
@@ -790,32 +729,24 @@ async function applyWorkspaceFilePatch(
   if (structuralChange) {
     const previousFiles = cached.result.files
     const files: WorkspaceFile[] = []
-    const nextIndex = new Map<string, WorkspaceFile>()
     let batchCount = 0
-    for (const entries of [cached.filesByPath, insertedFiles]) {
-      for (const [path, file] of entries) {
-        if (!removed.has(path)) {
-          files.push(file)
-          nextIndex.set(path, file)
-        }
-        batchCount += 1
-        if (batchCount >= 128) {
-          batchCount = 0
-          await yieldWorkspaceFileTask()
-        }
+    for (const file of cached.filesByPath.values()) {
+      files.push(file)
+      batchCount += 1
+      if (batchCount >= 128) {
+        batchCount = 0
+        await yieldWorkspaceFileTask()
       }
     }
-    cached.filesByPath = nextIndex
     const projectionUpserts = upserts.map(
       (entry) => cached.filesByPath.get(entry.path) ?? entry
     )
     patchWorkspaceFileTreeProjection(previousFiles, files, projectionUpserts, deletes)
     cached.result = { ...cached.result, files }
     pathIndexesByFiles.set(files, cached.filesByPath as Map<string, unknown>)
-    publishWorkspaceFileResult(key, cached.result, { upserts: projectionUpserts, deletes: removed })
+    publishWorkspaceFileResult(key, cached.result)
     publishPathPatches(key, metadataPaths)
   } else {
-    if (removed.size) publishWorkspaceFileResult(key, cached.result, { upserts: [], deletes: removed })
     // Existing-file edits mutate the shared FileInfo object in place. Thread
     // states keep the same 50k-entry array while visible file rows receive a
     // path-scoped revision notification for their size label.
@@ -1404,11 +1335,6 @@ export function resumeWorkspaceFilesDeduped(
 export function hasLoadedWorkspaceFiles(threadId: string, workspacePath: string): boolean {
   void threadId
   return cachedResults.has(normalizeWorkspaceFileKey(workspacePath))
-}
-
-/** A nonempty list can also come from tool events without an initial scan. */
-export function isWorkspaceFileScanSnapshot(workspacePath: string, files: readonly { path: string }[]): boolean {
-  return scannedFilesByWorkspaceKey.get(files) === normalizeWorkspaceFileKey(workspacePath)
 }
 
 export function markWorkspaceFilesStale(threadId: string, workspacePath: string): void {

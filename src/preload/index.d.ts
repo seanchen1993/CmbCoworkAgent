@@ -1,14 +1,13 @@
-import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
-import type { GitGraphPage } from "../shared/git-graph"
+import type { DesignUrlImportApi } from "../shared/design-url-import"
+import type { DesignSessionApi, DesignSessionSnapshot } from "../shared/managed-design-session"
 import type {
-  GitBranchKind,
-  GitBranchListResult,
-  GitBranchMenuCursor,
-  GitBranchMenuPage,
-  GitBranchMenuResult,
-  GitBranchMutationResult,
-  GitCurrentBranchResult
-} from "../shared/git-branches"
+  DesignArtifactPackageRef,
+  DesignAssetPreviewTicket,
+  DesignPackageCommitParams,
+  DesignPackageStageResult
+} from "../shared/design-package"
+import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
+import type { DesignSystemLibraryApi, DesignSystemInfo } from "../shared/design-system"
 import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import type { ProjectAgentRunListener } from "../shared/project-agent-run"
 import type { ProjectReportApi } from "../shared/project-analysis-report"
@@ -30,11 +29,6 @@ import type {
   RunAnalysisStages,
   RunAnalysisSessions
 } from "../shared/project-run-analysis"
-import type { PersonalEfficiencyExportOptions } from "../shared/personal-efficiency-export"
-import type {
-  PersonalEfficiencyData,
-  PersonalEfficiencyFilters
-} from "../shared/personal-efficiency"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -71,6 +65,7 @@ import type {
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import type { RequirementsApi } from "./requirements-api-types"
 import type {
   WorkflowWorktreeAction,
   WorkflowWorktreeActionResponse
@@ -221,7 +216,6 @@ import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
-  ProjectMetricOverviewData,
   ProjectMetricSummaryData,
   ProjectMetricTrendData,
   ProjectMetricTrendFilters
@@ -261,28 +255,7 @@ import type {
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
-import type {
-  BrowserRecordingSession,
-  BrowserAttachOptions,
-  BrowserBounds,
-  BrowserCdpConfig,
-  BrowserScriptLibraryDeleteInput,
-  BrowserNavigateOptions,
-  BrowserPanelRequest,
-  BrowserProfileImportOptions,
-  BrowserProfileImportResult,
-  BrowserScriptExecutionInput,
-  BrowserScriptExecutionState,
-  BrowserRecordingDraftUpdateInput,
-  BrowserScreenshotResult,
-  ScriptRecordingStartOptions,
-  BrowserScriptLibraryEntry,
-  BrowserScriptLibraryListOptions,
-  BrowserScriptLibraryReadInput,
-  BrowserScriptLibrarySaveInput,
-  BrowserScriptLibraryUpdateInput,
-  BrowserState
-} from "../shared/browser-types"
+import type { BrowserApi } from "./browser"
 import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent,
@@ -1382,10 +1355,6 @@ interface CustomAPI {
     ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
-  btw: {
-    create(request: BtwRequest): Promise<{ id: string; ordinal: number; thread: Thread }>
-    close(id: string): Promise<void>
-  }
   models: {
     getCatalog: () => Promise<{
       models: ModelConfig[]
@@ -1659,7 +1628,6 @@ interface CustomAPI {
       options?: {
         worktreePath?: string
         includeSummary?: boolean
-        refreshHead?: boolean
         includePushability?: boolean
       }
     ) => Promise<{
@@ -1672,7 +1640,6 @@ interface CustomAPI {
       hasPushableCommit: boolean
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
-      repositoryRoots?: string[]
       worktreeBranch?: string | null
       error?: string
     }>
@@ -1878,6 +1845,18 @@ interface CustomAPI {
       title?: string
     }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
+    selectCode: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    selectPrototypeZip: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    readText: (
+      filePath: string
+    ) => Promise<{ success: boolean; filename?: string; content?: string; error?: string }>
+    readDataUrl: (filePath: string) => Promise<{
+      success: boolean
+      filename?: string
+      dataUrl?: string
+      size?: number
+      error?: string
+    }>
   }
   marketSkillShortcut: {
     get: () => Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>>
@@ -2124,50 +2103,7 @@ interface CustomAPI {
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
   }
-  browser: {
-    attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
-    detach: () => Promise<BrowserState>
-    setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
-    setZoomFactor: (zoomFactor: number) => Promise<BrowserState>
-    navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
-    goBack: () => Promise<BrowserState>
-    goForward: () => Promise<BrowserState>
-    reload: () => Promise<BrowserState>
-    stop: () => Promise<BrowserState>
-    clearConsole: () => Promise<BrowserState>
-    getState: () => Promise<BrowserState>
-    startScriptRecording: (
-      options?: ScriptRecordingStartOptions
-    ) => Promise<BrowserRecordingSession>
-    pauseScriptRecording: () => Promise<BrowserRecordingSession>
-    updateScriptRecordingDraft: (
-      input: BrowserRecordingDraftUpdateInput
-    ) => Promise<BrowserRecordingSession>
-    resumeScriptRecording: () => Promise<BrowserRecordingSession>
-    stopScriptRecording: () => Promise<BrowserRecordingSession>
-    getScriptRecording: () => Promise<BrowserRecordingSession>
-    saveScriptLibraryEntry: (
-      input: BrowserScriptLibrarySaveInput
-    ) => Promise<BrowserScriptLibraryEntry>
-    listScriptLibraryEntries: (
-      options?: BrowserScriptLibraryListOptions
-    ) => Promise<BrowserScriptLibraryEntry[]>
-    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
-    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
-    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
-    executeRecordingScript: (input: BrowserScriptExecutionInput) => Promise<void>
-    getScriptExecutionState: () => Promise<BrowserScriptExecutionState>
-    cancelRecordingScriptExecution: () => Promise<boolean>
-    getCdpConfig: () => Promise<BrowserCdpConfig>
-    isProfileImportRuntimeEnabled: () => Promise<boolean>
-    saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
-    captureScreenshot: () => Promise<BrowserScreenshotResult>
-    importProfileData: (options: BrowserProfileImportOptions) => Promise<BrowserProfileImportResult>
-    disposeAllForRendererUnload: () => void
-    onState: (callback: (state: BrowserState) => void) => () => void
-    onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
-    onScriptExecutionState: (callback: (state: BrowserScriptExecutionState) => void) => () => void
-  }
+  browser: BrowserApi
   lsp: {
     getConfig: () => Promise<LspConfig>
     saveConfig: (updates: Partial<LspConfig>) => Promise<void>
@@ -2363,6 +2299,218 @@ interface CustomAPI {
       content: string
     ) => Promise<{ success: boolean; error?: string }>
   }
+  chatx: {
+    getConfig: () => Promise<ChatXConfig>
+    saveConfig: (updates: Partial<ChatXConfig>) => Promise<void>
+    restart: () => Promise<void>
+    cancelByThread: (threadId: string) => Promise<boolean>
+  }
+  design: {
+    importTemplate: DesignTemplateApi["importTemplate"]
+    updateTemplateAssociation: DesignTemplateApi["updateTemplateAssociation"]
+    listImportedTemplates: DesignTemplateApi["listImportedTemplates"]
+    readTemplate: DesignTemplateApi["readTemplate"]
+    readSystem: DesignSystemLibraryApi["readSystem"]
+    saveSystem: DesignSystemLibraryApi["saveSystem"]
+    selectSystemFile: DesignSystemLibraryApi["selectSystemFile"]
+    exportSystem: DesignSystemLibraryApi["exportSystem"]
+    extractSystem: DesignSystemLibraryApi["extractSystem"]
+    cancelSystemExtraction: DesignSystemLibraryApi["cancelSystemExtraction"]
+    onSystemExtractionProgress: DesignSystemLibraryApi["onSystemExtractionProgress"]
+    sessions: DesignSessionApi
+    generate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
+      modelId?: string,
+      history?: Array<{ role: "user" | "assistant"; content: string }>,
+      tabId?: string
+    ) => () => void
+    storeHtml: (tabId: string, html: string) => Promise<{ ok: boolean }>
+    saveArtifact: (
+      tabId: string,
+      html: string,
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
+    ) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    saveArtifactFile: (
+      filePath: string,
+      html: string,
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
+    ) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    importFromUrl: DesignUrlImportApi["importFromUrl"]
+    cancelUrlImport: DesignUrlImportApi["cancelUrlImport"]
+    finishUrlImport: DesignUrlImportApi["finishUrlImport"]
+    prepareUrlImportForEditing: DesignUrlImportApi["prepareUrlImportForEditing"]
+    onUrlImportProgress: DesignUrlImportApi["onUrlImportProgress"]
+    openImportBrowser: DesignUrlImportApi["openImportBrowser"]
+    controlImportInteractions: DesignUrlImportApi["controlImportInteractions"]
+    pickImportHtmlOrZip: () => Promise<{
+      canceled: boolean
+      filePath?: string
+      error?: string
+    }>
+    stageImportPackage: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<DesignPackageStageResult>
+    cancelImportPackage: (stageId: string) => Promise<{ canceled: boolean }>
+    commitImportPackage: (
+      params: DesignPackageCommitParams
+    ) => Promise<{
+      success: boolean
+      snapshot?: DesignSessionSnapshot
+      artifactPackage?: DesignArtifactPackageRef | null
+      missingAssets?: string[]
+      outOfScopeAssets?: string[]
+      warnings?: string[]
+      error?: string
+    }>
+    acquirePreviewUrl: (
+      sessionId: string,
+      kind: "canvas" | "draft",
+      runId?: string
+    ) => Promise<{
+      success: boolean
+      ticket?: DesignAssetPreviewTicket
+      error?: string
+    }>
+    releasePreviewUrl: (token: string) => Promise<{ released: boolean }>
+    importPrototypeZip: (
+      filePath: string,
+      options?: {
+        workspacePath?: string
+        sessionId?: string | null
+        createNew?: boolean
+        designSystemId?: string | null
+      }
+    ) => Promise<{
+      success: boolean
+      html?: string
+      title?: string
+      imageCount?: number
+      metadataCount?: number
+      snapshot?: DesignSessionSnapshot
+      artifactPackage?: DesignArtifactPackageRef | null
+      error?: string
+    }>
+    syncContextFiles: (params: {
+      workspacePath?: string
+      designSessionId?: string
+      kind: "attachments" | "code"
+      files: Array<{ filename: string; sourcePath?: string; content?: string }>
+    }) => Promise<{
+      success: boolean
+      dirPath?: string
+      files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+      error?: string
+    }>
+    readArtifact: (
+      tabId: string,
+      workspacePath?: string
+    ) => Promise<{
+      success: boolean
+      filePath?: string
+      html?: string
+      metadata?: unknown
+      error?: string
+    }>
+    readArtifactFile: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<{
+      success: boolean
+      filePath?: string
+      html?: string
+      metadata?: unknown
+      error?: string
+    }>
+    getArtifactPackageInfo: (
+      filePath: string,
+      workspacePath?: string,
+      sessionId?: string
+    ) => Promise<{
+      success: boolean
+      filePath?: string
+      dirPath?: string
+      entryRelativePath?: string
+      relatedFileCount?: number
+      isPackage?: boolean
+      error?: string
+    }>
+    exportArtifactPackage: (
+      filePath: string,
+      workspacePath?: string,
+      options?: { sessionId?: string; suggestedName?: string; saveDialog?: boolean }
+    ) => Promise<{
+      success: boolean
+      fileName?: string
+      savedPath?: string
+      canceled?: boolean
+      buffer?: ArrayBuffer
+      relatedFileCount?: number
+      error?: string
+    }>
+    listSystems: () => Promise<DesignSystemInfo[]>
+    listTemplates: () => Promise<DesignTemplateInfo[]>
+    agentGenerate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
+      tabId: string,
+      modelId?: string,
+      imageData?: string,
+      mimeType?: string,
+      currentHtml?: string,
+      skill?: { name: string; path: string },
+      workspacePath?: string,
+      artifactId?: string,
+      sourceArtifactPath?: string,
+      designSessionId?: string,
+      designSystemId?: string
+    ) => () => void
+    askQuestions: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: {
+        type: string
+        question?: unknown
+        questions?: unknown[]
+        error?: string
+      }) => void,
+      modelId?: string,
+      designSystemId?: string
+    ) => () => void
+    generateFromImage: (
+      sessionId: string,
+      prompt: string,
+      imageData: string,
+      mimeType: string,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      modelId?: string,
+      designSystemId?: string
+    ) => () => void
+    cancel: (sessionId: string) => Promise<void>
+    saveVariant: (variantId: string, html: string) => Promise<{ filePath: string }>
+  }
+  requirements: RequirementsApi
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">
     setMode: (mode: "none" | "unelevated" | "readonly" | "elevated") => Promise<void>
@@ -2429,7 +2577,7 @@ interface CustomAPI {
         context: unknown
       }) => void
     ) => () => void
-    intentResponse: (requestId: string, accepted: boolean) => Promise<boolean>
+    intentResponse: (requestId: string, accepted: boolean) => Promise<void>
     /**
      * Manually retry a failed skill generation. Skips the intent banner and
      * jumps straight to generate → confirm → write.
@@ -2443,7 +2591,6 @@ interface CustomAPI {
       callback: (req: {
         threadId?: string
         requestId: string
-        source?: "proposal"
         skillId: string
         name: string
         description: string
@@ -2451,12 +2598,11 @@ interface CustomAPI {
       }) => void
     ) => () => void
     confirmResponse: (requestId: string, approved: boolean, content?: string) => Promise<void>
-    onBtwRequestClosed: (callback: (request: BtwSkillRequestClosed) => void) => () => void
     /** Listen to streaming generation progress from the main process */
     onGenerating: (
       callback: (event: {
         threadId?: string
-        phase: "start" | "token" | "done" | "error" | "settled"
+        phase: "start" | "token" | "done" | "error"
         text: string
       }) => void
     ) => () => void
@@ -2856,20 +3002,6 @@ interface CustomAPI {
     projectMetricGroupOptions: (
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ) => Promise<{ success: boolean; data?: string[]; error?: string }>
-    personalEfficiency: (
-      filters: PersonalEfficiencyFilters,
-      sapId?: string
-    ) => Promise<{ success: boolean; data?: PersonalEfficiencyData; error?: string }>
-    personalEfficiencyExport: (
-      filters: PersonalEfficiencyFilters,
-      options?: PersonalEfficiencyExportOptions
-    ) => Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }>
-    projectMetricOverview: (
-      filters: ProjectMetricFilters
-    ) => Promise<{ success: boolean; data?: ProjectMetricOverviewData; error?: string }>
-    projectMetricIndicatorExport: (
-      filters: ProjectMetricFilters
-    ) => Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }>
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
@@ -3381,31 +3513,34 @@ interface CustomAPI {
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void
   }
   git: {
-    currentBranch: (cwd?: string, forSwitcher?: true) => Promise<GitCurrentBranchResult>
-    cancelBranchProbe: () => Promise<void>
-    readBranchHead: (gitDir: string) => Promise<string | null | undefined>
-    cancelBranchHead: () => Promise<void>
-    cancelCommitGraph: () => Promise<void>
-    getCommitGraph: (cwd?: string, skip?: number, snapshot?: string, forDialog?: true) => Promise<GitGraphPage>
-    cancelBranchList: () => Promise<void>
+    currentBranch: (cwd?: string) => Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      isMultiRepo?: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
+      error?: string
+    }>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }
-    ) => Promise<GitBranchListResult>
-    listBranchMenu: (
-      cwd?: string,
-      options?: { refreshRemote?: boolean; paged?: true }
-    ) => Promise<GitBranchMenuResult>
-    readBranchMenuPage: (cursor: GitBranchMenuCursor) => Promise<GitBranchMenuPage>
-    getChangedFileCount: (cwd?: string, branch?: string | null) => Promise<number>
-    switchBranch: (branch: string, cwd?: string, kind?: GitBranchKind) => Promise<GitBranchMutationResult>
-    createBranch: (branch: string, cwd?: string) => Promise<GitBranchMutationResult>
+    ) => Promise<{ success: boolean; branches: string[]; error?: string }>
+    switchBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
+    createBranch: (branch: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
   }
   gitPanel: {
     getCommitHistory: (threadId: string) => Promise<{
       success: boolean
       projectPath: string | null
       records: GitCommitHistoryRecord[]
+      error?: string
+    }>
+    recordCommitHistory: (
+      threadId: string,
+      fullMessage: string
+    ) => Promise<{
+      success: boolean
+      record: GitCommitHistoryRecord | null
       error?: string
     }>
   }

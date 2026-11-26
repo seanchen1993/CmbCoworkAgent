@@ -1,6 +1,3 @@
-import { queuedDraftPreparationLock, submitInFlightLockStore, subscribeSubmitInFlightRelease } from "./submit-in-flight-lock"
-import type { PromptHistoryCursor } from "./prompt-history"
-import { normalizeGitWorkspacePathKey } from "../../../shared/workspace-path"
 import {
   cancelThreadSearchOnTabChange, isReadOnlyProjectSearchThread, useThreadSearch
 } from "./thread-search-navigation"
@@ -91,10 +88,7 @@ import type {
   QueuedMessage
 } from "@/types"
 import type { BotSkillSelection } from "../../../shared/bots/skill-selection"
-import { isThreadDeletionPending, isThreadRetired, selectThreadSummary, useAppStore } from "@/lib/store"
-import { collectChangedStreamingThreadIds } from "./thread-stream-activity"
-import { forgetBtw, setBtwPendingInteraction, subscribeBtwSkillEvolution } from "@/lib/btw-chat"
-import { isBtwThreadId } from "../../../shared/btw-chat"
+import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
@@ -104,13 +98,10 @@ import {
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
-  readCheckpointReplayTurns,
-  type CheckpointReplayTurns,
   isCheckpointEmptyAssistantToolCallMessage,
   isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
-import { prepareToolTranscriptReplayMerge } from "../../../shared/tool-transcript-replay"
 import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
@@ -191,10 +182,10 @@ import {
   normalizeSchedulerMessageSnapshot
 } from "./scheduler-message-snapshot"
 import {
+  getWorkspaceFilePathIndex,
   markWorkspaceFilesStale,
-  mergeWorkspaceStreamFiles,
-  reconcileWorkspaceFilePatch,
   normalizeWorkspaceFileKey,
+  registerWorkspaceFilePathIndex,
   retainWorkspaceFilesForPathChange,
   refreshWorkspaceFilesFromChangeBatch,
   subscribeWorkspaceFileResults
@@ -320,8 +311,6 @@ type HistoryCheckpoint = {
         tool_calls?: unknown[]
         tool_call_id?: string
         name?: string
-        status?: string
-        is_error?: boolean
         additional_kwargs?: Record<string, unknown>
         kwargs?: {
           id?: string
@@ -330,8 +319,6 @@ type HistoryCheckpoint = {
           tool_calls?: unknown[]
           tool_call_id?: string
           name?: string
-          status?: string
-          is_error?: boolean
           additional_kwargs?: Record<string, unknown>
         }
       }>
@@ -497,12 +484,10 @@ function rememberSearchGoalEvent(previous: readonly GoalEvent[], event: GoalEven
 
 const mergePersistedMessagesIntoTranscript = (
   baseMessages: Message[],
-  persistedMessages: readonly Message[],
-  useStableProviderOccurrences = false
+  persistedMessages: Message[]
 ): Message[] => {
   return mergeCheckpointAuthorityTranscriptMessages(baseMessages, persistedMessages, {
-    isSameMessage: sameGoalCommandMessage,
-    useStableProviderOccurrences
+    isSameMessage: sameGoalCommandMessage
   })
 }
 
@@ -701,7 +686,6 @@ export interface HookInterruptionState {
 }
 
 export interface ThreadGitContext {
-  workspacePath: string | null
   isGitRepo?: boolean
   isWorktree?: boolean
   branch?: string | null
@@ -794,7 +778,6 @@ export interface ThreadState {
   contextReminder: ContextReminderState
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
-  draftPromptHistoryCursor?: PromptHistoryCursor
   draftBotReplyTo?: BotMessageReply | null
   draftBotMentions?: BotMessageMention[]
   /** Managed Bot composer attachments survive navigation; no binary data is retained here. */
@@ -1003,11 +986,8 @@ export interface ThreadActions {
   loadEarlierMessages: () => Promise<number>
   loadMessageWindowAround: (
     target: { messageId: string; ordinal: number },
-    readPage?: (residentMessageIds: readonly string[]) => Promise<{
-      page: ThreadMessagesPage; goalEvent?: GoalEvent; canonicalMessageId?: string
-    } | null>,
-    onTargetResolved?: (messageId: string) => void
-  ) => Promise<string | false>
+    readPage?: (residentMessageIds: readonly string[]) => Promise<{ page: ThreadMessagesPage; goalEvent?: GoalEvent } | null>
+  ) => Promise<boolean>
   loadReleasedMessageWindow: () => Promise<{ revealMessageId: string | null } | false>
   restoreLatestMessageWindow: () => Promise<boolean>
   cancelMessageWindowLoad: () => void
@@ -1054,7 +1034,7 @@ export interface ThreadActions {
   setContextReminder: (
     update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
-  setDraftInput: (input: string, cursor?: PromptHistoryCursor) => void
+  setDraftInput: (input: string) => void
   setDraftBotInput: (input: string, mentions: BotMessageMention[]) => void
   setDraftBotReplyTo: (reply: BotMessageReply | null) => void
   setDraftAttachments: (update: DraftFilesUpdate<FileAttachment>) => void
@@ -1151,7 +1131,6 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
 }
 
 function loadQueuedMessages(threadId: string, required = false): QueuedMessage[] {
-  if (isBtwThreadId(threadId)) return []
   try {
     const raw = window.localStorage.getItem(queueStorageKey(threadId))
     if (raw === null) return []
@@ -1169,7 +1148,6 @@ function loadQueuedMessages(threadId: string, required = false): QueuedMessage[]
 }
 
 function persistQueuedMessages(threadId: string, messages: QueuedMessage[]): string | null {
-  if (isBtwThreadId(threadId)) return null
   try {
     if (messages.length === 0) {
       window.localStorage.removeItem(queueStorageKey(threadId))
@@ -1259,7 +1237,7 @@ const createDefaultThreadState = (): ThreadState => ({
 })
 
 function isThreadMetadataExplicitNormalMode(threadId: string): boolean {
-  const thread = selectThreadSummary(useAppStore.getState(), threadId)
+  const thread = useAppStore.getState().threads.find((item) => item.thread_id === threadId)
   return isExplicitNormalModeMetadata(thread?.metadata)
 }
 
@@ -1307,7 +1285,7 @@ function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGit
     const branch = typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
 
     if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
-    return { workspacePath, isGitRepo, isWorktree, branch }
+    return { isGitRepo, isWorktree, branch }
   }
 
   // 兼容旧 metadata：新写入都会使用 metadata.gitContext 对象。
@@ -1336,7 +1314,7 @@ function getGitContextFromMetadata(metadata: Record<string, unknown>): ThreadGit
   const isWorktree = metadataMarkedWorktree || cachedIsWorktree
 
   if (isGitRepo === undefined && isWorktree === undefined && !branch) return null
-  return { workspacePath, isGitRepo, isWorktree, branch }
+  return { isGitRepo, isWorktree, branch }
 }
 
 const defaultStreamData: StreamData = {
@@ -1917,13 +1895,12 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
       isLoading: latestStream.isLoading,
       stream: latestStream
     })
-  }, [stream.messages, stream.messageOrderRevision, stream.isLoading, threadId])
+  }, [stream.messages, stream.isLoading, threadId])
 
   return null
 })
 
 export function ThreadProvider({ children }: { children: ReactNode }) {
-  useEffect(subscribeBtwSkillEvolution, [])
   const currentThreadId = useAppStore((state) => state.currentThreadId)
   const projectSessionThreadId = useThreadSearch((state) => state.projectSessionThreadId)
   const foregroundHistoryReadOnly = useThreadSearch(() =>
@@ -1953,6 +1930,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       return { ...previous, [threadId]: { ...current, terminal: true } }
     })
   }, [])
+  const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({})
   const initializedThreadsRef = useRef<Set<string>>(new Set())
   const previousCurrentThreadIdRef = useRef<string | null>(null)
   const actionsCache = useRef<Record<string, ThreadActions>>({})
@@ -2179,14 +2157,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
 
         const previousSummary = threadStateSummariesRef.current[threadId]
-        const sideThread = isBtwThreadId(threadId)
-        if (sideThread) {
-          const pending = Boolean(state?.pendingApproval || state?.pendingUserInput)
-          if (pending !== Boolean(previous?.pendingApproval || previous?.pendingUserInput)) {
-            setBtwPendingInteraction(threadId, pending)
-          }
-        }
-        const nextSummary = state && !sideThread
+        const nextSummary = state
           ? summarizeThreadState(state, previous, previousSummary)
           : undefined
         if (!threadStateSummariesEqual(previousSummary, nextSummary)) {
@@ -2261,12 +2232,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         return
       }
       let nextState = { ...current, ...updates }
-      if (nextState.draftPromptHistoryCursor && updates.workspacePath !== undefined &&
-          nextState.draftPromptHistoryCursor.workspace !==
-            (updates.workspacePath && (normalizeGitWorkspacePathKey(updates.workspacePath) || "/"))) {
-        if (nextState.draftInput === nextState.draftPromptHistoryCursor.text) nextState.draftInput = ""
-        nextState.draftPromptHistoryCursor = undefined
-      }
       if (nextState.messages.length > THREAD_MESSAGE_RESIDENT_LIMIT) {
         const pageBoundaryIds = new Set(
           nextState.historyPageWindows.map((window) => window.lastMessageId)
@@ -2321,7 +2286,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
-    const cleanupResults = subscribeWorkspaceFileResults((workspaceKey, files, _result, filePatch) => {
+    const cleanupResults = subscribeWorkspaceFileResults((workspaceKey, files) => {
       // One shared scan publishes one files-array reference. Update every
       // hydrated task on that physical path in one state transaction.
       const changes: ThreadStateRegistryChange<ThreadState>[] = []
@@ -2332,8 +2297,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           initializedThreadsRef.current.has(threadId) &&
           state.workspaceFiles !== files
         ) {
-          const workspaceFiles = reconcileWorkspaceFilePatch(state.workspaceFiles, files, filePatch)
-          if (workspaceFiles !== state.workspaceFiles) changes.push({ threadId, state: { ...state, workspaceFiles } })
+          changes.push({ threadId, state: { ...state, workspaceFiles: files } })
         }
       }
       commitThreadStateChanges(changes)
@@ -3177,36 +3141,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [updateThreadState]
   )
 
-  const publishThreadLoadingStates = useCallback((next: Record<string, boolean>): void => {
-    const affectedIds = collectChangedStreamingThreadIds(loadingStatesRef.current, next)
-    loadingStatesRef.current = next
-    // Only a finished stream can add an idle holder to the eviction candidates.
-    if (affectedIds.some(threadId => !next[threadId])) {
-      setDehydrationEligibilityRevision(revision => revision + 1)
-    }
-    // Publish the directory timestamp with the loading transition so the sidebar
-    // can commit both changes together.
-    if (affectedIds.length > 0) {
-      useAppStore.getState().touchThreadSummaries(affectedIds, new Date())
-    }
-  }, [])
-
   const setThreadLoadingState = useCallback((threadId: string, isLoading: boolean): void => {
     const previous = loadingStatesRef.current
     if (previous[threadId] === isLoading) return
-    // An auxiliary tab starts idle. Publishing a false entry would wake the main sidebar on open and close.
-    if (!isLoading && previous[threadId] === undefined && isBtwThreadId(threadId)) return
-    publishThreadLoadingStates({ ...previous, [threadId]: isLoading })
-  }, [publishThreadLoadingStates])
-
-  const clearThreadLoadingState = useCallback((threadId: string): void => {
-    const previous = loadingStatesRef.current
-    if (!Object.prototype.hasOwnProperty.call(previous, threadId)) return
-    const next = { ...previous }
-    delete next[threadId]
-    publishThreadLoadingStates(next)
-    allStreamSubscribersRef.current.forEach((callback) => callback())
-  }, [publishThreadLoadingStates])
+    const next = { ...previous, [threadId]: isLoading }
+    loadingStatesRef.current = next
+    setLoadingStates(next)
+  }, [])
 
   // Handle stream updates from ThreadStreamHolder
   const handleStreamUpdate = useCallback(
@@ -3359,12 +3300,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     threadStateSubscribersRef.current[threadId] = subscribers
     return () => {
       subscribers.delete(callback)
-      if (subscribers.size === 0) {
-        delete threadStateSubscribersRef.current[threadId]
-        if (isBtwThreadId(threadId) && initializedThreadsRef.current.size > MAX_RETAINED_IDLE_STREAM_HOLDERS) {
-          setDehydrationEligibilityRevision(revision => revision + 1)
-        }
-      }
+      if (subscribers.size === 0) delete threadStateSubscribersRef.current[threadId]
     }
   }, [])
 
@@ -4539,14 +4475,37 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }))
           }
           break
-        case "workspace": {
-          const files = data.files
-          if (Array.isArray(files)) {
+        case "workspace":
+          if (Array.isArray(data.files)) {
             updateThreadState(threadId, (state) => {
-              const workspaceFiles = mergeWorkspaceStreamFiles(state.workspaceFiles, files)
-              if (workspaceFiles) return { workspaceFiles }
-              if (state.workspacePath) markWorkspaceFilesStale(threadId, state.workspacePath)
-              return {}
+              const cachedIndex = getWorkspaceFilePathIndex(state.workspaceFiles)
+              // Large disk snapshots are registered with an O(1) path index.
+              // A missing index only belongs to an early/small legacy state;
+              // never synchronously rebuild an unbounded map on a stream event.
+              if (!cachedIndex && state.workspaceFiles.length > 1_024) {
+                if (state.workspacePath) {
+                  markWorkspaceFilesStale(threadId, state.workspacePath)
+                }
+                return {}
+              }
+              const fileMap =
+                cachedIndex ?? new Map(state.workspaceFiles.map((file) => [file.path, file]))
+              let nextFiles: typeof state.workspaceFiles | null = null
+              for (const f of data.files!) {
+                const existing = fileMap.get(f.path)
+                if (existing) {
+                  existing.is_dir = f.is_dir
+                  existing.size = f.size
+                  continue
+                }
+                const next = { path: f.path, is_dir: f.is_dir, size: f.size }
+                fileMap.set(f.path, next)
+                nextFiles ??= state.workspaceFiles.slice()
+                nextFiles.push(next)
+              }
+              if (!nextFiles) return {}
+              registerWorkspaceFilePathIndex(nextFiles, fileMap)
+              return { workspaceFiles: nextFiles }
             })
           }
           if (data.path) {
@@ -4557,7 +4516,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             )
           }
           break
-        }
         case "subagents":
           if (Array.isArray(data.subagents)) {
             const parentStreamData = streamDataRef.current[threadId]
@@ -4677,9 +4635,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 resolvedTier: data.resolvedTier!,
                 routeReason: data.routeReason ?? ""
               },
-              // Ordinary chats use the routed model to show the context window.
-              // A side conversation keeps the model selected for its next turn.
-              ...(!isBtwThreadId(threadId) && { currentModel: data.resolvedModelId! })
+              // Sync currentModel to the routing-resolved model so that
+              // ContextUsageIndicator tracks the correct context window.
+              // Note: only update in-memory state, do NOT persist to thread
+              // metadata — that stays as the user's manual selection for
+              // pinned mode fallback.
+              currentModel: data.resolvedModelId!
             }))
           }
           break
@@ -4744,13 +4705,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }
             // The main process already persisted this mode. Keep the UI in sync
             // without writing stale renderer metadata back over newer main updates.
-            const app = useAppStore.getState()
-            const thread = selectThreadSummary(app, threadId)
-            if (thread) {
-              const updated = { ...thread, metadata: { ...thread.metadata, agentMode: data.mode } }
-              if (isBtwThreadId(threadId)) app.addThreadSummary(updated)
-              else useAppStore.setState({ threads: app.threads.map(row => row === thread ? updated : row) })
-            }
+            useAppStore.setState((state) => ({
+              threads: state.threads.map((thread) =>
+                thread.thread_id === threadId
+                  ? {
+                      ...thread,
+                      metadata: { ...(thread.metadata ?? {}), agentMode: data.mode }
+                    }
+                  : thread
+              )
+            }))
             updateThreadState(threadId, (state) =>
               state.coordinatorWorkers.length > 0
                 ? { coordinatorWorkers: [...state.coordinatorWorkers] }
@@ -5445,7 +5409,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return 0
           }
         },
-        loadMessageWindowAround: async (target, readPage, onTargetResolved) => {
+        loadMessageWindowAround: async (target, readPage) => {
           const state = threadStatesRef.current[threadId]
           if (!state) return false
           if (!target.messageId || !Number.isSafeInteger(target.ordinal) || target.ordinal < 0) {
@@ -5463,30 +5427,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const residentMessageIds = selectTargetedThreadMessageTail(
               state.messages, THREAD_MESSAGE_PROTECTED_TAIL, state.historyWindowGap
             ).filter((message) => message.ordinal !== undefined).map((message) => message.id)
-            const readLocalPage = async () => {
-              const load = (targetMessageId: string) => window.api.threads.getMessagesPage(threadId, {
-                targetMessageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
-              })
-              let page = await load(target.messageId)
-              const message = page.messages.find(({ id }) => id === target.messageId)
-              const canonicalMessageId = message?.legacy_checkpoint_replay_of
-              if (canonicalMessageId && isCurrentLoad()) {
-                const end = message?.legacy_checkpoint_replay_end
-                page = await load(end ?? canonicalMessageId)
-                if (end && isCurrentLoad() && !page.messages.some(({ id }) => id === canonicalMessageId))
-                  page = await load(canonicalMessageId)
-                const outcomes = message?.legacy_checkpoint_tool_outcomes
-                if (outcomes?.length) page = {
-                  ...page,
-                  messages: page.messages.map((row) => row.id === canonicalMessageId
-                    ? { ...row, legacy_checkpoint_tool_outcomes: outcomes } : row)
-                }
-              }
-              return { page, goalEvent: undefined, canonicalMessageId }
-            }
-            const result = readPage ? await readPage(residentMessageIds) : await readLocalPage()
+            const result = readPage ? await readPage(residentMessageIds) : { page: await window.api.threads.getMessagesPage(threadId, {
+              targetMessageId: target.messageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
+            }), goalEvent: undefined }
             const page = result?.page
-            const targetId = result?.canonicalMessageId ?? target.messageId
             await pendingGoalTranscriptEventsRef.current[threadId]
             if (!isCurrentLoad()) return false
             if (!page) {
@@ -5519,13 +5463,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const targetMessages = mergeGoalUserEventsIntoDurablePage(durableMessages, goalEvents, raw,
               getGoalTranscriptPageRange(raw, page.hasMore, page.hasNewerMessages === false ? undefined : { kind: "target" }),
               targetTail)
-            if (!targetMessages.some((message) => message.id === targetId)) {
+            if (!targetMessages.some((message) => message.id === target.messageId)) {
               updateThreadState(threadId, () => ({ historyPageLoading: false }))
               messageWindowIntentCoordinator.finish(intent)
               return false
             }
 
-            onTargetResolved?.(targetId)
             let loaded = false
             updateThreadState(threadId, (latest) => {
               const live = liveStreamAccumulatorsRef.current[threadId]
@@ -5537,7 +5480,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 latest.messages,
                 targetMessages,
                 {
-                  targetMessageId: targetId,
+                  targetMessageId: target.messageId,
                   maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
                   protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
                   existingGap: latest.historyWindowGap,
@@ -5548,7 +5491,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 }
               )
               const messages = windowResult.messages
-              loaded = windowResult.messages.some((message) => message.id === targetId)
+              loaded = windowResult.messages.some((message) => message.id === target.messageId)
               const nextToolCallStates = retainResidentToolCallStates(
                 upsertToolCallStatesFromMessages(latest.toolCallStates, targetMessages),
                 messages
@@ -5561,8 +5504,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   historyPageLoading: false
                 }
               }
-              const durableTarget = result?.goalEvent?.transcript_message_id ??
-                (result?.canonicalMessageId ? raw.at(-1)?.id : undefined) ?? targetId
+              const durableTarget = result?.goalEvent?.transcript_message_id ?? target.messageId
               const targetPageWindow = createThreadMessagePageWindow(targetMessages, {
                 targetMessageId: durableTarget
               }, undefined, raw)
@@ -5599,7 +5541,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               }
             })
             messageWindowIntentCoordinator.finish(intent)
-            return loaded ? targetId : false
+            return loaded
           } catch (error) {
             if (!isCurrentLoad()) return false
             console.warn("[ThreadContext] Failed to load targeted message window:", error)
@@ -6183,10 +6125,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 : update
           }))
         },
-        setDraftInput: (input: string, cursor?: PromptHistoryCursor) => {
+        setDraftInput: (input: string) => {
           updateThreadState(threadId, (state) => ({
             draftInput: input,
-            draftPromptHistoryCursor: cursor,
             ...(state.draftBotMentions?.length ? {
               draftBotMentions: rebaseGroupMentions(state.draftInput, input, state.draftBotMentions)
             } : {})
@@ -6194,7 +6135,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftBotInput: (input, mentions) => {
           const selected = parseBotMessageMentions(input, mentions)
-          updateThreadState(threadId, () => ({ draftInput: input, draftPromptHistoryCursor: undefined, draftBotMentions: selected }))
+          updateThreadState(threadId, () => ({ draftInput: input, draftBotMentions: selected }))
         },
         setDraftBotReplyTo: (draftBotReplyTo) => {
           updateThreadState(threadId, () => ({ draftBotReplyTo }))
@@ -6451,7 +6392,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let durableConversationPresence: ThreadConversationPresence = "unknown"
       let hasPersistedVisibleTailAfterCheckpoint = false
       let checkpointMessagesLoaded = false
-      let checkpointReplayTurns: CheckpointReplayTurns | undefined
       let checkpointPresenceFallbackResolved = false
       let mainTranscriptPublished = false
       let criticalHistoryHydrationFailed = false
@@ -6678,15 +6618,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         })
       }
       const checkpointRuntimeLoad = allowRuntimeRecovery ? readCheckpointRuntime() : null
-      const routingModeLoad = isBtwThreadId(threadId)
-        ? Promise.resolve("pinned" as const)
-        : window.api.routing.getMode().catch((error) => {
-            console.warn(
-              `[ThreadContext] Failed to load routing mode for thread ${threadId}; using pinned:`,
-              error
-            )
-            return "pinned" as const
-          })
+      const routingModeLoad = window.api.routing.getMode().catch((error) => {
+        console.warn(
+          `[ThreadContext] Failed to load routing mode for thread ${threadId}; using pinned:`,
+          error
+        )
+        return "pinned" as const
+      })
       const threadDetailsLoad = Promise.all([
         window.api.threads.get(
           threadId,
@@ -6703,10 +6641,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (!threadDetailsResult.succeeded) throw threadDetailsResult.error
         const { thread, routingMode } = threadDetailsResult
         if (!isCurrentLoad()) return
-        if (!thread && isBtwThreadId(threadId)) {
-          forgetBtw(threadId)
-          return
-        }
         if (thread) {
           persistedMessageTimes = getMessageTimeMap(thread.thread_values)
           persistedInternalGoalMessageTimes = getInternalGoalMessageTimeMap(thread.thread_values)
@@ -6791,8 +6725,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         if (!isCurrentLoad()) return
-        // 侧聊首问依赖此处恢复的工作区和模型。IPC 短暂失联时沿用有界重试。
-        if (isBtwThreadId(threadId)) criticalHistoryHydrationFailed = true
         console.error("[ThreadContext] Failed to load thread details:", error)
       }
       if (!isCurrentLoad()) return
@@ -6881,9 +6813,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             Array.isArray(channelValues.messages)
           ) {
             checkpointMessagesLoaded = true
-            checkpointReplayTurns = readCheckpointReplayTurns(
-              latestCheckpoint.checkpoint
-            )
             let internalGoalPromptIndex = 0
             const checkpointRawRestoredMessages = channelValues.messages.flatMap(
               (msg, index): Message | [] => {
@@ -6952,9 +6881,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
                 const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
                 const toolName = msg.name ?? msg.kwargs?.name
-                const toolStatus = msg.status ?? msg.kwargs?.status
-                const toolIsError = msg.is_error === true || msg.kwargs?.is_error === true ||
-                  additionalKwargs?.is_error === true || toolStatus === "error"
                 const messageId =
                   msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
                 const fallbackTime = new Date()
@@ -6989,7 +6915,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   }
                 }
                 const providerTuple =
-                  role === "assistant" || role === "tool"
+                  role === "assistant"
                     ? getMessageProviderTupleFromMetadata(additionalKwargs)
                     : undefined
 
@@ -7002,8 +6928,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   tool_calls: toolCalls as Message["tool_calls"],
                   ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                   ...(role === "tool" && toolName && { name: toolName }),
-                  ...(role === "tool" && toolStatus && { status: toolStatus }),
-                  ...(role === "tool" && toolIsError && { is_error: true }),
                   created_at: startAt,
                   start_at: startAt,
                   end_at: endAt
@@ -7146,15 +7070,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ),
               goalTranscriptPageRange !== undefined
             )
-      const replay = prepareToolTranscriptReplayMerge(
-        visiblePersistedThreadMessages,
-        checkpointTranscript,
-        checkpointReplayTurns
-      )
       const restoredTranscript = mergePersistedMessagesIntoTranscript(
-        replay.checkpoint,
-        replay.durable,
-        checkpointMessagesLoaded
+        checkpointTranscript,
+        visiblePersistedThreadMessages
       )
       const restoredTranscriptMessages = restoreVisibleCheckpointMessageTimes(
         restoredTranscript,
@@ -7168,8 +7086,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // legacy-checkpoint restoration.
       let hydratedTranscriptMessages = mergePersistedMessagesIntoTranscript(
         preserveBotNotices(restoredTranscriptMessages),
-        threadStatesRef.current[threadId]?.messages ?? [],
-        checkpointMessagesLoaded
+        threadStatesRef.current[threadId]?.messages ?? []
       )
       delete hydrationAttempt.botNotices
       const botHistoryOrigins = new Map(visiblePersistedThreadMessages.flatMap(message =>
@@ -7816,7 +7733,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const hydrateWritableWorkflow = useCallback((threadId: string) => {
     const epoch = threadListenerEpochRef.current[threadId]
     if (!epoch) return
-    const thread = selectThreadSummary(useAppStore.getState(), threadId)
+    const thread = useAppStore.getState().threads.find((row) => row.thread_id === threadId)
     if (!hasWorkflowPanelCapability(thread?.metadata)) return
 
     const canRestore = (): boolean => {
@@ -8393,14 +8310,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // later must not let that old continuation patch the replacement row.
       const modelGateGeneration = modelSelectionGateRef.current.begin(threadId)
       modelSelectionGateRef.current.finish(threadId, modelGateGeneration)
-      // A retired side tab cannot reopen under the same UUID. Release its
-      // generation and advance the fence for IDs that can be reinitialized.
-      const historyGenerations = threadHistoryLoadGenerationRef.current
-      if (isBtwThreadId(threadId) && isThreadRetired(threadId)) {
-        delete historyGenerations[threadId]
-      } else {
-        historyGenerations[threadId] = (historyGenerations[threadId] ?? 0) + 1
-      }
+      // Invalidate every in-flight history/transcript hydration request before
+      // any cleanup can yield back to the event loop. Keep the counter instead
+      // of deleting it so a later reinitialization cannot reuse a stale token.
+      threadHistoryLoadGenerationRef.current[threadId] =
+        (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
       messageWindowIntentCoordinator.cancel(threadId)
       firstTranscriptPublishedThreadIdsRef.current.delete(threadId)
       delete knownDurableMessageIdsRef.current[threadId]
@@ -8472,7 +8386,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete subagentTranscriptsRef.current[threadId]
       disableChatReportUploadForThread(threadId)
       delete hookLogsSubscribersRef.current[threadId]
-      clearThreadLoadingState(threadId)
       setActiveThreadIds((prev) => {
         if (!prev.has(threadId)) return prev
         const next = new Set(prev)
@@ -8490,20 +8403,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [
       clearSchedulerStreamingForThread,
       clearSchedulerMainStreamingForThread,
-      clearThreadLoadingState,
       coordinatorWorkerRequestCache,
       deleteThreadState,
       messageWindowIntentCoordinator,
       releaseThreadListeners
     ]
   )
-
-  useEffect(() => useAppStore.subscribe((state, previous) => {
-    if (state.sideThreads === previous.sideThreads || state.sideThreads.size >= previous.sideThreads.size) return
-    for (const id of previous.sideThreads.keys()) {
-      if (!state.sideThreads.has(id)) cleanupThread(id)
-    }
-  }), [cleanupThread])
 
   const handleStreamHolderDispose = useCallback((threadId: string): void => {
     const streamData = streamDataRef.current[threadId]
@@ -8650,7 +8555,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete subagentTranscriptPersistRetryCountRef.current[threadId]
       subagentTranscriptPersistRecoveryRequestsRef.current.delete(threadId)
 
-      clearThreadLoadingState(threadId)
+      const previousLoadingStates = loadingStatesRef.current
+      if (Object.prototype.hasOwnProperty.call(previousLoadingStates, threadId)) {
+        const nextLoadingStates = { ...previousLoadingStates }
+        delete nextLoadingStates[threadId]
+        loadingStatesRef.current = nextLoadingStates
+        setLoadingStates(nextLoadingStates)
+        allStreamSubscribersRef.current.forEach((callback) => callback())
+      }
 
       setActiveThreadIds((previous) => {
         if (!previous.has(threadId)) return previous
@@ -8668,7 +8580,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [
       canDehydrateThread,
       clearSchedulerStreamingForThread,
-      clearThreadLoadingState,
       coordinatorWorkerRequestCache,
       messageWindowIntentCoordinator,
       releaseThreadListeners,
@@ -8682,24 +8593,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     const excess = evictableIdleHolderIds.length - MAX_RETAINED_IDLE_STREAM_HOLDERS
     if (excess <= 0) return
 
-    const releaseListeners: Array<() => void> = []
     for (const threadId of evictableIdleHolderIds.slice(0, excess)) {
-      // Attachment reads can outlive the composer before the stream starts.
-      const heldLock = [submitInFlightLockStore, queuedDraftPreparationLock].find(lock => lock.current.has(threadId))
-      if (heldLock) {
-        releaseListeners.push(subscribeSubmitInFlightRelease(heldLock, threadId, () => {
-          setDehydrationEligibilityRevision(revision => revision + 1)
-        }))
-      } else {
-        dehydrateThread(threadId)
-      }
+      dehydrateThread(threadId)
     }
-    return () => releaseListeners.forEach(unsubscribe => unsubscribe())
   }, [
     activeThreadIds,
     canDehydrateThread,
     dehydrationEligibilityRevision,
-    dehydrateThread
+    dehydrateThread,
+    loadingStates
   ])
 
   // 运行态电平校正(心跳 + 定时任务线程)安全网:输入锁 scheduledTaskLoading 平时

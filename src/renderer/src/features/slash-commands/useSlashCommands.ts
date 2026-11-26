@@ -35,19 +35,6 @@ const GENERAL_SLASH_COMMANDS: SlashCommandItem[] = [
   BUILTIN_BROWSER_COMMAND
 ]
 
-export const BTW_SLASH_COMMANDS: SlashCommandItem[] = [
-  ...GENERAL_SLASH_COMMANDS,
-  {
-    id: "btw",
-    title: "辅助对话",
-    command: "/btw",
-    usage: "/btw <问题>",
-    description: "在右侧参考当前对话提问",
-    insertText: "/btw ",
-    keywords: ["side", "辅助对话", "侧边", "追问"]
-  }
-]
-
 export function isGoalSlashCommandInput(input: string): boolean {
   const trimmed = input.trim()
   return /^\/goal(?:$|\s+)/i.test(trimmed)
@@ -146,22 +133,14 @@ function commandMatchesFilter(command: SlashCommandItem, filter: string): boolea
   )
 }
 
-export function findInlineSlashQuery(input: string, caret: number) {
-  if (!input.includes("/") || /\S/u.test(input.charAt(caret))) return null
-  const match = input.slice(0, caret).match(/(?:^|\s)(\/[^\s/]*)$/u)
-  if (!match) return null
-  return { query: match[1], start: caret - match[1].length, end: caret }
-}
-
 export function buildSlashPopoverMode(params: {
   input: string
   skills: SkillMetadata[]
   skillSelected: boolean
   browserSelected?: boolean
   generalCommands?: SlashCommandItem[]
-  showEmptyResults?: boolean
 }): PopoverMode {
-  const { input, skills, skillSelected, browserSelected = false, showEmptyResults = true } = params
+  const { input, skills, skillSelected, browserSelected = false } = params
 
   if (skillSelected || browserSelected) return { kind: "closed" }
   if (!input.startsWith("/")) return { kind: "closed" }
@@ -178,7 +157,6 @@ export function buildSlashPopoverMode(params: {
       )
     : skills
 
-  if (!showEmptyResults && filter && !commands.length && !filteredSkills.length) return { kind: "closed" }
   return { kind: "slash", filter, commands, skills: filteredSkills }
 }
 
@@ -197,9 +175,8 @@ export function useSlashCommands(params: {
   skillSelected: boolean
   browserSelected?: boolean
   generalCommands?: SlashCommandItem[]
-  showEmptyResults?: boolean
 }) {
-  const { input, skills, skillSelected, browserSelected = false, generalCommands, showEmptyResults } = params
+  const { input, skills, skillSelected, browserSelected = false } = params
   const [selectedIdx, setSelectedIdx] = useState(0)
 
   const mode = useMemo<PopoverMode>(() => {
@@ -208,10 +185,9 @@ export function useSlashCommands(params: {
       skills,
       skillSelected,
       browserSelected,
-      generalCommands,
-      showEmptyResults
+      generalCommands: params.generalCommands
     })
-  }, [input, skills, skillSelected, browserSelected, generalCommands, showEmptyResults])
+  }, [input, skills, skillSelected, browserSelected, params.generalCommands])
 
   // Reset highlight to top whenever the popover (re-)opens or the filter changes,
   // so pressing Enter right after typing never selects a stale carry-over item.

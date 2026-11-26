@@ -13,10 +13,9 @@ import { ChevronDown, ChevronRight, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
 import { ToggleThumb } from "@/components/ui/toggle-thumb"
-import { selectThreadSummary, useAppStore } from "@/lib/store"
+import { useAppStore } from "@/lib/store"
 import { useThreadActions, useThreadStateSelector, type ThreadState } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
-import { isBtwThreadId } from "../../../../shared/btw-chat"
 import {
   resolveHydratedThreadModel,
   resolveBotWorkViewModel,
@@ -24,7 +23,6 @@ import {
 } from "../../../../shared/thread-model-selection"
 import { botWorkModelRoutingMode, isBotCreatedWorkMetadata, resolveLegacyBotWorkModelRef } from "../../../../shared/bots/model-policy"
 import { CustomModelDialog } from "./CustomModelDialog"
-import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
 import {
   invalidateModelCatalogCache,
   readModelCatalogCache,
@@ -63,10 +61,10 @@ function ModelSwitcherImpl({
   const [open, setOpen] = useState(false)
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)
-  const { models, threadSummary, loadModels } = useAppStore(
+  const { models, threads, loadModels } = useAppStore(
     useShallow((state) => ({
       models: state.models,
-      threadSummary: selectThreadSummary(state, threadId),
+      threads: state.threads,
       loadModels: state.loadModels
     }))
   )
@@ -94,11 +92,12 @@ function ModelSwitcherImpl({
   // canEnableRouting: both tiers must be present (models without tier default to premium)
   const canEnableRouting = hasEconomyModel && hasPremiumModel
 
+  const threadSummary = useMemo(
+    () => threads.find((thread) => thread.thread_id === threadId) ?? null,
+    [threadId, threads]
+  )
   const localBotRouting = isBotCreatedWorkMetadata(threadSummary?.metadata)
-  const sideConversation = isBtwThreadId(threadId)
-  const routingMode = sideConversation
-    ? "pinned"
-    : botWorkModelRoutingMode(threadSummary?.metadata) ?? globalRoutingMode
+  const routingMode = botWorkModelRoutingMode(threadSummary?.metadata) ?? globalRoutingMode
   const routingToggleOn = localBotRouting
     ? threadSummary?.metadata?.botWorkModelRoutingMode === "default" ||
       (threadSummary?.metadata?.botWorkModelRoutingMode == null && globalRoutingMode === "auto")
@@ -185,23 +184,18 @@ function ModelSwitcherImpl({
     const candidate = selectionChanged
       ? hydratedModel.modelId || currentModel
       : currentModel || hydratedModel.modelId || ""
-    const candidateModel = models.find((model) => model.id === candidate)
-    if (
-      routingMode === "auto" &&
-      candidateModel?.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE &&
-      availableDefaultModelId
-    ) {
-      // Let new automatic turns submit while preserving the saved pin.
-      if (currentModel !== availableDefaultModelId) restoreCurrentModel(availableDefaultModelId)
-      return
-    }
-
     let resolvedModel = candidate
-    if (!candidateModel && models.length > 0) {
+
+    const hasValidSelection = candidate && models.some((model) => model.id === candidate)
+    if (!hasValidSelection && models.length > 0) {
       const migrated = candidate.startsWith("custom:")
         ? models.find((model) => model.model === candidate.slice("custom:".length))
         : undefined
-      resolvedModel = migrated?.id ?? (availableDefaultModelId || candidate)
+      resolvedModel =
+        migrated?.id ??
+        models.find((model) => model.id === defaultModelId && model.available)?.id ??
+        models.find((model) => model.available)?.id ??
+        candidate
     }
 
     if (resolvedModel !== candidate) {
@@ -212,7 +206,7 @@ function ModelSwitcherImpl({
     }
   }, [
     currentModel,
-    availableDefaultModelId,
+    defaultModelId,
     hydratedModel.modelId,
     models,
     restoreCurrentModel,
@@ -257,7 +251,7 @@ function ModelSwitcherImpl({
           className={
             menu
               ? "h-auto w-full justify-start gap-2 rounded-md px-2 py-2 text-sm font-normal hover:bg-muted"
-              : cn("h-8 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground", sideConversation && "min-w-0 shrink")
+              : "h-8 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
           }
           aria-label={menu ? `切换模型：${modelLabel}` : undefined}
         >
@@ -286,7 +280,7 @@ function ModelSwitcherImpl({
           ) : selectedModel ? (
             <>
               <CustomIcon className="size-3.5" />
-              <span className={sideConversation ? "truncate" : undefined} title={sideConversation ? selectedModel.name : undefined}>{selectedModel.name}</span>
+              <span>{selectedModel.name}</span>
             </>
           ) : (
             <span>选择模型</span>
@@ -303,7 +297,7 @@ function ModelSwitcherImpl({
         side={menu ? "left" : "bottom"}
         sideOffset={8}
       >
-        {!sideConversation && (
+        {/* Auto routing toggle */}
           <div className="flex items-center justify-between px-2 py-1.5 mb-1 border-b border-border">
             <div className="flex items-center gap-1.5">
               <Zap
@@ -366,7 +360,6 @@ function ModelSwitcherImpl({
               />
             </button>
           </div>
-        )}
 
           {models.length > 0 ? (
           <div className={cn("space-y-0.5", menu && "max-h-[60vh] overflow-y-auto")}>
@@ -394,11 +387,9 @@ function ModelSwitcherImpl({
                 <span className="flex-1 truncate">
                   {model.name}
                   {!model.available
-                    ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
-                      ? "（非服务时段）"
-                      : model.unavailableReason
-                        ? "（用户信息不完整）"
-                        : "（未配置密钥）"
+                    ? model.unavailableReason
+                      ? "（用户信息不完整）"
+                      : "（未配置密钥）"
                     : ""}
                 </span>
                 <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">

@@ -16,23 +16,3 @@ export function hasOpenModalDialog(): boolean {
       dialog.getAttribute("data-state") !== "closed"
   )
 }
-
-export function getOpenWorkbenchDialog(): HTMLElement | null {
-  return document.body.querySelector<HTMLElement>(`:scope > ${MODAL_DIALOG_SELECTOR}[data-state="open"]`)
-}
-
-// Workbench DialogContent portals to body. Native popovers need to yield their
-// top-layer position when an asynchronous dialog takes keyboard focus.
-export function observeWorkbenchDialogOpen(onOpen: (dialog: HTMLElement) => void): () => void {
-  const body = document.body
-  const check = (): void => {
-    const dialog = getOpenWorkbenchDialog()
-    if (!dialog) return
-    observer.disconnect()
-    onOpen(dialog)
-  }
-  const observer = new MutationObserver(check)
-  observer.observe(body, { childList: true })
-  check()
-  return () => observer.disconnect()
-}

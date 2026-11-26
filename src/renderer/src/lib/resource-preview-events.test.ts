@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview,
-  invalidateOpenResourcePreviewIntent,
   isCurrentOpenResourcePreviewIntent,
   onOpenResourcePreview,
   type OpenResourcePreviewDetail
@@ -63,9 +62,7 @@ describe("resource preview events", () => {
     expect(received.map((detail) => detail.intentId)).toEqual([laterIntent, earlierIntent])
     expect(isCurrentOpenResourcePreviewIntent("thread-1", laterIntent, 0)).toBe(true)
     expect(isCurrentOpenResourcePreviewIntent("thread-1", earlierIntent, 0)).toBe(false)
-    invalidateOpenResourcePreviewIntent("thread-1")
-    expect(isCurrentOpenResourcePreviewIntent("thread-1", laterIntent, 0)).toBe(false)
-    expect(beginOpenResourcePreviewIntent("thread-1")).toBeGreaterThan(laterIntent)
+    beginOpenResourcePreviewIntent("thread-1")
     expect(isCurrentOpenResourcePreviewIntent("thread-1", laterIntent, 0)).toBe(false)
     cleanup()
   })

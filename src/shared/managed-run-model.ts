@@ -14,6 +14,14 @@ export const MANAGED_RUN_MODEL_OPTIONS = [
 
 export type ManagedRunModelSelection = (typeof MANAGED_RUN_MODEL_OPTIONS)[number]["value"]
 
+// Compatibility for the existing project-mode schedule editor. Newer callers
+// use MANAGED_RUN_MODEL_OPTIONS directly.
+export const MANAGED_RUN_MODEL_LABELS: Record<ManagedRunModelSelection, string> = {
+  default: "使用默认模型",
+  ultra: `使用${MAODOU_PRO_MODEL_NAME}`,
+  "idle-ultra": `使用${IDLE_ULTRA_MODEL_NAME}`
+}
+
 export function isManagedRunModelSelection(value: unknown): value is ManagedRunModelSelection {
   return MANAGED_RUN_MODEL_OPTIONS.some((option) => option.value === value)
 }

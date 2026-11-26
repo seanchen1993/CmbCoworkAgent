@@ -4,7 +4,6 @@ import { BOT_BROWSER_PROMPT_PREFIX } from "../../../shared/user-input-transport"
 import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
 import type { BotMessageMention } from "../../../shared/bots/contracts"
 import { parseBotInputFileIds } from "../../../shared/bots/input-files"
-import { readBtwReferences } from "../../../shared/btw-references"
 // Relative (not "@/") so this module stays importable from tsx unit tests, which
 // don't resolve the "@/" path alias for runtime values. skill-marker has no
 // imports of its own, so the chain stays alias-free.
@@ -99,13 +98,10 @@ export function getQueuedBotWorkCreationInput(draft: QueuedMessage): ReturnType<
   return input
 }
 
-export function getQueuedPreview(message: QueuedMessage, sideConversation = false): string {
-  const references = sideConversation ? readBtwReferences(message.text) : undefined
-  const content = getQueuedDisplayContent(references?.quotes.length
-    ? { ...message, text: references.body, builtinBrowser: false }
-    : message)
+export function getQueuedPreview(message: QueuedMessage): string {
+  const content = getQueuedDisplayContent(message)
   const display = (parseSkillUseBlock(content)?.rest ?? content).replace(/\s+/g, " ").trim()
-  return display || (references?.quotes.length ? `${references.quotes.length} 条注释` : "待执行消息")
+  return display || "待执行消息"
 }
 
 /** Parked drafts only resume on request. A possibly accepted handoff still fences the whole queue. */

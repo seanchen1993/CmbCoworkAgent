@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   CheckCircle2,
   ChevronDown,
@@ -8,7 +8,6 @@ import {
   PencilLine
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { getChatEscapeOverlay } from "@/lib/chat-pane-escape"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
@@ -24,7 +23,6 @@ interface UserInputRequestDialogProps {
   request: UserInputRequest | null
   onSubmit: (response: UserInputResponse) => void
   onLayoutChange?: (layout: UserInputRequestDialogLayout | null) => void
-  ownsEscape?: (event: KeyboardEvent) => boolean
   presentation?: "workbench" | "bot"
   useComposerForSingleAnswer?: boolean
   draft?: UserInputDraft | null
@@ -46,14 +44,12 @@ export function UserInputRequestDialog({
   request,
   onSubmit,
   onLayoutChange,
-  ownsEscape,
   presentation = "workbench",
   useComposerForSingleAnswer = false,
   draft,
   onDraftChange
 }: UserInputRequestDialogProps): React.JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement>(null)
-  const titleId = useId()
   const [localDraft, setLocalDraft] = useState(() => emptyUserInputDraft(request?.requestId ?? ""))
   const currentDraft = onDraftChange ? draft : localDraft
   const { answers: draftAnswers, activeIndex } =
@@ -120,17 +116,15 @@ export function UserInputRequestDialog({
   useEffect(() => {
     if (!request || presentation === "bot") return
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || useAppStore.getState().showCustomizeView) return
-      if (ownsEscape && !ownsEscape(event)) return
-      const overlay = getChatEscapeOverlay(event)
-      if (overlay && !dialogRef.current?.contains(overlay)) return
+      if (event.defaultPrevented || useAppStore.getState().showCustomizeView) return
+      if (event.key !== "Escape") return
       event.preventDefault()
       handleIgnore()
     }
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [handleIgnore, request, presentation, ownsEscape])
+  }, [handleIgnore, request, presentation])
 
   useEffect(() => {
     if (!onLayoutChange || presentation === "bot") return
@@ -307,7 +301,7 @@ export function UserInputRequestDialog({
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby={titleId}
+        aria-labelledby="user-input-dialog-title"
         className={cn(
           "flex min-h-0 w-full flex-col overflow-hidden rounded-[inherit]",
           collapsed && "h-full"
@@ -323,7 +317,7 @@ export function UserInputRequestDialog({
             <MessageSquareText className="size-3.5" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="text-sm font-semibold">
+            <h2 id="user-input-dialog-title" className="text-sm font-semibold">
               需要用户输入
             </h2>
             <p className="mt-0.5 text-xs text-muted-foreground">

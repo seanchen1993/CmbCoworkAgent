@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
-  invalidateOpenResourcePreviewIntent,
+  beginOpenResourcePreviewIntent,
   isCurrentOpenResourcePreviewIntent,
   onOpenResourcePreview,
   type OpenResourcePreviewDetail
@@ -21,7 +21,7 @@ export function useResourcePreviewRequest(
   useEffect(() => {
     const previousThreadId = previousThreadIdRef.current
     if (previousThreadId && previousThreadId !== threadId) {
-      invalidateOpenResourcePreviewIntent(previousThreadId)
+      beginOpenResourcePreviewIntent(previousThreadId)
     }
     previousThreadIdRef.current = threadId
   }, [threadId])

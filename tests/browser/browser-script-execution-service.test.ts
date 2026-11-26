@@ -23,16 +23,22 @@ vi.mock("playwright", () => ({
 import { executeRecordingScriptInBuiltinBrowser } from "../../src/main/browser/record/common/browser-script-execution-service"
 import {
   cancelRecordingScriptExecutionInBuiltinBrowser,
+  disposeSharedBrowserScriptExecutionConnection,
   getBrowserScriptExecutionState,
   onBrowserScriptExecutionStateChange
 } from "../../src/main/browser/record/common/browser-script-execution-service"
 
 describe("browser script execution service", () => {
+  let nextCdpPort = 38127
+  let currentCdpPort = nextCdpPort
+
   beforeEach(() => {
     vi.clearAllMocks()
-    cdpMocks.getCurrentBrowserCdpPort.mockReturnValue(38127)
+    currentCdpPort = nextCdpPort++
+    cdpMocks.getCurrentBrowserCdpPort.mockReturnValue(currentCdpPort)
     registryMocks.getGlobalBrowserService.mockReturnValue({
       requestPanel: vi.fn(),
+      waitForDeviceViewport: vi.fn(async () => undefined),
       prepareTarget: vi.fn(async () => ({
         sessionId: "app-browser",
         url: "https://example.com",
@@ -48,60 +54,75 @@ describe("browser script execution service", () => {
     })
   })
 
-  it("does not connect if playback stops while Playwright loads", async () => {
-    const ready = Promise.withResolvers<{ url: string; title: string }>()
-    registryMocks.getGlobalBrowserService.mockReturnValue({
-      requestPanel: vi.fn(),
-      prepareTarget: () => ready.promise
-    })
-    const playback = executeRecordingScriptInBuiltinBrowser({
-      script: 'await page.goto("https://example.com/started");'
-    })
-    ready.resolve({ url: "https://example.com", title: "Example" })
-    // Resume target preparation up to the asynchronous import, then cancel.
-    await Promise.resolve()
-    await cancelRecordingScriptExecutionInBuiltinBrowser()
+  it("reuses one Playwright CDP connection across consecutive replays", async () => {
+    const page = {
+      title: vi.fn(async () => "Example"),
+      url: vi.fn(() => "https://example.com")
+    }
+    const context = {
+      pages: vi.fn(() => [page])
+    }
+    const browser = {
+      contexts: vi.fn(() => [context]),
+      isConnected: vi.fn(() => true),
+      once: vi.fn(),
+      disconnect: vi.fn()
+    }
+    playwrightMocks.connectOverCDP.mockResolvedValue(browser)
 
-    await expect(playback).rejects.toMatchObject({ name: "BrowserScriptExecutionCancelledError" })
-    expect(playwrightMocks.connectOverCDP).not.toHaveBeenCalled()
+    const input = {
+      script: `import { test } from "@playwright/test";
+
+test("recorded script flow", async ({ page }) => {
+  await page.title();
+});
+`
+    }
+
+    await executeRecordingScriptInBuiltinBrowser(input)
+    await executeRecordingScriptInBuiltinBrowser(input)
+
+    expect(playwrightMocks.connectOverCDP).toHaveBeenCalledOnce()
+    expect(browser.isConnected).toHaveBeenCalledOnce()
+    expect(browser.disconnect).not.toHaveBeenCalled()
+
+    await disposeSharedBrowserScriptExecutionConnection()
+    expect(browser.disconnect).toHaveBeenCalledOnce()
   })
 
-  it("does not dispatch the first browser action when playback is cancelled during startup", async () => {
-    const loadingAssertions = Promise.withResolvers<void>()
-    const assertions = Promise.withResolvers<void>()
-    const goto = vi.fn(async () => undefined)
-    const disconnect = vi.fn()
-    playwrightMocks.connectOverCDP.mockResolvedValue({
-      contexts: () => [{ pages: () => [{ goto, url: () => "https://example.com" }] }],
-      disconnect
-    })
-    vi.resetModules()
-    vi.doMock("playwright/test", async () => {
-      loadingAssertions.resolve()
-      await assertions.promise
-      return { expect: vi.fn() }
-    })
-
-    try {
-      const playback =
-        await import("../../src/main/browser/record/common/browser-script-execution-service")
-      const outcome = playback
-        .executeRecordingScriptInBuiltinBrowser({
-          script: 'await page.goto("https://example.com/started");'
+  it("waits for an in-progress shared connection disposal", async () => {
+    let finishClose: (() => void) | undefined
+    const close = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishClose = resolve
         })
-        .then(() => "completed", (error: Error) => error.name)
-
-      await loadingAssertions.promise
-      expect(await playback.cancelRecordingScriptExecutionInBuiltinBrowser()).toBe(true)
-      assertions.resolve()
-
-      expect(await outcome).toBe("BrowserScriptExecutionCancelledError")
-      expect(goto).not.toHaveBeenCalled()
-      expect(disconnect).toHaveBeenCalledOnce()
-    } finally {
-      assertions.resolve()
-      vi.doUnmock("playwright/test")
+    )
+    const page = {
+      title: vi.fn(async () => "Example"),
+      url: vi.fn(() => "https://example.com")
     }
+    const browser = {
+      contexts: vi.fn(() => [{ pages: vi.fn(() => [page]) }]),
+      isConnected: vi.fn(() => true),
+      once: vi.fn(),
+      close
+    }
+    playwrightMocks.connectOverCDP.mockResolvedValue(browser)
+
+    await executeRecordingScriptInBuiltinBrowser({ script: "await page.title();" })
+    const firstDisposal = disposeSharedBrowserScriptExecutionConnection()
+    const secondDisposal = disposeSharedBrowserScriptExecutionConnection()
+    let secondCompleted = false
+    void secondDisposal.then(() => {
+      secondCompleted = true
+    })
+
+    await Promise.resolve()
+    expect(secondCompleted).toBe(false)
+    finishClose?.()
+    await Promise.all([firstDisposal, secondDisposal])
+    expect(close).toHaveBeenCalledOnce()
   })
 
   it("runs the recorded script against the in-app browser page", async () => {
@@ -125,12 +146,15 @@ describe("browser script execution service", () => {
     }
     const browser = {
       contexts: vi.fn(() => [context]),
+      isConnected: vi.fn(() => true),
+      once: vi.fn(),
       disconnect: vi.fn()
     }
     playwrightMocks.connectOverCDP.mockResolvedValue(browser)
 
     await executeRecordingScriptInBuiltinBrowser({
       script: `import { test } from "@playwright/test";
+// cmb-browser-device-viewport: 390x844
 
 const baseUrl = "https://example.com";
 
@@ -145,12 +169,17 @@ test("recorded script flow", async ({ page }) => {
     })
 
     expect(registryMocks.getGlobalBrowserService).toHaveBeenCalledOnce()
+    expect(
+      registryMocks.getGlobalBrowserService.mock.results[0]?.value.requestPanel
+    ).toHaveBeenCalledWith("thread-1", undefined, true, { width: 390, height: 844 })
     expect(cdpMocks.getCurrentBrowserCdpPort).toHaveBeenCalledOnce()
-    expect(playwrightMocks.connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:38127")
+    expect(playwrightMocks.connectOverCDP).toHaveBeenCalledWith(
+      `http://127.0.0.1:${currentCdpPort}`
+    )
     expect(goto).toHaveBeenCalledWith("https://example.com")
     expect(getByRole).toHaveBeenCalledWith("button", { name: "Save" })
     expect(click).toHaveBeenCalledOnce()
-    expect(browser.disconnect).toHaveBeenCalledOnce()
+    expect(browser.disconnect).not.toHaveBeenCalled()
     expect(states).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ status: "running", progressPercent: 0, totalSteps: 3 }),

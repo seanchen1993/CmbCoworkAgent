@@ -264,17 +264,3 @@ describe("StreamingMarkdown 空链接渲染", () => {
     threadState.workspacePath = null
   })
 })
-
-describe("StreamingMarkdown fenced code", () => {
-  it.each(["```", "~~~"])("highlights %s code on completion and preserves the copy control", fence => {
-    const text = [fence + "js", "const answer = 42", fence].join("\n")
-    const render = (isStreaming: boolean) => renderToStaticMarkup(
-      createElement(StreamingMarkdown, { children: text, isStreaming })
-    )
-    expect(render(true)).not.toContain("hljs-keyword")
-    const complete = render(false)
-    expect(complete).toContain("hljs-keyword")
-    expect(complete).toContain('aria-label="复制代码"')
-    expect(render(false)).toBe(complete)
-  })
-})

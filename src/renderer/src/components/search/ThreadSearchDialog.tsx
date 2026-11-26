@@ -10,7 +10,6 @@ import {
   SearchX
 } from "lucide-react"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
-import { hasOpenModalDialog } from "@/lib/modal-dialog"
 import { adoptThreadSearchSummary, isThreadDeletionPending, useAppStore } from "@/lib/store"
 import { useThreadStateSelector } from "@/lib/thread-context"
 import { REMOTE_INBOX_WORKSPACE_NAME } from "../../../../shared/remote-inbox-workspace"
@@ -161,7 +160,6 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
       ) {
         event.preventDefault()
         event.stopImmediatePropagation()
-        if (!useThreadSearch.getState().open && hasOpenModalDialog()) return
         openForCurrentView()
       }
     }

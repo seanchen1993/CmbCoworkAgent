@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore, memo, lazy, Suspense } from "react"
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, memo, lazy, Suspense } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
   Plus,
@@ -9,7 +9,6 @@ import {
   Loader2,
   AlertCircle,
   LayoutDashboard,
-  Workflow,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -32,7 +31,6 @@ import { ManagedRunIcon } from "@/components/ui/managed-run-icon"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import botWorkspaceMarkUrl from "@/assets/bot-workspace-mark.svg"
@@ -41,13 +39,12 @@ import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
 import { ThreadGroupDeleteDialog } from "./ThreadGroupDeleteDialog"
 import { useAppStore } from "@/lib/store"
 import {
-  useThreadContext,
-  type ThreadStateSummary
+  useAllStreamLoadingStates,
+  useThreadStateSummaries,
+  useThreadContext
 } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import { getDisplayThreadTitle } from "../../../../shared/thread-search-scope"
-import { isBtwThreadId } from "../../../../shared/btw-chat"
-import { useFeatureGate } from "@/lib/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
   deleteThreadGroupSequentially,
@@ -62,11 +59,9 @@ import {
 import {
   isHarnessFeatureThread,
   isHarnessProjectModeThread,
-  isRegularChatThread,
   isLocalWorkConversation
 } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
-import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -74,7 +69,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger
 } from "@/components/ui/context-menu"
-import { WorkspaceRenameDialog, type WorkspaceRenameTarget } from "./WorkspaceRenameDialog"
+import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
 import type { Thread } from "@/types"
 import type { BotThreadOwner } from "../../../../shared/bots/conversation"
 import { useThreadBotOwners } from "../bots/use-thread-bot-owners"
@@ -83,6 +78,7 @@ import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
 import { revealSidebarThread } from "./sidebar-thread-anchor"
 import { useThreadSearch } from "../../lib/thread-search-navigation"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
+import { collectChangedStreamingThreadIds } from "@/lib/thread-stream-activity"
 import { botDefaultWorkspaceOwner, botWorkspaceDisplay, botWorkOwnerLabel } from "@/lib/bot-workspace-display"
 import { useBotWorkspaceProfiles } from "../bots/use-bot-workspace-profiles"
 
@@ -609,293 +605,6 @@ function SidebarSettingsButton(): React.JSX.Element {
   )
 }
 
-interface ThreadProjectHeaderProps extends WorkspaceRenameTarget {
-  projectKey: string
-  threadCount: number
-  isManagedInbox: boolean
-  botWorkspaceName?: string
-  isPinned: boolean
-  isCollapsed: boolean
-  isHovered: boolean
-  hasSelectedThread: boolean
-  hasContextReminderThread: boolean
-  hasRunningThread: boolean
-  isUnread: boolean
-  setHoveredProjectKey: (key: string | null) => void
-  toggleProject: (key: string) => void
-  toggleProjectPin: (key: string) => void
-  renameProject: (project: WorkspaceRenameTarget) => void
-  createProjectThread: (
-    project: Pick<ThreadProject, "key" | "path" | "isManagedInbox">
-  ) => Promise<void>
-  openProjectDeleteDialog: (project: Pick<ThreadProject, "key" | "name" | "path">) => Promise<void>
-}
-
-const sidebarSummaryFields = [
-  "workspacePath",
-  "hasRunningCoordinatorWorker",
-  "scheduledTaskLoading",
-  "workflowRunning",
-  "hasPendingApproval",
-  "hasPendingUserInput",
-  "hasContextReminder"
-] as const satisfies readonly (keyof ThreadStateSummary)[]
-
-type SidebarThreadSummaries = Record<string, Pick<ThreadStateSummary, (typeof sidebarSummaryFields)[number]>>
-
-function useSidebarThreadSummaries(): SidebarThreadSummaries {
-  const { getThreadStateSummaries, subscribeToThreadStateSummaries } = useThreadContext()
-  const getSnapshot = useMemo(() => {
-    let source: Record<string, ThreadStateSummary> | undefined
-    let snapshot: SidebarThreadSummaries = {}
-    let snapshotSize = 0
-    return (): SidebarThreadSummaries => {
-      const next = getThreadStateSummaries()
-      if (source === next) return snapshot
-      source = next
-      const threadIds = Object.keys(next)
-      // Keystrokes can flip hasDraft without changing any displayed row or group.
-      if (threadIds.length !== snapshotSize || threadIds.some((threadId) => {
-        const previous = snapshot[threadId]
-        const summary = next[threadId]
-        return previous !== summary && (
-          !previous || sidebarSummaryFields.some((field) => previous[field] !== summary[field])
-        )
-      })) {
-        snapshot = next
-        snapshotSize = threadIds.length
-      }
-      return snapshot
-    }
-  }, [getThreadStateSummaries])
-  return useSyncExternalStore(subscribeToThreadStateSummaries, getSnapshot, getSnapshot)
-}
-
-// The directory and activity stores update independently. Keep the menu and tooltip
-// trees for unaffected workspaces out of those renders.
-const ThreadProjectHeader = memo(function ThreadProjectHeader({
-  projectKey,
-  name,
-  defaultName,
-  path,
-  hasCustomName,
-  threadCount,
-  isManagedInbox,
-  botWorkspaceName,
-  isPinned,
-  isCollapsed,
-  isHovered,
-  hasSelectedThread,
-  hasContextReminderThread,
-  hasRunningThread,
-  isUnread,
-  setHoveredProjectKey,
-  toggleProject,
-  toggleProjectPin,
-  renameProject,
-  createProjectThread,
-  openProjectDeleteDialog
-}: ThreadProjectHeaderProps): React.JSX.Element {
-  const project = { key: projectKey, name, path, isManagedInbox }
-  const canManageProject = Boolean(path)
-  const canRenameProject = canManageProject && !isManagedInbox
-  const canCreateProjectThread = !isManagedInbox
-  const openRenameDialog = (): void => {
-    if (canRenameProject) renameProject({ path, name, defaultName, hasCustomName })
-  }
-
-  return (
-    <ContextMenu>
-      <Popover open={isHovered}>
-        <PopoverTrigger asChild>
-          <ContextMenuTrigger asChild>
-            <div
-              className={cn(
-                "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
-                hasSelectedThread
-                  ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
-                  : "hover:bg-sidebar-hover"
-              )}
-              onMouseEnter={() => setHoveredProjectKey(projectKey)}
-              onMouseLeave={() => setHoveredProjectKey(null)}
-              onFocus={() => setHoveredProjectKey(projectKey)}
-              onBlur={(e) => {
-                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-                  setHoveredProjectKey(null)
-                }
-              }}
-            >
-              <button
-                type="button"
-                className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-                onClick={() => toggleProject(projectKey)}
-              >
-                {isCollapsed ? (
-                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                ) : (
-                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                )}
-                {isPinned ? (
-                  <Pin
-                    className="size-4 shrink-0 text-primary"
-                    aria-hidden="true"
-                  />
-                ) : botWorkspaceName !== undefined ? (
-                  <BotIcon
-                    className="size-4 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-                )}
-                <span className="min-w-0 flex-1 truncate text-xs font-medium duration-150">
-                  {name}
-                </span>
-              </button>
-              {hasContextReminderThread ? (
-                <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
-              ) : (
-                isUnread && (
-                  <span className="size-2 rounded-full bg-status-info shrink-0" />
-                )
-              )}
-              <span className="relative flex h-6 w-4 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-28 group-focus-within:w-28">
-                <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                  {threadCount}
-                </span>
-                <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                  <IconPopoverButton
-                    icon={
-                      isPinned ? (
-                        <PinOff className="size-3" />
-                      ) : (
-                        <Pin className="size-3" />
-                      )
-                    }
-                    popoverContent={
-                      isPinned ? "取消置顶工作区" : "置顶工作区"
-                    }
-                    disabled={!canManageProject}
-                    stopPropagation
-                    className={cn(
-                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
-                      isPinned && "text-primary opacity-100",
-                      !canManageProject && "cursor-not-allowed !opacity-30"
-                    )}
-                    onClick={() => toggleProjectPin(projectKey)}
-                  />
-                  <IconPopoverButton
-                    icon={<Pencil className="size-3" />}
-                    popoverContent={
-                      canRenameProject
-                        ? "修改工作区名称"
-                        : isManagedInbox
-                          ? "招乎默认聊天名称由应用管理"
-                          : "未关联工作区无法重命名"
-                    }
-                    disabled={!canRenameProject}
-                    stopPropagation
-                    className={cn(
-                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
-                      !canRenameProject && "cursor-not-allowed !opacity-30"
-                    )}
-                    onClick={() => openRenameDialog()}
-                  />
-                  <IconPopoverButton
-                    icon={<Plus className="size-3" />}
-                    popoverContent={
-                      canCreateProjectThread
-                        ? "新增任务"
-                        : "请从招乎默认聊天发送消息"
-                    }
-                    disabled={!canCreateProjectThread}
-                    stopPropagation
-                    className={cn(
-                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
-                      !canCreateProjectThread && "cursor-not-allowed !opacity-30"
-                    )}
-                    onClick={() => void createProjectThread(project)}
-                  />
-                  <IconPopoverButton
-                    icon={<Trash2 className="size-3" />}
-                    popoverContent={
-                      hasRunningThread
-                        ? "删除工作区会话（自动跳过运行中的任务）"
-                        : "删除工作区会话"
-                    }
-                    stopPropagation
-                    className="size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
-                    onClick={() => void openProjectDeleteDialog(project)}
-                  />
-                </span>
-              </span>
-            </div>
-          </ContextMenuTrigger>
-        </PopoverTrigger>
-        <PopoverContent
-          side="right"
-          align="start"
-          className="w-72 p-2 text-xs"
-          onOpenAutoFocus={(e) => e.preventDefault()}
-          onMouseEnter={() => setHoveredProjectKey(projectKey)}
-          onMouseLeave={() => setHoveredProjectKey(null)}
-        >
-          <div className="mb-1 font-medium text-muted-foreground">
-            {isManagedInbox
-              ? "工作区说明"
-              : (botWorkspaceName ?? "工作区路径")}
-          </div>
-          <div className="break-all text-foreground">
-            {isManagedInbox
-              ? "应用托管目录，路径已隐藏"
-              : path || "未关联工作区"}
-          </div>
-          {botWorkspaceName !== undefined && (
-            <p className="mt-2 text-muted-foreground">
-              Bot 自动管理的默认目录，用于保存任务文件。
-            </p>
-          )}
-        </PopoverContent>
-      </Popover>
-      <ContextMenuContent>
-        <ContextMenuItem
-          disabled={!canManageProject}
-          onClick={() => toggleProjectPin(projectKey)}
-        >
-          {isPinned ? (
-            <PinOff className="size-4 mr-2" />
-          ) : (
-            <Pin className="size-4 mr-2" />
-          )}
-          {isPinned ? "取消置顶工作区" : "置顶工作区"}
-        </ContextMenuItem>
-        <ContextMenuItem
-          disabled={!canRenameProject}
-          onClick={() => openRenameDialog()}
-        >
-          <Pencil className="size-4 mr-2" />
-          修改工作区名称
-        </ContextMenuItem>
-        <ContextMenuItem
-          disabled={!canCreateProjectThread}
-          onClick={() => void createProjectThread(project)}
-        >
-          <Plus className="size-4 mr-2" />
-          新增任务
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          variant="destructive"
-          onClick={() => void openProjectDeleteDialog(project)}
-        >
-          <Trash2 className="size-4 mr-2" />
-          {hasRunningThread ? "删除工作区会话（跳过运行中）" : "删除工作区会话"}
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
-  )
-})
-
 // Settings visibility only changes the footer button, not the task list.
 export const ThreadSidebar = memo(function ThreadSidebar({
   allowSearchAnchor = false
@@ -912,13 +621,12 @@ export const ThreadSidebar = memo(function ThreadSidebar({
     threadDirectoryHasMore,
     threadDirectoryLoadingMore,
     loadMoreThreads,
+    touchThreadSummaries,
     mainView,
-    previousThreadId,
     setMainView,
     showKanbanView,
     setShowKanbanView,
     showHarnessBoardView,
-    setShowHarnessBoardView,
     showDashboardView,
     setShowDashboardView,
     dashboardAllowed
@@ -936,23 +644,34 @@ export const ThreadSidebar = memo(function ThreadSidebar({
       threadDirectoryHasMore: state.threadDirectoryHasMore,
       threadDirectoryLoadingMore: state.threadDirectoryLoadingMore,
       loadMoreThreads: state.loadMoreThreads,
+      touchThreadSummaries: state.touchThreadSummaries,
       mainView: state.mainView,
-      previousThreadId: state.previousThreadId,
       setMainView: state.setMainView,
       showKanbanView: state.showKanbanView,
       setShowKanbanView: state.setShowKanbanView,
       showHarnessBoardView: state.showHarnessBoardView,
-      setShowHarnessBoardView: state.setShowHarnessBoardView,
       showDashboardView: state.showDashboardView,
       setShowDashboardView: state.setShowDashboardView,
       dashboardAllowed: state.dashboardAllowed
     }))
   )
 
-  const { cleanupThread, getAllStreamLoadingStates } = useThreadContext()
-  const threadStateSummaries = useSidebarThreadSummaries()
-  // Every displayed loading edge also updates its directory row in the same publication.
-  const allStreamLoadingStates = getAllStreamLoadingStates()
+  const { cleanupThread } = useThreadContext()
+  const threadStateSummaries = useThreadStateSummaries()
+  const allStreamLoadingStates = useAllStreamLoadingStates()
+
+  // Refresh the list time when a reply starts or ends.
+  const previousStreamLoadingStates = useRef(allStreamLoadingStates)
+  useEffect(() => {
+    const affectedIds = collectChangedStreamingThreadIds(
+      previousStreamLoadingStates.current,
+      allStreamLoadingStates
+    )
+    previousStreamLoadingStates.current = allStreamLoadingStates
+    if (affectedIds.length > 0) {
+      touchThreadSummaries(affectedIds, new Date())
+    }
+  }, [allStreamLoadingStates, touchThreadSummaries])
 
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
@@ -981,7 +700,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
   const [projectToDelete, setProjectToDelete] = useState<ThreadProjectDeleteTarget | null>(null)
   const [confirmingProjectDeletion, setConfirmingProjectDeletion] = useState(false)
   const [deletionProgress, setDeletionProgress] = useState<ThreadGroupDeletionProgress | null>(null)
-  const [projectToRename, setProjectToRename] = useState<WorkspaceRenameTarget | null>(null)
+  const [projectToRename, setProjectToRename] = useState<ThreadProject | null>(null)
   const exportingThreadIdRef = useRef<string | null>(null)
   const forkingThreadIdRef = useRef<string | null>(null)
   const projectDeletionInFlightRef = useRef(false)
@@ -990,57 +709,6 @@ export const ThreadSidebar = memo(function ThreadSidebar({
   threadStateSummariesRef.current = threadStateSummaries
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
-  const {
-    enabled: projectModeEnabled,
-    loading: projectModeLoading,
-    refresh: refreshProjectModeGate
-  } = useFeatureGate(FEATURE_GATES.projectMode)
-  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
-
-  const handleSelectChatTab = useCallback(async (): Promise<void> => {
-    if (mainView === "harness" || showHarnessBoardView) {
-      const previousThread = previousThreadId
-        ? threads.find((thread) => thread.thread_id === previousThreadId)
-        : null
-      if (previousThread && isRegularChatThread(previousThread)) {
-        setShowHarnessBoardView(false)
-        return
-      }
-
-      const firstThread = threads.find(isRegularChatThread)
-      if (firstThread) {
-        await selectThread(firstThread.thread_id)
-        return
-      }
-
-      setShowHarnessBoardView(false)
-    }
-  }, [
-    mainView,
-    previousThreadId,
-    selectThread,
-    setShowHarnessBoardView,
-    showHarnessBoardView,
-    threads
-  ])
-
-  const handleSelectProjectTab = useCallback(async (): Promise<void> => {
-    if (projectModeEnabled) {
-      setShowHarnessBoardView(true)
-      return
-    }
-
-    toast.info("敬请期待")
-    if (!projectModeForceRefreshRef.current) {
-      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
-        if (projectModeForceRefreshRef.current === refreshPromise) {
-          projectModeForceRefreshRef.current = null
-        }
-      })
-      projectModeForceRefreshRef.current = refreshPromise
-    }
-  }, [projectModeEnabled, refreshProjectModeGate, setShowHarnessBoardView])
-
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
   }, [])
@@ -1127,7 +795,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
 
     for (const thread of threads) {
       if (
-        isBtwThreadId(thread.thread_id) || isHarnessProjectModeThread(thread) ||
+        isHarnessProjectModeThread(thread) ||
         (thread.metadata?.botId && !isLocalWorkConversation(thread))
       )
         continue
@@ -1358,6 +1026,11 @@ export const ThreadSidebar = memo(function ThreadSidebar({
     setProjectToRename(null)
   }, [])
 
+  const openProjectRenameDialog = useCallback((project: ThreadProject) => {
+    if (!project.path || project.isManagedInbox) return
+    setProjectToRename(project)
+  }, [])
+
   const saveProjectName = useCallback(
     (path: string, nextName: string | null) => {
       setProjectNameOverrides((prev) => {
@@ -1402,17 +1075,14 @@ export const ThreadSidebar = memo(function ThreadSidebar({
     await createThread(metadata)
   }
 
-  const handleNewProjectThread = useCallback(
-    async (project: Pick<ThreadProject, "key" | "path" | "isManagedInbox">): Promise<void> => {
-      if (project.isManagedInbox) return
-      expandProject(project.key)
-      await createThread({
-        title: `Thread ${new Date().toLocaleDateString()}`,
-        workspacePath: project.path ?? null
-      })
-    },
-    [createThread, expandProject]
-  )
+  const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
+    if (project.isManagedInbox) return
+    expandProject(project.key)
+    await createThread({
+      title: `Thread ${new Date().toLocaleDateString()}`,
+      workspacePath: project.path ?? null
+    })
+  }
 
   const handleAddProject = async (): Promise<void> => {
     if (selectingProjectFolder) return
@@ -1503,9 +1173,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
     setForkingThreadId(threadId)
   }, [])
 
-  const openProjectDeleteDialog = useCallback(async (
-    project: Pick<ThreadProject, "key" | "name" | "path">
-  ): Promise<void> => {
+  const openProjectDeleteDialog = useCallback(async (project: ThreadProject): Promise<void> => {
     if (projectDeletionSelectionInFlightRef.current || projectDeletionInFlightRef.current) return
     projectDeletionSelectionInFlightRef.current = true
     const selector = { type: "workspace", workspacePath: project.path } as const
@@ -1638,58 +1306,6 @@ export const ThreadSidebar = memo(function ThreadSidebar({
         className="p-1 pb-0.5 space-y-1.5"
         style={{ paddingTop: "max(4px, var(--sidebar-safe-padding, 0px))" }}
       >
-        <div
-          role="tablist"
-          aria-label="侧边栏模式"
-          className="mb-2 grid h-8 grid-cols-2 rounded bg-sidebar-accent p-1"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSidebarTab === "chat"}
-            className={cn(
-              "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeSidebarTab === "chat"
-                ? "shadow border border-border/70 bg-background text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            onClick={() => void handleSelectChatTab()}
-          >
-            <MessageSquare className="size-3 shrink-0" />
-            <span className="min-w-0 truncate">对话模式</span>
-          </button>
-          <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeSidebarTab === "project"}
-                  aria-disabled={!projectModeEnabled}
-                  className={cn(
-                    "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    projectModeEnabled
-                      ? activeSidebarTab === "project"
-                        ? "shadow border border-border/70 bg-background text-foreground"
-                        : "text-muted-foreground hover:text-foreground"
-                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
-                    projectModeLoading && !projectModeEnabled && "opacity-55"
-                  )}
-                  onClick={() => void handleSelectProjectTab()}
-                >
-                  <Workflow className="size-3 shrink-0" />
-                  <span className="min-w-0 truncate">项目模式</span>
-                </button>
-              </TooltipTrigger>
-              {!projectModeEnabled && (
-                <TooltipContent side="bottom" sideOffset={6}>
-                  敬请期待
-                </TooltipContent>
-              )}
-            </Tooltip>
-          </TooltipProvider>
-        </div>
-
         {activeSidebarTab === "chat" ? (
           <>
             <Button
@@ -1820,6 +1436,9 @@ export const ThreadSidebar = memo(function ThreadSidebar({
             <div className="px-2 pb-2 space-y-1 overflow-hidden">
               {visibleProjectWindow.items.map((project) => {
                 const isCollapsed = collapsedProjectKeys.has(project.key)
+                const canManageProject = Boolean(project.path)
+                const canRenameProject = canManageProject && !project.isManagedInbox
+                const canCreateProjectThread = !project.isManagedInbox
                 const hasSelectedThread = project.key === currentProjectKey
                 const requestedVisibleThreads =
                   visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
@@ -1839,29 +1458,194 @@ export const ThreadSidebar = memo(function ThreadSidebar({
 
                 return (
                   <div key={project.key} className="space-y-1">
-                    <ThreadProjectHeader
-                      projectKey={project.key}
-                      name={project.name}
-                      defaultName={project.defaultName}
-                      path={project.path}
-                      hasCustomName={project.hasCustomName}
-                      threadCount={project.threads.length}
-                      isManagedInbox={project.isManagedInbox}
-                      botWorkspaceName={project.botWorkspace?.name}
-                      isPinned={project.isPinned}
-                      isCollapsed={isCollapsed}
-                      isHovered={hoveredProjectKey === project.key}
-                      hasSelectedThread={hasSelectedThread}
-                      hasContextReminderThread={hasContextReminderThread}
-                      hasRunningThread={hasRunningThread}
-                      isUnread={unreadCount > 0}
-                      setHoveredProjectKey={setHoveredProjectKey}
-                      toggleProject={toggleProject}
-                      toggleProjectPin={toggleProjectPin}
-                      renameProject={setProjectToRename}
-                      createProjectThread={handleNewProjectThread}
-                      openProjectDeleteDialog={openProjectDeleteDialog}
-                    />
+                    <ContextMenu>
+                      <Popover open={hoveredProjectKey === project.key}>
+                        <PopoverTrigger asChild>
+                          <ContextMenuTrigger asChild>
+                            <div
+                              className={cn(
+                                "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
+                                hasSelectedThread
+                                  ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
+                                  : "hover:bg-sidebar-hover"
+                              )}
+                              onMouseEnter={() => setHoveredProjectKey(project.key)}
+                              onMouseLeave={() => setHoveredProjectKey(null)}
+                              onFocus={() => setHoveredProjectKey(project.key)}
+                              onBlur={(e) => {
+                                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                                  setHoveredProjectKey(null)
+                                }
+                              }}
+                            >
+                              <button
+                                type="button"
+                                className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                                onClick={() => toggleProject(project.key)}
+                              >
+                                {isCollapsed ? (
+                                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                                ) : (
+                                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                                )}
+                                {project.isPinned ? (
+                                  <Pin
+                                    className="size-4 shrink-0 text-primary"
+                                    aria-hidden="true"
+                                  />
+                                ) : project.botWorkspace ? (
+                                  <BotIcon
+                                    className="size-4 shrink-0 text-muted-foreground"
+                                    aria-hidden="true"
+                                  />
+                                ) : (
+                                  <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                                )}
+                                <span className="min-w-0 flex-1 truncate text-xs font-medium duration-150">
+                                  {project.name}
+                                </span>
+                              </button>
+                              {hasContextReminderThread ? (
+                                <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
+                              ) : (
+                                unreadCount > 0 && (
+                                  <span className="size-2 rounded-full bg-status-info shrink-0" />
+                                )
+                              )}
+                              <span className="relative flex h-6 w-4 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-28 group-focus-within:w-28">
+                                <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                                  {project.threads.length}
+                                </span>
+                                <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                                  <IconPopoverButton
+                                    icon={
+                                      project.isPinned ? (
+                                        <PinOff className="size-3" />
+                                      ) : (
+                                        <Pin className="size-3" />
+                                      )
+                                    }
+                                    popoverContent={
+                                      project.isPinned ? "取消置顶工作区" : "置顶工作区"
+                                    }
+                                    disabled={!canManageProject}
+                                    stopPropagation
+                                    className={cn(
+                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
+                                      project.isPinned && "text-primary opacity-100",
+                                      !canManageProject && "cursor-not-allowed !opacity-30"
+                                    )}
+                                    onClick={() => toggleProjectPin(project.key)}
+                                  />
+                                  <IconPopoverButton
+                                    icon={<Pencil className="size-3" />}
+                                    popoverContent={
+                                      canRenameProject
+                                        ? "修改工作区名称"
+                                        : project.isManagedInbox
+                                          ? "招乎默认聊天名称由应用管理"
+                                          : "未关联工作区无法重命名"
+                                    }
+                                    disabled={!canRenameProject}
+                                    stopPropagation
+                                    className={cn(
+                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
+                                      !canRenameProject && "cursor-not-allowed !opacity-30"
+                                    )}
+                                    onClick={() => openProjectRenameDialog(project)}
+                                  />
+                                  <IconPopoverButton
+                                    icon={<Plus className="size-3" />}
+                                    popoverContent={
+                                      canCreateProjectThread
+                                        ? "新增任务"
+                                        : "请从招乎默认聊天发送消息"
+                                    }
+                                    disabled={!canCreateProjectThread}
+                                    stopPropagation
+                                    className={cn(
+                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
+                                      !canCreateProjectThread && "cursor-not-allowed !opacity-30"
+                                    )}
+                                    onClick={() => void handleNewProjectThread(project)}
+                                  />
+                                  <IconPopoverButton
+                                    icon={<Trash2 className="size-3" />}
+                                    popoverContent={
+                                      hasRunningThread
+                                        ? "删除工作区会话（自动跳过运行中的任务）"
+                                        : "删除工作区会话"
+                                    }
+                                    stopPropagation
+                                    className="size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
+                                    onClick={() => void openProjectDeleteDialog(project)}
+                                  />
+                                </span>
+                              </span>
+                            </div>
+                          </ContextMenuTrigger>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          side="right"
+                          align="start"
+                          className="w-72 p-2 text-xs"
+                          onOpenAutoFocus={(e) => e.preventDefault()}
+                          onMouseEnter={() => setHoveredProjectKey(project.key)}
+                          onMouseLeave={() => setHoveredProjectKey(null)}
+                        >
+                          <div className="mb-1 font-medium text-muted-foreground">
+                            {project.isManagedInbox
+                              ? "工作区说明"
+                              : (project.botWorkspace?.name ?? "工作区路径")}
+                          </div>
+                          <div className="break-all text-foreground">
+                            {project.isManagedInbox
+                              ? "应用托管目录，路径已隐藏"
+                              : project.path || "未关联工作区"}
+                          </div>
+                          {project.botWorkspace && (
+                            <p className="mt-2 text-muted-foreground">
+                              Bot 自动管理的默认目录，用于保存任务文件。
+                            </p>
+                          )}
+                        </PopoverContent>
+                      </Popover>
+                      <ContextMenuContent>
+                        <ContextMenuItem
+                          disabled={!canManageProject}
+                          onClick={() => toggleProjectPin(project.key)}
+                        >
+                          {project.isPinned ? (
+                            <PinOff className="size-4 mr-2" />
+                          ) : (
+                            <Pin className="size-4 mr-2" />
+                          )}
+                          {project.isPinned ? "取消置顶工作区" : "置顶工作区"}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={!canRenameProject}
+                          onClick={() => openProjectRenameDialog(project)}
+                        >
+                          <Pencil className="size-4 mr-2" />
+                          修改工作区名称
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={!canCreateProjectThread}
+                          onClick={() => void handleNewProjectThread(project)}
+                        >
+                          <Plus className="size-4 mr-2" />
+                          新增任务
+                        </ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          variant="destructive"
+                          onClick={() => void openProjectDeleteDialog(project)}
+                        >
+                          <Trash2 className="size-4 mr-2" />
+                          {hasRunningThread ? "删除工作区会话（跳过运行中）" : "删除工作区会话"}
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
 
                     {!isCollapsed && (
                       <div className="ml-4 space-y-1 border-l border-border/70 pl-2">

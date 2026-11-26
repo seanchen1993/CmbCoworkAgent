@@ -17,7 +17,6 @@ export interface GitRejectFile {
 interface GitRejectDialogProps {
   open: boolean
   running: boolean
-  isSubmitDisabled?: (filePaths: string[]) => boolean
   loading?: boolean
   selectionSeed?: number
   files: GitRejectFile[]
@@ -81,7 +80,6 @@ function getStatusClassName(status?: GitPanelFileStatus): string {
 export function GitRejectDialog({
   open,
   running,
-  isSubmitDisabled,
   loading = false,
   selectionSeed = 0,
   files,
@@ -158,9 +156,6 @@ export function GitRejectDialog({
     { additions: 0, deletions: 0 }
   )
   const allSelected = files.length > 0 && selectedPaths.size === files.length
-  const submissionPaths = selectedFiles.flatMap((file) =>
-    file.previousPath ? [file.previousPath, file.path] : [file.path]
-  )
   const noSelection = selectedFiles.length === 0
   const hasOmittedFiles = omittedFileCount > 0
 
@@ -390,9 +385,13 @@ export function GitRejectDialog({
             <Button
               type="button"
               variant="destructive"
-              disabled={running || loading || noSelection || hasOmittedFiles || isSubmitDisabled?.(submissionPaths)}
+              disabled={running || loading || noSelection || hasOmittedFiles}
               onClick={() => {
-                onSubmit(submissionPaths)
+                onSubmit(
+                  selectedFiles.flatMap((file) =>
+                    file.previousPath ? [file.previousPath, file.path] : [file.path]
+                  )
+                )
               }
               }
             >

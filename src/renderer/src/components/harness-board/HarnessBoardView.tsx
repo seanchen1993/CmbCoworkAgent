@@ -356,7 +356,7 @@ type ProjectCreateForm = HarnessProjectCreateInput &
   Pick<HarnessProjectMetadataUpdateInput, "workspacePath" | "projectDir">
 
 function createEmptyProjectForm(adapterId = ""): ProjectCreateForm {
-  return { ...createEmptyProjectMetadataForm(adapterId), isTestProject: false }
+  return createEmptyProjectMetadataForm(adapterId)
 }
 
 function createEmptyDeployUnitMapping(): HarnessDeployUnitConfig {

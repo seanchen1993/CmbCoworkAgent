@@ -574,13 +574,13 @@ function testClearOnEveryRunExit(): void {
   assertSourceOrder(
     foregroundDeleteBody,
     "controller.abort()",
-    "waitForReplacedRunToSettle(threadId, physicalSettlement)",
+    "waitForReplacedRunToSettle(threadId)",
     "thread deletion aborts and bounded-waits for its foreground run"
   )
   assertSourceOrder(
     foregroundDeleteBody,
     "LocalSandbox.cancelBackgroundTasksWithin(",
-    "if (!controller && !physicalSettlement) return (await shellSettlement)",
+    "if (!controller) return (await shellSettlement)",
     "thread deletion waits for detached Bash even when no foreground run is active"
   )
   assertSourceOrder(
@@ -684,9 +684,8 @@ function testClearOnEveryRunExit(): void {
 
 function testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence(): void {
   const replacementStart = agentIpc.indexOf("const replacement = await withThreadRunMutationLock")
-  const replacementEnd = agentIpc.indexOf('if ("startRejectedDuringShutdown" in replacement)', replacementStart)
-  assert(replacementStart >= 0 && replacementEnd > replacementStart, "new invoke replacement block exists")
-  const replacementBody = agentIpc.slice(replacementStart, replacementEnd)
+  assert(replacementStart >= 0, "new invoke replacement block exists")
+  const replacementBody = agentIpc.slice(replacementStart, replacementStart + 5000)
 
   assertIncludes(
     replacementBody,
@@ -707,12 +706,6 @@ function testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence(): void 
       settlementWaitOffset > abortOffset &&
       replacementBody.slice(abortOffset, settlementWaitOffset).includes("\n            }"),
     "invoke waits for a still-registered settlement even after its controller was released"
-  )
-  const publicationOffset = replacementBody.indexOf("activeRuns.set(threadId, nextAbortController)")
-  assert(
-    publicationOffset > settlementWaitOffset &&
-      replacementBody.slice(settlementWaitOffset, publicationOffset).includes("rejectClosedSideThread(threadId, window, channel)"),
-    "invoke rechecks the side conversation after waiting and before publishing its next controller"
   )
   assertIncludes(
     replacementBody,
@@ -2078,8 +2071,8 @@ function testFailedQueuedSendRollsBackOptimisticBubble(): void {
     "thread actions implement optimistic-message rollback"
   )
 
-  const pumpCatchStart = chat.indexOf("const recoverQueuedSubmission = async")
-  assert(pumpCatchStart >= 0, "queue pump recovery branch not found")
+  const pumpCatchStart = chat.indexOf("submitQueuedMessage(next)\n      .catch(async (err) => {")
+  assert(pumpCatchStart >= 0, "queue pump catch branch not found")
   const pumpCatchBody = chat.slice(pumpCatchStart, pumpCatchStart + 2600)
   assertSourceOrder(
     pumpCatchBody,
@@ -2134,31 +2127,26 @@ function testWillEnqueueDistinguishesLivePreparationFromPumpInFlight(): void {
   const liveSubmitBody = chat.slice(liveSubmitStart, liveSubmitEnd)
   assertSourceOrder(
     liveSubmitBody,
-    "if (shouldLockSubmit && !sideComposer) liveSubmitPreparingThreads.delete(threadId)",
+    "if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)",
     "await stream.submit(",
-    "the duplicate-submit guard ends before the ordinary run starts"
-  )
-  assertMatches(
-    liveSubmitBody,
-    /onPromptAccepted:[\s\S]*?if \(sideUserMessageId && !isBtwSubmissionBlocked\(threadId\)\) \{[\s\S]*?clearClaimedDraft\(\)\s*liveSubmitPreparingThreads\.delete\(threadId\)/,
-    "auxiliary submission consumes the draft and releases preparation only on prompt acceptance"
+    "the duplicate-submit guard ends when the prepared payload is committed, before the run starts"
   )
 }
 
 function testBusyDraftPreparationIsAtomic(): void {
   assertIncludes(
-    submitInFlightLock,
-    "export const queuedDraftPreparationLock: SubmitInFlightLockRef",
+    chat,
+    "const queuedDraftPreparingThreads = new Set<string>()",
     "busy draft preparation has a thread-scoped guard"
   )
   const claimStart = chat.indexOf(
-    "if (!tryAcquireSubmitInFlightLock(queuedDraftPreparationLock, shouldLockQueuedDraftPreparation, threadId))"
+    "if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.add(threadId)"
   )
   assert(claimStart >= 0, "busy draft preparation claim not found")
-  const claimBody = chat.slice(claimStart, chat.indexOf("const clearSubmittedReply =", claimStart))
+  const claimBody = chat.slice(claimStart, claimStart + 9000)
   assertSourceOrder(
     claimBody,
-    "tryAcquireSubmitInFlightLock(queuedDraftPreparationLock, shouldLockQueuedDraftPreparation, threadId)",
+    "queuedDraftPreparingThreads.add(threadId)",
     "await resolveAtFileAttachments({",
     "busy draft ownership is claimed before asynchronous attachment resolution"
   )
@@ -2170,7 +2158,7 @@ function testBusyDraftPreparationIsAtomic(): void {
   )
   assertIncludes(
     chat,
-    "releaseSubmitInFlightLock(queuedDraftPreparationLock, shouldLockQueuedDraftPreparation, threadId)",
+    "queuedDraftPreparingThreads.delete(threadId)",
     "busy draft preparation guard is always released"
   )
 }
@@ -2706,9 +2694,8 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
     "the separate pump-only lock was removed; submitInFlightRef is the single source of truth"
   )
   const pumpEffectStart = chat.indexOf("if (queueAutoDrainSuppressed) return")
-  const pumpEffectEnd = chat.indexOf("\n  ])", pumpEffectStart)
-  assert(pumpEffectStart >= 0 && pumpEffectEnd > pumpEffectStart, "pump effect not found")
-  const pumpEffectBody = chat.slice(pumpEffectStart, pumpEffectEnd)
+  assert(pumpEffectStart >= 0, "pump effect not found")
+  const pumpEffectBody = chat.slice(pumpEffectStart, pumpEffectStart + 2800)
   assertIncludes(
     pumpEffectBody,
     "if (submitInFlightRef.current.has(threadId)) return",
@@ -2730,10 +2717,11 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
     "if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return",
     "the pump checks the lock before later acquiring it for its own submit"
   )
-  const dependencies = pumpEffectBody.slice(pumpEffectBody.lastIndexOf("\n  }, ["))
-  for (const dependency of ["submitInFlightRef", "threadError", "threadId"]) {
-    assertIncludes(dependencies, `\n    ${dependency}`, `pump effect tracks ${dependency}`)
-  }
+  assertIncludes(
+    chat,
+    "submitInFlightRef,\n    threadError,\n    threadId",
+    "pump effect tracks its thread and shared lock dependencies explicitly"
+  )
 }
 
 function testLiveSubmitReleasePublishesQueuePumpWake(): void {
@@ -2801,7 +2789,7 @@ function testEditLengthErrorDoesNotPolluteThreadError(): void {
   const saveBody = chat.slice(saveStart, saveStart + 2000)
   assertIncludes(
     saveBody,
-    "if (nextBody.length > MAX_INPUT_CHARS) {\n      toast.error(",
+    "if (nextText.length > MAX_INPUT_CHARS) {\n      toast.error(",
     "the edit-length limit reports via toast, not setError"
   )
   assertNotIncludes(
@@ -2895,8 +2883,8 @@ function testSubmitInFlightLockSurvivesRemount(): void {
   // touching React's render/state cycle. A fifth independent review pass caught
   // this as the same-shaped gap D+E had already fixed for queueAutoDrainSuppressed.
   assertIncludes(
-    submitInFlightLock,
-    "const submitInFlightLockStore: SubmitInFlightLockRef = { current: new Set<string>() }",
+    chat,
+    "const submitInFlightLockStore: SubmitInFlightLockRef = sharedSubmitInFlightLockRef",
     "the lock store is a module-level constant, not created inside the component"
   )
   assertNotIncludes(

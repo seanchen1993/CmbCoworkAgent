@@ -1,19 +1,5 @@
 import type { Message } from "../types"
-import {
-  getMessageProviderOccurrence,
-  getMessageProviderSourceId
-} from "../../../shared/message-role-collision"
-import { readToolOwnershipId } from "../../../shared/tool-result-ownership"
-import {
-  findReplayedToolExchangeAliases,
-  getAssistantReplayContent
-} from "../../../shared/tool-transcript-replay"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
-
-export {
-  findReplayedToolExchangeAliases as findDisplayedReplayAliases,
-  preserveReplayToolBindings
-} from "../../../shared/tool-transcript-replay"
 
 export interface ChatMessageProjection {
   /**
@@ -32,126 +18,6 @@ export interface ChatLiveMessageProjectionMetadata {
   changedMessages: readonly Message[]
   contentVersion: number
   structureVersion: number
-}
-
-const noReplayAliases: ReadonlyMap<string, string> = new Map()
-export const noReplayAssistantContent: ReadonlyMap<string, Message["content"]> = new Map()
-
-function replaySourceKey(message: Message): string | undefined {
-  if (message.role === "assistant" || message.role === "tool") {
-    return `${message.role}:${getMessageProviderSourceId(message)}`
-  }
-  return undefined
-}
-
-function sameToolSlots(before: Message["tool_calls"], after: Message["tool_calls"]): boolean {
-  if (before === after) return true
-  const previous = Array.isArray(before) ? before : []
-  const next = Array.isArray(after) ? after : []
-  return previous.length === next.length && previous.every((call, index) =>
-    readToolOwnershipId(call) === readToolOwnershipId(next[index]) &&
-    call?.name === next[index]?.name
-  )
-}
-
-/** Recheck replay proof on order, ownership or evidence changes, including live reasoning. */
-export function createChatReplayAliasProjector(): (
-  display: ChatMessageProjection
-) => {
-  aliases: ReadonlyMap<string, string>
-  assistantContent: ReadonlyMap<string, Message["content"]>
-} {
-  let previousMessages: readonly Message[] | undefined
-  let previousStructureVersion = -1
-  let previousById = new Map<string, Message>()
-  let repeatedSources = new Set<string>()
-  let toolReplayAssistantIds = new Set<string>()
-  let projection = { aliases: noReplayAliases, assistantContent: noReplayAssistantContent }
-
-  return ({ messages, changedMessages, structureVersion }) => {
-    let rebuildSources = messages !== previousMessages || structureVersion !== previousStructureVersion
-    let evidenceChanged = false
-    if (!rebuildSources) {
-      for (const message of changedMessages) {
-        const previous = previousById.get(message.id)
-        if (message === previous) continue
-        const source = replaySourceKey(message)
-        if (!previous || message.role !== previous.role || source !== replaySourceKey(previous)) {
-          rebuildSources = true
-          break
-        }
-        previousById.set(message.id, message)
-        if (!source) continue
-        evidenceChanged ||= (repeatedSources.has(source) &&
-          (message.role === "tool" || toolReplayAssistantIds.has(message.id))) ||
-          previous.tool_call_id !== message.tool_call_id ||
-          previous.historical_tool_replay_id !== message.historical_tool_replay_id ||
-          previous.legacy_checkpoint_replay_of !== message.legacy_checkpoint_replay_of ||
-          (message.role === "tool" && previous.name !== message.name) ||
-          getMessageProviderOccurrence(previous) !== getMessageProviderOccurrence(message) ||
-          !sameToolSlots(previous.tool_calls, message.tool_calls)
-      }
-    }
-    if (rebuildSources) {
-      previousMessages = messages
-      previousStructureVersion = structureVersion
-      previousById = new Map()
-      repeatedSources = new Set()
-      const sources = new Set<string>()
-      for (const message of messages) {
-        previousById.set(message.id, message)
-        const source = replaySourceKey(message)
-        if (!source) continue
-        if (sources.has(source)) repeatedSources.add(source)
-        sources.add(source)
-      }
-    }
-    if (rebuildSources || evidenceChanged) {
-      toolReplayAssistantIds = new Set()
-      const nextAliases = findReplayedToolExchangeAliases(messages, toolReplayAssistantIds)
-      const assistantContent = getAssistantReplayContent(nextAliases, (id) => previousById.get(id))
-      const aliasesChanged = !mapsEqual(nextAliases, projection.aliases)
-      if (aliasesChanged || !mapsEqual(assistantContent, projection.assistantContent)) {
-        projection = { aliases: aliasesChanged ? nextAliases : projection.aliases, assistantContent }
-      }
-    }
-    return projection
-  }
-}
-
-function mapsEqual<T>(left: ReadonlyMap<string, T>, right: ReadonlyMap<string, T>): boolean {
-  if (left.size !== right.size) return false
-  for (const [id, value] of left) if (right.get(id) !== value) return false
-  return true
-}
-
-/** A live row may have the only surviving copy of renderer-only reasoning. */
-export function resolveChatReplayAliases(
-  replayAliases: ReadonlyMap<string, string>,
-  liveMessages: readonly Message[],
-  display: ChatMessageProjection,
-  liveMessageIds?: ReadonlySet<string>
-): ReadonlyMap<string, string> {
-  if (replayAliases.size === 0) return replayAliases
-  const carriesUniqueReasoning = (id: string, canonical: string): boolean => {
-    const index = display.indexById.get(id)
-    const canonicalIndex = display.indexById.get(canonical)
-    if (index === undefined) return false
-    const reasoning = display.messages[index].reasoning
-    return Boolean(reasoning &&
-      (canonicalIndex === undefined || display.messages[canonicalIndex].reasoning !== reasoning))
-  }
-  if (liveMessageIds && replayAliases.size < liveMessages.length) {
-    for (const [id, canonical] of replayAliases) {
-      if (liveMessageIds.has(id) && carriesUniqueReasoning(id, canonical)) return noReplayAliases
-    }
-    return replayAliases
-  }
-  for (const live of liveMessages) {
-    const canonical = replayAliases.get(live.id)
-    if (canonical && carriesUniqueReasoning(live.id, canonical)) return noReplayAliases
-  }
-  return replayAliases
 }
 
 function liveStructureKey(messages: readonly Message[]): string {
@@ -216,8 +82,7 @@ export function createChatMessageProjector(): (
   liveMessages: readonly Message[],
   orderHintMessages: ReadonlyArray<{ id?: string }> | undefined,
   baselineContentVersion?: number,
-  liveProjection?: ChatLiveMessageProjectionMetadata,
-  valuesOrderRevision?: number
+  liveProjection?: ChatLiveMessageProjectionMetadata
 ) => ChatMessageProjection {
   let previousBaseline: readonly Message[] | null = null
   let previousBaselineContentVersion = 0
@@ -227,7 +92,6 @@ export function createChatMessageProjector(): (
   let previousLiveProjectionStructureVersion = -1
   let previousUsedLiveProjection = false
   let previousOrderHintStructureKey = ""
-  let previousValuesOrderRevision = 0
   let baselineIndexById = new Map<string, number>()
   let liveIndexById = new Map<string, number>()
   let messages: Message[] = []
@@ -240,8 +104,7 @@ export function createChatMessageProjector(): (
     liveMessages,
     orderHintMessages,
     baselineContentVersion = 0,
-    liveProjection,
-    valuesOrderRevision = 0
+    liveProjection
   ) => {
     const usesLiveProjection = Boolean(liveProjection)
     const nextLiveStructureKey = usesLiveProjection ? "" : liveStructureKey(liveMessages)
@@ -254,7 +117,6 @@ export function createChatMessageProjector(): (
       (liveProjection
         ? liveProjection.structureVersion !== previousLiveProjectionStructureVersion
         : nextLiveStructureKey !== previousLiveStructureKey) ||
-      valuesOrderRevision !== previousValuesOrderRevision ||
       nextOrderHintStructureKey !== previousOrderHintStructureKey
 
     const changedMessages: Message[] = []
@@ -307,7 +169,6 @@ export function createChatMessageProjector(): (
       previousLiveProjectionStructureVersion = liveProjection?.structureVersion ?? -1
       previousUsedLiveProjection = usesLiveProjection
       previousOrderHintStructureKey = nextOrderHintStructureKey
-      previousValuesOrderRevision = valuesOrderRevision
       contentVersion += 1
       structureVersion += 1
       return {

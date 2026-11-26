@@ -285,11 +285,6 @@ export interface Message {
   botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
-  /** An exact physical tool result verified by a durable page read. */
-  historical_tool_replay_id?: string
-  legacy_checkpoint_replay_of?: string
-  legacy_checkpoint_replay_end?: string
-  legacy_checkpoint_tool_outcomes?: readonly import("../../shared/tool-result-ownership").VerifiedToolOutcome[]
   /** A rendered Goal event occupies the position immediately before its durable anchor. */
   transcript_anchor_message_id?: string
   provider_source_id?: string
