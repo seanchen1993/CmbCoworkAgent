@@ -142,42 +142,43 @@ async function gitPath(cwd: string, ...args: string[]): Promise<string> {
   return path.resolve(cwd, value)
 }
 
-let nativeGitVersion: Promise<number[]> | undefined
+type GitOperation = "update-ref" | "hook"
+let nativeGitVersion: Promise<string> | undefined
+
+export function supportsTaskGitOperation(version: string, operation: GitOperation): boolean {
+  const match = /\bgit version (\d+)\.(\d+)(?:\.(\d+))?/i.exec(version)
+  if (!match) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  if (major !== 2) return major > 2
+  if (operation === "hook") return minor >= 36
+  // 2.33.1 backported the interactive update-ref stdout flush.
+  return minor > 33 || (minor === 33 && Number(match[3] ?? 0) >= 1)
+}
 
 // Keep the user's Git for repository discovery, staging, filters, signing and commit-tree.
 // Only the interactive ref transaction and git hook run need newer Git commands.
-async function transactionGit(root: string, minimumMinor: number): Promise<string> {
-  nativeGitVersion ??= git(root, ["--version"])
-    .then((output) => {
-      const version = /git version (\d+)\.(\d+)/i.exec(output)
-      if (!version) throw new Error("无法识别系统 Git 版本")
-      return [Number(version[1]), Number(version[2])]
-    })
-    .catch((error) => {
-      nativeGitVersion = undefined
-      throw error
-    })
-  const [major, minor] = await nativeGitVersion
-  if (major > 2 || (major === 2 && minor >= minimumMinor)) return "git"
-  if (process.platform === "win32") {
-    const helper = path.join("task-commit-git", "cmd", "git.exe")
-    const roots = process.resourcesPath ? [process.resourcesPath] : []
-    if (process.defaultApp || !process.versions.electron) {
-      roots.push(
-        path.resolve(__dirname, "../../resources"),
-        path.resolve(__dirname, "../../../resources")
-      )
-    }
-    for (const base of roots) {
-      const file = path.join(base, helper)
-      if ((await fs.stat(file).catch(() => null))?.isFile()) return file
-    }
-    throw new Error(
-      "当前应用缺少旧版 Git 的提交兼容组件。请安装新版应用；开发环境可运行 npm run prepare:task-commit-git。"
+async function transactionGit(root: string, operation: GitOperation): Promise<string> {
+  if (process.platform !== "win32") return "git"
+  nativeGitVersion ??= git(root, ["--version"]).catch((error) => {
+    nativeGitVersion = undefined
+    throw error
+  })
+  if (supportsTaskGitOperation(await nativeGitVersion, operation)) return "git"
+  const helper = path.join("task-commit-git", "cmd", "git.exe")
+  const roots = process.resourcesPath ? [process.resourcesPath] : []
+  if (process.defaultApp || !process.versions.electron) {
+    roots.push(
+      path.resolve(__dirname, "../../resources"),
+      path.resolve(__dirname, "../../../resources")
     )
   }
+  for (const base of roots) {
+    const file = path.join(base, helper)
+    if ((await fs.stat(file).catch(() => null))?.isFile()) return file
+  }
   throw new Error(
-    `此提交操作需要 Git 2.${minimumMinor} 或更高版本，当前 Git 为 ${major}.${minor}。`
+    "当前应用缺少旧版 Git 的提交兼容组件。请安装新版应用；开发环境可运行 npm run prepare:task-commit-git。"
   )
 }
 
@@ -198,7 +199,7 @@ async function runTaskCommitHook(
   args: string[] = [],
   index?: string
 ): Promise<void> {
-  const executable = await transactionGit(root, 36)
+  const executable = await transactionGit(root, "hook")
   await git(
     root,
     ["-c", "core.hooksPath=" + hooksDir, "hook", "run", "--ignore-missing", name, "--", ...args],
@@ -487,7 +488,7 @@ async function runHeadTransaction(
   // update HEAD locks both the symbolic HEAD and its referent during "prepare".
   // Verify the branch while both locks are held. This also handles a checkout
   // switching to a different branch that happens to point at the same old SHA.
-  const executable = await transactionGit(root, 34)
+  const executable = await transactionGit(root, "update-ref")
   const config =
     executable === "git"
       ? []
