@@ -1,4 +1,5 @@
 import type { GitGraphPage } from "../shared/git-graph"
+import type { TaskCommitBindingApi } from "../shared/task-commit-binding"
 import type {
   GitBranchKind,
   GitBranchListResult,
@@ -1676,8 +1677,13 @@ interface CustomAPI {
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
         worktreePath?: string
+        commitBindingVersion?: string
+        includeCommitTarget?: boolean
       }
     ) => Promise<{
+      commitPreviewRevision?: string
+      unavailableFileCount?: number
+      commitPreviewTarget?: { root: string; scope: string; branch: string }
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1703,7 +1709,7 @@ interface CustomAPI {
     getGitPanelFileDiff: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string }
+      options?: { worktreePath?: string; commitBindingVersion?: string; commitPreviewRevision?: string }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1792,10 +1798,11 @@ interface CustomAPI {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string; agentInitiated?: boolean }
+      options?: { worktreePath?: string; agentInitiated?: boolean; commitBindingVersion?: string; commitPreviewRevision?: string }
     ) => Promise<{
       success: boolean
       error?: string
+      warning?: string
     }>
     pushWorktree: (
       threadId: string,
@@ -2103,6 +2110,7 @@ interface CustomAPI {
     getCompileModelInfo: (threadId: string) => Promise<TaskMmdCompileModelInfo>
     onChanged: (callback: (payload: { threadId?: string }) => void) => () => void
   }
+  taskCommitBinding: TaskCommitBindingApi
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
     saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>

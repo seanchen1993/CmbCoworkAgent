@@ -395,6 +395,36 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     }
   })
 
+  it("offers only task-authorized repositories when the session also contains an unrelated repository", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agent-bound-multi-repo-"))
+    const workspace = path.join(directory, "workspace")
+    const local = path.join(workspace, "local")
+    const registered = [path.join(directory, "billing"), path.join(directory, "ledger")]
+    const bindingModule = await import("../services/task-commit-binding")
+    const binding = vi.spyOn(bindingModule, "readTaskCommitBinding").mockResolvedValue({
+      version: "v1", workspacePath: workspace, cardNumber: "C-1", repositoryPaths: registered
+    })
+    try {
+      for (const repo of [local, ...registered]) initRepository(repo)
+      const raw = vi.fn<RawExecuteFn>()
+      const approve = vi.fn<RequestApprovalFn>().mockResolvedValue({ type: "reject", tool_call_id: "test" })
+      const agent = new ToolOrchestrator(new ApprovalStore(), raw, approve, () => false, false, true,
+        workspace, { threadId: "task", canReview: () => true })
+      await agent.execute('git commit -m "test" -- file.txt', workspace, "none")
+      expect(approve).toHaveBeenCalledTimes(1)
+      expect(approve.mock.calls[0][0].suggestedGitRepositories?.map(repo => repo.path)).toEqual(registered)
+      await agent.execute('git commit -m "test" -- local/file.txt', workspace, "none")
+      expect(approve.mock.calls[1][0].suggestedCommitFilePaths).toEqual([path.join(local, "file.txt")])
+      const denied = await agent.execute('git -C local commit -m "test" -- file.txt', workspace, "none")
+      expect(denied.output).toContain("未登记")
+      expect(approve).toHaveBeenCalledTimes(2)
+      expect(raw).not.toHaveBeenCalled()
+    } finally {
+      binding.mockRestore()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("infers the only repository below a non-Git parent without showing a target selector", async () => {
     const workspace = mkdtempSync(path.join(tmpdir(), "agent-single-child-repo-"))
     try {

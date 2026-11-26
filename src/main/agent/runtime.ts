@@ -107,6 +107,8 @@ import {
   type SkillHookContextProvider
 } from "./local-sandbox"
 import { foregroundCommandCall, foregroundCommandEvidence } from "./foreground-command-evidence"
+import { taskCommitCall, withTaskCommitCall } from "./task-commit-call"
+import { recordTaskCommitEdit } from "../services/task-commit-edits"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import {
   createShellTaskMonitorTools,
@@ -196,7 +198,7 @@ import path from "path"
 import { join, resolve, delimiter } from "path"
 import fs from "fs/promises"
 import { app, BrowserWindow } from "electron"
-import { sendCurrentAgentRunStreamEvent } from "./agent-run-service"
+import { canDisplayTaskCommitReview, sendCurrentAgentRunStreamEvent } from "./agent-run-service"
 import {
   appendTaskCompletionAndRepetitionPrompt,
   getOutputStylePrompt,
@@ -934,6 +936,9 @@ function createTrustedToolFilePreviewContextMiddleware(threadId: string) {
       const toolCall = request.toolCall as { id?: string; name?: string } | undefined
       const toolCallId = toolCall?.id?.trim()
       const toolName = toolCall?.name?.trim()
+      if (toolName === "execute" && toolCallId) {
+        return withTaskCommitCall(threadId, toolCallId, () => handler(request))
+      }
       if (
         !toolCallId ||
         !toolName ||
@@ -941,9 +946,10 @@ function createTrustedToolFilePreviewContextMiddleware(threadId: string) {
       ) {
         return handler(request)
       }
-      return runWithTrustedToolFilePreviewContext({ threadId, toolCallId, toolName }, () =>
+      const invoke = () => runWithTrustedToolFilePreviewContext({ threadId, toolCallId, toolName }, () =>
         handler(request)
       )
+      return toolName === "read_file" ? invoke() : withTaskCommitCall(threadId, toolCallId, invoke)
     }
   })
 }
@@ -5459,12 +5465,22 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const baseHooks = hookScope.disabled ? [] : getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
 
+  const taskCommitEnabled = threadId === approvalThreadId && !options.worktreeIsolation
+  const callBinding = () => {
+    const call = taskCommitCall.getStore()
+    return taskCommitEnabled && call?.threadId === threadId ? call.binding : null
+  }
   const backend = new LocalSandbox({
     // File tools are rooted in the independent checkout. Shell starts there and
     // keeps the worktree Git guard; the user's configured OS sandbox, if any,
     // remains an additional execution policy rather than a worktree prerequisite.
     rootDir: fileRoot,
     agentId,
+    taskCommitRepositoryPaths: () => callBinding()?.repositoryPaths,
+    onTaskCommitEdit: (file, before, after) => {
+      const version = callBinding()?.version
+      if (version) recordTaskCommitEdit(threadId, version, file, before, after)
+    },
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
     // Native Git in an isolated worktree runs through the normal shell path.
@@ -5725,7 +5741,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     getYoloMode,
     options.autoApproveFileEdits === true,
     !options.worktreeIsolation,
-    workspacePath
+    workspacePath,
+    threadId === approvalThreadId && !options.worktreeIsolation
+      ? {
+          threadId,
+          canReview: () => !options.botCommunication && !managedExecution && canDisplayTaskCommitReview() &&
+            BrowserWindow.getAllWindows().some(win => !win.isDestroyed())
+        }
+      : undefined
   )
   backend.setOrchestrator(orchestrator)
 

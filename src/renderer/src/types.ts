@@ -519,6 +519,7 @@ export interface HITLRequest {
   suggestedCommitFilePaths?: string[]
   suggestedCommitFileBasePath?: string
   suggestedGitWorktreePath?: string
+  commitBindingVersion?: string
   suggestedGitRepositories?: Array<{
     path: string
     displayPath: string

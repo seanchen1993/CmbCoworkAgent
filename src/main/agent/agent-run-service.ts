@@ -53,9 +53,15 @@ export interface AgentRunDelivery {
 
 const runDeliveryStorage = new AsyncLocalStorage<{
   threadId: string
+  source: StandardTurnSource
   channel: string
   delivery: AgentRunDelivery
 }>()
+
+export function canDisplayTaskCommitReview(): boolean {
+  const current = runDeliveryStorage.getStore()
+  return !current || (current.source === "desktop" && current.delivery.isAvailable())
+}
 
 /** Runtime boundary events must follow the run's stream, including background Bot runs. */
 export function sendCurrentAgentRunStreamEvent(threadId: string, payload: unknown): boolean {
@@ -358,6 +364,7 @@ export async function startAgentRun(
     .run(
       {
         threadId: request.threadId,
+        source: context.source,
         channel: resolveAgentStreamRequestChannel(ambientChannel, request.streamRequestId),
         delivery
       },

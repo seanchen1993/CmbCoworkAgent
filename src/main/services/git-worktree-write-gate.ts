@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises"
 import path from "node:path"
 
-type WorktreeWriteKind = "checkout" | "panel"
+type WorktreeWriteKind = "checkout" | "panel" | "task-commit"
 
 const activeWrites = new Map<string, { kind: WorktreeWriteKind; count: number }>()
 const preparingPanelWrites = new Set<Set<string>>()
@@ -24,7 +24,11 @@ export function normalizeGitDirPath(gitDir: string, workingDir: string): string 
 
 function beginWrite(gitDir: string, kind: WorktreeWriteKind): () => void {
   const key = gitWorktreeWriteKey(gitDir)
-  const active = activeWrites.get(key) ?? { kind, count: 0 }
+  const current = activeWrites.get(key)
+  const active = current ?? { kind, count: 0 }
+  if (current && (current.kind === "task-commit" || kind === "task-commit")) {
+    throw new Error("当前工作树正在执行 Git 写入，请等待操作完成后再提交或切换分支")
+  }
   if (active.kind !== kind) {
     throw new Error(
       kind === "checkout"
@@ -59,7 +63,9 @@ export interface GitPanelWritePreparation {
 
 // The panel cannot identify its worktree until after async repository discovery.
 // Remember checkouts that finish in that gap, then compare the physical Git directory.
-export function prepareGitPanelWrite(): GitPanelWritePreparation {
+export function prepareGitPanelWrite(
+  kind: "panel" | "task-commit" = "panel"
+): GitPanelWritePreparation {
   const changedWorktrees = new Set<string>()
   preparingPanelWrites.add(changedWorktrees)
   return {
@@ -71,7 +77,7 @@ export function prepareGitPanelWrite(): GitPanelWritePreparation {
       if (changedWorktrees.has(gitWorktreeWriteKey(canonicalGitDir))) {
         throw new Error("当前工作树已切换分支，请刷新后重试")
       }
-      return beginWrite(canonicalGitDir, "panel")
+      return beginWrite(canonicalGitDir, kind)
     },
     dispose() {
       preparingPanelWrites.delete(changedWorktrees)
