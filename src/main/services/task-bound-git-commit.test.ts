@@ -51,7 +51,8 @@ describe("task-bound Git commit", { timeout: 45_000 }, () => {
   beforeEach(() => {
     root = realpathSync(mkdtempSync(path.join(tmpdir(), "task-bound-commit-test-")))
     temporary.push(root)
-    git("init", "-q", "-b", "main")
+    git("init", "-q")
+    git("symbolic-ref", "HEAD", "refs/heads/main")
     git("config", "user.name", "Commit Fixture")
     git("config", "user.email", "commit@example.test")
     git("config", "core.autocrlf", "false")

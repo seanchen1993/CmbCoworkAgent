@@ -37,6 +37,8 @@ tests/screenshots/
 
 # Java LSP VSIX bundles (downloaded via scripts/download-jdtls.sh)
 resources/lsp-vsix/*.vsix
+/resources/task-commit-git/
+/resources/.task-commit-git-*/
 
 # Claude Code local session artifacts
 .cmbdevclaw/
