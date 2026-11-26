@@ -46,6 +46,7 @@ jobs:
           src/main/ipc/bot-files.test.ts
           src/main/ipc/attachment-security.test.ts
           src/main/bots/input-images.test.ts
+          src/main/bots/delivery-receipt-path.test.ts
           src/main/file-parser.test.ts
           src/main/file-attachment-parser/client.test.ts
           src/main/chat-images.test.ts
