@@ -1,4 +1,5 @@
 import { prepareMarketCommand } from "../services/market-content"
+import { archiveArtifactsInternally } from "./artifact-archive"
 import {
   harnessStageWatches,
   markHarnessStageAttributionDirty
@@ -4160,7 +4161,6 @@ async function requireArchiveRunDetail(
     throw new Error("缺少归档项目或特性")
   }
   const detail = await getHarnessRunDetail(projectId, slug)
-  if (!detail.artifactArchiveAvailable) throw new Error("当前插件未配置产物归档")
   if (detail.run.slug !== slug) throw new Error("产物所属特性已变化，请刷新后重试")
   return detail
 }
@@ -4267,16 +4267,33 @@ export async function archiveHarnessArtifacts(
     return unit
   })
   const writePath = await resolveKnowledgeDepositionPath([knowledgeBaseId], knowledgeBaseId)
+  const artifactPaths = [...new Set(paths)]
+  const context = projectConfigContextFromWorker(workerContext)
+  if (!context.plugin || !context.configSnapshot?.value || context.configSnapshot.error) {
+    throw context.configSnapshot?.error ?? new Error("无法读取当前项目的插件配置")
+  }
+  if (!hasConfiguredHarnessInvocationInContext(context, "archiveArtifacts")) {
+    await archiveArtifactsInternally({
+      artifactPaths,
+      knowledgeWritePath: writePath,
+      projectCode: project.projectCode,
+      projectName: project.name,
+      sapId,
+      feature: detail.run.slug,
+      selectedDeployUnits
+    })
+    return { writePath }
+  }
   const invocation = buildConfiguredHarnessInvocationFromContext(
     project,
-    projectConfigContextFromWorker(workerContext),
+    context,
     "archiveArtifacts",
     {
       feature: detail.run.slug,
       projectName: project.name,
       sapId,
       selectedDeployUnitsJson: JSON.stringify(selectedDeployUnits),
-      artifactPathsJson: JSON.stringify([...new Set(paths)]),
+      artifactPathsJson: JSON.stringify(artifactPaths),
       knowledgeWritePath: writePath
     }
   )
@@ -4347,9 +4364,6 @@ async function loadHarnessRunDetail(
     resolveFeatureWorkspace(featureBinding?.sessionWorkspace, selectedDeployUnits)
   )
   const detail: HarnessRunDetailViewModel = {
-    ...(hasConfiguredHarnessInvocationInContext(context, "archiveArtifacts")
-      ? { artifactArchiveAvailable: true }
-      : {}),
     ...(artifactAccumulation ? { artifactAccumulation } : {}),
     project: {
       projectId: project.projectId,

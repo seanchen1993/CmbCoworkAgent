@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { HarnessDeployUnitMapping, HarnessRunNode } from "../../shared/harness-board-types"
@@ -242,7 +242,6 @@ describe("public system constraint indicators", () => {
         ]
       }
     ]
-    expect((await getHarnessRunDetail("p", "f")).artifactArchiveAvailable).toBeUndefined()
     const bound = {
       deployUnitIdMapping: "bound",
       deployUnitId: "bound",
@@ -318,6 +317,9 @@ describe("public system constraint indicators", () => {
     expect(cli.slice(1, 6)).toEqual([writePath, "project", "001234", "f", "--selected-deployUnit"])
     expect(JSON.parse(cli[6])).toEqual([bound, added])
     await expect(archiveHarnessArtifacts(input)).rejects.toThrow("该特性已归档")
+    await expect(readFile(join(writePath, "archive-input.json"))).rejects.toMatchObject({
+      code: "ENOENT"
+    })
     await rm(join(state.root, "archive-args.json"))
 
     state.sapId = undefined
@@ -333,6 +335,103 @@ describe("public system constraint indicators", () => {
     expect(emptyCli[3]).toBe("800000")
     expect(JSON.parse(emptyCli[6])).toEqual([])
   })
+
+  it.each([{ deployUnitIds: [] }, { deployUnitIds: ["unit-a", "unit-b"] }])(
+    "archives files and directories internally when the plugin command is absent (%j)",
+    async ({ deployUnitIds }) => {
+      await saveLibraries([{ id: "unbound" }])
+      const project = join(state.root, "project")
+      const directory = join(project, "材料")
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(project, "说明.md"), "spec")
+      await writeFile(join(directory, "附件.md"), "attachment")
+      state.runNodes = [
+        {
+          id: "draft",
+          label: "Draft",
+          nodeStatus: "unknown",
+          status: { label: "Draft", uiKind: "unknown" },
+          hooks: [],
+          artifacts: [
+            {
+              id: "spec",
+              artifactLabel: "需求",
+              artifactType: "unknown",
+              artifactStatus: "generated",
+              path: null,
+              paths: ["说明.md", "材料"],
+              required: false,
+              status: { label: "已生成", uiKind: "done" }
+            }
+          ]
+        }
+      ]
+      state.selectedDeployUnits = deployUnitIds.map((id) => ({
+        deployUnitId: id,
+        deployUnitIdMapping: id,
+        localRepoPath: project
+      }))
+      const input = {
+        projectId: "p",
+        slug: "f",
+        knowledgeBaseId: "unbound",
+        artifactPaths: ["说明.md", "材料"],
+        deployUnitIds
+      }
+      const writePath = knowledgeDirectory("unbound", "write")
+      const groups = deployUnitIds.length ? deployUnitIds : ["common"]
+      const existingAgents = join(writePath, groups[0], "Agents.md")
+      await mkdir(join(writePath, groups[0]))
+      await writeFile(existingAgents, "# 已有约束")
+
+      const linkPath = join(directory, "链接")
+      await symlink(project, linkPath, "junction")
+      try {
+        await expect(archiveHarnessArtifacts(input)).rejects.toThrow("产物包含链接")
+        await expect(readFile(existingAgents, "utf8")).resolves.toBe("# 已有约束")
+        await expect(readFile(join(writePath, "archive-input.json"))).rejects.toMatchObject({
+          code: "ENOENT"
+        })
+      } finally {
+        await rm(linkPath)
+      }
+
+      expect((await getHarnessArchiveArtifactsOptions("p", "f")).artifacts).toEqual([
+        { path: "说明.md", label: "需求" },
+        { path: "材料", label: "需求" }
+      ])
+      await expect(archiveHarnessArtifacts(input)).resolves.toEqual({ writePath })
+      for (const unit of groups) {
+        const folder = join(writePath, unit, "project_project_001234", "f")
+        await expect(readFile(join(folder, "说明.md"), "utf8")).resolves.toBe("spec")
+        await expect(readFile(join(folder, "材料", "附件.md"), "utf8")).resolves.toBe("attachment")
+        const prefix = unit === groups[0] ? "# 已有约束\n" : ""
+        const relativeFolder = `${unit}/project_project_001234/f`
+        await expect(readFile(join(writePath, unit, "Agents.md"), "utf8")).resolves.toBe(
+          prefix +
+            `- ${relativeFolder}/说明.md: project_的文档\n` +
+            `- ${relativeFolder}/材料: project_的文档\n`
+        )
+      }
+      const recorded: unknown = JSON.parse(
+        await readFile(join(writePath, "archive-input.json"), "utf8")
+      )
+      expect(recorded).toEqual([
+        {
+          artifactPaths: [await realpath(join(project, "说明.md")), await realpath(directory)],
+          knowledgeWritePath: writePath,
+          projectCode: "project",
+          projectName: "project",
+          sapId: "001234",
+          feature: "f",
+          selectedDeployUnits: state.selectedDeployUnits
+        }
+      ])
+      await expect(archiveHarnessArtifacts({ ...input, deployUnitIds: [] })).rejects.toThrow(
+        "该特性已归档"
+      )
+    }
+  )
 
   it("keeps the configured deploy units for legacy injection commands", async () => {
     state.sessionContextCommand = "inject"

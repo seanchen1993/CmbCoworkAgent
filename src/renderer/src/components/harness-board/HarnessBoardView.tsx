@@ -7292,9 +7292,7 @@ function FeatureDetailPage({
                   slug={detail.run.slug}
                   knowledgeBases={knowledgeBases?.knowledgeBases ?? []}
                   formatError={cleanIpcError}
-                  disabled={
-                    loading || projectInteractionDisabled || !detail.artifactArchiveAvailable
-                  }
+                  disabled={loading || projectInteractionDisabled}
                 />
               )}
               {detail?.artifactAccumulation && (
@@ -8545,7 +8543,7 @@ export function HarnessBoardView({
       dialogOpen ||
       editingProject !== null ||
       selectedProjectId !== null ||
-      runDetail?.artifactArchiveAvailable === true,
+      runDetail !== null,
     cleanIpcError
   )
   const [syncingKnowledgeBaseIds, setSyncingKnowledgeBaseIds] = useState<Set<string>>(new Set())

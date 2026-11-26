@@ -1044,7 +1044,6 @@ export interface HarnessArchiveArtifactsInput {
 }
 
 export interface HarnessRunDetailViewModel {
-  artifactArchiveAvailable?: boolean
   artifactAccumulation?: {
     syncType: "invoke_session"
     nextAction: HarnessWorkflowNextAction
