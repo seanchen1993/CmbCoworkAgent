@@ -1,13 +1,18 @@
 import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
 import { createBotDispatchFeedbackMiddleware } from "./bot-dispatch-feedback"
 import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
+import { getSideThreadContext, getSideThreadLifetimeSignal } from "../ipc/btw-chat"
+import { createSideConversationMiddleware } from "./side-conversation-context"
 import { BOT_COMMUNICATION_PROMPT } from "./bot-communication-prompt"
 import { createForegroundWorkBudgetMiddleware, type ForegroundWorkBudget } from "./foreground-work-budget"
 import {
   withCoordinatorNotificationDelivery,
   type CoordinatorNotificationDelivery
 } from "./coordinator-notification-delivery"
-import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import {
+  INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
 import { pinForegroundCheckpointOpen, preemptBackgroundThreadMutation } from "../ipc/thread-run-mutation-lock"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import { createOpeningReplyReminderMiddleware } from "./opening-reply-reminder"
@@ -336,6 +341,7 @@ export function createPhysicalScopedGateRecoveryMessage(
       ? parent.id
       : parent.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
   if (typeof durableParentId !== "string" || !durableParentId) return new HumanMessage(prompt)
+  const initialNotificationId = parent.additional_kwargs[INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]
 
   return new HumanMessage({
     content: prompt,
@@ -343,6 +349,9 @@ export function createPhysicalScopedGateRecoveryMessage(
     additional_kwargs: {
       ...(goalBoundary && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
       ...(notificationBoundary && { [NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: true }),
+      ...(notificationBoundary && typeof initialNotificationId === "string" && {
+        [INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: initialNotificationId
+      }),
       [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
     }
   })
@@ -402,7 +411,8 @@ import {
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import {
   autoSelectPlaywrightInAppBrowserTab,
-  invokeMcpToolWithPlaywrightInAppBrowserSupport
+  invokeMcpToolWithPlaywrightInAppBrowserSupport,
+  shouldPreparePlaywrightInAppBrowser
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   DeepSeekChatOpenAICompletions,
@@ -1314,7 +1324,7 @@ Use concise, high-information bullets. Preserve exact user corrections, file pat
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
   tools: McpCapabilityTool[],
-  context: { workspacePath: string; threadId?: string }
+  context: { workspacePath: string; threadId?: string; inAppBrowserSignal?: AbortSignal }
 ): DynamicStructuredTool[] {
   return tools.map((tool) =>
     createEagerMcpTool(
@@ -1327,6 +1337,7 @@ function createEagerMcpTools(
             tool,
             workspacePath: context.workspacePath,
             threadId: context.threadId,
+            signal: context.inAppBrowserSignal,
             args,
             invoke: () => capabilityService.invoke(tool.capabilityId, args)
           }),
@@ -1389,6 +1400,7 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
+    inAppBrowserSignal?: AbortSignal
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1682,7 +1694,8 @@ export function createScopedMcpCapabilityService(
         tabsTool,
         capabilityService: service,
         workspacePath: baseContext.workspacePath,
-        threadId: baseContext.threadId
+        threadId: baseContext.threadId,
+        signal: baseContext.inAppBrowserSignal
       })
 
       if (pluginId) hookScope.activatePlugin(pluginId)
@@ -1690,21 +1703,28 @@ export function createScopedMcpCapabilityService(
         tool,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
+        signal: baseContext.inAppBrowserSignal,
         args: effectiveArgs,
         prepareBeforeInvoke: false,
-        invoke: async () => {
+        invoke: async (signal) => {
+          const invokeTool = async (target: McpCapabilityTool) => {
+            const dispatchSignal = signal ?? (shouldPreparePlaywrightInAppBrowser(target)
+              ? baseContext.inAppBrowserSignal
+              : undefined)
+            if (!dispatchSignal) return service.invoke(target.capabilityId, effectiveArgs)
+            dispatchSignal.throwIfAborted()
+            const invocation = await service.invoke(target.capabilityId, effectiveArgs, dispatchSignal)
+            dispatchSignal.throwIfAborted()
+            return invocation
+          }
           try {
-            return await service.invoke(tool.capabilityId, effectiveArgs)
+            return await invokeTool(tool)
           } catch (error) {
             const fallbackTool = shouldFallbackMcpError(error)
               ? findFallbackTool(tool, snapshot.tools)
               : null
             if (!fallbackTool) throw error
-            return appendFallbackNotice(
-              await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-              tool,
-              fallbackTool
-            )
+            return appendFallbackNotice(await invokeTool(fallbackTool), tool, fallbackTool)
           }
         }
       })
@@ -2418,6 +2438,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     tools = [],
     systemPrompt,
     middleware: customMiddleware = [],
+    sideConversationMiddleware,
     subagents = [],
     responseFormat,
     contextSchema,
@@ -3371,7 +3392,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...systemPromptPreviewCaptureMiddleware,
       ...(mainAllowedToolNames !== undefined
         ? [createRuntimeToolAllowlistMiddleware(mainAllowedToolNames)]
-        : [])
+        : []),
+      ...(sideConversationMiddleware ? [sideConversationMiddleware] : [])
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
@@ -5903,6 +5925,10 @@ The workspace root is: ${fileRoot}`
     console.log("[Runtime] Memory disabled for this session")
   }
 
+  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
+  const sideConversationSignal = sideConversationLifetime && options.abortSignal
+    ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
+    : sideConversationLifetime
   const capabilityService = createScopedMcpCapabilityService(
     options.capabilityService ??
       (disableMcpTools
@@ -5923,6 +5949,7 @@ The workspace root is: ${fileRoot}`
     {
       workspacePath,
       threadId,
+      inAppBrowserSignal: sideConversationSignal,
       agentId,
       pluginOutputDir,
       systemId,
@@ -5983,7 +6010,8 @@ The workspace root is: ${fileRoot}`
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
       workspacePath,
-      threadId: options.threadId
+      threadId: options.threadId,
+      inAppBrowserSignal: sideConversationSignal
     })
     console.log(
       "[Runtime] Constrained coordinator worker: keeping",
@@ -6000,7 +6028,8 @@ The workspace root is: ${fileRoot}`
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
       workspacePath,
-      threadId: options.threadId
+      threadId: options.threadId,
+      inAppBrowserSignal: sideConversationSignal
     })
     toolSearchTools = await createToolSearchTools(
       capabilityService,
@@ -6052,7 +6081,7 @@ The workspace root is: ${fileRoot}`
     )
   }
   if (!options.noSkillEvolutionTool) {
-    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
+    extraTools.push(createSkillEvolutionTool({ threadId, abortSignal: sideConversationSignal }))
   }
 
   // Conditionally inject Java LSP tool
@@ -6072,7 +6101,7 @@ The workspace root is: ${fileRoot}`
       ...(await createInAppBrowserTools(allMcpTools, {
         workspacePath,
         threadId: options.threadId,
-        abortSignal: options.abortSignal
+        abortSignal: sideConversationSignal ?? options.abortSignal
       }))
     )
   }
@@ -7113,6 +7142,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             selectedSkill: input.selectedSkill,
             runner: coordinatorWorkerRunner,
             notificationOwner: backgroundNotificationOwner,
+            admissionSignal: sideConversationLifetime,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           }),
@@ -7140,6 +7170,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             // started it changes hands: the summary is owed to whoever is
             // driving now, not to whoever launched the first turn.
             notificationOwner: backgroundNotificationOwner,
+            admissionSignal: sideConversationLifetime,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           })
@@ -7348,8 +7379,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     ? resolvedProjectContextPrompt
     : combinedAgentsPrompt
 
+  const inherited = getSideThreadContext(threadId)
   const agent = createDeepAgent({
     middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
+    sideConversationMiddleware: inherited?.length
+      ? createSideConversationMiddleware(inherited, mainModelInputBudget)
+      : undefined,
     subagentLifecycleMiddleware: options.subagentLifecycle
       ? createSubagentLifecycleMiddleware(options.subagentLifecycle)
       : undefined,

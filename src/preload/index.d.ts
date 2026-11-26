@@ -1,3 +1,4 @@
+import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
 import type { GitGraphPage } from "../shared/git-graph"
 import type {
   GitBranchKind,
@@ -1375,6 +1376,10 @@ interface CustomAPI {
     ) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
   }
+  btw: {
+    create(request: BtwRequest): Promise<{ id: string; ordinal: number; thread: Thread }>
+    close(id: string): Promise<void>
+  }
   models: {
     getCatalog: () => Promise<{
       models: ModelConfig[]
@@ -2418,7 +2423,7 @@ interface CustomAPI {
         context: unknown
       }) => void
     ) => () => void
-    intentResponse: (requestId: string, accepted: boolean) => Promise<void>
+    intentResponse: (requestId: string, accepted: boolean) => Promise<boolean>
     /**
      * Manually retry a failed skill generation. Skips the intent banner and
      * jumps straight to generate → confirm → write.
@@ -2432,6 +2437,7 @@ interface CustomAPI {
       callback: (req: {
         threadId?: string
         requestId: string
+        source?: "proposal"
         skillId: string
         name: string
         description: string
@@ -2439,11 +2445,12 @@ interface CustomAPI {
       }) => void
     ) => () => void
     confirmResponse: (requestId: string, approved: boolean, content?: string) => Promise<void>
+    onBtwRequestClosed: (callback: (request: BtwSkillRequestClosed) => void) => () => void
     /** Listen to streaming generation progress from the main process */
     onGenerating: (
       callback: (event: {
         threadId?: string
-        phase: "start" | "token" | "done" | "error"
+        phase: "start" | "token" | "done" | "error" | "settled"
         text: string
       }) => void
     ) => () => void

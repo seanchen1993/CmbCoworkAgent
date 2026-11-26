@@ -8,6 +8,7 @@
 import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
+  disposeSkillProposalWindow,
   getRecentSkillUsageNames,
   resetSkillProposalWindow,
   snapshotSkillProposalWindow,
@@ -77,6 +78,21 @@ function testRecentSkillUsageKeepsOnlyLastFiveTurns(): void {
   )
 }
 
+function testDisposalDropsOnlyTheRetiredThread(): void {
+  const side = "retired-side-thread"
+  const parent = "live-parent-thread"
+  appendSkillProposalWindowTurn(side, makeTurn(1, ["side-skill"]))
+  appendSkillProposalWindowTurn(parent, makeTurn(2, ["parent-skill"]))
+
+  disposeSkillProposalWindow(side)
+
+  assert(snapshotSkillProposalWindow(side).length === 0, "retired proposal window should be empty")
+  assertArrayEqual(getRecentSkillUsageNames(side), [], "retired skill usage should be empty")
+  assert(snapshotSkillProposalWindow(parent).length === 1, "parent proposal window should survive")
+  assertArrayEqual(getRecentSkillUsageNames(parent), ["parent-skill"], "parent usage should survive")
+}
+
 testRecentSkillUsageSurvivesProposalWindowReset()
 testRecentSkillUsageKeepsOnlyLastFiveTurns()
+testDisposalDropsOnlyTheRetiredThread()
 console.log("skill-proposal-window.spec.ts passed")

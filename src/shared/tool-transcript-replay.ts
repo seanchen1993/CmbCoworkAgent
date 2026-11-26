@@ -394,7 +394,8 @@ function resultReplayKey(result: TranscriptMessage): string {
   return JSON.stringify([getMessageProviderSourceId(result), result.tool_call_id])
 }
 
-function historicalReplayId(row: TranscriptMessage): string | undefined {
+/** Validate a stored replay hint against its tool execution identity. */
+export function readHistoricalToolReplayId(row: TranscriptMessage): string | undefined {
   const earlierId = row.historical_tool_replay_id
   const occurrence = getMessageProviderOccurrence(row) ?? 1
   if (
@@ -495,7 +496,7 @@ export function hasToolReplayCandidates(messages: readonly TranscriptMessage[]):
       return true
     if (message.role !== "tool" || !message.tool_call_id || !hasToolResultExecutionId(message))
       continue
-    if (historicalReplayId(message)) return true
+    if (readHistoricalToolReplayId(message)) return true
     const key = resultReplayKey(message)
     if (seen.has(key)) return true
     seen.add(key)
@@ -540,7 +541,7 @@ function findReplayedResultRebindings<T extends TranscriptMessage>(
     const original = attached
       ? rememberVersion(seen, key, row, sameRow)
       : seen.get(key)?.find((earlier) => sameRow(earlier, row))
-    const canonical = original && original.id !== row.id ? original.id : historicalReplayId(row)
+    const canonical = original && original.id !== row.id ? original.id : readHistoricalToolReplayId(row)
     const pending = waitingForReplacement.get(call)
     if (canonical && (attached || pending)) {
       const copies = pending ?? []
@@ -3254,7 +3255,7 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
       const originalOwner = duplicateOf && ownerByResultId.get(duplicateOf)
       const earlier = duplicateOf ? earlierResults.get(duplicateOf) : undefined
       const matchesHistoricalResult =
-        (previous && duplicateOf && historicalReplayId(previous) === duplicateOf) ||
+        (previous && duplicateOf && readHistoricalToolReplayId(previous) === duplicateOf) ||
         (earlier &&
           previous &&
           sameRow(earlier, previous) &&
@@ -3271,7 +3272,7 @@ export function preserveReplayToolBindings<T extends TranscriptMessage>(
         (!next.name || !callName || next.name === callName) &&
         hasToolResultExecutionId(previous) &&
         hasToolResultExecutionId(next) &&
-        !historicalReplayId(next) &&
+        !readHistoricalToolReplayId(next) &&
         !previouslyOwnedExecutionIds.has(getMessageProviderSourceId(next)) &&
         resultReplayKey(previous) !== resultReplayKey(next)
       )
@@ -3488,7 +3489,7 @@ export function findReplayedToolExchangeAliases<T extends TranscriptMessage>(
       callsWithUnownedResults.add(row.tool_call_id)
     }
     const canonical =
-      (historicalReplayId(row) && repairs.get(row.id)) ??
+      (readHistoricalToolReplayId(row) && repairs.get(row.id)) ??
       duplicateResults.get(row)?.id ??
       repairs.get(row.id)
     if (!canonical) continue

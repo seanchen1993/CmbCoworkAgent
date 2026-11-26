@@ -87,13 +87,14 @@ const fixture = {
     metadata: Record<string, unknown>,
     ready = true,
     initialModel = "",
-    routingMode: "auto" | "pinned" = "pinned"
+    routingMode: "auto" | "pinned" = "pinned",
+    threadId = "imported"
   ) {
     flushSync(() => root.render(null))
-    store.reset(metadata, ready, initialModel, routingMode)
+    store.reset(metadata, ready, initialModel, routingMode, threadId)
     root.render(
       <AppErrorBoundary>
-        <ModelSwitcher threadId="imported" />
+        <ModelSwitcher threadId={threadId} />
       </AppErrorBoundary>
     )
   },

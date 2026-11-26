@@ -66,7 +66,7 @@ import {
   HarnessSessionContextLimitError
 } from "../harness-board/context-integrity"
 
-describe("managed model routing", () => {
+describe("model routing", () => {
   beforeEach(() => {
     routingMocks.managedModel.mockReset()
     routingMocks.resolveModel.mockReset()
@@ -107,6 +107,27 @@ describe("managed model routing", () => {
       expect.objectContaining({ requestedModelId: "original-model", routingMode: "pinned" })
     )
   })
+
+  it.each([undefined, "resume", "interrupt"] as const)(
+    "uses the auxiliary conversation's selected model under global auto routing for continuation %s",
+    async (continuation) => {
+      const threadId = "btw-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002"
+      routingMocks.resolveModel.mockResolvedValue({
+        resolvedModelId: "custom:side-model",
+        resolvedTier: "premium",
+        layer: "pinned"
+      })
+      const request = { taskSource: "chat", requestedModelId: "custom:side-model", continuation } as const
+
+      await resolveStandardTurnRouting({ ...request, threadId, routingMode: "auto" })
+      expect(routingMocks.resolveModel).toHaveBeenLastCalledWith({ ...request, threadId, routingMode: "pinned", message: undefined })
+
+      await resolveStandardTurnRouting({ ...request, threadId: "ordinary", routingMode: "auto" })
+      expect(routingMocks.resolveModel).toHaveBeenLastCalledWith({
+        ...request, threadId: "ordinary", routingMode: "auto", message: undefined
+      })
+    }
+  )
 
   it("surfaces an unavailable Pro error without falling back to ordinary routing", async () => {
     routingMocks.managedModel.mockImplementation(() => {

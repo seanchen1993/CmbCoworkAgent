@@ -1,7 +1,8 @@
 import type { ResourceLimits, Worker } from "node:worker_threads"
 import { getDbPath, peekThreadCheckpointDir } from "../storage"
-import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../types"
+import type { ThreadMessagesPage } from "../types"
 import type {
+  ThreadMessageHydrationPageOptions,
   ThreadMessageHydrationWorkerResponse,
   ThreadMessageHydrationWorkerStats
 } from "./protocol"
@@ -193,7 +194,7 @@ export class ThreadMessageHydrationClient {
 
   async readPage(
     threadId: string,
-    options: ThreadMessagesPageOptions = {},
+    options: ThreadMessageHydrationPageOptions = {},
     webContentsId?: number
   ): Promise<ThreadMessagesPage> {
     if (this.closing) {
@@ -283,7 +284,11 @@ export class ThreadMessageHydrationClient {
               includeVisibleMessagePresence: options.includeVisibleMessagePresence,
               notAfterCreatedAt: options.notAfterCreatedAt,
               recoveryCheckpointId: options.recoveryCheckpointId,
-              recoveryTranscriptRevision: options.recoveryTranscriptRevision
+              recoveryTranscriptRevision: options.recoveryTranscriptRevision,
+              ...(webContentsId === undefined && {
+                userOrdinalFloor: options.userOrdinalFloor,
+                sideContextTextByteBudget: options.sideContextTextByteBudget
+              })
             },
             cancellationBuffer
           })
@@ -371,7 +376,7 @@ function getDefaultClient(): ThreadMessageHydrationClient {
 
 export function readThreadMessagesPageInWorker(
   threadId: string,
-  options: ThreadMessagesPageOptions = {},
+  options: ThreadMessageHydrationPageOptions = {},
   webContentsId?: number
 ): Promise<ThreadMessagesPage> {
   return getDefaultClient().readPage(threadId, options, webContentsId)

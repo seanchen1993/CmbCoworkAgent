@@ -18,10 +18,7 @@ interface PlaywrightBrowserTargetService {
   requestPanel(threadId?: string): void
 }
 
-// Auto-opening the Browser tab now includes renderer tab switching, BrowserPanel mount,
-// and BrowserView attach/target bootstrap. Give that path a more realistic startup budget.
-const BROWSER_PANEL_READY_TIMEOUT_MS = 5_000
-const BROWSER_PANEL_READY_POLL_MS = 100
+const BROWSER_TARGET_READY_TIMEOUT_MS = 5_000
 const PLAYWRIGHT_TAB_LINE_PATTERN = /^\s*-\s*(\d+):\s*(\(current\)\s*)?\[(.*?)\]\((.*?)\)\s*$/
 const PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[PlaywrightMcpBridge]`
 
@@ -34,10 +31,6 @@ interface PlaywrightTabEntry {
 
 function normalizeProviderName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "")
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function formatUrlForLog(value: string): string {
@@ -93,22 +86,6 @@ function pickPlaywrightTabForBrowserState(
   return null
 }
 
-async function waitForBrowserPanelReady(
-  service: PlaywrightBrowserTargetService
-): Promise<BrowserState | null> {
-  const deadline = Date.now() + BROWSER_PANEL_READY_TIMEOUT_MS
-  while (true) {
-    const state = service.getState()
-    // 只检查 BrowserView 是否已创建即可。当 BrowserWelcomePanel 显示时，
-    // BrowserView 会被暂时隐藏（让位于欢迎面板覆盖层），但 WebContents 仍然存活、
-    // CDP 连接仍然可用，MCP 可以正常操作。导航后 URL 变化会自动使 view 重新可见。
-    if (state.created) return state
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) return null
-    await delay(Math.min(BROWSER_PANEL_READY_POLL_MS, remaining))
-  }
-}
-
 export function shouldPreparePlaywrightInAppBrowser(
   tool: McpCapabilityTool,
   cdpPort: number | null = getCurrentBrowserCdpPort()
@@ -133,8 +110,11 @@ function shouldAutoSelectPlaywrightInAppBrowserTab(
 export async function preparePlaywrightInAppBrowser(options: {
   workspacePath: string
   threadId?: string
+  signal?: AbortSignal
   service?: PlaywrightBrowserTargetService | null
 }): Promise<void> {
+  const { signal } = options
+  signal?.throwIfAborted()
   const service = options.service === undefined ? getGlobalBrowserService() : options.service
   if (!service) throw new Error("In-app browser service is unavailable")
 
@@ -143,20 +123,30 @@ export async function preparePlaywrightInAppBrowser(options: {
     throw new Error("Browser CDP endpoint is not configured")
   }
 
-  // 主动请求切到右侧浏览器面板，让 renderer 端挂载 BrowserPanel 并触发 attach。
+  // The frontend can defer showing the panel when another conversation has focus.
   service.requestPanel(options.threadId)
 
-  const state = await waitForBrowserPanelReady(service)
-  if (!state) {
-    throw new Error(
-      '已尝试自动打开右侧"浏览器"Tab，但内置浏览器未及时就绪，请稍后重试。'
-    )
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
+  try {
+    await Promise.race([
+      service.prepareTarget({ workspacePath: options.workspacePath, visible: false }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error("内置浏览器未及时就绪，请稍后重试。"))
+        }, BROWSER_TARGET_READY_TIMEOUT_MS)
+        if (signal) {
+          onAbort = () => reject(signal.reason)
+          signal.addEventListener("abort", onAbort, { once: true })
+          if (signal.aborted) onAbort()
+        }
+      })
+    ])
+    signal?.throwIfAborted()
+  } finally {
+    clearTimeout(timeout)
+    if (onAbort) signal?.removeEventListener("abort", onAbort)
   }
-
-  await service.prepareTarget({
-    workspacePath: options.workspacePath,
-    visible: false
-  })
 }
 
 export function requestPlaywrightInAppBrowserPanelAfterInvoke(options: {
@@ -183,19 +173,25 @@ export async function invokeMcpToolWithPlaywrightInAppBrowserSupport(options: {
   workspacePath: string
   threadId?: string
   args?: Record<string, unknown>
-  invoke: () => Promise<McpInvocationResult>
+  signal?: AbortSignal
+  invoke: (signal?: AbortSignal) => Promise<McpInvocationResult>
   browserService?: PlaywrightBrowserTargetService | null
   prepareBeforeInvoke?: boolean
 }): Promise<McpInvocationResult> {
-  if (options.prepareBeforeInvoke !== false && shouldPreparePlaywrightInAppBrowser(options.tool)) {
+  const inAppBrowser = shouldPreparePlaywrightInAppBrowser(options.tool)
+  const signal = inAppBrowser ? options.signal : undefined
+  if (options.prepareBeforeInvoke !== false && inAppBrowser) {
     await preparePlaywrightInAppBrowser({
       workspacePath: options.workspacePath,
       threadId: options.threadId,
+      signal,
       service: options.browserService
     })
   }
 
-  const result = await options.invoke()
+  signal?.throwIfAborted()
+  const result = await options.invoke(signal)
+  signal?.throwIfAborted()
   requestPlaywrightInAppBrowserPanelAfterInvoke({
     tool: options.tool,
     result,
@@ -211,10 +207,13 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
   capabilityService: Pick<McpCapabilityService, "invoke">
   workspacePath: string
   threadId?: string
+  signal?: AbortSignal
   browserService?: PlaywrightBrowserTargetService | null
 }): Promise<void> {
   if (!shouldAutoSelectPlaywrightInAppBrowserTab(options.tool)) return
 
+  const { capabilityService, signal, tabsTool } = options
+  signal?.throwIfAborted()
   const browserService =
     options.browserService === undefined ? getGlobalBrowserService() : options.browserService
   if (!browserService) {
@@ -223,7 +222,7 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
     )
     return
   }
-  if (!options.tabsTool) {
+  if (!tabsTool) {
     console.warn(
       `${PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX} Skipped tab auto-select for ${options.tool.toolId} because browser_tabs is unavailable.`
     )
@@ -233,13 +232,18 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
   await preparePlaywrightInAppBrowser({
     workspacePath: options.workspacePath,
     threadId: options.threadId,
+    signal,
     service: browserService
   })
 
+  signal?.throwIfAborted()
   const state = browserService.getState()
-  const listResult = await options.capabilityService.invoke(options.tabsTool.capabilityId, {
-    action: "list"
-  })
+  const invokeTabs = (args: Record<string, unknown>) =>
+    signal
+      ? capabilityService.invoke(tabsTool.capabilityId, args, signal)
+      : capabilityService.invoke(tabsTool.capabilityId, args)
+  const listResult = await invokeTabs({ action: "list" })
+  signal?.throwIfAborted()
   if (listResult.isError) {
     console.warn(
       `${PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX} Failed to list Playwright tabs for ${BROWSER_SESSION_ID}; result=${listResult.text || "(empty)"}.`
@@ -262,10 +266,11 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
     return
   }
 
-  const selectResult = await options.capabilityService.invoke(options.tabsTool.capabilityId, {
+  const selectResult = await invokeTabs({
     action: "select",
     index: matchingTab.index
   })
+  signal?.throwIfAborted()
   if (selectResult.isError) {
     console.warn(
       `${PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX} Failed to select Playwright tab ${matchingTab.index} for ${BROWSER_SESSION_ID}; result=${selectResult.text || "(empty)"}.`

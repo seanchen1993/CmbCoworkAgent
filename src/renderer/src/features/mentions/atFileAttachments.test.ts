@@ -16,6 +16,32 @@ afterEach(() => {
 })
 
 describe("bounded @file attachment reads", () => {
+  it("counts only new @files against an already full attachment list", async () => {
+    const workspaceFiles = ["a.txt", "b.txt", "c.txt", "d.txt"].map(path => ({ path, name: path, is_dir: false } as FileInfo))
+    const attachments = workspaceFiles.slice(0, 3).map(file => ({
+      filename: file.path, filePath: "/workspace/" + file.path, content: "a", mimeType: "text/plain", size: 1, truncated: false
+    }))
+    const input = { attachments, mentionedFiles: [], workspacePath: "/workspace", workspaceFiles,
+      maxAttachments: 3, maxTotalChars: 24000, readWorkspaceFile: vi.fn() }
+    const duplicate = await resolveAtFileAttachments({ ...input, rawMessage: "检查 @a.txt" })
+    expect(duplicate.mentionCountLimitHit).toBe(false)
+    expect(duplicate.attachments).toEqual(attachments)
+    const fourth = await resolveAtFileAttachments({ ...input, rawMessage: "检查 @d.txt" })
+    expect(fourth.mentionCountLimitHit).toBe(true)
+    vi.stubGlobal("window", { electron: { process: { platform: "win32" } } })
+    try {
+      const windowsDuplicate = await resolveAtFileAttachments({
+        ...input, workspacePath: "C:/Project", rawMessage: "检查 @a.txt",
+        attachments: attachments.map(file => ({ ...file, filePath: "c:\\PROJECT\\" + file.filename }))
+      })
+      expect(windowsDuplicate.mentionCountLimitHit).toBe(false)
+      expect(windowsDuplicate.attachments).toHaveLength(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(input.readWorkspaceFile).not.toHaveBeenCalled()
+  })
+
   it("keeps imported quote mentions literal while retaining authored file choices and editor attachment cleanup", async () => {
     const quote = { id: "source", ordinal: 1, role: "assistant" as const,
       text: 'Read @notes.md and @"config.json".\n@notes.md is reference data.' }

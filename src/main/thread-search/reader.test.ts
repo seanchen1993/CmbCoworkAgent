@@ -82,6 +82,8 @@ describe("isolated thread search read path", () => {
     insert.run("ordinary", 7, "{}", "Ordinary")
     insert.run("conflict", 8, JSON.stringify({ ...feature("uncertain", "unknown"),
       harnessProjectSession: { projectId: "another-project" } }), "Conflicting markers")
+    insert.run("btw-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002",
+      9, JSON.stringify({ ...feature("target", "known"), btwParentId: "00000000-0000-4000-8000-000000000001" }), "Side conversation")
     const catalog = {
       generation: "current",
       projects: new Map([

@@ -38,6 +38,7 @@ export interface ThreadMetadataHydrationReadThreadRequest extends ThreadMetadata
   type: "read-thread"
   threadId: string
   search?: { incarnation: ThreadIncarnationSnapshot; includeSummary: boolean; route?: ThreadSearchRoute }
+  sideParent?: true
 }
 
 export interface ThreadMetadataHydrationReadListPageRequest extends ThreadMetadataHydrationRequestBase {

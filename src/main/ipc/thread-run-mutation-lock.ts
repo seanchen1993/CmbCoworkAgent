@@ -16,6 +16,10 @@ const threadRunMutationLock = new AsyncKeyedLock({
 })
 
 let cancelBackgroundMutation: ((threadId: string) => Promise<void>) | undefined
+const preemptibleBackgroundMutations = new Map<string, {
+  controller: AbortController
+  completion: Promise<unknown>
+}>()
 const foregroundCheckpointOpens = new Map<string, number>()
 const publishingThreads = new Set<string>()
 
@@ -37,7 +41,12 @@ export function registerBackgroundThreadMutationCancellation(
 }
 
 export async function preemptBackgroundThreadMutation(threadId: string): Promise<void> {
-  await cancelBackgroundMutation?.(threadId)
+  const mutation = preemptibleBackgroundMutations.get(threadId)
+  mutation?.controller.abort()
+  await Promise.all([
+    cancelBackgroundMutation?.(threadId),
+    mutation?.completion.catch(() => undefined)
+  ])
 }
 
 export function pinForegroundCheckpointOpen(threadId: string): () => void {
@@ -53,19 +62,31 @@ export function isForegroundCheckpointOpening(threadId: string): boolean {
   return foregroundCheckpointOpens.has(threadId)
 }
 
+/** A preemptible operation keeps the lock until its cancelled work drains. */
 export function tryBackgroundThreadMutationLock<T>(
   threadId: string,
-  operation: () => Promise<T>
+  operation: () => Promise<T>,
+  controller?: AbortController
 ): Promise<T> | undefined {
   if (threadRunMutationLock.has(threadId)) return undefined
-  return threadRunMutationLock.withKey(threadId, operation)
+  if (!controller) return threadRunMutationLock.withKey(threadId, operation)
+  const completion = threadRunMutationLock.withKey(threadId, async () => {
+    try {
+      controller.signal.throwIfAborted()
+      return await operation()
+    } finally {
+      preemptibleBackgroundMutations.delete(threadId)
+    }
+  })
+  preemptibleBackgroundMutations.set(threadId, { controller, completion })
+  return completion
 }
 
 export function withThreadRunMutationLock<T>(
   threadId: string,
   operation: () => Promise<T>
 ): Promise<T> {
-  void cancelBackgroundMutation?.(threadId)
+  void preemptBackgroundThreadMutation(threadId)
   return threadRunMutationLock.withKey(threadId, operation)
 }
 

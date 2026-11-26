@@ -5,17 +5,16 @@ import {
   type ProjectedChatSearchSegment
 } from "../../../shared/chat-search-index"
 import { CHAT_SEARCH_INPUT_LIMIT } from "../../../shared/chat-search-plan"
-import type { ChatSearchSourceSegment, ChatSearchLocation } from "../../../shared/chat-search-types"
+import type { ChatSearchPlan, ChatSearchSourceSegment, ChatSearchLocation } from "../../../shared/chat-search-types"
+
+type SearchPlanOptions = Pick<ChatSearchPlan, "role" | "sideUserContent" | "stripThink" | "cleanAttachments">
 
 type Request =
-  | {
+  | (SearchPlanOptions & {
       type: "begin"
       requestId: number
       id: number
-      role: string
-      stripThink?: boolean
-      cleanAttachments?: boolean
-    }
+    })
   | {
       type: "part"
       requestId: number
@@ -37,15 +36,12 @@ const forget = (id: number): void => {
   retainedUnits -= documentUnits(documents.get(id) ?? [])
   documents.delete(id)
 }
-let pending: {
+let pending: (SearchPlanOptions & {
   id: number
-  role: string
-  stripThink?: boolean
-  cleanAttachments?: boolean
   units: number
   segments: ChatSearchSourceSegment[]
   parts: string[]
-} | null = null
+}) | null = null
 
 self.onmessage = (event: MessageEvent<Request>): void => {
   const request = event.data
@@ -54,6 +50,7 @@ self.onmessage = (event: MessageEvent<Request>): void => {
       pending = {
         id: request.id,
         role: request.role,
+        sideUserContent: request.sideUserContent,
         stripThink: request.stripThink,
         cleanAttachments: request.cleanAttachments,
         units: 0,
@@ -79,6 +76,7 @@ self.onmessage = (event: MessageEvent<Request>): void => {
       if (!pending || pending.parts.length) throw new Error("Incomplete search document")
       const plan = {
         role: pending.role,
+        sideUserContent: pending.sideUserContent,
         stripThink: pending.stripThink,
         cleanAttachments: pending.cleanAttachments,
         truncated: false,

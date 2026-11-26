@@ -424,22 +424,14 @@ async function scheduleKnownWorkspaceSandboxPrewarm(
   if (mode === "elevated") return
 
   try {
-    const [{ getAllThreadSummaries }, { LocalSandbox }] = await Promise.all([
+    const [{ getRecentThreadWorkspacePathsForSandbox }, { LocalSandbox }] = await Promise.all([
       import("../db"),
       import("../agent/local-sandbox")
     ])
     const workspaces = new Set<string>()
 
-    for (const thread of getAllThreadSummaries().slice(0, SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
-      if (typeof thread.metadata !== "string" || !thread.metadata) continue
-      try {
-        const metadata = JSON.parse(thread.metadata) as { workspacePath?: unknown }
-        if (typeof metadata.workspacePath === "string" && metadata.workspacePath.trim()) {
-          workspaces.add(metadata.workspacePath)
-        }
-      } catch {
-        // Ignore malformed metadata and continue.
-      }
+    for (const path of getRecentThreadWorkspacePathsForSandbox(SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+      if (path.trim()) workspaces.add(path)
     }
 
     if (workspaces.size === 0) return

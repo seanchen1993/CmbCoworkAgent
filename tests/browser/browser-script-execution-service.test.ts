@@ -29,6 +29,7 @@ import {
 
 describe("browser script execution service", () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     cdpMocks.getCurrentBrowserCdpPort.mockReturnValue(38127)
     registryMocks.getGlobalBrowserService.mockReturnValue({
       requestPanel: vi.fn(),
@@ -45,6 +46,62 @@ describe("browser script execution service", () => {
         consoleEntries: []
       }))
     })
+  })
+
+  it("does not connect if playback stops while Playwright loads", async () => {
+    const ready = Promise.withResolvers<{ url: string; title: string }>()
+    registryMocks.getGlobalBrowserService.mockReturnValue({
+      requestPanel: vi.fn(),
+      prepareTarget: () => ready.promise
+    })
+    const playback = executeRecordingScriptInBuiltinBrowser({
+      script: 'await page.goto("https://example.com/started");'
+    })
+    ready.resolve({ url: "https://example.com", title: "Example" })
+    // Resume target preparation up to the asynchronous import, then cancel.
+    await Promise.resolve()
+    await cancelRecordingScriptExecutionInBuiltinBrowser()
+
+    await expect(playback).rejects.toMatchObject({ name: "BrowserScriptExecutionCancelledError" })
+    expect(playwrightMocks.connectOverCDP).not.toHaveBeenCalled()
+  })
+
+  it("does not dispatch the first browser action when playback is cancelled during startup", async () => {
+    const loadingAssertions = Promise.withResolvers<void>()
+    const assertions = Promise.withResolvers<void>()
+    const goto = vi.fn(async () => undefined)
+    const disconnect = vi.fn()
+    playwrightMocks.connectOverCDP.mockResolvedValue({
+      contexts: () => [{ pages: () => [{ goto, url: () => "https://example.com" }] }],
+      disconnect
+    })
+    vi.resetModules()
+    vi.doMock("playwright/test", async () => {
+      loadingAssertions.resolve()
+      await assertions.promise
+      return { expect: vi.fn() }
+    })
+
+    try {
+      const playback =
+        await import("../../src/main/browser/record/common/browser-script-execution-service")
+      const outcome = playback
+        .executeRecordingScriptInBuiltinBrowser({
+          script: 'await page.goto("https://example.com/started");'
+        })
+        .then(() => "completed", (error: Error) => error.name)
+
+      await loadingAssertions.promise
+      expect(await playback.cancelRecordingScriptExecutionInBuiltinBrowser()).toBe(true)
+      assertions.resolve()
+
+      expect(await outcome).toBe("BrowserScriptExecutionCancelledError")
+      expect(goto).not.toHaveBeenCalled()
+      expect(disconnect).toHaveBeenCalledOnce()
+    } finally {
+      assertions.resolve()
+      vi.doUnmock("playwright/test")
+    }
   })
 
   it("runs the recorded script against the in-app browser page", async () => {

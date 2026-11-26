@@ -22,7 +22,40 @@ function handlerSlice(channel: string, nextChannel: string): string {
   return modelsSource.slice(start, start + 1 + end)
 }
 
+describe("workspace file watcher concurrency contract", () => {
+  it("checks that a side conversation is open after async file operations before attaching its watcher", () => {
+    const nextPage = handlerSlice("workspace:fileScanNext", "workspace:fileScanCancel")
+    const ensure = handlerSlice("workspace:ensureWatching", "workspace:setActiveThread")
+    for (const handler of [nextPage, ensure]) {
+      const workspace = handler.indexOf("await readThreadWorkspacePath(threadId)")
+      const admitted = handler.indexOf("canRunSideThread(threadId)")
+      const start = handler.indexOf("startWatching(threadId,")
+      expect(workspace).toBeGreaterThanOrEqual(0)
+      expect(admitted).toBeGreaterThan(workspace)
+      expect(start).toBeGreaterThan(admitted)
+      expect(handler.slice(admitted, start).trimEnd().replace(/await$/, "")).not.toContain("await ")
+    }
+  })
+})
+
 describe("workspace worktree concurrency contract", () => {
+  it("keeps live side conversations in both worktree binding snapshots", () => {
+    const start = modelsSource.indexOf("function getWorktreeGuardWorkspaceBindings()")
+    const guard = modelsSource.slice(start, modelsSource.indexOf("function sanitizeManualWorktreeBranch", start))
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(guard).toMatch(/!isBtwThreadId\(threadId\)\s*\|\|\s*hasRegisteredSideThread\(threadId\)/)
+    expect(guard).toContain("getSideThreadTeardown(threadId) !== undefined")
+    expect(guard).toContain("getActiveAgentRunSettlement(threadId) !== undefined")
+    expect(guard).toContain("workflowRunManager.isActive(threadId)")
+    expect(guard).toContain("coordinatorWorkerManager.hasUnsettledWorkersForThread(threadId)")
+    expect(guard).toContain("LocalSandbox.hasActiveBackgroundTasks(threadId, { includeChildRuns: true })")
+
+    const remove = handlerSlice("workspace:removeWorktree", "workspace:createWorktree")
+    const create = handlerSlice("workspace:createWorktree", "workspace:saveWorktreeContext")
+    expect(remove.match(/getWorktreeGuardWorkspaceBindings\(\)/g)).toHaveLength(2)
+    expect(create.match(/getWorktreeGuardWorkspaceBindings\(\)/g)).toHaveLength(2)
+  })
+
   it("coalesces duplicate creates in the renderer and across renderer windows", () => {
     const source = handlerSlice("workspace:createWorktree", "workspace:saveWorktreeContext")
     const coordinator = source.indexOf("return manualWorktreeCreateCoordinator.run({")
@@ -53,7 +86,7 @@ describe("workspace worktree concurrency contract", () => {
       canonicalBindingScan
     )
     const removal = source.indexOf("await removeWorkflowWorktree({", activeWorkflow)
-    const finalBindingRead = source.lastIndexOf("getPersistedThreadWorkspaceBindings()", removal)
+    const finalBindingRead = source.lastIndexOf("getWorktreeGuardWorkspaceBindings()", removal)
 
     expect(lock).toBeGreaterThanOrEqual(0)
     expect(latestThread).toBeGreaterThan(lock)
@@ -137,7 +170,7 @@ describe("workspace worktree concurrency contract", () => {
       canonicalRollbackScan
     )
     const durableRollbackRead = source.lastIndexOf(
-      "getPersistedThreadWorkspaceBindings()",
+      "getWorktreeGuardWorkspaceBindings()",
       rollbackMutation
     )
 

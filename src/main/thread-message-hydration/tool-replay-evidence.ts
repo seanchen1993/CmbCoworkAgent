@@ -5,13 +5,19 @@ interface PageResult {
   provider_occurrence?: number
 }
 
+// A null cutoff includes earlier rows on the same page. The tuple matches
+// backward pagination when multiple messages share an ordinal.
+const earlierThanCutoff = `CASE WHEN ?3 IS NULL
+  THEN (earlier.ordinal, earlier.message_id) < (copy.ordinal, copy.message_id)
+  ELSE earlier.ordinal < ?3 END`
+
 // Check exact saved payloads through provider and primary-key indexes. A
 // fragment head alone cannot establish that the prior full output was equal.
 // Start from the requested page IDs and keep materialization explicit so the
 // query planner cannot run these lookups for the rest of the thread.
 const exactEarlierToolResult = `
   earlier.thread_id = copy.thread_id AND earlier.role = 'tool'
-  AND earlier.ordinal < ?3
+  AND ${earlierThanCutoff}
   AND COALESCE(earlier.provider_occurrence, 1) < copy.provider_occurrence
   AND earlier.content_json IS copy.content_json
   AND earlier.tool_call_id IS copy.tool_call_id
@@ -30,7 +36,7 @@ function toolResultSignature(alias: "copy" | "earlier"): string {
 
 const TOOL_REPLAY_EVIDENCE_SQL = `
   WITH candidates AS MATERIALIZED (
-    SELECT copy.message_id, copy.provider_source_id, copy.provider_occurrence,
+    SELECT copy.message_id, copy.ordinal, copy.provider_source_id, copy.provider_occurrence,
       ${toolResultSignature("copy")} AS signature, COALESCE(
       (SELECT earlier.message_id FROM thread_messages AS earlier
        WHERE earlier.message_id = copy.provider_source_id AND ${exactEarlierToolResult}
@@ -58,10 +64,10 @@ const TOOL_REPLAY_EVIDENCE_SQL = `
     CROSS JOIN thread_messages AS earlier ON earlier.thread_id = ?1
       AND earlier.provider_source_id = sources.provider_source_id AND earlier.role = 'tool'
       AND earlier.provider_occurrence > 1 AND earlier.provider_occurrence < sources.last_occurrence
-      AND earlier.ordinal < ?3
+      AND (?3 IS NULL OR earlier.ordinal < ?3)
     CROSS JOIN unresolved AS copy ON copy.provider_source_id = earlier.provider_source_id
       AND copy.signature = ${toolResultSignature("earlier")}
-      AND earlier.provider_occurrence < copy.provider_occurrence
+      AND earlier.provider_occurrence < copy.provider_occurrence AND ${earlierThanCutoff}
     WHERE NOT EXISTS (SELECT 1 FROM thread_message_fragment_states AS fragment
       WHERE fragment.thread_id = earlier.thread_id AND fragment.message_id = earlier.message_id)
     GROUP BY copy.message_id
@@ -76,21 +82,22 @@ export function readPriorToolReplayIds(
     sql: string,
     threadId: string,
     ids: string,
-    beforeOrdinal: number
-  ) => Iterable<readonly unknown[]>
+    beforeOrdinal: number | null
+  ) => Iterable<readonly unknown[]>,
+  options?: { includeInPage?: boolean }
 ): ReadonlyMap<string, string> {
   const ids = messages
     .filter((message) => message.role === "tool" && (message.provider_occurrence ?? 1) > 1)
     .map(({ id }) => id)
   const proof = new Map<string, string>()
   if (!ids.length) return proof
-  const oldest = Math.min(...messages.map(({ ordinal }) => ordinal ?? 0))
-  if (oldest <= 0) return proof
+  const cutoff = options?.includeInPage ? null : Math.min(...messages.map(({ ordinal }) => ordinal ?? 0))
+  if (cutoff !== null && cutoff <= 0) return proof
   for (const [id, earlierId] of query(
     TOOL_REPLAY_EVIDENCE_SQL,
     threadId,
     JSON.stringify(ids),
-    oldest
+    cutoff
   )) {
     if (typeof id === "string" && typeof earlierId === "string") proof.set(id, earlierId)
   }

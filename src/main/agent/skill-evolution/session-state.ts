@@ -1,5 +1,5 @@
 import { resetToolCallCount } from "../runtime"
-import { resetSkillProposalWindow } from "./proposal-window"
+import { disposeSkillProposalWindow, resetSkillProposalWindow } from "./proposal-window"
 
 export type SkillEvolutionIntentDecision = "accept" | "skip"
 
@@ -12,4 +12,9 @@ export function shouldResetSkillEvolutionSessionAfterIntent(
 export function resetSkillEvolutionSession(threadId: string): void {
   resetToolCallCount(threadId)
   resetSkillProposalWindow(threadId)
+}
+
+export function disposeSkillEvolutionSession(threadId: string): void {
+  resetToolCallCount(threadId)
+  disposeSkillProposalWindow(threadId)
 }
