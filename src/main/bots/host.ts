@@ -787,6 +787,20 @@ export class LocalBotHost {
     if (groupId) this.getGroupMember(groupId, botId)
     return this.store.retainImageSelection(botId, groupId, workId, inputs)
   }
+
+  desktopAttachmentPreviewInput(botId: string, inputId: string, groupId?: string, workId?: string) {
+    if (groupId) {
+      this.getGroupMember(groupId, botId)
+      return this.store.groupImageInputs(groupId, [inputId])[0]
+    }
+    if (workId) {
+      const work = this.getWork(botId, workId)
+      this.assertWorkNotDeleting(work)
+      if (work.source || work.audienceKey !== "desktop")
+        throw new BotError("CONFLICT", "此工作不能预览桌面输入附件")
+    }
+    return this.store.desktopInputFiles(botId, [inputId], workId)[0]
+  }
   retainGroupImage(groupId: string, memberId: string, attachment: FileAttachment, path: string) {
     this.getGroupMember(groupId, memberId)
     return this.store.retainGroupImage(groupId, attachment, path)

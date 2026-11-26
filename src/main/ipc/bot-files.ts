@@ -1,4 +1,4 @@
-import { BotImageImportBatch, readBotImageSelection } from "../bots/image-import"
+import { BotImageImportBatch, readBotAttachmentImages, readBotImageSelection } from "../bots/image-import"
 import { decodeChatImage } from "../chat-image-decoder"
 import { assertChatAttachmentWindow } from "./chat-attachment-window"
 import { botImageMime } from "../../shared/bots/input-files"
@@ -679,6 +679,23 @@ export function registerBotFileHandlers(
   }
   const imageWindow = (event: IpcMainInvokeEvent) =>
     getMainWindow ? assertChatAttachmentWindow(event, getMainWindow) : desktopWindow(event)
+  ipcMain.handle("bots:files:read-attachment-images", async (
+    event, hostId: unknown, botId: unknown, input: unknown, groupId?: unknown, workId?: unknown
+  ) => {
+    imageWindow(event)
+    const host = hostFor(hostId)
+    const bot = botIdentifier(botId), inputId = botIdentifier(input)
+    const group = groupId === undefined ? undefined : botIdentifier(groupId)
+    const work = workId === undefined ? undefined : botIdentifier(workId)
+    if (group && work) throw new BotError("INVALID_INPUT", "工作与群会话不能混用")
+    const lookup = () => host.desktopAttachmentPreviewInput(bot, inputId, group, work)
+    const file = lookup()
+    const images = await readBotAttachmentImages(file, "bot-attachment-preview:" + inputId)
+    imageWindow(event)
+    if (lookup().file.filePath !== file.file.filePath)
+      throw new BotError("CONFLICT", "附件已变更，请重新添加")
+    return images
+  })
   ipcMain.handle("bots:files:authorize-delivery", async (event, hostId: unknown, input: unknown) => {
     desktopWindow(event)
     const host = hostFor(hostId)

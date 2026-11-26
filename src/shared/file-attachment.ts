@@ -74,6 +74,17 @@ export interface ChatImageRef {
   height: number
 }
 
+export interface DraftAttachmentImage {
+  filename: string
+  url: string
+}
+
+export interface DraftChatImageRequest {
+  threadId: string
+  workspacePath: string | null
+  imageId: string
+}
+
 export const MAX_CHAT_IMAGES = 3
 export const MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
 export const MAX_ATTACHMENT_TOTAL_CHARS = 24_000

@@ -231,6 +231,7 @@ import {
   resolveAtFileSelection
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
+import { AttachmentImagePreview } from "./AttachmentImagePreview"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../../shared/goal-events"
 import { findThreadMessageGapTailStart } from "@/lib/thread-message-pages"
@@ -252,6 +253,7 @@ import {
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_TOTAL_CHARS,
   MAX_ATTACHMENT_PICKER_FILES,
+  type DraftAttachmentImage,
   type SelectedAttachmentFileGrant
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
@@ -1001,6 +1003,7 @@ export interface ManagedChatTurn {
   /** Host-owned file selection; returns references to files retained in its workspace. */
   attachFiles?(maxFiles: number, maxChars: number): Promise<FileAttachment[]>
   attachWorkspaceFile?(fileId: string, maxChars: number): Promise<FileAttachment>
+  readAttachmentImages?(inputId: string): Promise<DraftAttachmentImage[]>
   attachFileBytes?(
     files: Array<{ fileName: string; bytes: ArrayBuffer }>,
     maxChars: number
@@ -2837,6 +2840,15 @@ export function ChatContainer({
   // ── File attachments state ──
   const [managedAttachmentLoading, setAttachmentLoading] = useState(false)
   const managedUpload = Boolean(managedTurn)
+  const readBotAttachmentImages = managedTurn?.readAttachmentImages
+  const readAttachmentImages = useCallback(async (file: FileAttachment) => {
+    if (file.botInputId) return await readBotAttachmentImages?.(file.botInputId) ?? []
+    if (managedUpload) return []
+    return Promise.all(attachmentImages(file).map(async ({ id, filename }) => ({
+      filename,
+      url: await window.api.file.readDraftChatImage({ threadId, workspacePath: workspacePath ?? null, imageId: id })
+    })))
+  }, [managedUpload, readBotAttachmentImages, threadId, workspacePath])
   const uploadDraft = useMemo(() => ({ threadId, workspacePath, managedUpload }),
     [threadId, workspacePath, managedUpload])
   const uploadDraftRef = useRef(uploadDraft)
@@ -11209,6 +11221,7 @@ export function ChatContainer({
                                 className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1 text-xs group cursor-default"
                               >
                                 <Paperclip className="size-3 shrink-0 text-muted-foreground" />
+                                <AttachmentImagePreview attachment={att} read={readAttachmentImages} />
                                 <span className="max-w-[160px] truncate" title={att.filePath}>
                                   {att.filename}
                                 </span>

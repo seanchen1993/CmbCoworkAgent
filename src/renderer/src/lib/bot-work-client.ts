@@ -86,6 +86,14 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
       owner(botId, groupId)
       return client.attachFileBytes(botId, files, maxChars, undefined, work.id)
     },
+    ...(client.readAttachmentImages ? {
+      readAttachmentImages: (botId: string, inputId: string, groupId?: string, requestedWorkId?: string) => {
+        owner(botId, groupId)
+        if (requestedWorkId !== undefined && requestedWorkId !== work.id)
+          throw new BotError("INVALID_INPUT", "工作会话目标不一致")
+        return client.readAttachmentImages!(botId, inputId, undefined, work.id)
+      }
+    } : {}),
     ...(client.attachWorkspaceFile ? {
       attachWorkspaceFile: (botId: string, threadId: string, fileId: string, maxChars: number) => {
         owner(botId)

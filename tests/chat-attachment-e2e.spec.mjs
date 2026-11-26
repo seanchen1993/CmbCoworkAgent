@@ -65,10 +65,18 @@ try {
     const stale = await window.api.file.chatImageSubmissionStatus({ ...request, incarnation: "uuid:old" })
       .then(() => false, () => true)
     const ids = [image.attachment.image.id, ...word.attachment.embeddedImages.map(image => image.id)]
+    const previewRequest = { threadId, workspacePath: profile, imageId: ids[0] }
+    const imagePreview = await window.api.file.readDraftChatImage(previewRequest)
+    const wrongWorkspace = await window.api.file.readDraftChatImage({ ...previewRequest, workspacePath: null })
+      .then(() => false, () => true)
     await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "pin", messageId, ids })
     await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "pin", messageId, ids })
     await window.api.file.updateImageOwners({ threadId, workspacePath: profile, action: "unpin", messageId })
-    return { threadId, document, image, word, sheet, web, atFile, atHtml, bad, status, stale }
+    await window.api.file.updateImageOwners({ ...previewRequest, action: "discard", ids: [ids[0]] })
+    const removedPreview = await window.api.file.readDraftChatImage(previewRequest)
+      .then(() => false, () => true)
+    return { threadId, document, image, word, sheet, web, atFile, atHtml, bad, status, stale,
+      imagePreview, wrongWorkspace, removedPreview }
   }, {
     profile, png: Array.from(bytes), docx: Array.from(docx), xlsx: Array.from(visualXlsx(bytes)),
     inline: '<p>Inline test</p><img src="data:image/png;base64,' + bytes.toString("base64") +
@@ -95,15 +103,79 @@ try {
   assert.equal(result.bad.success, false)
   assert.equal(result.status, "missing")
   assert.equal(result.stale, true, "a recreated thread must reject an old image submission")
+  assert.match(result.imagePreview, /^data:image\/webp;base64,/)
+  assert.equal(result.wrongWorkspace, true)
+  assert.equal(result.removedPreview, true)
   console.log("HTML, DOCX, XLSX, PNG, workspace mentions, image validation and queue ownership passed through Electron IPC")
+  await verifyBotAttachmentPreviews(page, bytes, docx)
   await verifyImageSendPresentation(app, page, result.threadId, profile, bytes)
-  console.log("Image send, browser option, cancellation, reload, stop and stale workspace recovery passed through the composer")
+  await verifyBotDraftComposerPreview(page, bytes)
+  console.log("Attachment previews, image send, cancellation, reload, stop and workspace recovery passed")
 
 } finally {
   try {
     await app?.close()
   } finally {
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  }
+}
+
+async function verifyBotAttachmentPreviews(page, bytes, docx) {
+  const { direct, embedded, groupImages, wrongBot, wrongGroup } = await page.evaluate(async ({ png, document }) => {
+    const api = window.api.bots
+    const settings = { instructions: "Fixture for local image previews", color: "#168bea",
+      modelRef: null, memoryMode: "disabled" }
+    const bot = await api.create({ ...settings, name: "Attachment Preview Bot" })
+    const other = await api.create({ ...settings, name: "Other Attachment Bot" })
+    const group = await api.saveGroup({ name: "Attachment Preview Group", memberIds: [bot.id, other.id] })
+    const upload = (fileName, data) => ({ fileName, bytes: Uint8Array.from(data).buffer })
+    const [photo, word] = await api.attachFileBytes(bot.id,
+      [upload("bot-photo.png", png), upload("bot-document.docx", document)], 500)
+    const [groupPhoto] = await api.attachFileBytes(bot.id, [upload("group-photo.png", png)], 500, group.id)
+    return {
+      direct: await api.readAttachmentImages(bot.id, photo.botInputId),
+      embedded: await api.readAttachmentImages(bot.id, word.botInputId),
+      groupImages: await api.readAttachmentImages(other.id, groupPhoto.botInputId, group.id),
+      wrongBot: await api.readAttachmentImages(other.id, photo.botInputId).then(() => false, () => true),
+      wrongGroup: await api.readAttachmentImages(bot.id, groupPhoto.botInputId).then(() => false, () => true)
+    }
+  }, { png: Array.from(bytes), document: Array.from(docx) })
+  assert.deepEqual(direct.map(image => image.filename), ["bot-photo.png"])
+  assert.equal(embedded.length, 2)
+  assert.deepEqual(groupImages.map(image => image.filename), ["group-photo.png"])
+  for (const image of [...direct, ...embedded, ...groupImages]) {
+    assert.match(image.url, /^data:image\/webp;base64,/)
+    const { width, height } = await sharp(Buffer.from(image.url.split(",")[1], "base64")).metadata()
+    assert.deepEqual([width, height], [12, 6])
+  }
+  assert.equal(wrongBot, true)
+  assert.equal(wrongGroup, true)
+}
+
+async function verifyBotDraftComposerPreview(page, bytes) {
+  await page.getByText("Bots", { exact: true }).first().click()
+  await page.getByText("Attachment Preview Bot", { exact: true }).first().click()
+  const chat = page.locator('[data-chat-surface="bot"]')
+  const attach = chat.getByRole("button", { name: "添加文件", exact: true })
+  await attach.waitFor()
+  const filename = "bot-composer-preview.png"
+  const dataTransfer = await page.evaluateHandle(({ filename, bytes }) => {
+    const data = new DataTransfer()
+    data.items.add(new File([Uint8Array.from(bytes)], filename))
+    return data
+  }, { filename, bytes: Array.from(bytes) })
+  try {
+    await attach.dispatchEvent("drop", { dataTransfer })
+    const preview = chat.getByRole("button", { name: `预览图片 ${filename}` })
+    await preview.click()
+    const dialog = page.getByRole("dialog", { name: filename })
+    await dialog.getByRole("img", { name: filename }).evaluate(node => node.decode())
+    await page.keyboard.press("Escape")
+    await dialog.waitFor({ state: "hidden" })
+    await chat.getByRole("button", { name: `移除附件 ${filename}` }).click()
+    await preview.waitFor({ state: "detached" })
+  } finally {
+    await dataTransfer.dispose()
   }
 }
 
@@ -158,21 +230,39 @@ async function verifyImageSendPresentation(app, page, threadId, workspacePath, b
     }
     throw new Error("Timed out waiting for attachment submission fixture")
   }
-  const sendImage = async (name, question) => {
-    const dataTransfer = await page.evaluateHandle(({ name, png }) => {
+  const dropFile = async (name, content) => {
+    const dataTransfer = await page.evaluateHandle(({ name, content }) => {
       const data = new DataTransfer()
-      data.items.add(new File([Uint8Array.from(png)], name, { type: "image/png" }))
+      data.items.add(new File([Uint8Array.from(content)], name))
       return data
-    }, { name, png: Array.from(bytes) })
+    }, { name, content: Array.from(content) })
     try {
       await composer.dispatchEvent("drop", { dataTransfer })
       await chat.getByText(name, { exact: true }).waitFor()
-      await composer.fill(question)
-      await composer.press("Enter")
     } finally {
       await dataTransfer.dispose()
     }
   }
+  const sendImage = async (name, question) => {
+    await dropFile(name, bytes)
+    await composer.fill(question)
+    await composer.press("Enter")
+  }
+
+  await dropFile("draft-preview.png", bytes)
+  const preview = chat.getByRole("button", { name: "预览图片 draft-preview.png" })
+  await preview.click()
+  const dialog = page.getByRole("dialog", { name: "draft-preview.png" })
+  const image = dialog.getByRole("img", { name: "draft-preview.png" })
+  assert.equal(await image.evaluate(async node => { await node.decode(); return node.naturalWidth }), 12)
+  await page.keyboard.press("Escape")
+  await dialog.waitFor({ state: "hidden" })
+  await chat.getByRole("button", { name: "移除附件 draft-preview.png" }).click()
+  await preview.waitFor({ state: "detached" })
+
+  await dropFile("draft-preview.docx", visualDocx([bytes, bytes]))
+  await chat.getByRole("button", { name: /预览图片.*draft-preview\.docx/ }).nth(1).waitFor()
+  await chat.getByRole("button", { name: "移除附件 draft-preview.docx" }).click()
 
   await sendImage("cancel-before-handoff.png", "Cancel this visual turn")
   await waitForFixture(() => Boolean(globalThis.attachmentQueueFixture.releaseStatus))

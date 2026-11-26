@@ -3811,7 +3811,7 @@ export class BotStore {
     return retained
   }
 
-  private groupImageInputs(groupId: string, ids: readonly string[]): BotInputFile[] {
+  groupImageInputs(groupId: string, ids: readonly string[]): BotInputFile[] {
     return parseBotInputFileIds(ids).map(id => {
       const row = this.rows("SELECT payload FROM bot_group_image_inputs WHERE group_id=? AND id=?",
         [groupId, id])[0]

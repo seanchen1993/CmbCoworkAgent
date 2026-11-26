@@ -1,4 +1,5 @@
 import { botAttachmentIdentity } from "../../../../shared/bots/input-files"
+import { AttachmentImagePreview } from "@/components/chat/AttachmentImagePreview"
 import { BotGroupMentionInput, type BotGroupInputControl } from "./BotGroupMentionInput"
 import {
   displayedGroupMentions,
@@ -75,6 +76,7 @@ import {
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_PICKER_FILES,
   MAX_ATTACHMENT_TOTAL_CHARS,
+  type DraftAttachmentImage,
   type FileAttachment
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
@@ -180,6 +182,11 @@ export function BotGroupConversation({
   const [older, setOlder] = useState(true)
   const refreshRef = useRef<() => void>(() => {})
   const members = bots.filter((bot) => group.memberIds.includes(bot.id))
+  const attachmentBotId = members.find(bot => !bot.archived && !bot.deleting)?.id
+  const readAttachmentImages = useCallback(async (file: FileAttachment) => {
+    if (!attachmentBotId || !file.botInputId) return []
+    return await client.readAttachmentImages?.(attachmentBotId, file.botInputId, group.id) ?? []
+  }, [attachmentBotId, client, group.id])
   const filePreviewThreadId = `group-files-${group.id}`
   const [fileWorkspace, setFileWorkspace] = useState<{
     client: BotClient
@@ -953,6 +960,7 @@ export function BotGroupConversation({
               inputRef={inputRef}
               editDraft={editDraft}
               attach={attach}
+              readAttachmentImages={readAttachmentImages}
               send={send}
               jumpToReply={jumpToReply}
               hasQuestions={questions.length > 0}
@@ -1035,6 +1043,7 @@ function GroupComposer({
   inputRef,
   editDraft,
   attach,
+  readAttachmentImages,
   send,
   jumpToReply,
   hasQuestions
@@ -1047,6 +1056,7 @@ function GroupComposer({
   inputRef: RefObject<BotGroupInputControl | null>
   editDraft: (patch: Parameters<ReturnType<typeof useBotGroupDrafts.getState>["edit"]>[1]) => void
   attach: (files?: File[]) => Promise<void>
+  readAttachmentImages: (file: FileAttachment) => Promise<DraftAttachmentImage[]>
   send: (event: React.FormEvent) => Promise<void>
   jumpToReply: (reply: { id: string; ordinal: number }) => Promise<void>
   hasQuestions: boolean
@@ -1131,6 +1141,7 @@ function GroupComposer({
               key={botAttachmentIdentity(file)}
               className="inline-flex max-w-full items-center gap-2 rounded-xl bg-muted px-3 py-1.5 text-xs"
             >
+              <AttachmentImagePreview attachment={file} read={readAttachmentImages} />
               <span className="truncate">{file.filename}</span>
               <button
                 type="button"

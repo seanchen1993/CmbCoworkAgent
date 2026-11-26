@@ -259,7 +259,8 @@ import type {
   AttachmentBytesParseRequest,
   AttachmentFileSelectionResult,
   AttachmentGrantParseRequest,
-  WorkspaceChatImageRequest, ChatImageOwnerRequest, ChatImageStatusRequest, ChatImageSubmissionStatus
+  WorkspaceChatImageRequest, ChatImageOwnerRequest, ChatImageStatusRequest, ChatImageSubmissionStatus,
+  DraftChatImageRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
@@ -1873,6 +1874,7 @@ interface CustomAPI {
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
+    readDraftChatImage: (request: DraftChatImageRequest) => Promise<string>
     attachWorkspaceImage: (request: WorkspaceChatImageRequest) => Promise<ParsedAttachment>
     updateImageOwners: (request: ChatImageOwnerRequest) => Promise<void>
     chatImageSubmissionStatus: (request: ChatImageStatusRequest) => Promise<ChatImageSubmissionStatus>

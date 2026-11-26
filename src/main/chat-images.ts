@@ -5,6 +5,7 @@ import { decodeChatImage } from "./chat-image-decoder"
 import { getCmbCoworkAgentDataRoot } from "./app-data-root"
 import { getDb, getThreadCore } from "./db"
 import { captureThreadIncarnation, type ThreadIncarnationRow } from "./services/thread-incarnation"
+import { openStableFileHandle, readStableFileHandleBounded } from "./services/stable-file-handle"
 import type { AgentInvokeParams } from "./types"
 import { chatImageMarker } from "../shared/attachment-message-parts"
 import { normalizeGitWorkspacePathKey } from "../shared/workspace-path"
@@ -100,6 +101,23 @@ export async function readChatImage(threadId: string, id: string) {
   const data = await readFile(join(scope(threadId), id + ".webp"))
   if (!isStagedChatImage(data, data.length)) throw new Error("图片内容无效或超过预算")
   return { type: "image_url" as const, image_url: { url: "data:image/webp;base64," + data.toString("base64") } }
+}
+
+export async function readDraftChatImage(threadId: string, id: string, assertCurrent: () => void): Promise<string> {
+  if (typeof id !== "string" || !validId.test(id)) throw new Error("图片引用无效")
+  assertCurrent()
+  assertImageInputOwner(threadId, id)
+  const root = scope(threadId)
+  const opened = await openStableFileHandle(root, join(root, id + ".webp"))
+  try {
+    const data = await readStableFileHandleBounded(opened, MAX_STAGED_CHAT_IMAGE_BYTES)
+    if (!isStagedChatImage(data, data.length)) throw new Error("图片内容无效或超过预算")
+    assertCurrent()
+    assertImageInputOwner(threadId, id)
+    return "data:image/webp;base64," + data.toString("base64")
+  } finally {
+    await opened.handle.close()
+  }
 }
 
 

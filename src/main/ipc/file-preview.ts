@@ -1,7 +1,7 @@
 import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
 import path from "node:path"
 import { assertChatAttachmentWindow } from "./chat-attachment-window"
-import type { ChatImageOwnerRequest, ChatImageStatusRequest } from "../../shared/file-attachment"
+import type { ChatImageOwnerRequest, ChatImageStatusRequest, DraftChatImageRequest } from "../../shared/file-attachment"
 import { threadIncarnationKey } from "../../shared/thread-incarnation"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
@@ -311,6 +311,16 @@ export function registerWorkspaceFilePreviewHandlers(
     assertChatAttachmentWindow(event, getMainWindow)
     const { stageWorkspaceChatImage } = await import("../workspace-chat-image")
     return stageWorkspaceChatImage(request, () => { assertChatAttachmentWindow(event, getMainWindow) })
+  })
+  ipcMain.handle("workspace:readDraftChatImage", async (event, request: DraftChatImageRequest) => {
+    const assertWindow = () => assertChatAttachmentWindow(event, getMainWindow)
+    assertWindow()
+    if (!request || !(request.workspacePath === null || typeof request.workspacePath === "string"))
+      throw new Error("图片草稿所属工作区无效")
+    const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
+    const { readDraftChatImage } = await import("../chat-images")
+    const { assertCurrent } = captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertWindow)
+    return readDraftChatImage(request.threadId, request.imageId, assertCurrent)
   })
   ipcMain.handle("workspace:updateChatImageOwners", async (event, request: ChatImageOwnerRequest) => {
     const assertWindow = () => { assertChatAttachmentWindow(event, getMainWindow) }

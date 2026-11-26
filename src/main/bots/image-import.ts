@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto"
 import { lstat, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join } from "node:path"
-import type { FileAttachment } from "../../shared/file-attachment"
-import { MAX_ATTACHMENT_FILE_BYTES } from "../../shared/file-attachment"
+import type { DraftAttachmentImage, FileAttachment } from "../../shared/file-attachment"
+import { isVisualDocumentPath, MAX_ATTACHMENT_FILE_BYTES } from "../../shared/file-attachment"
 import { decodeChatImage } from "../chat-image-decoder"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
-import { botImageMime } from "../../shared/bots/input-files"
+import { botImageMime, type BotInputFile } from "../../shared/bots/input-files"
+import { inputFileSnapshot } from "./input-files"
 
 export type PrivateImageInput = { attachment: FileAttachment; path: string }
 const active = new Set<string>()
@@ -26,6 +27,32 @@ export async function readBotImageSelection(directory: string, path: string): Pr
   } finally {
     await opened.handle.close()
   }
+}
+
+export async function readBotAttachmentImages(file: BotInputFile, lane: string): Promise<DraftAttachmentImage[]> {
+  const { filename, size } = file.file
+  const direct = Boolean(botImageMime(filename, size))
+  if (!direct && !(file.attachment?.embeddedImageCount && isVisualDocumentPath(filename))) return []
+  const { path, directory, digest } = inputFileSnapshot(file)
+  const bytes = await readBotImageSelection(directory, path)
+  if (bytes.byteLength !== size || createHash("sha256").update(Buffer.from(bytes)).digest("hex") !== digest)
+    throw new Error("所选附件的保存版本不可用或已变化，请重新选择附件")
+  const images: DraftAttachmentImage[] = []
+  const add = async (name: string, source: ArrayBuffer, label: string) => {
+    const { data } = await decodeChatImage(name, source, undefined, true)
+    if (!data) throw new Error("图片预览不可用")
+    images.push({ filename: label, url: "data:image/webp;base64," + Buffer.from(data).toString("base64") })
+  }
+  if (direct) await add(filename, bytes, filename)
+  else {
+    const { getFileAttachmentParserClient } = await import("../file-attachment-parser/client")
+    const parsed = await getFileAttachmentParserClient().parse({ kind: "bytes", fileName: filename, bytes }, 1, lane, true)
+    if (parsed.documentImages?.length !== file.attachment?.embeddedImageCount)
+      throw new Error("文档内嵌图片读取不完整")
+    for (const image of parsed.documentImages ?? [])
+      await add("embedded" + image.extension, image.bytes, filename + " · 图片 " + (image.index + 1))
+  }
+  return images
 }
 
 /** Each selection owns one immutable managed copy. Only its receipt carries the physical path. */

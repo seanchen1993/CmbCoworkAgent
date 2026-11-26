@@ -599,6 +599,9 @@ export interface BotClient {
     groupId?: string,
     workId?: string
   ): Promise<import("../file-attachment").FileAttachment[]>
+  readAttachmentImages?(
+    botId: string, inputId: string, groupId?: string, workId?: string
+  ): Promise<import("../file-attachment").DraftAttachmentImage[]>
   /** Retain a selected file from the exact local Bot conversation's workspace. */
   attachWorkspaceFile?(
     botId: string, threadId: string, fileId: string, maxChars: number, workId?: string

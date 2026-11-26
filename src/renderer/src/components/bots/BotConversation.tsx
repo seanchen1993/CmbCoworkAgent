@@ -467,6 +467,8 @@ export function BotConversation({
     if (workId) return cancelConversation()
     throw new Error("任务状态已变化，请根据当前状态重试")
   }, [sender, client, bot.id, workId, userOwnsComposer, running, backgroundBusy, cancelConversation])
+  const readAttachmentImages = useCallback(async (inputId: string) =>
+    await client.readAttachmentImages?.(bot.id, inputId) ?? [], [bot.id, client])
   const managedTurn = useMemo<ManagedChatTurn>(
     () => ({
       allowedSkillNames: bot.allowedSkillNames,
@@ -519,6 +521,7 @@ export function BotConversation({
       }).join("|"),
       attachFiles: (maxFiles, maxChars) => client.attachFiles(bot.id, maxFiles, maxChars),
       attachFileBytes: (files, maxChars) => client.attachFileBytes(bot.id, files, maxChars),
+      ...(client.readAttachmentImages ? { readAttachmentImages } : {}),
       ...(client.hostId === "local" && !work?.source && client.attachWorkspaceFile ? {
         attachWorkspaceFile: (fileId: string, maxChars: number) =>
           client.attachWorkspaceFile!(bot.id, threadId, fileId, maxChars)
@@ -550,6 +553,7 @@ export function BotConversation({
       controlFocusRequest,
       tasks,
       visualAdmissions,
+      readAttachmentImages,
       cancel,
       running,
       backgroundBusy,

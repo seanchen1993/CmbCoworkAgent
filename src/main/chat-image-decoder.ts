@@ -4,7 +4,7 @@ import { chatImageExtensions, MAX_ATTACHMENT_FILE_BYTES } from "../shared/file-a
 let decoding = 0
 
 /** Decode and normalize in the image worker. A validation-only call publishes no asset. */
-export async function decodeChatImage(name: string, bytes: ArrayBuffer, tempPath?: string) {
+export async function decodeChatImage(name: string, bytes: ArrayBuffer, tempPath?: string, includeData = false) {
   const extension = extname(name).toLowerCase()
   if (!chatImageExtensions.includes(extension) || !bytes.byteLength || bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES)
     throw new Error("图片格式或大小超限")
@@ -13,12 +13,12 @@ export async function decodeChatImage(name: string, bytes: ArrayBuffer, tempPath
   try {
     const { default: launch } = await import("./chat-image-worker?nodeWorker")
     const worker = launch({
-      workerData: { bytes, extension, tempPath }, transferList: [bytes],
+      workerData: { bytes, extension, tempPath, includeData }, transferList: [bytes],
       resourceLimits: { maxOldGenerationSizeMb: 128 }
     })
     const timer = setTimeout(() => void worker.terminate(), 15_000)
     try {
-      return await new Promise<{ width: number; height: number }>((resolve, reject) => {
+      return await new Promise<{ width: number; height: number; data?: Uint8Array }>((resolve, reject) => {
         worker.once("error", reject)
         worker.once("exit", () => reject(new Error("图片解析任务已结束或超时")))
         worker.once("message", value => value.error ? reject(new Error(value.error)) : resolve(value))

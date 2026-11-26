@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises"
 import sharp from "sharp"
 
 async function normalizeImage() {
-  const { bytes, extension, tempPath } = workerData
+  const { bytes, extension, tempPath, includeData } = workerData
   const source = Buffer.from(bytes)
   sharp.concurrency(1)
   const decoder = sharp(source, { limitInputPixels: 16_000_000, failOn: "warning" })
@@ -23,7 +23,7 @@ async function normalizeImage() {
       .webp({ quality: 92 }).toBuffer({ resolveWithObject: true })
     if (data.length > 2 * 1024 * 1024) continue
     if (tempPath) await writeFile(tempPath, data, { flag: "wx", mode: 0o600 })
-    return { width: info.width, height: info.height }
+    return { width: info.width, height: info.height, ...(includeData ? { data } : {}) }
   }
   throw new Error("图片压缩后仍超过发送上限")
 }
