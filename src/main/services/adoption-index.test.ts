@@ -57,6 +57,7 @@ import {
   markOutboxFailed,
   markOutboxSending,
   resetInterruptedOutboxEvents,
+  settleGenerationRepoCheck,
   setAdoptionIndexSnapshotFsyncForTest,
   setAdoptionIndexSnapshotReplaceForTest,
   trimGeneratedSourceTextToByteCap,
@@ -417,6 +418,27 @@ describe("adoption-index harness_node_name column", () => {
     expect(Array.from(getGenRowByEventId("g_source_new")?.generated_lines_blob ?? [])).toEqual([
       5, 6, 7, 8
     ])
+  })
+
+  it("shares the source-text budget with deferred writes while retaining their hashes and event", () => {
+    const source = new Uint8Array([1, 2, 3, 4])
+    const pending = makeRow({ event_id: "waiting", created_at: 10, generated_lines_blob: source })
+    const event = {
+      eventId: "waiting_gen",
+      eventName: "code_gen",
+      createdAt: 10,
+      payloadJson: "{}"
+    }
+    expect(insertGenEventWithOutbox(pending, event, pending.file_path)).toBe(true)
+    insertGenEvent(makeRow({ event_id: "ready", created_at: 20, generated_lines_blob: source }))
+    trimGeneratedSourceTextToByteCap(4)
+    settleGenerationRepoCheck(pending.file_path, "inside", 10)
+    expect(getGenRowByEventId("ready")?.generated_lines_blob).toEqual(source)
+    expect(getGenRowByEventId("waiting")).toMatchObject({
+      generated_lines_blob: null,
+      line_hashes: pending.line_hashes
+    })
+    expect(getOutboxEvent("waiting_gen")?.status).toBe("pending")
   })
 
   it("bounds completed details by compressed bytes and row count", () => {

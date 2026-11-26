@@ -4,6 +4,11 @@ import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "fs
 import { homedir } from "os"
 import { dirname, isAbsolute, join, relative, resolve as resolvePath } from "path"
 import { promisify } from "util"
+import {
+  getRegisteredReposPath,
+  readRegisteredRepos,
+  type RegisteredGitHookRepo
+} from "./git-hook-registry"
 import { getOpenworkDir } from "../storage"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
@@ -145,16 +150,6 @@ interface HookPushIntent {
   records?: HookPushRecord[]
 }
 
-interface RegisteredGitHookRepo {
-  gitRoot: string
-  enabled: boolean
-  registeredAt: string
-  updatedAt: string
-  lastSyncedAt?: string
-  lastErrorAt?: string
-  lastError?: string
-}
-
 type GitHookSyncResult = "synced" | "busy" | "unavailable"
 
 const syncTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -206,10 +201,6 @@ function getHookEventsDir(): string {
 
 function getRepoEventsDir(gitRoot: string): string {
   return join(getHookEventsDir(), repoKey(gitRoot))
-}
-
-function getRegisteredReposPath(): string {
-  return join(getGitHookBaseDir(), "repos.json")
 }
 
 async function ensureDir(dir: string): Promise<void> {
@@ -271,25 +262,6 @@ function resolveTouchedFilePath(workspacePath: string, filePath: string): string
   if (trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)) return resolvePath(trimmed)
   if (!workspacePath.trim()) return null
   return resolvePath(join(workspacePath, trimmed))
-}
-
-async function readRegisteredRepos(): Promise<RegisteredGitHookRepo[]> {
-  const raw = await readJsonFile<RegisteredGitHookRepo[]>(getRegisteredReposPath())
-  if (!Array.isArray(raw)) return []
-  return raw.flatMap((repo): RegisteredGitHookRepo[] => {
-    if (!repo || typeof repo.gitRoot !== "string" || !repo.gitRoot.trim()) return []
-    return [
-      {
-        gitRoot: repo.gitRoot,
-        enabled: repo.enabled !== false,
-        registeredAt: repo.registeredAt || nowIsoLocal(),
-        updatedAt: repo.updatedAt || repo.registeredAt || nowIsoLocal(),
-        ...(repo.lastSyncedAt ? { lastSyncedAt: repo.lastSyncedAt } : {}),
-        ...(repo.lastErrorAt ? { lastErrorAt: repo.lastErrorAt } : {}),
-        ...(repo.lastError ? { lastError: repo.lastError } : {})
-      }
-    ]
-  })
 }
 
 async function saveRegisteredRepos(repos: RegisteredGitHookRepo[]): Promise<void> {
