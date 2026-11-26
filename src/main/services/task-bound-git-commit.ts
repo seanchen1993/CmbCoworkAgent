@@ -101,10 +101,16 @@ function gitEnv(index?: string): NodeJS.ProcessEnv {
   }
 }
 
-function git(cwd: string, args: string[], index?: string, input?: string): Promise<string> {
+function git(
+  cwd: string,
+  args: string[],
+  index?: string,
+  input?: string,
+  executable = "git"
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile(
-      "git",
+      executable,
       ["--literal-pathspecs", ...args],
       {
         cwd,
@@ -126,8 +132,55 @@ function git(cwd: string, args: string[], index?: string, input?: string): Promi
 }
 
 const outputLine = (s: string): string => s.replace(/\r?\n$/, "")
-const nulList = (items: string[]): string => items.join("\0") + "\0"
 const nulFields = (s: string): string[] => s.split("\0").filter(Boolean)
+
+// Git 2.21 prints unrecognized rev-parse options to stdout and exits successfully.
+// Read each value separately and resolve --git-path relative to the queried directory.
+async function gitPath(cwd: string, ...args: string[]): Promise<string> {
+  const value = outputLine(await git(cwd, ["rev-parse", ...args]))
+  if (!value || value === args[0]) throw new Error("无法读取 Git 工作树路径")
+  return path.resolve(cwd, value)
+}
+
+type GitOperation = "update-ref" | "hook"
+let nativeGitVersion: Promise<string> | undefined
+
+export function supportsTaskGitOperation(version: string, operation: GitOperation): boolean {
+  const match = /\bgit version (\d+)\.(\d+)(?:\.(\d+))?/i.exec(version)
+  if (!match) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  if (major !== 2) return major > 2
+  if (operation === "hook") return minor >= 36
+  // 2.33.1 backported the interactive update-ref stdout flush.
+  return minor > 33 || (minor === 33 && Number(match[3] ?? 0) >= 1)
+}
+
+// Keep the user's Git for repository discovery, staging, filters, signing and commit-tree.
+// Only the interactive ref transaction and git hook run need newer Git commands.
+async function transactionGit(root: string, operation: GitOperation): Promise<string> {
+  if (process.platform !== "win32") return "git"
+  nativeGitVersion ??= git(root, ["--version"]).catch((error) => {
+    nativeGitVersion = undefined
+    throw error
+  })
+  if (supportsTaskGitOperation(await nativeGitVersion, operation)) return "git"
+  const helper = path.join("task-commit-git", "cmd", "git.exe")
+  const roots = process.resourcesPath ? [process.resourcesPath] : []
+  if (process.defaultApp || !process.versions.electron) {
+    roots.push(
+      path.resolve(__dirname, "../../resources"),
+      path.resolve(__dirname, "../../../resources")
+    )
+  }
+  for (const base of roots) {
+    const file = path.join(base, helper)
+    if ((await fs.stat(file).catch(() => null))?.isFile()) return file
+  }
+  throw new Error(
+    "当前应用缺少旧版 Git 的提交兼容组件。请安装新版应用；开发环境可运行 npm run prepare:task-commit-git。"
+  )
+}
 
 async function exists(filePath: string): Promise<boolean> {
   try {
@@ -137,6 +190,23 @@ async function exists(filePath: string): Promise<boolean> {
     if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false
     throw error
   }
+}
+
+async function runTaskCommitHook(
+  root: string,
+  hooksDir: string,
+  name: string,
+  args: string[] = [],
+  index?: string
+): Promise<void> {
+  const executable = await transactionGit(root, "hook")
+  await git(
+    root,
+    ["-c", "core.hooksPath=" + hooksDir, "hook", "run", "--ignore-missing", name, "--", ...args],
+    index,
+    undefined,
+    executable
+  )
 }
 
 async function assertOrdinaryCommit(gitDir: string, hooksDir: string): Promise<void> {
@@ -304,12 +374,9 @@ async function snapshotTree(
   // Start from an empty private index every time so Git hashes the current worktree content
   // rather than trusting stat data inherited from the user's index or an earlier check.
   await git(root, [...gitOptions, "read-tree", parent], index)
-  await git(
-    root,
-    [...gitOptions, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
-    index,
-    nulList(files)
-  )
+  for (const chunk of gitPathChunks(files)) {
+    await git(root, [...gitOptions, "add", "-A", "--", ...chunk], index)
+  }
   return outputLine(await git(root, [...gitOptions, "write-tree"], index))
 }
 
@@ -348,17 +415,12 @@ async function captureCommitPreview(
     throw new Error("提交预览需要明确的父提交和工作区内相对文件")
   }
   const realScope = await fs.realpath(scope)
-  const context = outputLine(
-    await git(realScope, [
-      "rev-parse",
-      "--path-format=absolute",
-      "--show-toplevel",
-      "--absolute-git-dir",
-      "HEAD^{commit}"
-    ])
-  ).split(/\r?\n/)
-  if (context.length !== 3 || context[2] !== parent) throw new Error("预览期间目标分支发生变化")
-  const [rootPath, gitDir] = context
+  const [rootPath, gitDir, head] = await Promise.all([
+    gitPath(realScope, "--show-toplevel"),
+    gitPath(realScope, "--absolute-git-dir"),
+    git(realScope, ["rev-parse", "--verify", "HEAD^{commit}"]).then(outputLine)
+  ])
+  if (head !== parent) throw new Error("预览期间目标分支发生变化")
   const root = await fs.realpath(rootPath)
   const distinct = [...new Set(files)]
   let headTypes: Map<string, string> | undefined
@@ -426,7 +488,15 @@ async function runHeadTransaction(
   // update HEAD locks both the symbolic HEAD and its referent during "prepare".
   // Verify the branch while both locks are held. This also handles a checkout
   // switching to a different branch that happens to point at the same old SHA.
-  const child = spawn("git", ["update-ref", "-m", subject, "--stdin"], {
+  const executable = await transactionGit(root, "update-ref")
+  const config =
+    executable === "git"
+      ? []
+      : [
+          "-c",
+          "core.hooksPath=" + path.dirname(await gitPath(root, "--git-path", "hooks/pre-commit"))
+        ]
+  const child = spawn(executable, [...config, "update-ref", "-m", subject, "--stdin"], {
     cwd: root,
     env: gitEnv(),
     windowsHide: true,
@@ -539,7 +609,7 @@ async function commitWithIndexLock(
     if (preCommit || prepareMessage || checkMessage) {
       const runHook = async (name: string, args: string[] = []) => {
         try {
-          await git(root, ["hook", "run", "--ignore-missing", name, "--", ...args], candidateIndex)
+          await runTaskCommitHook(root, hooksDir, name, args, candidateIndex)
         } catch (error) {
           throw new Error(
             `${name} 钩子拒绝或未能完成提交：${error instanceof Error ? error.message : error}`
@@ -578,12 +648,9 @@ async function commitWithIndexLock(
     candidate = { sha, parent, branch, tree, files: diff }
     // Prepare the real index update on a copy. git reset touches only the exact
     // selected entries; unrelated staged changes and partial stages remain intact.
-    await git(
-      root,
-      ["reset", "-q", sha, "--pathspec-from-file=-", "--pathspec-file-nul"],
-      nextIndex,
-      nulList(files)
-    )
+    for (const chunk of gitPathChunks(files)) {
+      await git(root, ["reset", "-q", sha, "--", ...chunk], nextIndex)
+    }
     await fs.chmod(nextIndex, Number(savedIndex.mode))
     pendingIndex = await fs.stat(nextIndex, { bigint: true })
     if (pendingIndex.ino === BigInt(0)) throw new Error("文件系统未提供可核对的暂存锁标识")
@@ -660,8 +727,7 @@ async function commitWithIndexLock(
     if (!(await sameLockFile(lockPath, pendingIndex))) throw new Error("暂存锁被替换，需核对索引")
     await fs.rename(lockPath, indexPath)
     ownsIndexLock = false
-    if (hooks.includes("post-commit"))
-      await git(root, ["hook", "run", "--ignore-missing", "post-commit"])
+    if (hooks.includes("post-commit")) await runTaskCommitHook(root, hooksDir, "post-commit")
     return { status: "committed", sha, branch, files: diff }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
@@ -703,22 +769,12 @@ export async function recoverTaskBoundCommitIndex(
   let releaseWrite: (() => void) | undefined
   const preparation = prepareGitPanelWrite("task-commit")
   try {
-    const context = outputLine(
-      await git(worktreePath, [
-        "rev-parse",
-        "--path-format=absolute",
-        "--absolute-git-dir",
-        "--git-path",
-        "index"
-      ])
-    ).split(/\r?\n/)
-    if (
-      context.length !== 2 ||
-      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha) ||
-      !branch.startsWith("refs/heads/")
-    )
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha) || !branch.startsWith("refs/heads/"))
       throw new Error("无法验证提交回执中的工作树")
-    const [gitDir, indexPath] = context
+    const [gitDir, indexPath] = await Promise.all([
+      gitPath(worktreePath, "--absolute-git-dir"),
+      gitPath(worktreePath, "--git-path", "index")
+    ])
     const lockPath = indexPath + ".lock"
     releaseQueue = await acquireTaskBoundWorktreeWrite(gitDir)
     releaseWrite = await preparation.reserve(worktreePath, Promise.resolve(gitDir))
@@ -823,20 +879,12 @@ export async function executeTaskBoundGitCommit(
   let releaseSerial: (() => void) | undefined
   try {
     const scope = await fs.realpath(options.worktreePath)
-    const context = outputLine(
-      await git(scope, [
-        "rev-parse",
-        "--path-format=absolute",
-        "--show-toplevel",
-        "--absolute-git-dir",
-        "--git-path",
-        "index",
-        "--git-path",
-        "hooks/pre-commit"
-      ])
-    )
-    const [rootPath, gitDir, indexPath, hookPath] = context.split(/\r?\n/)
-    if (context.split(/\r?\n/).length !== 4) throw new Error("无法可靠识别 Git 工作树")
+    const [rootPath, gitDir, indexPath, hookPath] = await Promise.all([
+      gitPath(scope, "--show-toplevel"),
+      gitPath(scope, "--absolute-git-dir"),
+      gitPath(scope, "--git-path", "index"),
+      gitPath(scope, "--git-path", "hooks/pre-commit")
+    ])
     const root = await fs.realpath(rootPath)
     releaseSerial = await acquireTaskBoundWorktreeWrite(gitDir)
     releasePanel = await preparation.reserve(scope, Promise.resolve(gitDir))

@@ -3,6 +3,12 @@ const fs = require("fs")
 const path = require("path")
 
 module.exports = async function (context) {
+  if (context?.electronPlatformName === "win32") {
+    const { Arch } = require("builder-util")
+    const { installTaskCommitGit } = await import("./prepare-task-commit-git.mjs")
+    await installTaskCommitGit(path.join(context.appOutDir, "resources"), Arch[context.arch])
+    return
+  }
   try {
     const isLinux = process.platform === "linux" || process.env.FORCE_AFTER_PACK_LINUX === "1"
     if (!isLinux) {

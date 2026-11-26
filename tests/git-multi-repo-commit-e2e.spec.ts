@@ -276,36 +276,72 @@ async function verifyExternalTaskBinding(
   await settings.waitFor({ state: "hidden" })
   await page.getByRole("button", { name: "QA-EXTERNAL", exact: true }).waitFor()
 
+  const hooks = join(external, ".git", "task-hooks")
+  mkdirSync(hooks)
+  git(external, ["config", "core.hooksPath", ".git/task-hooks"])
+  writeFileSync(join(hooks, "pre-commit"), [
+    "#!/bin/sh",
+    'test "$(git diff --cached --name-only)" = tracked.txt || exit 1',
+    'echo checked > "$(git rev-parse --git-dir)/task-hook-receipt"'
+  ].join("\n") + "\n", { mode: 0o755 })
   writeFileSync(join(external, "tracked.txt"), "reviewed external change\n")
   const message = "QA-EXTERNAL #comment test:review external change #CMBDevClaw"
-  const result = await page.evaluate(
-    async ({ threadId, external, message }) => {
-      const { taskCommitBinding, workspace } = (window as unknown as WindowWithApi).api
-      const binding = await taskCommitBinding.read(threadId)
-      if (!binding?.repositoryPaths.includes(external) || binding.cardNumber !== "QA-EXTERNAL") {
-        throw new Error(`Expected persisted binding for ${external}, got ${JSON.stringify(binding)}`)
-      }
-      const options = { worktreePath: external, commitBindingVersion: binding.version }
-      const preview = await workspace.getGitPanelDiffs(threadId, {
-        ...options,
-        includeDiffs: false,
-        includeChangedFiles: true
-      })
-      if (
-        !preview.success ||
-        preview.changedFiles?.join() !== "tracked.txt" ||
-        !preview.commitPreviewRevision
-      ) {
-        throw new Error(preview.error || "Expected one reviewed external file")
-      }
-      return workspace.commitWorktree(threadId, message, ["tracked.txt"], {
-        ...options,
-        commitPreviewRevision: preview.commitPreviewRevision
-      })
-    },
-    { threadId, external, message }
+  const openPreview = () =>
+    page.evaluate(
+      async ({ threadId, external }) => {
+        const { taskCommitBinding, workspace } = (window as unknown as WindowWithApi).api
+        const binding = await taskCommitBinding.read(threadId)
+        if (!binding?.repositoryPaths.includes(external) || binding.cardNumber !== "QA-EXTERNAL") {
+          throw new Error(
+            `Expected persisted binding for ${external}, got ${JSON.stringify(binding)}`
+          )
+        }
+        const options = { worktreePath: external, commitBindingVersion: binding.version }
+        const preview = await workspace.getGitPanelDiffs(threadId, {
+          ...options,
+          includeDiffs: false,
+          includeChangedFiles: true
+        })
+        if (
+          !preview.success ||
+          preview.changedFiles?.join() !== "tracked.txt" ||
+          !preview.commitPreviewRevision
+        ) {
+          throw new Error(preview.error || "Expected one reviewed external file")
+        }
+        return { ...options, commitPreviewRevision: preview.commitPreviewRevision }
+      },
+      { threadId, external }
+    )
+  const submit = (options: Awaited<ReturnType<typeof openPreview>>) =>
+    page.evaluate(
+      ({ threadId, message, options }) =>
+        (window as unknown as WindowWithApi).api.workspace.commitWorktree(
+          threadId,
+          message,
+          ["tracked.txt"],
+          options
+        ),
+      { threadId, message, options }
+    )
+
+  const first = await openPreview()
+  const repeat = await openPreview()
+  assert(
+    first.commitPreviewRevision !== repeat.commitPreviewRevision,
+    "授权后可以连续打开有效的新预览"
   )
+  const startingHead = git(external, ["rev-parse", "HEAD"])
+  git(external, ["checkout", "-q", "-b", "same-tip-branch"])
+  const stale = await submit(repeat)
+  assert(
+    !stale.success && Boolean(stale.error?.includes("变化")),
+    "切换到相同 SHA 的另一分支后拒绝旧预览"
+  )
+  assert(git(external, ["rev-parse", "HEAD"]) === startingHead, "拒绝过期预览时保持原提交")
+  const result = await submit(await openPreview())
   assert(result.success, result.error || "桌面授权的外部仓库已完成提交")
+  assert(existsSync(join(external, ".git", "task-hook-receipt")), "外仓配置的提交钩子已验证候选暂存区")
   assert(git(external, ["log", "-1", "--format=%s"]) === message, "外部提交使用已保存的任务卡号")
 }
 
@@ -334,7 +370,7 @@ async function main(): Promise<void> {
   mkdirSync(workspace, { recursive: true })
 
   const initialCommit = initializeRepository(mainRepository, linkedWorktree)
-  log(`Temporary workspace: ${workspace}`)
+  log(`Temporary workspace: ${workspace} (${git(testRoot, ["--version"])})`)
 
   const cleanEnv = {
     ...process.env,

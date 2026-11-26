@@ -18,11 +18,24 @@ import {
   captureTaskCommitPreviewTree,
   executeTaskBoundGitCommit,
   recoverTaskBoundCommitIndex,
+  supportsTaskGitOperation,
   type TaskCommitCandidate
 } from "./task-bound-git-commit"
 import { beginGitCheckoutWrite, prepareGitPanelWrite } from "./git-worktree-write-gate"
 
 const temporary: string[] = []
+
+it.each([
+  ["2.21.0", false, false],
+  ["2.33.0", false, false],
+  ["2.33.1", true, false],
+  ["2.34.0", true, false],
+  ["2.36.0", true, true]
+])("checks the native transaction and hook capabilities of Git %s", (version, refs, hooks) => {
+  const output = `git version ${version}.windows.1`
+  expect(supportsTaskGitOperation(output, "update-ref")).toBe(refs)
+  expect(supportsTaskGitOperation(output, "hook")).toBe(hooks)
+})
 let root: string
 let beforeCommit: string
 const file = (name: string): string => path.join(root, name)
@@ -51,7 +64,8 @@ describe("task-bound Git commit", { timeout: 45_000 }, () => {
   beforeEach(() => {
     root = realpathSync(mkdtempSync(path.join(tmpdir(), "task-bound-commit-test-")))
     temporary.push(root)
-    git("init", "-q", "-b", "main")
+    git("init", "-q")
+    git("symbolic-ref", "HEAD", "refs/heads/main")
     git("config", "user.name", "Commit Fixture")
     git("config", "user.email", "commit@example.test")
     git("config", "core.autocrlf", "false")
