@@ -345,6 +345,50 @@ describe("thread message hydration worker", () => {
     expect(combined.messages).toEqual([...prior.messages, ...latest.messages])
   })
 
+  it("pages past oversized coordinator polling results before selecting side-context rows", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(`INSERT INTO thread_messages
+      (thread_id, message_id, role, content_json, name, created_at, ordinal)
+      VALUES ('coordinator-parent', ?, ?, ?, ?, 0, ?)`)
+    const fragment = database.prepare(`INSERT INTO thread_message_fragments
+      (thread_id, message_id, content_text, created_at) VALUES ('coordinator-parent', ?, ?, 0)`)
+    const state = database.prepare(`INSERT INTO thread_message_fragment_states
+      (thread_id, message_id, total_chars, updated_at) VALUES ('coordinator-parent', ?, ?, 0)`)
+    insert.run("question", "user", JSON.stringify("Earlier fact: KESTREL"), null, 0)
+    insert.run("tool", "tool", JSON.stringify("Useful tool fact: WILLOW"), "read_file", 1)
+    insert.run("unnamed-result", "tool", JSON.stringify("Unnamed tool result"), null, 2)
+    const workerProgress = "Worker progress ".repeat(10_000)
+    for (let ordinal = 3; ordinal < 11; ordinal++) {
+      const id = `poll-${ordinal}`
+      insert.run(id, "tool", JSON.stringify("Waiting\n"), "read_worker_state", ordinal)
+      fragment.run(id, workerProgress)
+      state.run(id, "Waiting\n".length + workerProgress.length)
+    }
+    database.prepare("INSERT INTO thread_message_buckets VALUES ('coordinator-parent', 11, 11, 0)").run()
+    const client = createWorkerClient(path)
+    const options = { beforeOrdinal: 11, beforeMessageId: "\u0001", byteBudget: 64 * 1024, limit: 2 }
+
+    const normal = await client.readPage("coordinator-parent", options)
+    expect(normal.messages).toEqual([expect.objectContaining({
+      id: "poll-10", content: expect.stringContaining("Worker progress")
+    })])
+
+    const sideOptions = { ...options, sideContextTextByteBudget: 80 }
+    const latest = await client.readPage("coordinator-parent", sideOptions)
+    expect(latest.messages.map(({ id, content }) => [id, content])).toEqual([
+      ["tool", "Useful tool fact: WILLOW"], ["unnamed-result", "Unnamed tool result"]
+    ])
+    expect(latest.beforeMessageId).toBe("tool")
+    expect(latest.hasMore).toBe(true)
+    expect(latest.truncatedMessageIds).toBeUndefined()
+
+    const earlier = await client.readPage("coordinator-parent", {
+      ...sideOptions, beforeOrdinal: latest.beforeOrdinal!, beforeMessageId: latest.beforeMessageId!
+    })
+    expect(earlier.messages.map(({ id, content }) => [id, content])).toEqual([["question", "Earlier fact: KESTREL"]])
+    expect(earlier.hasMore).toBe(false)
+  })
+
   it("uses the persisted tail of a fragmented side-context row and filters from its opening text", async () => {
     const { database, path } = createDatabase()
     const insert = database.prepare(`INSERT INTO thread_messages

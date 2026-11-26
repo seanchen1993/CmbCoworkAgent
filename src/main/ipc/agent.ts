@@ -1,3 +1,4 @@
+import { waitForAbort } from "../utils/wait-for-abort"
 import { botSkillDispatchInput } from "../agent/bot-skill-dispatch"
 import {
   COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
@@ -7400,6 +7401,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const throwIfInvokeAborted = (): void => {
           if (
             abortController.signal.aborted ||
+            getSideThreadLifetimeSignal(threadId)?.aborted ||
             !isCurrentRunMessageQueueOwner(threadId, runToken)
           ) {
             throw createAbortError()
@@ -7979,7 +7981,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
           // thread is deleted (threads:delete) or the app is quitting.
-          await fireSessionStartOnce(
+          const sessionStart = fireSessionStartOnce(
             threadId,
             sessionWorkspacePath,
             onHookResult,
@@ -7988,8 +7990,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnState.turnId,
             harnessAgentContext.pluginOutputDir,
             harnessAgentContext.systemId,
-            getHarnessHookContext(harnessAgentContext)
+            getHarnessHookContext(harnessAgentContext),
+            abortController.signal
           )
+          await waitForAbort(sessionStart, abortController.signal)
           throwIfInvokeAborted()
           sendActiveHookNotice(window, channel, workspacePath)
 

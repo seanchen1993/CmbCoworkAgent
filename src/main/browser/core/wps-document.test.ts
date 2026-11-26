@@ -1,4 +1,5 @@
 import type { WebContents } from "electron"
+import { getEventListeners } from "node:events"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { readWpsDocumentText } from "./wps-document"
 
@@ -48,6 +49,7 @@ describe("shared WPS document reader", () => {
   })
   it("bounds a stalled WPS promise and does not start further frame reads after timeout", async () => {
     vi.useFakeTimers()
+    const controller = new AbortController()
     const office = frame("office-iframe")
     let fail!: (reason: Error) => void
     office.executeJavaScript.mockImplementation(
@@ -57,11 +59,34 @@ describe("shared WPS document reader", () => {
         })
     )
     const next = frame("editor")
-    const result = readWpsDocumentText(contents([office, next])).catch((error) => error.message)
+    const result = readWpsDocumentText(contents([office, next]), { signal: controller.signal }).catch(
+      (error) => error.message
+    )
     await vi.advanceTimersByTimeAsync(10_001)
     expect(await result).toContain("超时")
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0)
     fail(new Error("late failure"))
     await Promise.resolve()
+    expect(next.executeJavaScript).not.toHaveBeenCalled()
+  })
+  it("stops waiting for the active WPS frame and skips other frames after cancellation", async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const office = frame("office-iframe")
+    const pending = Promise.withResolvers<{ text: string; totalChars: number }>()
+    office.executeJavaScript.mockReturnValue(pending.promise)
+    const next = frame("editor")
+    const outcome = expect(
+      readWpsDocumentText(contents([office, next]), { signal: controller.signal })
+    ).rejects.toMatchObject({ name: "AbortError" })
+
+    expect(office.executeJavaScript).toHaveBeenCalledOnce()
+    controller.abort()
+    await outcome
+    expect(vi.getTimerCount()).toBe(0)
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0)
+    pending.reject(new Error("late frame failure"))
+    await vi.advanceTimersByTimeAsync(0)
     expect(next.executeJavaScript).not.toHaveBeenCalled()
   })
   it("rejects invalid read sizes and results from a navigated frame", async () => {

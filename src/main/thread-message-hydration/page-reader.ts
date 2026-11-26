@@ -37,7 +37,9 @@ import {
   type ToolOwnershipMessage,
   type VerifiedToolOutcome
 } from "../../shared/tool-result-ownership"
-import { coordinatorTranscriptContentToText } from "../../shared/internal-notification-turn"
+import {
+  coordinatorTranscriptContentToText, isQuietCoordinatorToolName, QUIET_COORDINATOR_TOOL_NAMES
+} from "../../shared/internal-notification-turn"
 import { isVisibleTranscriptMessage } from "../../shared/transcript-visibility"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
@@ -270,6 +272,10 @@ function projectSideContextMessage(
   if (row.role !== "user" && row.role !== "assistant" && row.role !== "tool") {
     return { message, truncated: false, bytes: overhead }
   }
+  // Recovery reads can still include the physical polling row for source verification.
+  if (row.role === "tool" && isQuietCoordinatorToolName(row.name)) {
+    return { message, truncated: false, bytes: overhead }
+  }
   // Omit replay text while keeping the physical row available for pagination.
   if (historicalReplayOf && readHistoricalToolReplayId({
     ...message,
@@ -443,7 +449,8 @@ function readCandidates(
   request: ThreadMessageHydrationReadRequest,
   limit: number,
   cancellation: Int32Array,
-  legacyMigration: LegacyCheckpointMigrationBoundary | null
+  legacyMigration: LegacyCheckpointMigrationBoundary | null,
+  excludeQuietCoordinatorResults: boolean
 ): { rows: CandidateRow[]; verifiedAnchor?: import("../types").ThreadMessagesPage["verifiedAnchor"] } {
   const beforeOrdinal = request.options.beforeOrdinal
   const beforeMessageId = request.options.beforeMessageId?.trim() ?? ""
@@ -582,6 +589,12 @@ function readCandidates(
     )
   }
 
+  const quietToolNames = excludeQuietCoordinatorResults ? [...QUIET_COORDINATOR_TOOL_NAMES] : []
+  // Filter before LIMIT and body-size estimation so hidden polls cannot break up side-context pages.
+  const candidateBoundarySql = quietToolNames.length > 0
+    ? `${createdAtBoundarySql}\n           AND (m.role <> 'tool' OR COALESCE(m.name, '') NOT IN (${quietToolNames.map(() => "?").join(", ")}))`
+    : createdAtBoundarySql
+  const candidateBoundaryBindings = [...boundaryBindings, ...quietToolNames]
   const statement = database.prepare(
     hasAnchorMessageId
       ? `SELECT m.message_id, m.ordinal,
@@ -597,7 +610,7 @@ function readCandidates(
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
            AND (m.ordinal > ? OR (m.ordinal = ? AND m.message_id > ?))
-           ${createdAtBoundarySql}
+           ${candidateBoundarySql}
          ORDER BY m.ordinal ASC, m.message_id ASC
          LIMIT ?`
       : hasTargetMessageId
@@ -614,11 +627,11 @@ function readCandidates(
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
            AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id <= ?))
-           ${createdAtBoundarySql}
+           ${candidateBoundarySql}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
         : hasBeforeOrdinal
-      ? getBackwardThreadMessageCandidatesSql(userOrdinalFloor !== undefined, createdAtBoundarySql)
+      ? getBackwardThreadMessageCandidatesSql(userOrdinalFloor !== undefined, candidateBoundarySql)
       : `SELECT m.message_id, m.ordinal,
                 1024 +
                 CASE
@@ -631,7 +644,7 @@ function readCandidates(
          LEFT JOIN thread_message_fragment_states AS fragments
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
-           ${createdAtBoundarySql}
+           ${candidateBoundarySql}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
   )
@@ -641,7 +654,7 @@ function readCandidates(
           exactMessageOrdinal as number,
           exactMessageOrdinal as number,
           anchorMessageId,
-          ...boundaryBindings,
+          ...candidateBoundaryBindings,
           limit + 1
         ]
       : hasTargetMessageId
@@ -650,7 +663,7 @@ function readCandidates(
             exactMessageOrdinal as number,
             exactMessageOrdinal as number,
             targetMessageId,
-            ...boundaryBindings,
+            ...candidateBoundaryBindings,
             limit + 1
           ]
       : hasBeforeOrdinal
@@ -659,10 +672,10 @@ function readCandidates(
             ...(userOrdinalFloor === undefined
               ? threadMessageBeforeCursorBindings(request.threadId, beforeMessageId, beforeOrdinal as number)
               : [userOrdinalFloor, beforeOrdinal as number, beforeMessageId]),
-            ...boundaryBindings,
+            ...candidateBoundaryBindings,
             limit + 1
           ]
-      : [request.threadId, ...boundaryBindings, limit + 1]
+      : [request.threadId, ...candidateBoundaryBindings, limit + 1]
   const rows: CandidateRow[] = []
   for (const raw of statement.iterate(...bindings)) {
     throwIfCancelled(cancellation)
@@ -1041,7 +1054,8 @@ export function readThreadMessagesPage(
       request,
       limit,
       cancellation,
-      legacyCheckpointMigration
+      legacyCheckpointMigration,
+      sideContextTextByteBudget !== undefined && !request.options.recoveryCheckpointId
     )
     const residentOrdinals = request.options.targetMessageId && request.options.residentMessageIds
       ? readResidentOrdinals(database, request.threadId, request.options.residentMessageIds, Math.floor(byteBudget / 4))

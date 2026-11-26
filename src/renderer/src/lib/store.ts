@@ -47,7 +47,7 @@ import {
 } from "../../../shared/message-role-collision"
 import { revalidateModelCatalog } from "./model-catalog-cache"
 import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/types"
-import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
+import { getChatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
 import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache"
 import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
 import { DEFAULT_STARTUP_VIEW, type StartupView } from "../../../shared/startup-view"
@@ -100,7 +100,7 @@ export function retireRendererThread(threadId: string, deferDirectoryUpdate = fa
     },
     {
       label: "Failed to clear deleted thread scroll state",
-      run: () => chatScrollSessionStore.delete(threadId)
+      run: () => getChatScrollSessionStore(threadId).delete(threadId)
     },
     {
       label: "Failed to clear deleted thread skill generation",

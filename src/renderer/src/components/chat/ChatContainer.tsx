@@ -182,7 +182,7 @@ import {
   type DurableChatSearchMatch,
   type DurableChatSearchPage
 } from "./ChatSearchOverlay"
-import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
+import { getChatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -1856,6 +1856,7 @@ export function ChatContainer({
         : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
+  const chatScrollSessionStore = getChatScrollSessionStore(threadId)
   const [initialChatScrollView] = useState(() => chatScrollSessionStore.open(threadId))
   const initialChatScrollSession = initialChatScrollView.session
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
@@ -4448,7 +4449,7 @@ export function ChatContainer({
       if (lease.threadId !== threadId) return
       chatScrollSessionStore.setPendingRevealMessageId(lease, messageId)
     },
-    [threadId]
+    [chatScrollSessionStore, threadId]
   )
   const invalidateDurableMessageReveal = useCallback((): void => {
     durableMessageWindowGenerationRef.current += 1
@@ -4530,7 +4531,7 @@ export function ChatContainer({
     upwardUserScrollIntentUntilRef.current = 0
     downwardUserScrollIntentUntilRef.current = 0
     scrollbarUserIntentActiveRef.current = false
-  }, [threadId])
+  }, [chatScrollSessionStore, threadId])
 
   useEffect(() => {
     if (!trackTranscriptScroll || scrollParent || !scrollRef.current) return
@@ -4804,7 +4805,7 @@ export function ChatContainer({
         bottomScrollFrameRef.current = null
       }
     }
-  }, [cancelMessageWindowLoad, getViewport, threadId])
+  }, [cancelMessageWindowLoad, chatScrollSessionStore, getViewport, threadId])
   const searchDurableMessages = useCallback(
     (query: string, options: DurableChatSearchOptions): Promise<DurableChatSearchPage> => {
       return window.api.threads.searchMessages(threadId, query, {

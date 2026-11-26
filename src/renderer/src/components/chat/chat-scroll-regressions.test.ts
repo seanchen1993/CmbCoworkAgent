@@ -10,6 +10,7 @@ import {
 } from "./ChatMessageVirtualList"
 import {
   createChatScrollSessionStore,
+  getChatScrollSessionStore,
   restoreChatScrollSessionState,
   type ChatScrollSession
 } from "./chat-scroll-session-store"
@@ -358,6 +359,77 @@ describe("chat scroll session restoration", () => {
     expect(store.size()).toBe(2)
   })
 
+  it("keeps the main chat scroll lease while repeatedly opening and deleting side chats", () => {
+    const store = createChatScrollSessionStore()
+    const mainView = store.open("thread-a")
+    store.save(mainView.lease, detachedSession("thread-a", 1))
+
+    for (let index = 0; index < 48; index += 1) {
+      const sideThreadId = `side-${index}`
+      const sideView = store.open(sideThreadId)
+      store.save(sideView.lease, detachedSession(sideThreadId))
+      store.delete(sideThreadId)
+    }
+
+    const lastReadPosition = detachedSession("thread-a", 5)
+    lastReadPosition.anchor = { messageId: "thread-a-m-12", offsetFromViewportTop: 24 }
+    store.save(mainView.lease, lastReadPosition)
+
+    expect(store.size()).toBe(1)
+    expect(store.open("thread-a").session).toMatchObject({
+      state: { unreadCount: 5 },
+      anchor: lastReadPosition.anchor
+    })
+  })
+
+  it("isolates the main chat lease and cached state from a growing set of side tabs", () => {
+    const parentId = "c23102be-c6aa-4171-bbe0-b7cf773472de"
+    const mainStore = getChatScrollSessionStore(parentId)
+    const mainLease = mainStore.open(parentId).lease
+    const mainSession = detachedSession(parentId)
+    mainStore.save(mainLease, mainSession)
+    mainStore.setPendingRevealMessageId(mainLease, "parent-pending-reveal")
+
+    const otherThreadIds = Array.from({ length: 47 }, (_, index) => `thread-${index}`)
+    const sideThreadIds = Array.from(
+      { length: 49 },
+      (_, index) => `btw-${parentId}-fb0b28b8-4adc-4f00-a317-${String(index).padStart(12, "0")}`
+    )
+    const sideStore = getChatScrollSessionStore(sideThreadIds[0])
+
+    try {
+      for (const id of otherThreadIds) {
+        mainStore.save(mainStore.open(id).lease, detachedSession(id))
+      }
+      const sideLeases = sideThreadIds.map((id) => {
+        const store = getChatScrollSessionStore(id)
+        const lease = store.open(id).lease
+        store.save(lease, detachedSession(id))
+        store.setPendingRevealMessageId(lease, `${id}-pending-reveal`)
+        return lease
+      })
+
+      expect(mainStore.getPendingRevealMessageId(mainLease)).toBe("parent-pending-reveal")
+      expect(mainStore.size()).toBe(48)
+      expect(sideStore.size()).toBe(48)
+      const [evictedSideLease] = sideLeases
+      sideStore.save(evictedSideLease, detachedSession(evictedSideLease.threadId))
+      sideStore.setPendingRevealMessageId(evictedSideLease, "evicted-side-reveal")
+      expect(sideStore.open(evictedSideLease.threadId)).toMatchObject({
+        session: null,
+        pendingRevealMessageId: null
+      })
+      expect(mainStore.open(parentId)).toMatchObject({
+        session: { anchor: mainSession.anchor },
+        pendingRevealMessageId: "parent-pending-reveal"
+      })
+    } finally {
+      for (const id of [parentId, ...otherThreadIds, ...sideThreadIds]) {
+        getChatScrollSessionStore(id).delete(id)
+      }
+    }
+  })
+
   it("does not let an unmount save resurrect a deleted same-id session", () => {
     const store = createChatScrollSessionStore(2)
     const oldView = store.open("thread-a")
@@ -365,10 +437,12 @@ describe("chat scroll session restoration", () => {
     store.setPendingRevealMessageId(oldView.lease, "old-message")
 
     store.delete("thread-a")
+    // React cleanup can run after the backend deletion has already completed.
+    store.save(oldView.lease, detachedSession("thread-a", 9))
+    store.setPendingRevealMessageId(oldView.lease, "stale-reveal")
     const replacementView = store.open("thread-a")
     expect(replacementView.session).toBeNull()
     expect(replacementView.pendingRevealMessageId).toBeNull()
-    // React cleanup can run after the backend deletion has already completed.
     store.save(oldView.lease, detachedSession("thread-a", 9))
     store.setPendingRevealMessageId(oldView.lease, "stale-reveal")
 

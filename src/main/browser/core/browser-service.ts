@@ -433,12 +433,14 @@ export class BrowserService {
       textOffset?: number
       linkOffset?: number
       frameIndex?: number
+      signal?: AbortSignal
     } = {}
   ): Promise<{
     frames: BrowserIframeInformation[]
   }> {
     const session = this.requireSession()
     await session.targetReady
+    options.signal?.throwIfAborted()
     const mainFrame = session.view.webContents.mainFrame
     const iframeFrames = mainFrame.framesInSubtree.filter((frame) => frame !== mainFrame)
     const frames = iframeFrames
@@ -485,10 +487,10 @@ export class BrowserService {
     return { frames: results }
   }
 
-  async readWpsDocumentText(): Promise<{ text: string }> {
+  async readWpsDocumentText(signal?: AbortSignal): Promise<{ text: string }> {
     const session = this.requireSession()
     await session.targetReady
-    const { text } = await readWpsDocumentText(session.view.webContents)
+    const { text } = await readWpsDocumentText(session.view.webContents, { signal })
     return { text }
   }
 

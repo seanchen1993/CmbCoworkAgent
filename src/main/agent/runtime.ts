@@ -409,10 +409,10 @@ import {
   getGlobalMcpCapabilityService
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
+import { waitForAbort } from "../utils/wait-for-abort"
 import {
   autoSelectPlaywrightInAppBrowserTab,
-  invokeMcpToolWithPlaywrightInAppBrowserSupport,
-  shouldPreparePlaywrightInAppBrowser
+  invokeMcpToolWithPlaywrightInAppBrowserSupport
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   DeepSeekChatOpenAICompletions,
@@ -1400,7 +1400,7 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
-    inAppBrowserSignal?: AbortSignal
+    abortSignal?: AbortSignal
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1434,19 +1434,20 @@ export function createScopedMcpCapabilityService(
     return [...hookScope.activePluginIds].sort().join("\u001f")
   }
 
-  const getBaseToolSnapshot = async (): Promise<{
+  const getBaseToolSnapshot = async (signal = baseContext.abortSignal): Promise<{
     fingerprint: string
     tools: McpCapabilityTool[]
   }> => {
+    signal?.throwIfAborted()
     if (baseSnapshotCache) {
       return { fingerprint: baseSnapshotCache.fingerprint, tools: [...baseSnapshotCache.tools] }
     }
 
     let snapshot: { fingerprint: string; tools: McpCapabilityTool[] }
     if (service.getSnapshot) {
-      snapshot = await service.getSnapshot()
+      snapshot = await waitForAbort(service.getSnapshot(), signal)
     } else {
-      const tools = await service.listTools()
+      const tools = await waitForAbort(service.listTools(), signal)
       snapshot = {
         fingerprint: tools
           .map((tool) => tool.capabilityId)
@@ -1459,11 +1460,12 @@ export function createScopedMcpCapabilityService(
     return { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
   }
 
-  const getScopedToolSnapshot = async (): Promise<{
+  const getScopedToolSnapshot = async (signal = baseContext.abortSignal): Promise<{
     tools: McpCapabilityTool[]
     maps: ReturnType<typeof buildAliasMaps>
   }> => {
-    const baseSnapshot = await getBaseToolSnapshot()
+    const baseSnapshot = await getBaseToolSnapshot(signal)
+    signal?.throwIfAborted()
     const cacheKey = `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`
     if (scopedSnapshotCache?.key === cacheKey) {
       return { tools: [...scopedSnapshotCache.tools], maps: scopedSnapshotCache.maps }
@@ -1485,11 +1487,12 @@ export function createScopedMcpCapabilityService(
 
   const resolveScopedTool = async (idOrAlias: string): Promise<McpCapabilityTool | null> => {
     const { maps } = await getScopedToolSnapshot()
+    baseContext.abortSignal?.throwIfAborted()
     return (
       maps.capabilityById.get(idOrAlias) ??
       maps.toolIds.get(idOrAlias) ??
       maps.canonicalToolIds.get(idOrAlias) ??
-      service.getTool(idOrAlias)
+      waitForAbort(service.getTool(idOrAlias), baseContext.abortSignal)
     )
   }
 
@@ -1625,15 +1628,27 @@ export function createScopedMcpCapabilityService(
       }
     },
     getTool: resolveScopedTool,
-    invoke: async (idOrAlias, args) => {
-      const snapshot = await getScopedToolSnapshot()
+    invoke: async (idOrAlias, args, callerSignal) => {
+      const scopeSignal = baseContext.abortSignal
+      const signal =
+        scopeSignal && callerSignal && scopeSignal !== callerSignal
+          ? AbortSignal.any([scopeSignal, callerSignal])
+          : scopeSignal ?? callerSignal
+      const invokeTool = (targetId: string, input: Record<string, unknown>) => {
+        if (!signal) return service.invoke(targetId, input)
+        signal.throwIfAborted()
+        return waitForAbort(service.invoke(targetId, input, signal), signal)
+      }
+      const snapshot = await getScopedToolSnapshot(signal)
+      signal?.throwIfAborted()
       const tool =
         snapshot.maps.capabilityById.get(idOrAlias) ??
         snapshot.maps.toolIds.get(idOrAlias) ??
         snapshot.maps.canonicalToolIds.get(idOrAlias) ??
-        (await service.getTool(idOrAlias))
+        (await waitForAbort(service.getTool(idOrAlias), signal))
+      signal?.throwIfAborted()
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
-      if (!tool) return service.invoke(idOrAlias, args)
+      if (!tool) return invokeTool(idOrAlias, args)
 
       const hookContext: HookContext = {
         toolName: tool.toolId,
@@ -1656,11 +1671,14 @@ export function createScopedMcpCapabilityService(
         projectDir: baseContext.projectDir,
         workspaceHookCwd: baseContext.workspaceHookCwd,
         forceSyncWorkspaceHooks: baseContext.forceSyncWorkspaceHooks,
+        ...(signal && { abortSignal: signal, stopPendingHooksOnAbort: true }),
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
       const preHooks = resolveHooksForContext("PreToolUse", hookContext)
+      signal?.throwIfAborted()
       const preResult = await runHooksEnriched(preHooks, "PreToolUse", hookContext, onHookResult)
+      signal?.throwIfAborted()
       if (preResult) {
         hookScope.activatePersistentHooks(preHooks)
       }
@@ -1695,46 +1713,42 @@ export function createScopedMcpCapabilityService(
         capabilityService: service,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
-        signal: baseContext.inAppBrowserSignal
+        signal
       })
 
+      signal?.throwIfAborted()
       if (pluginId) hookScope.activatePlugin(pluginId)
       const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
         tool,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
-        signal: baseContext.inAppBrowserSignal,
+        signal,
         args: effectiveArgs,
         prepareBeforeInvoke: false,
-        invoke: async (signal) => {
-          const invokeTool = async (target: McpCapabilityTool) => {
-            const dispatchSignal = signal ?? (shouldPreparePlaywrightInAppBrowser(target)
-              ? baseContext.inAppBrowserSignal
-              : undefined)
-            if (!dispatchSignal) return service.invoke(target.capabilityId, effectiveArgs)
-            dispatchSignal.throwIfAborted()
-            const invocation = await service.invoke(target.capabilityId, effectiveArgs, dispatchSignal)
-            dispatchSignal.throwIfAborted()
-            return invocation
-          }
+        invoke: async () => {
           try {
-            return await invokeTool(tool)
+            return await invokeTool(tool.capabilityId, effectiveArgs)
           } catch (error) {
+            signal?.throwIfAborted()
             const fallbackTool = shouldFallbackMcpError(error)
               ? findFallbackTool(tool, snapshot.tools)
               : null
             if (!fallbackTool) throw error
-            return appendFallbackNotice(await invokeTool(fallbackTool), tool, fallbackTool)
+            const result = await invokeTool(fallbackTool.capabilityId, effectiveArgs)
+            return appendFallbackNotice(result, tool, fallbackTool)
           }
         }
       })
+      signal?.throwIfAborted()
       const postContext: HookContext = {
         ...hookContext,
         toolArgs: effectiveArgs,
         toolResult: result.text
       }
       const postHooks = resolveHooksForContext("PostToolUse", postContext)
+      signal?.throwIfAborted()
       const postResult = await runHooksEnriched(postHooks, "PostToolUse", postContext, onHookResult)
+      signal?.throwIfAborted()
       if (postResult) {
         hookScope.activatePersistentHooks(postHooks)
       }
@@ -1747,6 +1761,7 @@ export function createScopedMcpCapabilityService(
       if (shouldSendFailureFuseNotice(failureFuseDecision)) {
         onFailureFuseNotice?.(failureFuseDecision)
       }
+      signal?.throwIfAborted()
       // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
       // than a throw or a `success: false` shape, so `detectToolFailure` (which
       // looks at common ad-hoc shapes) doesn't see them. Translate isError →
@@ -1764,6 +1779,7 @@ export function createScopedMcpCapabilityService(
           })
         }
         const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+        signal?.throwIfAborted()
         runHooksEnriched(failureHooks, "PostToolUseFailure", failureContext, onHookResult).catch(
           (e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
         )
@@ -2369,6 +2385,41 @@ interface RuntimeToolFailure {
   signal: ToolFailureSignal
 }
 
+type RuntimeTool = {
+  name?: string
+  func?: unknown
+  invoke?: unknown
+}
+
+export function wrapRuntimeToolErrors(tools: RuntimeTool[], abortSignal?: AbortSignal): void {
+  for (const tool of tools) {
+    for (const method of ["func", "invoke"] as const) {
+      const original = tool[method]
+      if (typeof original !== "function") continue
+      tool[method] = async (...args: unknown[]) => {
+        abortSignal?.throwIfAborted()
+        try {
+          const result = await Reflect.apply(original, tool, args)
+          abortSignal?.throwIfAborted()
+          return result
+        } catch (error) {
+          abortSignal?.throwIfAborted()
+          if (
+            isWorkflowStructuredOutputFatalError(error) ||
+            (method === "invoke" && (isHookHaltError(error) || isFailureFuseHaltError(error)))
+          )
+            throw error
+          const message = error instanceof Error ? error.message : String(error)
+          const level =
+            error instanceof TypeError || error instanceof ReferenceError ? "error" : "warn"
+          console[level](`[Runtime] Tool "${tool.name}" error (non-fatal):`, message)
+          return message
+        }
+      }
+    }
+  }
+}
+
 /** Dispatch tool exceptions using the owning runtime's hook scope and failure fuse. */
 export function createRuntimeToolFailureHandler(
   baseContext: HookContext & { sessionId: string },
@@ -2379,6 +2430,8 @@ export function createRuntimeToolFailureHandler(
   onHookResult?: HookResultCallback
 ): (input: RuntimeToolFailure) => FailureFuseDecision | undefined {
   return ({ toolName, toolCallId, toolArgs, signal }) => {
+    const abortSignal = baseContext.stopPendingHooksOnAbort ? baseContext.abortSignal : undefined
+    if (abortSignal?.aborted) return undefined
     const { sessionId: threadId, turnId } = baseContext
     const decision = turnId
       ? recordToolFailure({
@@ -2408,9 +2461,12 @@ export function createRuntimeToolFailureHandler(
       })
     }
     const event = "PostToolUseFailure"
-    runHooks(resolveHooks(event, context), event, context, onHookResult).catch((error) =>
-      console.warn("[Hooks] PostToolUseFailure hook error:", error)
-    )
+    const hooks = resolveHooks(event, context)
+    if (!abortSignal?.aborted) {
+      runHooks(hooks, event, context, onHookResult).catch((error) =>
+        console.warn("[Hooks] PostToolUseFailure hook error:", error)
+      )
+    }
     return decision
   }
 }
@@ -2508,6 +2564,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
     // adapter keeps createDeepAgent oblivious to that wiring.
     onToolFailureSignal,
+    sideConversationSignal,
     onFinalSystemPrompt,
     onFailureFuseNotice,
     onTurnCompletionRecovery,
@@ -2522,6 +2579,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
     onToolFailureSignal?: (input: RuntimeToolFailure) => FailureFuseDecision | void
+    sideConversationSignal?: AbortSignal
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
     checkFinalDelivery?: TurnFinalDeliveryCheck
@@ -2955,6 +3013,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       try {
         return await handler(request)
       } catch (error) {
+        sideConversationSignal?.throwIfAborted()
         // Protection halts are control flow, not tool failures. Propagate
         // before PostToolUseFailure/failure-fuse accounting can misclassify
         // or replace the dedicated stationarity halt.
@@ -5182,6 +5241,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     skillUseTracker,
     onFileMutation
   } = options
+  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
+  const sideConversationSignal = sideConversationLifetime && options.abortSignal
+    ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
+    : sideConversationLifetime
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const runtimeBlockedToolNames = runtimeToolDenylist(blockedToolNames)
   const isCoordinatorMode = agentMode === "coordinator"
@@ -5491,7 +5554,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         taskSubagentsEnabled: mainSubagentsEnabled
       }
     ),
-    abortSignal: options.abortSignal,
+    abortSignal: sideConversationSignal ?? options.abortSignal,
+    stopPendingHooksOnAbort: sideConversationSignal !== undefined,
     backgroundCommandLifecycle: options.backgroundCommandLifecycle,
     foregroundCommandLifecycle: options.foregroundCommandLifecycle,
     runId: threadId,
@@ -5925,10 +5989,6 @@ The workspace root is: ${fileRoot}`
     console.log("[Runtime] Memory disabled for this session")
   }
 
-  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
-  const sideConversationSignal = sideConversationLifetime && options.abortSignal
-    ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
-    : sideConversationLifetime
   const capabilityService = createScopedMcpCapabilityService(
     options.capabilityService ??
       (disableMcpTools
@@ -5949,7 +6009,7 @@ The workspace root is: ${fileRoot}`
     {
       workspacePath,
       threadId,
-      inAppBrowserSignal: sideConversationSignal,
+      abortSignal: sideConversationSignal,
       agentId,
       pluginOutputDir,
       systemId,
@@ -6052,11 +6112,6 @@ The workspace root is: ${fileRoot}`
     }
   }
 
-  type RuntimeTool = {
-    name?: string
-    func?: unknown
-    invoke?: unknown
-  }
   const extraTools: RuntimeTool[] = []
   if (options.enableRequestUserInput) {
     extraTools.push(
@@ -6106,44 +6161,6 @@ The workspace root is: ${fileRoot}`
     )
   }
 
-  // Wrap extra tools so that errors are returned as strings instead of throwing
-  function wrapToolErrors(tools: RuntimeTool[]): void {
-    for (const t of tools) {
-      if (typeof t.func === "function") {
-        const originalFunc = t.func
-        t.func = async (...args: unknown[]) => {
-          try {
-            return await Reflect.apply(originalFunc, t, args)
-          } catch (e: unknown) {
-            if (isWorkflowStructuredOutputFatalError(e)) throw e
-            const msg = e instanceof Error ? e.message : String(e)
-            const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
-            console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
-            return msg
-          }
-        }
-      }
-      if (typeof t.invoke === "function") {
-        const originalInvoke = t.invoke
-        t.invoke = async (...args: unknown[]) => {
-          try {
-            return await Reflect.apply(originalInvoke, t, args)
-          } catch (e: unknown) {
-            if (
-              isHookHaltError(e) ||
-              isFailureFuseHaltError(e) ||
-              isWorkflowStructuredOutputFatalError(e)
-            )
-              throw e
-            const msg = e instanceof Error ? e.message : String(e)
-            const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
-            console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
-            return msg
-          }
-        }
-      }
-    }
-  }
   if (options.additionalTools?.length) {
     extraTools.push(...(options.additionalTools as unknown as RuntimeTool[]))
   }
@@ -6314,11 +6331,11 @@ The workspace root is: ${fileRoot}`
     )
   }
 
-  wrapToolErrors(extraTools)
-  wrapToolErrors(memoryTools as RuntimeTool[])
+  wrapRuntimeToolErrors(extraTools, sideConversationSignal)
+  wrapRuntimeToolErrors(memoryTools as RuntimeTool[], sideConversationSignal)
 
   if (toolSearchTools.length > 0) {
-    wrapToolErrors(toolSearchTools as RuntimeTool[])
+    wrapRuntimeToolErrors(toolSearchTools as RuntimeTool[], sideConversationSignal)
   }
 
   if (codeExecRouteEnabled) {
@@ -6352,6 +6369,7 @@ The workspace root is: ${fileRoot}`
   const toolHookMiddleware = createToolHookMiddleware({
     workspacePath,
     threadId: options.threadId,
+    abortSignal: sideConversationSignal,
     agentId,
     hookScope,
     resolveHooksForContext,
@@ -7240,7 +7258,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       })
     : []
   if (coordinatorWorkerToolsForMain.length > 0) {
-    wrapToolErrors(coordinatorWorkerToolsForMain as RuntimeTool[])
+    wrapRuntimeToolErrors(coordinatorWorkerToolsForMain as RuntimeTool[], sideConversationSignal)
   }
 
   if (isCoordinatorMode) {
@@ -7496,6 +7514,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     userInputWithoutToolLock: options.userInputWithoutToolLock,
     botBrowserToolsOwnFileLock: options.botBrowserToolsOwnFileLock,
     toolHookMiddleware,
+    sideConversationSignal,
     onFailureFuseNotice,
     onContextCompaction,
     onToolFailureSignal: createRuntimeToolFailureHandler(
@@ -7515,6 +7534,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         harnessNodeStatus,
         projectCode,
         projectDir,
+        ...(sideConversationSignal && {
+          abortSignal: sideConversationSignal,
+          stopPendingHooksOnAbort: true
+        }),
         ...isolatedWorkspaceHookContext
       },
       resolveHooksForContext,

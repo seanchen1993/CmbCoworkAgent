@@ -20,11 +20,14 @@ import { getSelectableModelConfigOrDefault } from "../models/registry"
 import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOKENS, getDbPath, getThreadCheckpointPath } from "../storage"
 import { getWorkspaceFilePreviewClient } from "../workspace-file-preview/client"
 import { classifyWorkspaceFilePreviewError } from "../workspace-file-preview/errors"
+import { sideThreads, type SideWindow } from "../side-thread-registry"
 import {
   isForegroundCheckpointOpening,
   tryBackgroundThreadMutationLock,
   withThreadRunMutationLock
 } from "./thread-run-mutation-lock"
+
+export { getSideThreadLifetimeSignal } from "../side-thread-registry"
 
 export const btwRequest = z.object({
   parentId: z.string().uuid(),
@@ -33,27 +36,13 @@ export const btwRequest = z.object({
     .refine(path => !path.includes("\0"))).max(BTW_FILE_CANDIDATE_LIMIT).optional()
 }).strict()
 
-interface SideWindow {
-  document: AbortController
-  ids: Set<string>
-}
-
-interface SideThreadRegistration {
-  ordinal: number
-  owner: SideWindow
-  lifetime: AbortController
-  context: BtwMessage[]
-}
-
 interface SideThreadTeardown {
   attempt: Promise<void>
   completion: Promise<void>
 }
 
 const sideWindows = new WeakMap<WebContents, SideWindow>()
-const sideThreads = new Map<string, SideThreadRegistration>()
 const sideThreadTeardowns = new Map<string, SideThreadTeardown>()
-const closedSideThreadSignal = AbortSignal.abort()
 
 export function canRunSideThread(threadId: string): boolean {
   const parentId = getBtwParentId(threadId)
@@ -64,12 +53,6 @@ export function canRunSideThread(threadId: string): boolean {
 
 export function getSideThreadContext(threadId: string): readonly BtwMessage[] | undefined {
   return sideThreads.get(threadId)?.context
-}
-
-/** Also fence work that first looks up a side thread after it is unregistered. */
-export function getSideThreadLifetimeSignal(threadId: string): AbortSignal | undefined {
-  if (!getBtwParentId(threadId)) return undefined
-  return sideThreads.get(threadId)?.lifetime.signal ?? closedSideThreadSignal
 }
 
 export function hasRegisteredSideThread(threadId: string): boolean {

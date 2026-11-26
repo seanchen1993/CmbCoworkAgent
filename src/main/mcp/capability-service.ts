@@ -6,6 +6,7 @@ import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser
 import { buildMcpServerConfig } from "../ipc/mcp"
 import { getEnabledMcpConnectors, getPlugins, getUserInfo, parseMcpJsonFile } from "../storage"
 import type { PluginMcpServerConfig } from "../types"
+import { waitForAbort } from "../utils/wait-for-abort"
 import { buildAliasMaps, buildCapabilityAliases, type McpCapabilitySeed } from "./aliasing"
 import { resolveMcpConnectorKind } from "./connector-kind"
 import type {
@@ -243,7 +244,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     signal?: AbortSignal
   ): Promise<McpInvocationResult> {
     signal?.throwIfAborted()
-    await this.ensureInitialized()
+    await waitForAbort(this.ensureInitialized(), signal)
     signal?.throwIfAborted()
 
     const tool = this.resolveTool(idOrAlias)
@@ -256,7 +257,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       throw new Error("MCP runtime is not initialized")
     }
 
-    const serverClient = await client.getClient(tool.providerKey)
+    const serverClient = await waitForAbort(client.getClient(tool.providerKey), signal)
     if (!serverClient) {
       throw new Error(`MCP client is unavailable for provider ${tool.providerDisplayName}`)
     }

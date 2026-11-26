@@ -15,7 +15,8 @@ import {
   getDiscoveredSkillAliases,
   normalizeSkillId
 } from "../skills/ids"
-import { runHooks, type HookContext, type HookResultCallback } from "./runner"
+import { getHookCancellationSignal, runHooks, type HookContext, type HookResultCallback } from "./runner"
+import { waitForAbort } from "../utils/wait-for-abort"
 import { joinHookText } from "./text"
 import type { HookConfig, HookEvent, HookResult } from "./types"
 import {
@@ -213,8 +214,8 @@ export async function runHooksEnriched(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
-  return enrichHookResultWithRequiredSkill(
-    await runHooks(hooks, event, context, onHookResult),
-    context
-  )
+  const result = await runHooks(hooks, event, context, onHookResult)
+  const signal = getHookCancellationSignal(event, context)
+  signal?.throwIfAborted()
+  return waitForAbort(enrichHookResultWithRequiredSkill(result, context), signal)
 }
