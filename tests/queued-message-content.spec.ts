@@ -259,6 +259,20 @@ function testDisplayAttachmentAndSkill(): void {
   )
 }
 
+function testRequirementWorkbenchInstructionIsModelOnly(): void {
+  const instruction = "请使用 `requirement-workbench` 技能处理上述需求。"
+  const draft = qm({
+    text: "需求名称：示例",
+    contextLabel: "requirement-workbench",
+    skillBlock: instruction,
+    skillName: "requirement-workbench"
+  })
+  assertEqual(getQueuedModelContent(draft), `需求名称：示例\n\n${instruction}`,
+    "requirement workbench instruction reaches the model")
+  assertEqual(getQueuedDisplayContent(draft), "需求名称：示例",
+    "requirement workbench instruction stays hidden from the user bubble")
+}
+
 // ── getQueuedPreview (single-line list preview) ─────────────────────────────────
 
 function testPreviewCollapsesWhitespace(): void {
@@ -312,6 +326,7 @@ async function main(): Promise<void> {
     testDisplayWithAttachmentPrefix,
     testDisplaySkillOnly,
     testDisplayAttachmentAndSkill,
+    testRequirementWorkbenchInstructionIsModelOnly,
     testPreviewCollapsesWhitespace,
     testPreviewStripsSkillBlock,
     testPreviewEmptyFallback,

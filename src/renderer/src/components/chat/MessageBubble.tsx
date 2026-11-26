@@ -681,8 +681,10 @@ function MessageBubbleImpl({
 
     if (typeof displayMessageContent === "string") {
       const displayContent = displayMessageContent
+      const contextualSkillName =
+        message.contextLabel === "requirement-workbench" ? "requirement-workbench" : null
       // Empty content (after potentially stripping the trailing skill-use block below)
-      if (!displayContent.trim() && !historicalSkillName) {
+      if (!displayContent.trim() && !historicalSkillName && !contextualSkillName) {
         return null
       }
 
@@ -692,7 +694,7 @@ function MessageBubbleImpl({
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
         const skillContent = parseUserVisibleSkillContent(displayContent)
-        const skillName = historicalSkillName ?? skillContent.skillName
+        const skillName = historicalSkillName ?? contextualSkillName ?? skillContent.skillName
         const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
         return (
           <div

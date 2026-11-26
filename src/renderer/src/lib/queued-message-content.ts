@@ -47,7 +47,8 @@ export function getQueuedDisplayContent(message: QueuedMessage, includeWorkbench
     ? formatBotMessageReply(primary, message.botReplyTo, "workbench")
     : primary
   const visible = formatBuiltinBrowserTranscriptMessage(body, message.builtinBrowser === true)
-  return [visible, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+  const visibleSkillBlock = message.contextLabel === "requirement-workbench" ? undefined : message.skillBlock
+  return [visible, visibleSkillBlock].filter((part) => part && part.trim()).join("\n\n")
 }
 
 /** Keep real attachment references separate from display text and part of request identity. */
