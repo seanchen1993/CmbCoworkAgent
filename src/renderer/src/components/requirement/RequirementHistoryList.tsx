@@ -6,6 +6,7 @@ import {
   EllipsisVertical,
   FilePlus2,
   Loader2,
+  Pencil,
   Trash2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -107,7 +108,8 @@ export function RequirementHistoryList({
   systemId,
   onCreate,
   onOpen,
-  onDelete
+  onDelete,
+  onChangeSystem
 }: {
   requirements: RequirementRecord[]
   currentUser: RequirementUser | null
@@ -125,6 +127,7 @@ export function RequirementHistoryList({
   onCreate: () => void
   onOpen: (requirement: RequirementRecord) => void
   onDelete: (requirement: RequirementRecord) => Promise<void>
+  onChangeSystem: (requirement: RequirementRecord) => void
 }): React.JSX.Element {
   const threads = useAppStore((state) => state.threads)
   const allStreamLoadingStates = useAllStreamLoadingStates()
@@ -317,6 +320,13 @@ export function RequirementHistoryList({
                           align="end"
                           onClick={(event) => event.stopPropagation()}
                         >
+                          <DropdownMenuItem
+                            disabled={item.readOnly}
+                            onSelect={() => onChangeSystem(item)}
+                          >
+                            <Pencil />
+                            更换系统
+                          </DropdownMenuItem>
                           <DropdownMenuItem
                             variant="destructive"
                             disabled={item.readOnly}

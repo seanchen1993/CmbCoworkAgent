@@ -1147,6 +1147,27 @@ async function renameRequirement(reqId: string, title: string): Promise<Requirem
   return toRuntimeRequirement(next)
 }
 
+async function updateRequirementSystem(
+  reqId: string,
+  systemId: string
+): Promise<RequirementRuntimeItem> {
+  const normalizedReqId = reqId?.trim()
+  const normalizedSystemId = systemId?.trim()
+  if (!normalizedReqId || !normalizedSystemId) throw new Error("需求编号和系统不能为空")
+  const list = await readRequirementIndex()
+  const index = list.findIndex((item) => item.reqId === normalizedReqId)
+  if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+  if (list[index].systemId === normalizedSystemId) return toRuntimeRequirement(list[index])
+  const next = {
+    ...list[index],
+    systemId: normalizedSystemId,
+    updatedAt: new Date().toISOString()
+  }
+  list[index] = next
+  await writeRequirementIndex(list)
+  return toRuntimeRequirement(next)
+}
+
 async function saveRequirementDesignState(
   reqId: string,
   state: {
@@ -1657,6 +1678,16 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
         return { success: true, requirement: await renameRequirement(reqId, title) }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : "重命名需求失败" }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:update-system",
+    async (_event, { reqId, systemId }: { reqId: string; systemId: string }) => {
+      try {
+        return { success: true, requirement: await updateRequirementSystem(reqId, systemId) }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : "更换需求系统失败" }
       }
     }
   )

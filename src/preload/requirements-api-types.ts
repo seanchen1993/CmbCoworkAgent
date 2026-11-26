@@ -67,6 +67,7 @@ export interface RequirementsApi {
     error?: string
   }>
   rename: (payload: { reqId: string; title: string }) => Promise<RequirementResult>
+  updateSystem: (payload: { reqId: string; systemId: string }) => Promise<RequirementResult>
   saveDesignState: (payload: {
     reqId: string
     needDesign: "" | "0" | "1"

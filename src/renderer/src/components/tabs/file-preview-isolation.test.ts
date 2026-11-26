@@ -199,6 +199,28 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).toContain("{onFullscreenChange ? (")
   })
 
+  it("keeps an explicit overlay file request until the drawer closes", () => {
+    const handledRequest = resourcePanelOverlay.match(
+      /const clearHandledPreviewRequest = useCallback\(\(\) => \{([\s\S]*?)\n  \}, \[clearPreviewRequest\]\)/
+    )?.[1]
+    const closeOverlay = resourcePanelOverlay.match(
+      /const close = useCallback\(\(\) => \{([\s\S]*?)\n  \}, \[clearPreviewRequest, detachBrowser\]\)/
+    )?.[1]
+
+    expect(handledRequest).toBeDefined()
+    expect(handledRequest).not.toContain("setFilePreview(null)")
+    expect(handledRequest).toContain("clearPreviewRequest()")
+    expect(closeOverlay).toContain("setFilePreview(null)")
+    expect(closeOverlay).toContain("setFilePreviewThreadId(null)")
+    expect(resourcePanelOverlay).toContain('if (mode === "preview") return')
+    expect(resourcePanelOverlay).toContain(
+      "onRequestPreviewMode={handlePreviewModeRequest}"
+    )
+    expect(resourcePanelOverlay).not.toContain(
+      'onRequestPreviewMode={() => selectMode("preview")}'
+    )
+  })
+
   it("requires a trusted-source grant instead of exposing renderer path-to-token minting", () => {
     expect(previewIpc).toContain('"externalGrant" in source')
     expect(previewIpc).toContain("resolveExternalFileReadGrant")

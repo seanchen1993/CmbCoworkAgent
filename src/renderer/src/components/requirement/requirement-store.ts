@@ -53,15 +53,22 @@ function findSystem(systems: DesignSystemInfo[], systemId: string | null): Desig
 
 type RequirementStore = {
   systemList: RequirementSystemInfo[]
+  systemsLoaded: boolean
+  /** Last system used when creating a requirement. Persisted across sessions. */
   selectedSystemId: string | null
+  /** Requirement-list filter. Deliberately independent from creation history. */
+  listSystemFilterId: string | null
   setSystemList: (systems: DesignSystemInfo[]) => void
   setSelectedSystemId: (systemId: string | null) => void
+  setListSystemFilterId: (systemId: string | null) => void
   addCustomSystem: (name: string) => RequirementSystemInfo
 }
 
 export const useRequirementStore = create<RequirementStore>((set) => ({
   systemList: readCustomSystems(),
+  systemsLoaded: false,
   selectedSystemId: readLastSelectedSystemId(),
+  listSystemFilterId: null,
   setSystemList: (systems) => {
     set((state) => {
       const systemList = mergeCustomSystems(
@@ -69,15 +76,23 @@ export const useRequirementStore = create<RequirementStore>((set) => ({
         state.systemList.filter((system) => system.theme === "")
       )
       const selectedSystemId = findSystem(systemList, state.selectedSystemId)?.id ?? null
+      const listSystemFilterId = findSystem(systemList, state.listSystemFilterId)?.id ?? null
       if (selectedSystemId !== state.selectedSystemId) persistLastSelectedSystemId(selectedSystemId)
-      return { systemList, selectedSystemId }
+      return { systemList, systemsLoaded: true, selectedSystemId, listSystemFilterId }
     })
   },
   setSelectedSystemId: (systemId) => {
     set((state) => {
       const selectedSystemId = findSystem(state.systemList, systemId)?.id ?? null
+      if (selectedSystemId === state.selectedSystemId) return state
       persistLastSelectedSystemId(selectedSystemId)
       return { selectedSystemId }
+    })
+  },
+  setListSystemFilterId: (systemId) => {
+    set((state) => {
+      const listSystemFilterId = findSystem(state.systemList, systemId)?.id ?? null
+      return listSystemFilterId === state.listSystemFilterId ? state : { listSystemFilterId }
     })
   },
   addCustomSystem: (name) => {

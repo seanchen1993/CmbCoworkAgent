@@ -228,6 +228,8 @@ export function RequirementEntryView({
     return () => window.removeEventListener(REQUIREMENT_SPACE_LIST_EVENT, openSpaceList)
   }, [])
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
+  const [systemChangeTarget, setSystemChangeTarget] = useState<RequirementRecord | null>(null)
+  const systemChangeSavingRef = useRef(false)
   const [draftSystemId, setDraftSystemId] = useState<string | null>(null)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
   const [quickStartDialogOpen, setQuickStartDialogOpen] = useState(false)
@@ -819,6 +821,39 @@ export function RequirementEntryView({
     toast.success("需求、关联会话和归档文件已删除")
   }
 
+  const changeRequirementSystem = async (
+    requirement: RequirementRecord,
+    systemId: string
+  ): Promise<void> => {
+    if (systemChangeSavingRef.current) return
+    if (systemId === requirement.systemId) {
+      setSystemChangeTarget(null)
+      return
+    }
+    systemChangeSavingRef.current = true
+    try {
+      const system = getSelectedRequirementSystem(systemId)
+      if (!system) throw new Error("选择的系统不存在")
+      const result = await window.api.requirements.updateSystem({ reqId: requirement.id, systemId })
+      if (!result.success || !result.requirement) {
+        throw new Error(result.error || "更换需求系统失败")
+      }
+      await Promise.allSettled(
+        getRequirementThreadIds(requirement).map((threadId) =>
+          useAppStore.getState().patchThreadMetadata(threadId, {
+            set: { requirementSystem: system.name }
+          })
+        )
+      )
+      const updated = fromPersistedRequirement(result.requirement, system.name)
+      replaceRequirement(updated)
+      setSystemChangeTarget(null)
+      toast.success(`已将需求更换到「${system.name}」`)
+    } finally {
+      systemChangeSavingRef.current = false
+    }
+  }
+
   if (!requirementsLoaded) {
     return <RequirementListLoading />
   }
@@ -855,6 +890,7 @@ export function RequirementEntryView({
           onNew={() => startNewRequirement()}
           onOpenRequirement={openRequirement}
           onDeleteRequirement={deleteRequirement}
+          onChangeRequirementSystem={setSystemChangeTarget}
         />
       )}
 
@@ -968,6 +1004,21 @@ export function RequirementEntryView({
           confirmLabel={requirementDialogOpen ? "确认切换" : "确认并创建需求"}
         />
       )}
+
+      {systemChangeTarget ? (
+        <SystemSelectionDialog
+          initialSystemId={systemChangeTarget.systemId}
+          onCancel={() => setSystemChangeTarget(null)}
+          onConfirm={(systemId) => {
+            void changeRequirementSystem(systemChangeTarget, systemId).catch((error) =>
+              toast.error(error instanceof Error ? error.message : "更换需求系统失败")
+            )
+          }}
+          title="更换需求系统"
+          description={`为「${systemChangeTarget.title}」选择新的业务系统。需求内容和关联会话会保留。`}
+          confirmLabel="确认更换"
+        />
+      ) : null}
 
       {requirementDialogOpen && draftSystem && (
         <NewRequirementDialog

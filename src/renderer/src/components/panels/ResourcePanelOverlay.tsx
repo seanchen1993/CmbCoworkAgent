@@ -68,6 +68,8 @@ export function ResourcePanelOverlay({
   }, [mode])
   const close = useCallback(() => {
     setOpen(false)
+    setFilePreview(null)
+    setFilePreviewThreadId(null)
     clearPreviewRequest()
     detachBrowser()
   }, [clearPreviewRequest, detachBrowser])
@@ -76,7 +78,11 @@ export function ResourcePanelOverlay({
     close()
   }, [close, mode])
   const clearHandledPreviewRequest = useCallback(() => {
-    setFilePreview(null)
+    // Keep an explicitly supplied overlay preview alive for the lifetime of the
+    // drawer. RightPanel stores the selected path locally after handling the
+    // request, but clearing the parent request here can race with mounting the
+    // panel for a different thread (notably from the requirement design page),
+    // leaving an open drawer with its empty preview state.
     clearPreviewRequest()
   }, [clearPreviewRequest])
 
@@ -161,6 +167,14 @@ export function ResourcePanelOverlay({
     selectMode("browser")
   }, [selectMode])
 
+  const handlePreviewModeRequest = useCallback(() => {
+    // A file request has already selected preview mode and supplied the
+    // thread/path context. Running selectMode("preview") again would clear
+    // that context and make RightPanel reset the path it just accepted.
+    if (mode === "preview") return
+    selectMode("preview")
+  }, [mode, selectMode])
+
   useBrowserViewLifecycle({
     currentThreadId: renderedMainView === "thread" ? activeThreadId : null,
     harnessSessionThreadId: renderedMainView === "harness" ? activeThreadId : null,
@@ -196,7 +210,7 @@ export function ResourcePanelOverlay({
         }
         onResourcePreviewRequestHandled={clearHandledPreviewRequest}
         listenForResourcePreview={false}
-        onRequestPreviewMode={() => selectMode("preview")}
+        onRequestPreviewMode={handlePreviewModeRequest}
         onRequestWorkMode={closeFromUser}
       />
     </OverlayDrawer>

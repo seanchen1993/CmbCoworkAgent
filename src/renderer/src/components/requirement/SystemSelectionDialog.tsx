@@ -37,11 +37,13 @@ export function SystemSelectionDialog({
   const [customSystemName, setCustomSystemName] = useState("")
   const [loading, setLoading] = useState(false)
   const systemList = useRequirementStore((state) => state.systemList)
+  const systemsLoaded = useRequirementStore((state) => state.systemsLoaded)
   const setSystemList = useRequirementStore((state) => state.setSystemList)
   const addCustomSystem = useRequirementStore((state) => state.addCustomSystem)
 
   // 弹窗打开时加载系统列表，若 store 已有缓存则跳过请求
   useEffect(() => {
+    if (systemsLoaded) return
     let cancelled = false
     void (async () => {
       setLoading(true)
@@ -59,7 +61,7 @@ export function SystemSelectionDialog({
     return () => {
       cancelled = true
     }
-  }, [setSystemList])
+  }, [setSystemList, systemsLoaded])
 
   const selectedSystem = systemList.find((system) => system.id === selectedSystemId) ?? null
   const visibleSystems = systemList.filter((system) =>

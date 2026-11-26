@@ -98,6 +98,12 @@ export const requirementsApi = {
       requirement?: RequirementRuntimeItem
       error?: string
     }>,
+  updateSystem: (payload: { reqId: string; systemId: string }) =>
+    ipcRenderer.invoke("requirements:update-system", payload) as Promise<{
+      success: boolean
+      requirement?: RequirementRuntimeItem
+      error?: string
+    }>,
   saveDesignState: (payload: {
     reqId: string
     needDesign: "" | "0" | "1"

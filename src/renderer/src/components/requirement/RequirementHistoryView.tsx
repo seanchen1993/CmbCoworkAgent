@@ -36,7 +36,8 @@ export function RequirementHistoryView({
   onSourceFilterChange,
   onNew,
   onOpenRequirement,
-  onDeleteRequirement
+  onDeleteRequirement,
+  onChangeRequirementSystem
 }: {
   requirements: RequirementRecord[]
   currentUser: RequirementUser | null
@@ -52,13 +53,14 @@ export function RequirementHistoryView({
   onNew: () => void
   onOpenRequirement: (requirement: RequirementRecord) => void
   onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
+  onChangeRequirementSystem: (requirement: RequirementRecord) => void
 }): React.JSX.Element {
   const [initialQuery] = useState(takeSpaceListQuery)
   const [searchInput, setSearchInput] = useState(initialQuery)
   const [query, setQuery] = useState(initialQuery)
   const [mineOnly, setMineOnly] = useState(false)
   const deferredQuery = useDeferredValue(query)
-  const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
+  const listSystemFilterId = useRequirementStore((state) => state.listSystemFilterId)
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
@@ -74,9 +76,9 @@ export function RequirementHistoryView({
   const visibleCount = filterRequirements(requirements, {
     currentUser,
     mineOnly,
-    query,
+    query: deferredQuery,
     sourceFilter,
-    systemId: selectedSystemId
+    systemId: listSystemFilterId
   }).length
 
   return (
@@ -212,10 +214,11 @@ export function RequirementHistoryView({
                   sourceFilter === "space" ? onRequirementSpacePageChange : undefined
                 }
                 mineOnly={mineOnly}
-                systemId={selectedSystemId}
+                systemId={listSystemFilterId}
                 onCreate={onNew}
                 onOpen={onOpenRequirement}
                 onDelete={onDeleteRequirement}
+                onChangeSystem={onChangeRequirementSystem}
               />
             </div>
           </div>

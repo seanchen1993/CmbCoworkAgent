@@ -23,9 +23,9 @@ export function ProductModeNavigation({
   activeTab: "requirements" | "design"
   onTabChange: (tab: "requirements" | "design") => void
 }): React.JSX.Element {
-  const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
+  const listSystemFilterId = useRequirementStore((state) => state.listSystemFilterId)
   const systemList = useRequirementStore((state) => state.systemList)
-  const setSelectedSystemId = useRequirementStore((state) => state.setSelectedSystemId)
+  const setListSystemFilterId = useRequirementStore((state) => state.setListSystemFilterId)
   const [personaWelcome, setPersonaWelcome] = useState(() =>
     getRequirementPersonaWelcome(readStoredRequirementPersona())
   )
@@ -37,6 +37,10 @@ export function ProductModeNavigation({
     window.addEventListener(REQUIREMENT_PERSONA_CHANGED_EVENT, updateWelcome)
     return () => window.removeEventListener(REQUIREMENT_PERSONA_CHANGED_EVENT, updateWelcome)
   }, [])
+
+  useEffect(() => {
+    if (activeTab === "requirements") setListSystemFilterId(null)
+  }, [activeTab, setListSystemFilterId])
 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 px-5 pt-3 lg:px-7">
@@ -63,9 +67,9 @@ export function ProductModeNavigation({
       </div>
       {activeTab === "requirements" && (
         <Select
-          value={selectedSystemId ?? ALL_REQUIREMENT_SYSTEMS_VALUE}
+          value={listSystemFilterId ?? ALL_REQUIREMENT_SYSTEMS_VALUE}
           onValueChange={(value) =>
-            setSelectedSystemId(value === ALL_REQUIREMENT_SYSTEMS_VALUE ? null : value)
+            setListSystemFilterId(value === ALL_REQUIREMENT_SYSTEMS_VALUE ? null : value)
           }
         >
           <SelectTrigger
