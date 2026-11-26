@@ -325,7 +325,8 @@ async function main(): Promise<void> {
     })
     await page.locator('input[value="pro"]').waitFor()
     assert.equal(await page.locator('input[value="pro"]').isDisabled(), true)
-    assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
+    await page.getByText(/200k 上下文窗口由系统管理/).waitFor()
+    assert.equal(await page.locator('input[value="200000"]').isDisabled(), true)
     assert.equal(await page.getByText(/非服务时段/).count(), 0)
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isEnabled(), true)
 
@@ -336,6 +337,8 @@ async function main(): Promise<void> {
     })
     await page.locator('input[value="ultra"]').waitFor()
     assert.equal(await page.locator('input[value="ultra"]').isDisabled(), true)
+    await page.getByText(/128k 上下文窗口由系统管理/).waitFor()
+    assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
     await page.getByText(/生产环境服务时间为北京时间 22:00 至次日 07:00/).waitFor()
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isEnabled(), true)
     const nameInput = page.locator('input[value="闲时模型 Ultra"]')
@@ -374,7 +377,12 @@ async function main(): Promise<void> {
       ),
       [128_000, 256_000]
     )
-    console.log("PASS Pro model: editable UAT context")
+    await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.showGatewaySettings("ultra", true)
+    )
+    await page.getByText(/128k 上下文窗口由系统管理/).waitFor()
+    assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
+    console.log("PASS Maodou models: editable 200k Pro context and locked 128k Ultra context in UAT")
   } finally {
     await app.close()
   }

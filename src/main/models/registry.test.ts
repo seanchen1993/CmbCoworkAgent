@@ -154,6 +154,7 @@ describe("builtin model registry", () => {
       apiKey: "idle-test-key",
       model: "pro",
       idleModelEnvironment: "production",
+      maxTokens: 200_000,
       enableThinking: true,
       enableThinkingEffort: true,
       thinkingEffort: "high"
@@ -231,7 +232,7 @@ describe("builtin model registry", () => {
       expect.objectContaining({
         name: "码豆模型PRO",
         model: "pro",
-        maxTokens: 128_000,
+        maxTokens: 200_000,
         apiKey: "idle-test-key",
         transport: "idle-gateway",
         origin: "local"
@@ -254,10 +255,10 @@ describe("builtin model registry", () => {
       notice: expect.stringContaining("北京时间 22:00 至次日 07:00")
     })
     expect(() => updateBuiltinModelOverride("idle-ultra", { maxTokens: 256_000 })).toThrow(
-      "固定为 128k"
+      "固定为 200k"
     )
     state.overrides["idle-ultra"] = { maxTokens: 256_000 }
-    expect(getModelConfigByRef("builtin:idle-ultra")?.maxTokens).toBe(128_000)
+    expect(getModelConfigByRef("builtin:idle-ultra")?.maxTokens).toBe(200_000)
   })
 
   it("does not reuse another built-in model's credential for the idle gateway", () => {
@@ -281,14 +282,14 @@ describe("builtin model registry", () => {
     ).toThrow("compaction trigger")
     updateBuiltinModelOverride(id, { maxTokens: 256_000 })
     expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
-    expect(getModelConfigByRef("builtin:maodou-ultra")?.maxTokens).toBe(200_000)
+    expect(getModelConfigByRef("builtin:maodou-ultra")?.maxTokens).toBe(128_000)
 
     state.idleModelUseUat = false
     expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)).toMatchObject({
-      maxTokens: 128_000,
+      maxTokens: 200_000,
       lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"]
     })
-    updateBuiltinModelOverride(id, { maxTokens: 128_000, temperature: 0.3 })
+    updateBuiltinModelOverride(id, { maxTokens: 200_000, temperature: 0.3 })
     expect(state.overrides[id]).toEqual({ maxTokens: 256_000, temperature: 0.3 })
     resetBuiltinModelOverride(id)
     expect(state.overrides[id]).toEqual({ maxTokens: 256_000 })
@@ -297,6 +298,23 @@ describe("builtin model registry", () => {
     expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
     resetBuiltinModelOverride(id)
     expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(200_000)
+  })
+
+  it.each([false, true])("locks Ultra at 128k with a stale context override (UAT %s)", (useUat) => {
+    configureIdleModel()
+    state.idleModelUseUat = useUat
+    const id = "maodou-ultra"
+    state.overrides[id] = { maxTokens: 256_000, temperature: 0.3 }
+
+    expect(getAvailableModelConfigOrDefault(`builtin:${id}`)).toMatchObject({
+      maxTokens: 128_000,
+      temperature: 0.3
+    })
+    expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)?.lockedFields).toContain("maxTokens")
+    expect(() => updateBuiltinModelOverride(id, { maxTokens: 200_000 })).toThrow("固定为 128k")
+
+    updateBuiltinModelOverride(id, { maxTokens: 128_000, temperature: 0.4 })
+    expect(state.overrides[id]).toEqual({ temperature: 0.4 })
   })
 
   it("prefers Pro before MiniMax while honoring saved defaults and availability", async () => {
