@@ -8,6 +8,7 @@ import { copyDirRecursive } from "./utils/fs"
 import {
   getPetWindowPlatformPolicy,
   getPetWindowRefreshAction,
+  hidePetWindowForSession,
   shouldIgnorePetWindowMouseEvents
 } from "./pet-window-policy"
 
@@ -247,7 +248,13 @@ function toggleMainWindowFromPet(): BrowserWindow | null {
 
 function dismissPetForSession(): void {
   petDismissedForSession = true
-  closePetWindow()
+  stopPetHoverPolling()
+  hidePetBubble("pet-window-dismiss")
+  // The pet close button means "hide for this session", not "destroy a native window".
+  // On Windows the pet can be the last BrowserWindow; closing it would emit
+  // window-all-closed and make the main process quit.
+  hidePetWindowForSession(petWindow)
+  petWindowOptions?.applyMacDockIcon()
 }
 
 export function registerPetHandlers(ipcMain: IpcMain): void {

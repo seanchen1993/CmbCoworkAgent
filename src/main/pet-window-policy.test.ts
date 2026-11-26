@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   getPetWindowPlatformPolicy,
   getPetWindowRefreshAction,
+  hidePetWindowForSession,
   shouldIgnorePetWindowMouseEvents
 } from "./pet-window-policy"
 
@@ -66,6 +67,31 @@ describe("pet window settings refresh", () => {
         { enabled: true, selectedPetKey: "builtin:qie" }
       )
     ).toBe("recreate")
+  })
+})
+
+describe("pet window dismissal", () => {
+  it("hides a live pet window without invoking its close lifecycle", () => {
+    let hidden = false
+    hidePetWindowForSession({
+      isDestroyed: () => false,
+      hide: () => {
+        hidden = true
+      }
+    })
+    expect(hidden).toBe(true)
+  })
+
+  it("does nothing when the pet window is absent or already destroyed", () => {
+    let hidden = false
+    hidePetWindowForSession(null)
+    hidePetWindowForSession({
+      isDestroyed: () => true,
+      hide: () => {
+        hidden = true
+      }
+    })
+    expect(hidden).toBe(false)
   })
 })
 

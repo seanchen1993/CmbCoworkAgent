@@ -15,6 +15,17 @@ export type PetSettingsSnapshot = {
 
 export type PetWindowRefreshAction = "none" | "close" | "create" | "recreate"
 
+export type PetWindowDismissTarget = {
+  isDestroyed: () => boolean
+  hide: () => void
+}
+
+/** User dismissal hides the auxiliary window without entering Electron's close lifecycle. */
+export function hidePetWindowForSession(window: PetWindowDismissTarget | null): void {
+  if (!window || window.isDestroyed()) return
+  window.hide()
+}
+
 export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindowPlatformPolicy {
   if (platform === "win32") {
     return {
