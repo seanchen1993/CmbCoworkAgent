@@ -305,3 +305,16 @@ describe("readCommitFileDiffs", () => {
     ).resolves.toBeNull()
   })
 })
+
+it("drops ownership text for an oversized hunk while preserving ordinary adoption ranges", () => {
+  const patch = [
+    "diff --git a/file.py b/file.py",
+    "--- a/file.py",
+    "+++ b/file.py",
+    "@@ -0,0 +1,20001 @@",
+    ...Array.from({ length: 20001 }, (_, i) => `+value_${i} = ${i}`)
+  ].join("\n")
+  const diff = parseUnifiedZeroDiff(patch, true).get("file.py")
+  expect(diff?.addedText).toBeUndefined()
+  expect(diff?.addedRanges).toEqual([[1, 20001]])
+})

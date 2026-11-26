@@ -77,6 +77,14 @@ import {
   type EventReportResult,
   type IEventReporter
 } from "./event-reporter"
+import {
+  adjustCounts,
+  linePositions,
+  matchAddedLines,
+  sourcePosition,
+  setPositions,
+  type OwnershipLine
+} from "./adoption-line-transfer"
 import { AdoptionWorktrees } from "./adoption-worktree"
 import { getGitRootForPath } from "./git-repository-discovery"
 import {
@@ -101,6 +109,14 @@ import {
   type CommittedLineIndex
 } from "./commit-file-agent-lines"
 import {
+  getTransferCandidates,
+  hasMeasuredCommitFile,
+  findTransferFiles,
+  hasTransferSources,
+  getOutboxEvent,
+  getAdoptionPush,
+  type OwnershipChanges,
+  type TransferCandidate,
   cleanupAdoptionDeliveryRecords,
   closeAdoptionIndex,
   pendingGenerationRepoPaths,
@@ -122,7 +138,7 @@ import {
   initializeAdoptionIndex,
   insertGenEventWithOutbox,
   listDueCommitJobs,
-  listDueOutboxEvents,
+  listDueOutboxIds,
   listPendingGenPaths,
   markCommitJobProcessing,
   markCommitJobRetry,
@@ -709,7 +725,9 @@ function packLocalJson(value: unknown): Uint8Array | null {
 function unpackLocalJson<T>(bytes: Uint8Array | null | undefined): T | null {
   if (!bytes) return null
   try {
-    const json = gunzipSync(Buffer.from(bytes)).toString("utf-8")
+    const json = gunzipSync(Buffer.from(bytes), {
+      maxOutputLength: LOCAL_SOURCE_TEXT_MAX_BYTES
+    }).toString("utf-8")
     return JSON.parse(json) as T
   } catch {
     return null
@@ -2425,6 +2443,12 @@ export interface StagedSnapshot {
   stagedContent: Buffer | null
 }
 
+// Reconciliation can inspect a worktree copy from its patch alone. If a local
+// generation arrives concurrently, materialize its committed blob on demand.
+export type CommitMeasurementSnapshot =
+  | StagedSnapshot
+  | { absPath: string; stagedContent: undefined }
+
 // Bound how many `git show` blob reads run at once so a large staged set can't
 // spawn dozens of git processes simultaneously.
 const GIT_SHOW_CONCURRENCY = 4
@@ -2564,6 +2588,45 @@ export async function captureStagedSnapshotsForCommit(
   }
 }
 
+interface WorktreeLayout {
+  common: string
+  linked: boolean
+}
+const layouts = new Map<string, WorktreeLayout>()
+const rootKey = (p: string) =>
+  process.platform === "win32" ? resolvePath(p).toLowerCase() : resolvePath(p)
+
+async function readLayout(cwd: string, originalRoot?: string): Promise<string> {
+  // The fallback may be a bare common directory with no --show-toplevel.
+  const fields = await gitIdentityOutput(cwd, [
+    "rev-parse",
+    ...(originalRoot ? [] : ["--show-toplevel"]),
+    "--absolute-git-dir",
+    "--git-common-dir",
+    "--is-shallow-repository"
+  ])
+  const parts = fields.split(/\r?\n/)
+  const root = originalRoot ?? parts.shift()!
+  const [gitDir, commonDir, shallow] = parts
+  if (root && gitDir && commonDir && shallow === "false") {
+    const key = rootKey(root)
+    const common = rootKey(resolvePath(cwd, commonDir))
+    if (layouts.size >= 256) layouts.delete(layouts.keys().next().value!)
+    layouts.set(key, { common, linked: !!originalRoot || rootKey(gitDir) !== common })
+  } else if (root) layouts.delete(rootKey(root))
+  return root
+}
+
+function commitJobKey(root: string, sha: string): string {
+  return createHash("sha256")
+    .update(`${resolvePath(root).replace(/\\/g, "/")}\0${sha.toLowerCase()}`)
+    .digest("hex")
+}
+
+export function wasEmptyTransferProbe(root: string, sha: string): boolean {
+  return getCommitJob(commitJobKey(root, sha))?.empty_transfer_probe === 1
+}
+
 interface ResolvedCommitIdentity {
   repoPath: string
   commitSha: string
@@ -2571,11 +2634,11 @@ interface ResolvedCommitIdentity {
   jobId: string
 }
 
-async function gitIdentityOutput(cwd: string, args: string[]): Promise<string> {
+async function gitIdentityOutput(cwd: string, args: string[], timeout = 5000): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd,
     encoding: "utf-8",
-    timeout: 5000,
+    timeout,
     maxBuffer: 1024 * 1024,
     windowsHide: true
   })
@@ -2593,7 +2656,7 @@ async function gitIdentityOutput(cwd: string, args: string[]): Promise<string> {
  * path under the main checkout and silently match nothing.
  */
 async function resolveCommitIdentity(
-  snapshots: StagedSnapshot[],
+  snapshots: CommitMeasurementSnapshot[],
   commitSha?: string,
   commitTimeMs?: number,
   repoPath?: string,
@@ -2606,7 +2669,7 @@ async function resolveCommitIdentity(
     let execCwd = ""
     if (cwd) {
       try {
-        root = await gitIdentityOutput(cwd, ["rev-parse", "--show-toplevel"])
+        root = await readLayout(cwd)
         execCwd = root
       } catch {
         // Work tree gone (removed worktree, deleted checkout) — try the fallback.
@@ -2626,6 +2689,7 @@ async function resolveCommitIdentity(
       // Already canonical: callers pass the root git itself reported earlier.
       root = resolvePath(repoPath)
       execCwd = gitCwd
+      await readLayout(gitCwd, root)
     }
     const requestedSha = commitSha?.trim() || "HEAD"
     const sha = await gitIdentityOutput(execCwd, [
@@ -2640,9 +2704,7 @@ async function resolveCommitIdentity(
       resolvedCommitTimeMs = Number.isFinite(seconds) ? seconds * 1000 : undefined
     }
     const normalizedRoot = resolvePath(root)
-    const jobId = createHash("sha256")
-      .update(`${normalizedRoot.replace(/\\/g, "/")}\0${sha.toLowerCase()}`)
-      .digest("hex")
+    const jobId = commitJobKey(normalizedRoot, sha)
     return {
       repoPath: normalizedRoot,
       commitSha: sha,
@@ -2733,6 +2795,8 @@ async function captureSnapshotsFromCommit(job: CommitJobRow): Promise<StagedSnap
 async function readPendingCommitFileDiffs(
   job: CommitJobRow,
   absPaths: string[],
+  transferPaths: Set<string>,
+  collectText: boolean,
   gitCwd?: string
 ): Promise<Map<string, CommitFileDiff> | null> {
   const pendingPaths = new Set(
@@ -2740,7 +2804,7 @@ async function readPendingCommitFileDiffs(
   )
   const relPaths: string[] = []
   for (const absPath of absPaths) {
-    if (!pendingPaths.has(absPath)) continue
+    if (!pendingPaths.has(absPath) && !transferPaths.has(absPath)) continue
     const relPath = toRepoRelativePath(job.repo_path, absPath)
     if (relPath) relPaths.push(relPath)
   }
@@ -2749,16 +2813,311 @@ async function readPendingCommitFileDiffs(
   // still readable from the main checkout that shares its object store.
   const cwd = gitCwd && !existsSync(job.repo_path) ? gitCwd : job.repo_path
   const startedAt = Date.now()
-  const diffs = await readCommitFileDiffs({ cwd, commitSha: job.commit_sha, relPaths })
+  const diffs = await readCommitFileDiffs({ cwd, commitSha: job.commit_sha, relPaths, collectText })
   console.log(
     `[AdoptionTracker] commit diff: commitSha=${job.commit_sha} files=${relPaths.length} ok=${diffs !== null} durationMs=${Date.now() - startedAt}`
   )
   return diffs
 }
 
+function findTransferPaths(
+  layout: WorktreeLayout | undefined,
+  root: string,
+  paths: Iterable<string>,
+  through: number
+): Set<string> {
+  const result = new Set<string>()
+  if (!layout || !shouldStoreLocalSourceText() || !hasTransferSources(layout.common)) return result
+  const since = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  const files = new Map<string, string>()
+  for (const path of paths) {
+    const rel = toRepoRelativePath(root, path)
+    if (rel) files.set(rel, path)
+  }
+  for (const rel of findTransferFiles(
+    layout.common,
+    rootKey(root),
+    [...files.keys()],
+    since,
+    through
+  ))
+    result.add(files.get(rel)!)
+  return result
+}
+
+// One budget per commit, including failed ancestry probes. A slow repository or
+// a crowded path must not turn optional matching into a scan of its history.
+interface TransferBudget {
+  bytes: number
+  gitMs: number
+}
+function decodeOwnershipLines(blob: Uint8Array, budget: TransferBudget): OwnershipLine[] | null {
+  // Gzip ISIZE is the uncompressed length for our single bounded member.
+  const bytes = Buffer.from(blob.buffer, blob.byteOffset, blob.byteLength)
+  if (bytes.length < 4) return null
+  budget.bytes -= bytes.readUInt32LE(bytes.length - 4)
+  if (budget.bytes < 0) return null
+  const rows = unpackLocalJson<OwnershipLine[]>(bytes)
+  return Array.isArray(rows) &&
+    rows.every((row) => row && typeof row.text === "string" && typeof row.lineNumber === "number")
+    ? rows
+    : null
+}
+
+async function ownershipGit(
+  cwd: string,
+  args: string[],
+  budget: TransferBudget
+): Promise<string | null> {
+  if (budget.gitMs <= 0) return null
+  const start = performance.now()
+  try {
+    return await gitIdentityOutput(cwd, args, Math.min(1000, Math.ceil(budget.gitMs)))
+  } catch {
+    return null
+  } finally {
+    budget.gitMs -= performance.now() - start
+  }
+}
+
+function registerSourceEvidence(
+  measurement: FileMeasurement,
+  layout: WorktreeLayout,
+  job: CommitJobRow,
+  rel: string,
+  added: Map<number, string>,
+  budget: TransferBudget,
+  removed?: Set<string>
+): void {
+  const rollup = measurement.fileEvent?.outboxEvent
+  if (!rollup || !job.commit_time_ms) return
+  const props = (JSON.parse(rollup.payloadJson) as CoworkEvent).properties!
+  const agentLines = linePositions(props.agentLineRanges, props.agentLineRangesTruncated)
+  if (!agentLines) return
+  const unique = new Map<string, number>()
+  for (const [pos, text] of added) unique.set(text, unique.has(text) ? 0 : pos)
+  for (const write of measurement.writes) {
+    const detail = write.details
+    if (!detail || !write.outboxEvent) continue
+    const lines = decodeOwnershipLines(detail.details_blob, budget)
+    if (!lines) continue
+    let eligible = false
+    for (const [index, line] of lines.entries()) {
+      const pos = sourcePosition(lines, index, added, unique)
+      if (
+        pos &&
+        !removed?.has(line.text) &&
+        agentLines.has(pos) &&
+        line.status === "adopted" &&
+        !line.text.includes("\uFFFD")
+      ) {
+        line.sourceLine = pos
+        eligible = true
+      }
+    }
+    const packed = eligible && packLocalJson(lines)
+    if (!packed) continue
+    detail.details_blob = packed
+    detail.rel_path = rel
+    detail.origin = {
+      commonDir: layout.common,
+      root: rootKey(job.repo_path),
+      time: job.commit_time_ms,
+      adoptId: write.outboxEvent.eventId,
+      fileId: rollup.eventId
+    }
+  }
+}
+
+async function isNonMergeCommit(
+  cwd: string,
+  sha: string,
+  budget: TransferBudget
+): Promise<boolean> {
+  const parents = await ownershipGit(cwd, ["rev-list", "--parents", "-n1", sha], budget)
+  const parts = parents?.split(/\s+/)
+  return !!parts && parts[0] === sha && parts.length <= 2
+}
+
+async function transferFileOwnership(args: {
+  job: CommitJobRow
+  layout: WorktreeLayout
+  relPath: string
+  diff: CommitFileDiff
+  snapshot: CommitMeasurementSnapshot
+  measurement: FileMeasurement
+  changes: OwnershipChanges
+  ancestry: Map<string, boolean | null>
+  budget: TransferBudget
+  cwd: string
+}): Promise<void> {
+  const { job, layout, relPath, diff, snapshot, measurement, changes, ancestry, budget, cwd } = args
+  const sha = job.commit_sha,
+    time = job.commit_time_ms
+  if (
+    !time ||
+    !diff.addedText ||
+    snapshot.stagedContent === null ||
+    hasMeasuredCommitFile(sha, relPath)
+  )
+    return
+  const rows = getTransferCandidates(
+    layout.common,
+    rootKey(job.repo_path),
+    relPath,
+    Date.now() - GEN_ATTRIBUTION_WINDOW_MS,
+    time
+  )
+  if (!rows.length) return
+  // A merge can contain an entire second parent's changes as first-parent additions.
+  if (!ancestry.has(sha)) ancestry.set(sha, await isNonMergeCommit(cwd, sha, budget))
+  if (!ancestry.get(sha)) return
+  const sources: {
+    row: TransferCandidate
+    sha: string
+    detail: AdoptLineDetailsInput
+    lines: OwnershipLine[]
+  }[] = []
+  for (const row of rows) {
+    if (row.commit_sha === sha) continue
+    if (!ancestry.has(row.commit_sha)) {
+      // Bound history queries for a commit, even with a very crowded relative path.
+      if (ancestry.size >= 17) return
+      const base = await ownershipGit(cwd, ["merge-base", row.commit_sha, sha], budget)
+      ancestry.set(row.commit_sha, base ? base !== sha && base !== row.commit_sha : null)
+    }
+    // If history is inconclusive, this file could have multiple origins.
+    if (ancestry.get(row.commit_sha) === null) return
+    if (!ancestry.get(row.commit_sha)) continue
+    const detail = getAdoptLineDetails(row.commit_sha, row.gen_event_id)
+    if (!detail) return
+    const lines = decodeOwnershipLines(detail.details_blob, budget)
+    if (!lines) return
+    sources.push({ row, detail, sha: row.commit_sha, lines })
+  }
+  if (!sources.length) return
+  const existing = measurement.fileEvent
+  const targetFile: CoworkEvent = existing
+    ? JSON.parse(existing.outboxEvent.payloadJson)
+    : buildCommitFileEvent({
+        commitSha: sha,
+        absPath: snapshot.absPath,
+        relPath,
+        rollup: {
+          generatedLineCount: 0,
+          effectiveGeneratedLineCount: 0,
+          adoptedLineCount: 0,
+          genEventIds: []
+        },
+        committedLines: null,
+        adoptedCounts: new Map(),
+        fileDiff: diff,
+        measuredAt: Date.now()
+      })
+  const targetProps = targetFile.properties!
+  const occupied = linePositions(targetProps.agentLineRanges, targetProps.agentLineRangesTruncated)
+  if (!occupied) return
+  const added = new Map(diff.addedText)
+  for (const [pos, text] of added)
+    if (diff.removedText?.has(text) || text.includes("\uFFFD")) added.delete(pos)
+  const matches = matchAddedLines(sources, added, occupied)
+  if (!matches.size) return
+  const revisions = new Map<string, { original: string; event: CoworkEvent }>()
+  const mutable = (id: string) => {
+    let revision = revisions.get(id)
+    if (!revision) {
+      const old = getOutboxEvent(id)
+      if (!old) return null
+      revision = { original: old.payload_json, event: JSON.parse(old.payload_json) }
+      revisions.set(id, revision)
+    }
+    return revision.event
+  }
+  const details: OwnershipChanges["details"] = []
+  const credits: EventOutboxInput[] = []
+  const now = Date.now()
+  for (const source of sources) {
+    const moved = source.lines.filter((line) => matches.has(line))
+    if (!moved.length) continue
+    const { row } = source
+    const original = mutable(row.adopt_id),
+      file = mutable(row.file_id)
+    if (!original?.properties || !file?.properties) return
+    const positions = linePositions(
+      file.properties.agentLineRanges,
+      file.properties.agentLineRangesTruncated
+    )
+    if (!positions || moved.some((line) => !positions.has(line.sourceLine!))) return
+    const receiver: CoworkEvent = {
+      ...original,
+      eventId: randomUUID(),
+      eventTime: targetFile.eventTime,
+      properties: {
+        ...original.properties,
+        eventId: `a_${randomUUID()}`,
+        commitSha: sha,
+        sourceCommitSha: source.sha,
+        generatedLineCount: moved.length,
+        effectiveGeneratedLineCount: moved.length,
+        adoptedLineCount: moved.length,
+        ownershipRevision: 1,
+        measureLatencyMs: now - Date.parse(String(original.properties.generatedAt)),
+        measuredAt: new Date(now).toISOString()
+      }
+    }
+    credits.push(toOutboxEvent(receiver, now))
+    for (const line of moved) {
+      line.transferredTo = sha
+      positions.delete(line.sourceLine!)
+      occupied.add(matches.get(line)!)
+    }
+    adjustCounts(original.properties, -moved.length)
+    adjustCounts(file.properties, -moved.length)
+    original.properties.ownershipRevision = Number(original.properties.ownershipRevision ?? 0) + 1
+    file.properties.ownershipRevision = Number(file.properties.ownershipRevision ?? 0) + 1
+    setPositions(file.properties, positions)
+    adjustCounts(targetProps, moved.length)
+    ;(targetProps.genEventIds as string[]).push(row.gen_event_id)
+    const fromBlob = packLocalJson(source.lines)
+    const toBlob = packLocalJson(
+      moved.map(({ lineNumber, status, text }) => ({ lineNumber, status, text }))
+    )
+    if (!fromBlob || !toBlob) return
+    details.push(
+      {
+        genId: row.gen_event_id,
+        previous: source.detail.details_blob,
+        row: { ...source.detail, details_blob: fromBlob }
+      },
+      {
+        genId: row.gen_event_id,
+        row: {
+          commit_sha: sha,
+          file_path: snapshot.absPath,
+          rel_path: relPath,
+          details_blob: toBlob,
+          measured_at: now
+        }
+      }
+    )
+  }
+  setPositions(targetProps, occupied)
+  targetProps.fileDeleted = false
+  targetProps.addedNonBlankLineCount = [...diff.addedText.values()].filter((text) =>
+    text.trim()
+  ).length
+  const target = toOutboxEvent(targetFile, now)
+  if (existing) existing.outboxEvent = target
+  else credits.push(target)
+  for (const { original, event } of revisions.values())
+    changes.revisions.push({ original, event: toOutboxEvent(event, now) })
+  changes.details.push(...details)
+  changes.events.push(...credits)
+}
+
 async function runCommitJob(
   jobId: string,
-  suppliedSnapshots?: StagedSnapshot[],
+  suppliedSnapshots?: CommitMeasurementSnapshot[],
   gitCwd?: string
 ): Promise<boolean> {
   const initial = getCommitJob(jobId)
@@ -2772,7 +3131,7 @@ async function runCommitJob(
     const job = getCommitJob(jobId)
     if (!job) throw new Error(`commit job disappeared: ${jobId}`)
     const snapshots = suppliedSnapshots ?? (await captureSnapshotsFromCommit(job))
-    const measurable: StagedSnapshot[] = []
+    const measurable: CommitMeasurementSnapshot[] = []
     const seenPaths = new Set<string>()
     for (const snapshot of snapshots) {
       const absPath = resolvePath(snapshot.absPath)
@@ -2814,30 +3173,125 @@ async function runCommitJob(
         if (restored) await new Promise<void>((resume) => setImmediate(resume))
       } while (restored === GENERATION_REPO_BATCH_SIZE)
     }
+    const cwd = gitCwd && !existsSync(job.repo_path) ? gitCwd : job.repo_path
+    const root = rootKey(job.repo_path)
+    if (!layouts.has(root))
+      await readLayout(cwd, cwd !== job.repo_path ? job.repo_path : undefined).catch(
+        () => undefined
+      )
+    const layout = layouts.get(root)
+    const transferPaths = findTransferPaths(
+      layout,
+      job.repo_path,
+      paths,
+      job.commit_time_ms ?? Date.now()
+    )
     const fileDiffs = await readPendingCommitFileDiffs(
       job,
       measurable.map((snapshot) => snapshot.absPath),
+      transferPaths,
+      (!!layout?.linked && shouldStoreLocalSourceText()) || transferPaths.size > 0,
       gitCwd
     )
     const writes: AdoptionMeasurementWrite[] = []
     const fileEvents: AdoptionFileEventWrite[] = []
+    const changes: OwnershipChanges = {
+      transferProbe: transferPaths.size > 0,
+      detailsLimits: {
+        maxRows: LOCAL_ADOPT_DETAILS_MAX_ROWS,
+        maxBytes: LOCAL_ADOPT_DETAILS_MAX_BYTES
+      },
+      revisions: [],
+      events: [],
+      details: []
+    }
+    const budget: TransferBudget = { bytes: 8 * 1024 * 1024, gitMs: 2000 }
+    let matchedFiles = 0
+    const ancestry = new Map<string, boolean | null>()
     for (const snapshot of measurable) {
       const relPath = toRepoRelativePath(job.repo_path, snapshot.absPath)
-      const measurement = await buildMeasurementsForFile(snapshot.absPath, {
-        ...(snapshot.stagedContent === null
-          ? { stagedDeleted: true }
-          : { currentContent: snapshot.stagedContent }),
-        commitSha: job.commit_sha,
-        commitTimeMs: job.commit_time_ms ?? undefined,
-        repoRoot: job.repo_path,
-        // A file missing from a successful diff is unchanged against the first
-        // parent (a merge brought it in), so it simply has no added lines.
-        fileDiff: fileDiffs && relPath ? (fileDiffs.get(relPath) ?? emptyCommitFileDiff()) : null
-      })
+      let content = snapshot.stagedContent
+      if (
+        content === undefined &&
+        relPath &&
+        findPendingGensForFile(snapshot.absPath, Date.now() - GEN_ATTRIBUTION_WINDOW_MS, maxCreated)
+          .length
+      ) {
+        content = (
+          await execFileAsync("git", ["show", `${job.commit_sha}:${relPath}`], {
+            cwd,
+            encoding: "buffer",
+            timeout: 10000,
+            maxBuffer: STAGED_BLOB_MAX_BYTES,
+            windowsHide: true
+          })
+        ).stdout
+      }
+      const measurement: FileMeasurement =
+        content === undefined
+          ? { writes: [] }
+          : await buildMeasurementsForFile(snapshot.absPath, {
+              ...(content === null ? { stagedDeleted: true } : { currentContent: content }),
+              commitSha: job.commit_sha,
+              commitTimeMs: job.commit_time_ms ?? undefined,
+              repoRoot: job.repo_path,
+              // A file missing from a successful diff is unchanged against the first
+              // parent (a merge brought it in), so it simply has no added lines.
+              fileDiff:
+                fileDiffs && relPath ? (fileDiffs.get(relPath) ?? emptyCommitFileDiff()) : null
+            })
+      const diff = relPath ? fileDiffs?.get(relPath) : undefined
+      if (
+        budget.bytes > 0 &&
+        layout &&
+        relPath &&
+        diff?.addedText &&
+        !diff.binary &&
+        diff.addedLineCount <= MAX_LINES_FOR_MEASURE
+      ) {
+        if (++matchedFiles % 8 === 0) await new Promise<void>((resume) => setImmediate(resume))
+        if (layout.linked && measurement.fileEvent) {
+          if (!ancestry.has(job.commit_sha))
+            ancestry.set(job.commit_sha, await isNonMergeCommit(cwd, job.commit_sha, budget))
+          if (ancestry.get(job.commit_sha))
+            registerSourceEvidence(
+              measurement,
+              layout,
+              job,
+              relPath,
+              diff.addedText,
+              budget,
+              diff.removedText
+            )
+        }
+        if (budget.bytes > 0 && transferPaths.has(snapshot.absPath)) {
+          await transferFileOwnership({
+            job,
+            layout,
+            relPath,
+            diff,
+            snapshot,
+            measurement,
+            changes,
+            ancestry,
+            budget,
+            cwd
+          }).catch((error) => {
+            // An unreadable optional source must not stall the receiver's own
+            // generations; the normal measurement still commits atomically.
+            budget.bytes = 0
+            console.warn(
+              "[AdoptionTracker] skipped unreadable worktree ownership evidence",
+              job.commit_sha,
+              error
+            )
+          })
+        }
+      }
       writes.push(...measurement.writes)
       if (measurement.fileEvent) fileEvents.push(measurement.fileEvent)
     }
-    const result = commitAdoptionMeasurements(writes, jobId, fileEvents)
+    const result = commitAdoptionMeasurements(writes, jobId, fileEvents, changes)
     if (!result.success) throw new Error("failed to persist adoption measurement transaction")
     if (result.enqueuedCount > 0) scheduleOutboxDrain()
     console.log(
@@ -2857,7 +3311,7 @@ async function runCommitJob(
 
 function runCommitJobDeduped(
   jobId: string,
-  suppliedSnapshots?: StagedSnapshot[],
+  suppliedSnapshots?: CommitMeasurementSnapshot[],
   gitCwd?: string
 ): Promise<boolean> {
   const existing = inFlightCommitJobs.get(jobId)
@@ -2880,7 +3334,7 @@ function runCommitJobDeduped(
  * must not mark the commit processed when it resolves false.
  */
 export async function measureForCommit(
-  snapshots: StagedSnapshot[],
+  snapshots: CommitMeasurementSnapshot[],
   commitSha?: string,
   commitTimeMs?: number,
   repoPath?: string,
@@ -2910,9 +3364,23 @@ export async function measureForCommit(
   return runCommitJobDeduped(job.job_id, snapshots.length > 0 ? snapshots : undefined, gitCwd)
 }
 
+export function getWorktreeTransferPathsForCommit(
+  snapshots: StagedSnapshot[],
+  repoPath: string,
+  time?: number
+): Set<string> {
+  return findTransferPaths(
+    layouts.get(rootKey(repoPath)),
+    repoPath,
+    snapshots.map((s) => s.absPath),
+    time ?? Date.now()
+  )
+}
+
 export function hasPendingGenerationsForCommit(
   snapshots: StagedSnapshot[],
-  commitTimeMs?: number
+  commitTimeMs?: number,
+  repoPath?: string
 ): boolean {
   if (!initialized) return false
   const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
@@ -2935,6 +3403,8 @@ export function hasPendingGenerationsForCommit(
       return true
     if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
+  if (repoPath && getWorktreeTransferPathsForCommit(snapshots, repoPath, commitTimeMs).size)
+    return true
   return (
     pendingGenerationRepoPaths(
       () => snapshots.map((s) => resolvePath(s.absPath)),
@@ -3177,6 +3647,7 @@ function parseStoredGeneratedLineDetails(
     ) {
       return null
     }
+    if ((record as OwnershipLine).transferredTo) continue
     details.push({
       lineNumber: record.lineNumber,
       text: record.text,
@@ -3436,8 +3907,11 @@ async function drainAdoptionEventOutbox(generation: number, signal: AbortSignal)
   }
   if (!isOutboxLifecycleCurrent(generation, signal)) return
   resetInterruptedOutboxEvents(Date.now() - OUTBOX_SENDING_STALE_MS)
-  const rows = listDueOutboxEvents(Date.now(), OUTBOX_BATCH_SIZE)
-  for (const row of rows) {
+  const ids = listDueOutboxIds(Date.now(), OUTBOX_BATCH_SIZE)
+  for (const id of ids) {
+    // A transfer can revise a later row while the previous upload is awaiting I/O.
+    const row = getOutboxEvent(id)
+    if (!row || (row.status !== "pending" && row.status !== "retry")) continue
     if (!isOutboxLifecycleCurrent(generation, signal)) return
     if (Date.now() - row.created_at >= OUTBOX_RETRY_WINDOW_MS) {
       markOutboxFailed(row.event_id, "retry window expired after 24 hours", Date.now(), true)
@@ -3455,6 +3929,14 @@ async function drainAdoptionEventOutbox(generation: number, signal: AbortSignal)
       ) {
         throw new Error("outbox payload identity does not match its immutable key")
       }
+      const props = event.properties
+      const revisedSha =
+        props?.ownershipRevision &&
+        event.eventName === "code_adopt" &&
+        typeof props.commitSha === "string"
+          ? props.commitSha
+          : undefined
+      if (revisedSha) Object.assign(props!, getAdoptionPush(revisedSha))
       const reporter = getEventReporter()
       const result = await reportOutboxEventWithDeadline(reporter, event, signal, () => {
         reporterInvoked = true
@@ -3471,7 +3953,9 @@ async function drainAdoptionEventOutbox(generation: number, signal: AbortSignal)
           }
         : result
       if (reportResult.ok) {
-        markOutboxDelivered(row.event_id)
+        if (revisedSha && getAdoptionPush(revisedSha)?.pushOperationId !== props?.pushOperationId)
+          markOutboxDeferred(row.event_id, "push confirmed during adoption upload", Date.now())
+        else markOutboxDelivered(row.event_id)
       } else {
         const attempted = reportResult.attempted !== false
         const delay = retryDelayMs(row.attempts, reportResult.retryAfterMs, OUTBOX_RETRY_DELAYS_MS)
@@ -3680,6 +4164,7 @@ export async function initializeAdoptionTracker(): Promise<boolean> {
 }
 
 export function shutdownAdoptionTracker(): void {
+  layouts.clear()
   initialized = false
   outboxLifecycleGeneration += 1
   outboxLifecycleController.abort()

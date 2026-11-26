@@ -1,3 +1,4 @@
+import { buildGitCommitUrl, type GitRemoteInfo } from "../utils/git-remote"
 /**
  * Adoption Index
  *
@@ -403,7 +404,144 @@ export interface AdoptLineDetailsRow {
   measured_at: number
 }
 
-export type AdoptLineDetailsInput = Omit<AdoptLineDetailsRow, "gen_event_id">
+export type AdoptLineDetailsInput = Omit<AdoptLineDetailsRow, "gen_event_id"> & {
+  origin?: { commonDir: string; root: string; adoptId: string; fileId: string; time: number }
+}
+
+export interface TransferCandidate {
+  commit_sha: string
+  gen_event_id: string
+  adopt_id: string
+  file_id: string
+}
+
+export interface OwnershipChanges {
+  transferProbe: boolean
+  detailsLimits: AdoptLineDetailsLimits
+  revisions: { original: string; event: EventOutboxInput }[]
+  events: EventOutboxInput[]
+  details: { genId: string; previous?: Uint8Array; row: AdoptLineDetailsInput }[]
+}
+
+export function hasTransferSources(common: string): boolean {
+  return !!db?.exec("SELECT 1 FROM adopt_line_details WHERE common_dir=? LIMIT 1", [common]).length
+}
+
+// Probe using only the indexed metadata before reading any code or running Git.
+export function findTransferFiles(
+  common: string,
+  root: string,
+  paths: string[],
+  since: number,
+  through: number
+): Set<string> {
+  const found = new Set<string>()
+  if (!db) return found
+  for (let start = 0; start < paths.length; start += 128) {
+    const batch = paths.slice(start, start + 128)
+    const rows = db.exec(
+      `SELECT DISTINCT rel_path FROM adopt_line_details
+      WHERE common_dir=? AND source_root<>? AND commit_ms BETWEEN ? AND ?
+      AND rel_path IN (${batch.map(() => "?").join(",")})`,
+      [common, root, since, through, ...batch]
+    )[0]
+    for (const [path] of rows?.values ?? []) {
+      found.add(String(path))
+      if (found.size >= 256) return found
+    }
+  }
+  return found
+}
+
+export function hasMeasuredCommitFile(sha: string, path: string): boolean {
+  return !!db?.exec("SELECT 1 FROM adopt_line_details WHERE commit_sha=? AND rel_path=? LIMIT 1", [
+    sha,
+    path
+  ]).length
+}
+
+export function getTransferCandidates(
+  common: string,
+  root: string,
+  path: string,
+  since: number,
+  through: number
+): TransferCandidate[] {
+  if (!db) return []
+  const args = [common, path, root, since, through]
+  const where = "common_dir=? AND rel_path=? AND source_root<>? AND commit_ms BETWEEN ? AND ?"
+  // Over-budget/ambiguous paths must never be matched against a truncated set.
+  const stmt = db.prepare(
+    `SELECT commit_sha,gen_event_id,adopt_id,file_id,length(details_blob) AS size
+       FROM adopt_line_details WHERE ${where} LIMIT 33`,
+    args
+  )
+  const result: TransferCandidate[] = []
+  let bytes = 0
+  try {
+    while (stmt.step()) {
+      const row = stmt.getAsObject()
+      bytes += Number(row.size)
+      if (result.length >= 32 || bytes > 1024 * 1024) return []
+      result.push(row as unknown as TransferCandidate)
+    }
+  } finally {
+    stmt.free()
+  }
+  return result
+}
+
+export interface AdoptionPushReceipt extends GitRemoteInfo {
+  pushedAt: string
+  pushOperationId: string
+}
+
+export function rememberAdoptionPush(shas: string[], receipt: AdoptionPushReceipt): void {
+  if (!db || !shas.length) return
+  const {
+    remoteUrl,
+    repositoryName,
+    repositoryFullName,
+    repositoryHost,
+    repositoryWebUrl,
+    commitUrlTemplate,
+    pushedAt,
+    pushOperationId
+  } = receipt
+  db.run("INSERT OR REPLACE INTO adoption_push_operations VALUES (?,?,?)", [
+    pushOperationId,
+    JSON.stringify({
+      remoteUrl,
+      repositoryName,
+      repositoryFullName,
+      repositoryHost,
+      repositoryWebUrl,
+      commitUrlTemplate,
+      pushedAt,
+      pushOperationId
+    }),
+    Date.now()
+  ])
+  const stmt = db.prepare("INSERT OR REPLACE INTO adoption_push_receipts VALUES (?,?)")
+  try {
+    for (const sha of shas) stmt.run([sha, pushOperationId])
+  } finally {
+    stmt.free()
+  }
+  scheduleSave()
+}
+
+export function getAdoptionPush(sha: string): Record<string, unknown> | undefined {
+  const value = db?.exec(
+    `SELECT properties FROM adoption_push_receipts r
+    JOIN adoption_push_operations o ON o.id=r.operation WHERE r.sha=?`,
+    [sha]
+  )[0]?.values[0]?.[0]
+  if (typeof value !== "string") return undefined
+  const receipt: AdoptionPushReceipt = JSON.parse(value)
+  const commitUrl = buildGitCommitUrl(receipt, sha)
+  return { ...receipt, pushed: true, ...(commitUrl ? { commitUrl } : {}) }
+}
 
 export interface AdoptLineDetailsLimits {
   maxRows: number
@@ -481,6 +619,7 @@ export interface CommitJobRow {
   created_at: number
   updated_at: number
   completed_at: number | null
+  empty_transfer_probe: number | null
 }
 
 export interface AdoptionMeasurementWrite {
@@ -619,6 +758,37 @@ function openAdoptionDatabase(
         PRIMARY KEY (commit_sha, gen_event_id)
       )
     `)
+
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_adopt_commit_file ON adopt_line_details(commit_sha,rel_path)"
+    )
+
+    // Only linked-worktree measurements with provable added lines opt in.
+    const detailColumns = new Set(
+      db.exec("PRAGMA table_info(adopt_line_details)")[0].values.map((row) => row[1])
+    )
+    for (const column of [
+      "common_dir TEXT",
+      "source_root TEXT",
+      "adopt_id TEXT",
+      "file_id TEXT",
+      "commit_ms INTEGER"
+    ]) {
+      if (!detailColumns.has(column.split(" ")[0]))
+        db.run(`ALTER TABLE adopt_line_details ADD COLUMN ${column}`)
+    }
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_transfer_candidates ON adopt_line_details(common_dir, rel_path, commit_ms) WHERE common_dir IS NOT NULL"
+    )
+    db.run(
+      "CREATE TABLE IF NOT EXISTS adoption_push_operations (id TEXT PRIMARY KEY, properties TEXT NOT NULL, created_at INTEGER NOT NULL)"
+    )
+    db.run(
+      "CREATE TABLE IF NOT EXISTS adoption_push_receipts (sha TEXT PRIMARY KEY, operation TEXT NOT NULL)"
+    )
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_push_receipt_operation ON adoption_push_receipts(operation)"
+    )
 
     // Migrate older DBs that pre-date the attribution columns. sql.js does not
     // support "ADD COLUMN IF NOT EXISTS", so we swallow the "duplicate column"
@@ -783,6 +953,13 @@ function openAdoptionDatabase(
         UNIQUE(repo_path, commit_sha)
       )
     `)
+    if (
+      !db
+        .exec("PRAGMA table_info(commit_jobs)")[0]
+        .values.some((row) => row[1] === "empty_transfer_probe")
+    ) {
+      db.run("ALTER TABLE commit_jobs ADD COLUMN empty_transfer_probe INTEGER")
+    }
     db.run(
       `CREATE INDEX IF NOT EXISTS idx_commit_jobs_due
          ON commit_jobs(status, next_attempt_at, created_at)`
@@ -1210,9 +1387,21 @@ function insertAdoptLineDetailsRow(eventId: string, row: AdoptLineDetailsInput):
   if (!db) throw new Error("adoption index is not initialized")
   db.run(
     `INSERT OR REPLACE INTO adopt_line_details
-     (commit_sha, gen_event_id, file_path, rel_path, details_blob, measured_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [row.commit_sha, eventId, row.file_path, row.rel_path, row.details_blob, row.measured_at]
+     (commit_sha, gen_event_id, file_path, rel_path, details_blob, measured_at, common_dir, source_root, adopt_id, file_id, commit_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.commit_sha,
+      eventId,
+      row.file_path,
+      row.rel_path,
+      row.details_blob,
+      row.measured_at,
+      row.origin?.commonDir ?? null,
+      row.origin?.root ?? null,
+      row.origin?.adoptId ?? null,
+      row.origin?.fileId ?? null,
+      row.origin?.time ?? null
+    ]
   )
 }
 
@@ -1466,7 +1655,8 @@ export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): bo
 export function commitAdoptionMeasurements(
   writes: AdoptionMeasurementWrite[],
   commitJobId?: string,
-  fileEvents: AdoptionFileEventWrite[] = []
+  fileEvents: AdoptionFileEventWrite[] = [],
+  changes?: OwnershipChanges
 ): AdoptionMeasurementCommitResult {
   if (!db) return { success: false, measuredCount: 0, enqueuedCount: 0 }
   let measuredCount = 0
@@ -1474,6 +1664,15 @@ export function commitAdoptionMeasurements(
   let detailsLimits: AdoptLineDetailsLimits | undefined
   try {
     db.run("BEGIN TRANSACTION")
+    // The same SHA can be observed concurrently from two different checkouts.
+    // Only the first receiver can create its file rollup and credit these lines.
+    const checkedFiles = new Set<string>()
+    for (const { row, previous } of changes?.details ?? []) {
+      if (previous || !row.rel_path || checkedFiles.has(row.rel_path)) continue
+      if (hasMeasuredCommitFile(row.commit_sha, row.rel_path))
+        throw new Error("Receiver already measured in another checkout")
+      checkedFiles.add(row.rel_path)
+    }
     const closedGenEventIds = new Set<string>()
     for (const write of writes) {
       db.run(
@@ -1499,13 +1698,46 @@ export function commitAdoptionMeasurements(
       }
       if (insertOutboxEventUnsafe(fileEvent.outboxEvent)) enqueuedCount += 1
     }
+    if (changes) {
+      for (const { original, event } of changes.revisions) {
+        // A published adoption is replaced under its original server document ID.
+        // Never race an in-flight upload or a competing transfer of the same lines.
+        db.run(
+          `UPDATE event_outbox SET payload_json=?,status='pending',attempts=0,next_attempt_at=0,
+          created_at=?,updated_at=?,delivered_at=NULL,last_error=NULL
+          WHERE event_id=? AND payload_json=? AND status<>'sending'`,
+          [event.payloadJson, event.createdAt, event.createdAt, event.eventId, original]
+        )
+        if (!db.getRowsModified())
+          throw new Error("Ownership changed during transfer; retry commit")
+        enqueuedCount++
+      }
+      for (const event of changes.events) if (insertOutboxEventUnsafe(event)) enqueuedCount++
+      if (changes.details.length) detailsLimits = changes.detailsLimits
+      for (const { genId, row, previous } of changes.details) {
+        if (previous) {
+          db.run(
+            "UPDATE adopt_line_details SET details_blob=? WHERE commit_sha=? AND gen_event_id=? AND details_blob=?",
+            [row.details_blob, row.commit_sha, genId, previous]
+          )
+          if (!db.getRowsModified())
+            throw new Error("Source line ownership changed during transfer")
+        } else insertAdoptLineDetailsRow(genId, row)
+      }
+    }
     if (commitJobId) {
       const now = Date.now()
       db.run(
         `UPDATE commit_jobs
-            SET status = 'completed', completed_at = ?, updated_at = ?, last_error = NULL
+            SET status = 'completed', completed_at = ?, updated_at = ?, last_error = NULL,
+              empty_transfer_probe = COALESCE(empty_transfer_probe, ?)
           WHERE job_id = ?`,
-        [now, now, commitJobId]
+        [
+          now,
+          now,
+          Number((changes?.transferProbe && !writes.length && !changes.events.length) || false),
+          commitJobId
+        ]
       )
       if (db.getRowsModified() <= 0) {
         throw new Error(`commit job not found: ${commitJobId}`)
@@ -1660,18 +1892,18 @@ export function resetInterruptedCommitJobs(): void {
   }
 }
 
-export function listDueOutboxEvents(now: number, limit: number): EventOutboxRow[] {
+export function listDueOutboxIds(now: number, limit: number): string[] {
   if (!db) return []
   const stmt = db.prepare(
-    `SELECT * FROM event_outbox
+    `SELECT event_id FROM event_outbox
       WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
       ORDER BY created_at ASC
       LIMIT ?`
   )
   stmt.bind([now, Math.max(1, limit)])
   try {
-    const rows: EventOutboxRow[] = []
-    while (stmt.step()) rows.push(stmt.getAsObject() as unknown as EventOutboxRow)
+    const rows: string[] = []
+    while (stmt.step()) rows.push(String(stmt.get()[0]))
     return rows
   } finally {
     stmt.free()
@@ -1830,6 +2062,11 @@ export function cleanupAdoptionDeliveryRecords(cutoff: number): void {
     // The outbox has one total retention window measured from event creation.
     // This applies to unresolved rows too, so a permanently offline endpoint
     // cannot grow the database forever.
+    db.run(
+      "DELETE FROM adoption_push_receipts WHERE operation IN (SELECT id FROM adoption_push_operations WHERE created_at < ?)",
+      [cutoff]
+    )
+    db.run("DELETE FROM adoption_push_operations WHERE created_at < ?", [cutoff])
     db.run(`DELETE FROM event_outbox WHERE created_at < ?`, [cutoff])
     const outboxDeleted = db.getRowsModified()
     db.run(
