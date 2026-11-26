@@ -360,8 +360,7 @@ function RequirementConversationSession({
   )
   const manifestBelongsToCurrentThread = manifestThreadId === threadId
   const prdGenerationCompleted =
-    manifestBelongsToCurrentThread &&
-    isRequirementPrdGenerationCompleted(requirementSpaceManifest)
+    manifestBelongsToCurrentThread && isRequirementPrdGenerationCompleted(requirementSpaceManifest)
   const requirementSpacePublished =
     manifestBelongsToCurrentThread && isRequirementSpacePublished(requirementSpaceManifest)
   const prototypeFunctions = useMemo(
@@ -1268,7 +1267,6 @@ function RequirementConversationSession({
           }),
           skillName: skill.name,
           skillDescription: skill.description,
-          builtinBrowser: requirement.sourceType === "link",
           created_at: now,
           updated_at: now
         })

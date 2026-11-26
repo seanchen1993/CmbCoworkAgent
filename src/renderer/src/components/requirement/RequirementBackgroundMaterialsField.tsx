@@ -1,12 +1,5 @@
-import {
-  forwardRef,
-  useCallback,
-  useImperativeHandle,
-  useRef,
-  useState,
-  type ReactNode
-} from "react"
-import { FileText, Link, Plus, Upload, X } from "lucide-react"
+import { forwardRef, useCallback, useImperativeHandle, useState, type ReactNode } from "react"
+import { FileText, Link, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -17,6 +10,10 @@ import {
   MAX_REQUIREMENT_BACKGROUND_URLS,
   REQUIREMENT_BACKGROUND_FILE_ACCEPT
 } from "../../../../shared/file-attachment"
+import { RequirementFileDropzone } from "./RequirementFileDropzone"
+
+// Background URL attachments are retained in code but are not ready for release yet.
+const REQUIREMENT_BACKGROUND_LINKS_ENABLED = false
 
 function isImageFileName(fileName: string): boolean {
   return /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i.test(fileName.trim())
@@ -42,7 +39,6 @@ export const RequirementBackgroundMaterialsField = forwardRef<
   { files, urls, disabled = false, browserControlTag, onFilesChange, onUrlsChange },
   ref
 ): React.JSX.Element {
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const [urlDraft, setUrlDraft] = useState("")
 
   const addFiles = (nextFiles: File[]): void => {
@@ -109,83 +105,65 @@ export const RequirementBackgroundMaterialsField = forwardRef<
       <div>
         <div className="text-sm font-semibold text-foreground">需求背景补充材料</div>
         <div className="mt-1 text-xs leading-5 text-muted-foreground">
-          上传本地资料或添加线上链接，帮助 Agent 更完整地理解需求背景。
+          上传本地资料，帮助 Agent 更完整地理解需求背景。
         </div>
       </div>
 
       <div className="mt-4 space-y-3">
-        <div className="flex items-center gap-3 rounded-lg border border-dashed border-primary/30 bg-primary/[0.035] p-3">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <Upload className="size-4" />
+        <RequirementFileDropzone
+          accept={REQUIREMENT_BACKGROUND_FILE_ACCEPT}
+          multiple
+          disabled={disabled}
+          className="min-h-32 px-4"
+          onFilesSelected={addFiles}
+        >
+          <Upload className="mb-2 size-6 text-primary" />
+          <span className="text-xs font-semibold text-foreground">拖拽文件到此处，或点击上传</span>
+          <span className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            DOCX、MD、TXT、HTML 或图片 · 最多 10 个 · 单个不超过 10MB
           </span>
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-semibold text-foreground">上传本地文件</div>
-            <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-              DOCX、MD、TXT、HTML 或图片 · 最多 10 个 · 单个不超过 10MB
-            </div>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={disabled}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <Plus className="size-3.5" />
-            选择文件
-          </Button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept={REQUIREMENT_BACKGROUND_FILE_ACCEPT}
-            disabled={disabled}
-            className="hidden"
-            onChange={(event) => {
-              addFiles(Array.from(event.target.files ?? []))
-              event.target.value = ""
-            }}
-          />
-        </div>
+        </RequirementFileDropzone>
 
-        <div className="rounded-lg border border-border/80 bg-muted/15 p-3">
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-foreground">
-            <span className="flex items-center gap-2">
-              <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
-                <Link className="size-3.5" />
+        {REQUIREMENT_BACKGROUND_LINKS_ENABLED ? (
+          <div className="rounded-lg border border-border/80 bg-muted/15 p-3">
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-foreground">
+              <span className="flex items-center gap-2">
+                <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <Link className="size-3.5" />
+                </span>
+                添加线上链接
               </span>
-              添加线上链接
-            </span>
-            {browserControlTag}
-          </div>
-          <div className="flex gap-2">
-            <div className="relative min-w-0 flex-1">
-              <Link className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={urlDraft}
-                onChange={(event) => setUrlDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter") return
-                  event.preventDefault()
-                  addUrl()
-                }}
-                placeholder="https://..."
-                aria-label="线上背景资料链接"
-                className="h-9 bg-white pl-9"
-                disabled={disabled}
-              />
+              {browserControlTag}
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={disabled || !urlDraft.trim()}
-              onClick={addUrl}
-            >
-              添加
-            </Button>
+            <div className="flex gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Link className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={urlDraft}
+                  onChange={(event) => setUrlDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return
+                    event.preventDefault()
+                    addUrl()
+                  }}
+                  placeholder="https://..."
+                  aria-label="线上背景资料链接"
+                  className="h-9 bg-white pl-9"
+                  disabled={disabled}
+                />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={disabled || !urlDraft.trim()}
+                onClick={addUrl}
+              >
+                添加
+              </Button>
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
 
       {files.length > 0 ? (
@@ -220,7 +198,7 @@ export const RequirementBackgroundMaterialsField = forwardRef<
         </div>
       ) : null}
 
-      {urls.length > 0 ? (
+      {REQUIREMENT_BACKGROUND_LINKS_ENABLED && urls.length > 0 ? (
         <div className="mt-3 space-y-2">
           {urls.map((url) => (
             <div key={url} className="flex items-center gap-2 rounded-lg bg-muted/45 px-3 py-2">

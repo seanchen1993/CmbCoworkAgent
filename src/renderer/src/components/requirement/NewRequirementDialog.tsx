@@ -43,6 +43,7 @@ import {
   RequirementBackgroundMaterialsField,
   type RequirementBackgroundMaterialsFieldHandle
 } from "./RequirementBackgroundMaterialsField"
+import { RequirementFileDropzone } from "./RequirementFileDropzone"
 
 export type UploadSource = "file" | "text" | "link"
 
@@ -231,7 +232,6 @@ export function NewRequirementDialog({
   const [skillStatuses, setSkillStatuses] = useState<Record<string, RequirementSkillStatus>>({})
   const [browserControlState, setBrowserControlState] = useState<BrowserControlState>("loading")
   const [restartingApp, setRestartingApp] = useState(false)
-  const inputRef = useRef<HTMLInputElement>(null)
   const backgroundMaterialsRef = useRef<RequirementBackgroundMaterialsFieldHandle>(null)
   const lastAutoFilledTitleRef = useRef("")
 
@@ -531,15 +531,10 @@ export function NewRequirementDialog({
 
               {source === "file" ? (
                 <div className="space-y-3">
-                  <button
-                    type="button"
-                    onClick={() => inputRef.current?.click()}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={(event) => {
-                      event.preventDefault()
-                      updateFile(event.dataTransfer.files.item(0))
-                    }}
-                    className="flex min-h-44 w-full flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed border-[#d8cbbb] bg-[#fdfbf7] px-6 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:border-primary focus-visible:outline-none"
+                  <RequirementFileDropzone
+                    accept=".docx"
+                    disabled={saving}
+                    onFilesSelected={(files) => updateFile(files[0] ?? null)}
                   >
                     <Upload className="mb-3 size-7 text-primary" />
                     <span className="text-sm font-semibold text-foreground">
@@ -563,17 +558,7 @@ export function NewRequirementDialog({
                         </span>
                       </span>
                     ) : null}
-                    <input
-                      ref={inputRef}
-                      type="file"
-                      accept=".docx"
-                      className="hidden"
-                      onChange={(event) => {
-                        updateFile(event.target.files?.item(0) ?? null)
-                        event.target.value = ""
-                      }}
-                    />
-                  </button>
+                  </RequirementFileDropzone>
                 </div>
               ) : source === "link" ? (
                 <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
