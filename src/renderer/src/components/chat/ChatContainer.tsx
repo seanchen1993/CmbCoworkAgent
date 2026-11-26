@@ -4464,6 +4464,8 @@ export function ChatContainer({
   }, [invalidateDurableMessageReveal])
 
   const trackTranscriptScroll = surface !== "btw" || displayMessages.length > 0
+  const browsingWelcome = surface === "default" && displayMessages.length === 0 &&
+    !isLoading && !historyLoading && !navigation
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
     return scrollRef.current?.querySelector(
@@ -4905,7 +4907,8 @@ export function ChatContainer({
   )
 
   useEffect(() => {
-    if (!scrollParent || !trackTranscriptScroll) return
+    // Browsing welcome skills must not opt the first conversation turn out of following.
+    if (!scrollParent || !trackTranscriptScroll || browsingWelcome) return
     lastObservedScrollTopRef.current = scrollParent.scrollTop
 
     const confirmOrDetachFromScroll = (): void => {
@@ -5076,7 +5079,7 @@ export function ChatContainer({
       window.removeEventListener("pointercancel", cancelScrollbarPointerIntent, true)
       window.removeEventListener("blur", cancelScrollbarPointerIntent)
     }
-  }, [cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent, trackTranscriptScroll])
+  }, [browsingWelcome, cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent, trackTranscriptScroll])
 
   const scrollToMessageById = useCallback(
     (messageId: string, virtualBehavior: "smooth" | "auto" = "smooth"): void => {

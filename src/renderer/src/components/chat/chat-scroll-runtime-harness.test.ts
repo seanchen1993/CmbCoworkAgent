@@ -50,6 +50,7 @@ import {
 
 interface CapturedVirtuosoProps {
   data: readonly number[]
+  followOutput: false | ((atBottom: boolean) => false)
   initialTopMostItemIndex?: {
     index: number | "LAST"
     align?: "start" | "center" | "end"
@@ -200,6 +201,7 @@ describe("chat scroll render/runtime harness", () => {
     const virtuoso = renderVirtualList(0, runtime, true)
 
     expect(virtuoso?.data).toEqual([])
+    expect(virtuoso?.followOutput).toBe(false)
     expect(virtuoso?.initialTopMostItemIndex).toBeUndefined()
     virtuoso?.itemsRendered()
     expect(runtime.state).toMatchObject({ mode: "initializing", dataReady: false })
@@ -216,6 +218,8 @@ describe("chat scroll render/runtime harness", () => {
     const virtuoso = renderVirtualList(500, runtime)
     expect(virtuoso).not.toBeNull()
     expect(virtuoso?.data).toHaveLength(500)
+    const follow = virtuoso?.followOutput
+    expect(typeof follow === "function" && [follow(false), follow(true)]).toEqual([false, false])
     expect(virtuoso?.initialTopMostItemIndex).toEqual({
       index: "LAST",
       align: "end",
