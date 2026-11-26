@@ -455,6 +455,7 @@ import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
+import { hasRunningSideHooks, waitForSideHooksOnQuit } from "./side-thread-registry"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
@@ -1680,7 +1681,7 @@ if (browserNativeMessagingHostLaunch) {
   let sessionEndInProgress = false
   app.on("before-quit", (event) => {
     const activeSessions = hasActiveSessions()
-    const activeTasks = hasActiveForegroundRuns()
+    const activeTasks = hasActiveForegroundRuns() || hasRunningSideHooks()
     const pendingTraceReports = hasPendingTraceReports()
     console.warn("[Main] before-quit", {
       sessionEndDone,
@@ -1712,6 +1713,7 @@ if (browserNativeMessagingHostLaunch) {
         const shutdownResults = await Promise.allSettled([
           waitBestEffort(stopLocalBotHost(), 5_000),
           shutdownAllAgentTasks(5_000),
+          waitBestEffort(waitForSideHooksOnQuit(), 5_000),
           stopSchedulerAndWait(5_000),
           stopHeartbeatAndWait(5_000),
           builtinRobotManager.stop()

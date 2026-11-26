@@ -7400,6 +7400,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const throwIfInvokeAborted = (): void => {
           if (
             abortController.signal.aborted ||
+            getSideThreadLifetimeSignal(threadId)?.aborted ||
             !isCurrentRunMessageQueueOwner(threadId, runToken)
           ) {
             throw createAbortError()

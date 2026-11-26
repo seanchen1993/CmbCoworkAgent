@@ -751,7 +751,8 @@ const sessionLifecycleSrc = _read(
 )
 assert(
   /export async function fireSessionStartOnce/.test(sessionLifecycleSrc) &&
-    /const result = await runHooks/.test(sessionLifecycleSrc),
+    /const attempt = runSetupHooks\(/.test(sessionLifecycleSrc) &&
+    /await waitForAbort\(attempt, lifetime\)/.test(sessionLifecycleSrc),
   "P3d fireSessionStartOnce awaits Setup before SessionStart"
 )
 
