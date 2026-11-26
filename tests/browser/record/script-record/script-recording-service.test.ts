@@ -1180,7 +1180,7 @@ test("recorded script flow", async ({ page }) => {
     expect(executedScripts[1]).toBe(buildPlaywrightScriptRecorderDisposeScript())
   })
 
-  it("shares one stop task while recorder injection is still finishing", async () => {
+  it("returns the completed recording without waiting for recorder injection cleanup", async () => {
     startScriptRecording({ threadId: "thread-1" })
     let releaseInjection: (() => void) | undefined
     let executionCount = 0
@@ -1202,19 +1202,13 @@ test("recorded script flow", async ({ page }) => {
     await Promise.resolve()
     const firstStop = stopScriptRecording()
     const secondStop = stopScriptRecording()
-    let secondStopCompleted = false
-    void secondStop.then(() => {
-      secondStopCompleted = true
-    })
-
-    await Promise.resolve()
-    expect(secondStopCompleted).toBe(false)
-    releaseInjection?.()
     const [firstSession, secondSession] = await Promise.all([firstStop, secondStop])
-    await injection
-
     expect(firstSession.status).toBe("completed")
     expect(secondSession).toEqual(firstSession)
+
+    releaseInjection?.()
+    await injection
+
     expect(executionCount).toBe(2)
   })
 

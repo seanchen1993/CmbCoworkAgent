@@ -26,7 +26,7 @@ import {
 
 let activeSession: BrowserRecordingSession | null = null
 let lastSession: BrowserRecordingSession | null = null
-let stopRecordingPromise: Promise<BrowserRecordingSession> | null = null
+let stopRecordingCleanupPromise: Promise<void> | null = null
 const recordingStateListeners = new Set<(session: BrowserRecordingSession) => void>()
 let nextSessionNumber = 0
 let nextActionNumber = 0
@@ -134,6 +134,19 @@ const FRAME_ELEMENT_SELECTOR_CACHE = new Map<string, string>()
 const FRAME_INJECTION_PROMISES = new Map<string, Promise<void>>()
 const FRAME_DISPOSAL_PROMISES = new Map<string, Promise<void>>()
 const FRAME_CHANNEL_FRAME_CACHE = new Map<string, WebFrameMain>()
+const STOP_RECORDING_CLEANUP_TIMEOUT_MS = 2_000
+
+async function settleRecorderCleanupWithinTimeout(tasks: Promise<unknown>[]): Promise<void> {
+  if (tasks.length === 0) return
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    Promise.allSettled(tasks).then(() => undefined),
+    new Promise<void>((resolve) => {
+      timeout = setTimeout(resolve, STOP_RECORDING_CLEANUP_TIMEOUT_MS)
+    })
+  ])
+  if (timeout) clearTimeout(timeout)
+}
 
 function now(): string {
   return new Date().toISOString()
@@ -876,7 +889,6 @@ export function resumeScriptRecording(): BrowserRecordingSession {
 export async function stopScriptRecording(
   environment?: BrowserRecordingEnvironment
 ): Promise<BrowserRecordingSession> {
-  if (stopRecordingPromise) return stopRecordingPromise
   if (!activeSession) return toView(lastSession)
 
   const deviceViewport = normalizeDeviceViewport(environment?.deviceViewport)
@@ -895,25 +907,33 @@ export async function stopScriptRecording(
   lastSession = activeSession
   activeSession = null
   const stoppedSession = toView(lastSession)
-  stopRecordingPromise = (async () => {
+  const injectionTasks = [...FRAME_INJECTION_PROMISES.values()]
+  const recorderFrames = [...new Set(FRAME_CHANNEL_FRAME_CACHE.values())]
+  const cleanupPromise = (async () => {
     try {
-      await Promise.allSettled([...FRAME_INJECTION_PROMISES.values()])
-      await Promise.allSettled(
-        [...new Set(FRAME_CHANNEL_FRAME_CACHE.values())].map((frame) =>
-          disposeScriptRecorder(frame)
-        )
-      )
+      await settleRecorderCleanupWithinTimeout(injectionTasks)
+      await settleRecorderCleanupWithinTimeout(recorderFrames.map(disposeScriptRecorder))
     } catch (error) {
       console.warn("[BrowserScriptRecording] failed to clean up recorder frames", error)
     } finally {
-      FRAME_ELEMENT_SELECTOR_CACHE.clear()
-      FRAME_CHANNEL_FRAME_CACHE.clear()
+      // A new recording may already be installing recorders. Never let cleanup
+      // from the previous session erase its frame bookkeeping.
+      if (!activeSession) {
+        FRAME_ELEMENT_SELECTOR_CACHE.clear()
+        FRAME_CHANNEL_FRAME_CACHE.clear()
+      }
     }
-    return stoppedSession
   })().finally(() => {
-    stopRecordingPromise = null
+    if (stopRecordingCleanupPromise === cleanupPromise) {
+      stopRecordingCleanupPromise = null
+    }
   })
-  return stopRecordingPromise
+  stopRecordingCleanupPromise = cleanupPromise
+  // The completed recording is already immutable. Frame cleanup is best-effort
+  // housekeeping and must not keep the renderer's Stop button busy, especially
+  // on Windows where a destroyed frame can leave executeJavaScript pending.
+  void cleanupPromise
+  return stoppedSession
 }
 
 export function getScriptRecording(): BrowserRecordingSession {
@@ -1060,7 +1080,7 @@ export function resetScriptRecordingForTests(): void {
   nextSessionNumber = 0
   nextActionNumber = 0
   pendingExplicitNavigation = null
-  stopRecordingPromise = null
+  stopRecordingCleanupPromise = null
   FRAME_ELEMENT_SELECTOR_CACHE.clear()
   FRAME_INJECTION_PROMISES.clear()
   FRAME_DISPOSAL_PROMISES.clear()
