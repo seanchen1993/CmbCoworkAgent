@@ -895,7 +895,8 @@ async function inspectAndLaunch(
           featureStateHash: feature.featureStateHash,
           featureStatus: feature.featureStatus,
           nodeStatus: feature.currentNodeStatus,
-          nextActionHash: feature.nextActionHash
+          nextActionHash: feature.nextActionHash,
+          ...(feature.completedCodeBatches !== undefined ? { completedCodeBatches: feature.completedCodeBatches } : {})
         }
       })
       bindExistingManagedSession(
@@ -951,7 +952,8 @@ async function inspectAndLaunch(
           featureStateHash: feature.featureStateHash,
           featureStatus: feature.featureStatus,
           nodeStatus: feature.currentNodeStatus,
-          nextActionHash: feature.nextActionHash
+          nextActionHash: feature.nextActionHash,
+          ...(feature.completedCodeBatches !== undefined ? { completedCodeBatches: feature.completedCodeBatches } : {})
         },
         providerRetryCount:
           terminal?.outcome === "success" || advancesStage ? 0 : decidedRun.providerRetryCount,
@@ -1447,7 +1449,8 @@ export async function resolveManagedBizRetryDecision(
         featureStateHash: feature.featureStateHash,
         featureStatus: feature.featureStatus,
         nodeStatus: feature.currentNodeStatus,
-        nextActionHash: feature.nextActionHash
+        nextActionHash: feature.nextActionHash,
+        ...(feature.completedCodeBatches !== undefined ? { completedCodeBatches: feature.completedCodeBatches } : {})
       },
       providerRetryCount: 0,
       nextRetryAt: undefined

@@ -595,6 +595,7 @@ export interface ManagedRunSnapshot {
     featureStatus: HarnessFeatureStatus
     nodeStatus: HarnessNodeStatus
     nextActionHash: string
+    completedCodeBatches?: number
   }
   providerRetryCount: number
   /** Absent in historical records; the store normalizes it to zero on read. */
@@ -792,6 +793,7 @@ export interface ManagedFeatureStatusSnapshot {
   currentNodeStatus: HarnessNodeStatus
   isFinalNode: boolean
   nextAction?: HarnessWorkflowNextAction
+  completedCodeBatches?: number
   featureStateHash: string
   nextActionHash: string
 }

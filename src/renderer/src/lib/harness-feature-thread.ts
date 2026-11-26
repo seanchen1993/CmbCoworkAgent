@@ -8,7 +8,7 @@ import { toast } from "sonner"
 type CreateHarnessThread = (
   config: {
     workspacePath: string | null
-    harnessFeature: { projectId: string; slug: string; source: string }
+    harnessFeature: { projectId: string; slug: string; source: string; launchSkill?: string }
   },
   options?: { preserveView?: boolean }
 ) => Promise<Thread>
@@ -35,15 +35,18 @@ export async function createHarnessFeatureThread({
   nextAction,
   runDetail
 }: CreateHarnessFeatureThreadParams): Promise<Thread> {
+  const resolvedNextAction = nextAction ?? getHarnessRunNextAction(runDetail)
   const thread = await createThread(
     {
       workspacePath,
-      harnessFeature: { projectId, slug, source: HARNESS_SOURCE }
+      harnessFeature: {
+        projectId, slug, source: HARNESS_SOURCE,
+        ...(resolvedNextAction?.slashSkill === "autodev-code" ? { launchSkill: "autodev-code" } : {})
+      }
     },
     { preserveView: true }
   )
 
-  const resolvedNextAction = nextAction ?? getHarnessRunNextAction(runDetail)
   if (resolvedNextAction) {
     setPendingHarnessNextAction(thread.thread_id, resolvedNextAction)
   }

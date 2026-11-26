@@ -293,19 +293,26 @@ export function resolveManagedRunDecision(input: {
   const shouldAdvanceCompletedNode = Boolean(
     nodeCompleted && run.decisionBaseline && !isCompletedNodeStatus(run.decisionBaseline.nodeStatus)
   )
-  if (nodeChanged || shouldAdvanceCompletedNode) {
+  const previousCodeBatches = run.decisionBaseline.completedCodeBatches
+  const currentCodeBatches = feature.completedCodeBatches
+  const continuingCode = previousCodeBatches !== undefined && currentCodeBatches !== undefined
+  const completedCodeBatch = continuingCode && currentCodeBatches > previousCodeBatches
+  if (completedCodeBatch || (!continuingCode && (nodeChanged || shouldAdvanceCompletedNode))) {
     const invalidAction = missingNextActionDecision(feature)
     if (invalidAction) return invalidAction
     return {
       policyResult: {
         type: "biz_progress",
         proposedAction: "start_new_thread",
-        reasonCode: nodeChanged ? "current_node_changed" : "current_node_completed",
-        rule: nodeChanged
+        reasonCode: completedCodeBatch ? "code_batch_completed" : nodeChanged ? "current_node_changed" : "current_node_completed",
+        rule: completedCodeBatch
+          ? "当前 Code Batch 已通过验收，创建新会话执行下一批。"
+          : nodeChanged
           ? "currentNodeId 变化表示进入新的工作阶段，创建新会话。"
           : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进。"
       },
-      summary: nodeChanged ? "当前阶段已经变化，创建新会话继续" : "当前阶段已经结束，创建新会话继续"
+      summary: completedCodeBatch ? "当前 Code Batch 已完成，创建新会话继续" :
+        nodeChanged ? "当前阶段已经变化，创建新会话继续" : "当前阶段已经结束，创建新会话继续"
     }
   }
 

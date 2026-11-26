@@ -58,6 +58,24 @@ const successTerminal = {
 }
 
 describe("resolveManagedRunDecision", () => {
+  it("opens the next Code dialogue only after a Batch was delivered", () => {
+    const previous = runWithBaseline()
+    const run = runWithBaseline({
+      decisionBaseline: { ...previous.decisionBaseline!, completedCodeBatches: 0 }
+    })
+    const code = {
+      ...feature,
+      currentNodeId: "dev.code",
+      nextAction: { slashSkill: "autodev-code", userMessage: "继续执行下一批" },
+      completedCodeBatches: 0
+    }
+    expect(resolveManagedRunDecision({ run, feature: code, terminal: successTerminal }).policyResult.type)
+      .toBe("biz_retry")
+    expect(resolveManagedRunDecision({
+      run, feature: { ...code, completedCodeBatches: 1 }, terminal: successTerminal
+    }).policyResult).toMatchObject({ proposedAction: "start_new_thread", reasonCode: "code_batch_completed" })
+  })
+
   it("returns a terminal decision when the local provider retry budget is exhausted", () => {
     expect(
       resolveManagedRunDecision({

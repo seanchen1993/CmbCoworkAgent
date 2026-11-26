@@ -8431,7 +8431,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             throwIfInvokeAborted()
           }
 
-          const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)
+          const codeDialogue = (metadata.harnessFeature as { launchSkill?: string } | undefined)
+            ?.launchSkill === "autodev-code"
+          const autoCommit: Awaited<ReturnType<typeof beginAutoCommitTracking>> = codeDialogue
+            ? { snapshot: null }
+            : await beginAutoCommitTracking(threadId, workspacePath)
           throwIfInvokeAborted()
           turnState.autoCommitSnapshot = autoCommit.snapshot
 
@@ -10207,7 +10211,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               workflowNotificationTerminalEligibleForManaged = true
             }
             if (invokeFinalOutcome === "success") {
-              await finalizeAutoCommit({
+              if (!codeDialogue) await finalizeAutoCommit({
                 threadId,
                 workspacePath,
                 userPrompt: isInternalNotificationTurn

@@ -5,6 +5,7 @@ import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import {
   buildHarnessFeatureAgentContext,
   requireHarnessFeatureWorkspace,
+  resolveHarnessCodeDialogueWorkspace,
   resolveHarnessFeatureCurrentStage,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
@@ -45,11 +46,21 @@ export async function createThreadService(
     }
   }
 
-  if (harnessFeatureMetadata && !options.managedWorkspace) {
+  const codeDialogue = harnessFeatureMetadata?.launchSkill === "autodev-code"
+  if (harnessFeatureMetadata && (codeDialogue || !options.managedWorkspace)) {
     const { projectId, slug } = harnessFeatureMetadata
     if (typeof projectId !== "string" || typeof slug !== "string")
       throw new Error("特性会话标识无效")
-    nextMetadata.workspacePath = await requireHarnessFeatureWorkspace(projectId, slug)
+    if (codeDialogue) {
+      const fallback = options.managedWorkspace && typeof nextMetadata.workspacePath === "string"
+        ? nextMetadata.workspacePath
+        : undefined
+      nextMetadata.workspacePath = await resolveHarnessCodeDialogueWorkspace(projectId, slug, fallback)
+      nextMetadata.agentMode = "normal"
+      nextMetadata.subagentsEnabled = false
+    } else {
+      nextMetadata.workspacePath = await requireHarnessFeatureWorkspace(projectId, slug)
+    }
   }
 
   const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")

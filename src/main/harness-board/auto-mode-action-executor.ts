@@ -396,7 +396,8 @@ export async function createManagedHarnessSession(
         slug: input.featureId,
         source: HARNESS_SOURCE,
         runId: input.runId,
-        nodeId: input.nodeId
+        nodeId: input.nodeId,
+        ...(input.nextAction.slashSkill === "autodev-code" ? { launchSkill: "autodev-code" } : {})
       }
     },
     { managedWorkspace: true }

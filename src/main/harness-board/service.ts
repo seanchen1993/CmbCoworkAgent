@@ -33,9 +33,9 @@ import type { KnowledgeDepositionWorkspace } from "../../shared/knowledge-base-t
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
-import { access, mkdir, readFile, stat } from "node:fs/promises"
+import { access, mkdir, readFile, realpath, stat } from "node:fs/promises"
 import { assertEmptyProjectDirectory } from "./project-workspace"
-import { basename, isAbsolute, join, relative, resolve } from "path"
+import { basename, isAbsolute, join, relative, resolve, sep } from "path"
 import { serialize } from "node:v8"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
@@ -1102,10 +1102,7 @@ function projectDirectoryPath(project: HarnessProjectMetadata): string {
 
 function isInsideDirectory(basePath: string, targetPath: string): boolean {
   const relativePath = relative(resolve(basePath), resolve(targetPath))
-  return (
-    relativePath === "" ||
-    (!!relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath))
-  )
+  return relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
 }
 
 function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string {
@@ -3216,17 +3213,23 @@ export async function inspectHarnessManagedFeatureStatus(
     deriveFeatureStatusFromCurrentNode(currentNodeStatus, currentNodeIndex, workflow.nodes.length)
   const nextAction = resolveHarnessNextAction(workflow, currentNodeId, currentNodeStatus)
   const nextActionHash = hashManagedState("next-action", nextAction ?? null)
+  const completedCodeBatches = nextAction?.slashSkill === "autodev-code" &&
+    typeof run.completedCodeBatches === "number" && Number.isSafeInteger(run.completedCodeBatches)
+      ? run.completedCodeBatches
+      : undefined
   return {
     featureStatus,
     currentNodeId,
     currentNodeStatus,
     isFinalNode: currentNodeIndex >= 0 && currentNodeIndex === workflow.nodes.length - 1,
     ...(nextAction ? { nextAction } : {}),
+    ...(completedCodeBatches !== undefined ? { completedCodeBatches } : {}),
     featureStateHash: hashManagedState("feature-state", {
       featureStatus,
       currentNodeId,
       currentNodeStatus,
-      nextActionHash
+      nextActionHash,
+      completedCodeBatches
     }),
     nextActionHash
   }
@@ -4231,6 +4234,32 @@ async function validateFeatureWorkspace(
   if (!(await stat(path).catch(() => null))?.isDirectory())
     throw new Error("会话工作区不存在或不是文件夹，请重新配置")
   return path
+}
+
+export async function resolveHarnessCodeDialogueWorkspace(
+  projectId: string, featureId: string, fallback?: string
+): Promise<string> {
+  const context = await requireProjectContext(projectId)
+  const snapshot = await runInspectAdapter(
+    context.project, projectConfigContextFromWorker(context), "run", featureId, true
+  )
+  const run = isObject(snapshot.run) ? snapshot.run : {}
+  const candidate = normalizeText(run.codeDialogueWorkspace).trim()
+  if (!candidate) return fallback ?? requireHarnessFeatureWorkspace(projectId, featureId)
+  if (!isAbsolute(candidate)) throw new Error("Plan 中的 Code 仓库路径无效")
+  const [repo, project] = await Promise.all([
+    realpath(candidate), realpath(context.project.workspacePath)
+  ])
+  if (!isInsideDirectory(project, repo)) {
+    const bound = await findFeatureDeployUnitBinding(projectId, featureId)
+    const selected = [fallback, resolveFeatureWorkspace(bound?.sessionWorkspace, bound?.selectedDeployUnitMappings ?? []),
+      ...(bound?.selectedDeployUnitMappings ?? []).map((item) => item.localRepoPath)]
+    const roots = await Promise.all(
+      selected.filter((path): path is string => Boolean(path)).map((path) => realpath(path).catch(() => undefined))
+    )
+    if (!roots.includes(repo)) throw new Error(`Plan 仓库未绑定到当前 Feature：${repo}`)
+  }
+  return repo
 }
 
 export async function requireHarnessFeatureWorkspace(
