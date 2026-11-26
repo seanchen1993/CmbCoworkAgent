@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react"
 import { Archive, Loader2 } from "lucide-react"
-import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -20,6 +19,7 @@ interface ArchiveDialogProps {
   slug: string
   knowledgeBases: KnowledgeBaseListItem[]
   formatError: (error: unknown) => string
+  onArchived: (knowledgeBaseId: string) => void
 }
 
 function toggleSelection(values: Set<string>, value: string): Set<string> {
@@ -66,6 +66,7 @@ function ArtifactArchiveForm({
   slug,
   knowledgeBases,
   formatError,
+  onArchived,
   submitting,
   onSubmittingChange,
   onClose
@@ -116,7 +117,7 @@ function ArtifactArchiveForm({
     onSubmittingChange(true)
     setSubmitError("")
     try {
-      const { writePath } = await window.api.harnessBoard.archiveArtifacts({
+      await window.api.harnessBoard.archiveArtifacts({
         projectId,
         slug,
         knowledgeBaseId,
@@ -124,7 +125,7 @@ function ArtifactArchiveForm({
         deployUnitIds: [...deployUnitIds]
       })
       onClose()
-      toast.success(`请检查 ${writePath} 路径下的变更，并推送到码云`)
+      onArchived(knowledgeBaseId)
     } catch (error) {
       setSubmitError(formatError(error))
     } finally {

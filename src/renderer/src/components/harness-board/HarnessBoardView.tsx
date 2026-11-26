@@ -6417,6 +6417,7 @@ function FeatureDetailPage({
   onBackToProject,
   onEditDeployUnits,
   knowledgeBases,
+  onArtifactsArchived,
   onRefresh,
   managedScheduleRefreshRevision,
   onFeatureImManagementSaved,
@@ -6439,6 +6440,7 @@ function FeatureDetailPage({
   onBackToProject: () => void
   onEditDeployUnits: () => void
   knowledgeBases: KnowledgeBaseListResult | null
+  onArtifactsArchived: (knowledgeBaseId: string) => void
   onRefresh: () => void | Promise<void>
   managedScheduleRefreshRevision: number
   onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
@@ -7292,6 +7294,7 @@ function FeatureDetailPage({
                   slug={detail.run.slug}
                   knowledgeBases={knowledgeBases?.knowledgeBases ?? []}
                   formatError={cleanIpcError}
+                  onArchived={onArtifactsArchived}
                   disabled={loading || projectInteractionDisabled}
                 />
               )}
@@ -8534,6 +8537,7 @@ export function HarnessBoardView({
     useState<string[]>([])
   const [selectedDeployUnitIds, setSelectedDeployUnitIds] = useState<Set<string>>(new Set())
   const [projectModeTab, setProjectModeTab] = useHarnessRouteState("projects")
+  const [archivedKnowledgeBaseId, setArchivedKnowledgeBaseId] = useState<string | null>(null)
   const {
     result: knowledgeBaseResult,
     loading: knowledgeBaseLoading,
@@ -11858,6 +11862,10 @@ export function HarnessBoardView({
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
           knowledgeBases={knowledgeBaseResult}
+          onArtifactsArchived={(knowledgeBaseId) => {
+            setArchivedKnowledgeBaseId(knowledgeBaseId)
+            handleOpenSystemConstraints()
+          }}
           onRefresh={refreshSelectedRunDetail}
           managedScheduleRefreshRevision={managedScheduleRefreshRevision}
           onFeatureImManagementSaved={handleFeatureImManagementSaved}
@@ -12286,6 +12294,8 @@ export function HarnessBoardView({
             <TabsContent value="constraint-sync" className="mt-0">
               <KnowledgeBaseSyncPanel
                 result={knowledgeBaseResult}
+                archivedKnowledgeBaseId={archivedKnowledgeBaseId}
+                onArchiveNavigationHandled={() => setArchivedKnowledgeBaseId(null)}
                 loading={knowledgeBaseLoading}
                 syncingIds={syncingKnowledgeBaseIds}
                 expandedIds={expandedKnowledgePreviewAdapterIds}

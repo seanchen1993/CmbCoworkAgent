@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
@@ -47,6 +47,8 @@ function knowledgeStatus(
 
 export function KnowledgeBaseSyncPanel({
   result,
+  archivedKnowledgeBaseId,
+  onArchiveNavigationHandled,
   loading,
   syncingIds,
   expandedIds,
@@ -62,6 +64,8 @@ export function KnowledgeBaseSyncPanel({
   onOpenPath
 }: {
   result: KnowledgeBaseListResult | null
+  archivedKnowledgeBaseId: string | null
+  onArchiveNavigationHandled: () => void
   loading: boolean
   syncingIds: Set<string>
   expandedIds: Set<string>
@@ -80,8 +84,25 @@ export function KnowledgeBaseSyncPanel({
   const [pendingDelete, setPendingDelete] = useState<KnowledgeBaseListItem | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [gitTargetId, setGitTargetId] = useState<string | null>(null)
-  const gitItem = items.find((item) => item.idKey === gitTargetId && item.visibility === "visible")
+  const gitItem = items.find(
+    (item) =>
+      item.idKey === (archivedKnowledgeBaseId ?? gitTargetId) && item.visibility === "visible"
+  )
   const gitWorkspace = gitItem?.workspaces.find((workspace) => workspace.role === "write")
+  const gitWorkspaceAvailable = gitWorkspace?.localValid === true
+
+  useEffect(() => {
+    if (!archivedKnowledgeBaseId) return
+    if (gitWorkspaceAvailable) {
+      setGitTargetId(archivedKnowledgeBaseId)
+      toast.success("产物归档成功，请检查变更，关联任务卡片后提交并推送到码云")
+    } else {
+      setGitTargetId(null)
+      toast.warning("产物已归档，目标知识库工作区暂不可用，无法打开变更面板")
+    }
+    onArchiveNavigationHandled()
+  }, [archivedKnowledgeBaseId, gitWorkspaceAvailable, onArchiveNavigationHandled])
+
   const operationBusy =
     loading ||
     deleting ||
