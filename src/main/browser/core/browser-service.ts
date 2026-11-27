@@ -918,7 +918,10 @@ export class BrowserService {
   goBack(): BrowserState {
     const session = this.getActiveSession()
     if (session?.view.webContents.canGoBack()) {
-      markNextScriptNavigationExplicit()
+      const history = session.view.webContents.navigationHistory
+      markNextScriptNavigationExplicit(
+        history.getEntryAtIndex(history.getActiveIndex() - 1)?.url
+      )
       session.view.webContents.goBack()
     }
     return this.getState()
@@ -927,7 +930,10 @@ export class BrowserService {
   goForward(): BrowserState {
     const session = this.getActiveSession()
     if (session?.view.webContents.canGoForward()) {
-      markNextScriptNavigationExplicit()
+      const history = session.view.webContents.navigationHistory
+      markNextScriptNavigationExplicit(
+        history.getEntryAtIndex(history.getActiveIndex() + 1)?.url
+      )
       session.view.webContents.goForward()
     }
     return this.getState()
@@ -936,8 +942,9 @@ export class BrowserService {
   reload(): BrowserState {
     const session = this.getActiveSession()
     if (session) {
-      markNextScriptNavigationExplicit()
-      session.view.webContents.reload()
+      const webContents = session.view.webContents
+      markNextScriptNavigationExplicit(webContents.getURL())
+      webContents.reload()
     }
     return this.getState()
   }

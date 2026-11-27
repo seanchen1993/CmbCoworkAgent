@@ -1510,6 +1510,9 @@ test("recorded script flow", async ({ page }) => {
 
     recordScriptNavigation("https://should-not-record.test", "implicit")
     markNextScriptNavigationExplicit("https://example.com/dashboard")
+    // A click can navigate before the requested history/reload navigation
+    // finishes. It must not steal the explicit navigation marker.
+    recordScriptNavigation("https://example.com/click-target", "implicit")
     recordScriptNavigation("https://example.com/dashboard", "implicit")
 
     const session = await stopScriptRecording()
