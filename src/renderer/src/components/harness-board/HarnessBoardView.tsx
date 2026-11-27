@@ -6,7 +6,6 @@ import {
   withOwnedThreadSearchTransition
 } from "@/lib/thread-search-navigation"
 import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
-import { canReadPluginSource } from "../../../../shared/market-source-access"
 import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
@@ -210,6 +209,7 @@ import type { KnowledgeBaseListResult } from "../../../../shared/knowledge-base-
 import {
   filterProjectDialogInstalledAdapters,
   findInstalledPluginForAdapter,
+  findMarketPluginForAdapter,
   findSelectedAdapter
 } from "./project-dialog-plugin-visibility"
 import {
@@ -1492,30 +1492,6 @@ function buildMarketPluginMap(items: MarketItem[]): Map<string, MarketItem> {
     if (name) map.set(name, item)
   }
   return map
-}
-
-function normalizeAdapterMatchKey(value?: string): string {
-  return normalizeAdapterMarketName(value).toLocaleLowerCase()
-}
-
-function findMarketPluginForAdapter(
-  marketPlugins: MarketItem[],
-  installedPlugin: PluginMetadata | undefined,
-  adapter: HarnessAdapterRegistryItem
-): MarketItem | undefined {
-  if (canReadPluginSource(installedPlugin)) return undefined
-
-  const adapterKeys = new Set(
-    [adapter.id, adapter.name].map(normalizeAdapterMatchKey).filter(Boolean)
-  )
-  return marketPlugins.find((marketPlugin) => {
-    if (installedPlugin && findInstalledPluginForMarketItem([installedPlugin], marketPlugin)) {
-      return true
-    }
-    return [marketPlugin.name, marketPlugin.id, marketPlugin.chinese_name].some((value) =>
-      adapterKeys.has(normalizeAdapterMatchKey(value))
-    )
-  })
 }
 
 function buildHarnessBoardStats(

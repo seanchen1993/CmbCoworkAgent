@@ -12,6 +12,7 @@ import type {
 import type { MarketItem } from "../../api/market"
 import {
   filterProjectDialogInstalledAdapters,
+  findMarketPluginForAdapter,
   findSelectedAdapter
 } from "./project-dialog-plugin-visibility"
 
@@ -119,5 +120,50 @@ describe("market visibility for project dialogs", () => {
     })
     expect(findSelectedAdapter([replacement], replacement.id, project)).toBe(replacement)
     expect(findSelectedAdapter([replacement], bound.id)).toBeNull()
+  })
+
+  it("matches market metadata for market plugins even when the user has source access, but skips local imports", () => {
+    const marketListing = marketItem("AutoBizDevOps_Scene_Lite", {
+      id: "scene-lite-id",
+      category: "研发类场景/应用类研发",
+      description: "轻量开发交付闭环"
+    })
+    const ownerInstalled = plugin("installed-owner", {
+      name: "AutoBizDevOps_Scene_Lite",
+      origin: "market",
+      sourceAccess: "owner",
+      marketplace: { name: marketListing.name, id: marketListing.id }
+    })
+    const whitelistInstalled = plugin("installed-whitelist", {
+      name: "AutoBizDevOps_Scene_Lite",
+      origin: "market",
+      sourceAccess: "whitelist",
+      marketplace: { name: marketListing.name, id: marketListing.id }
+    })
+    const regularInstalled = plugin("installed-regular", {
+      name: "AutoBizDevOps_Scene_Lite",
+      origin: "market",
+      marketplace: { name: marketListing.name, id: marketListing.id }
+    })
+    const localInstalled = plugin("installed-local", {
+      name: "AutoBizDevOps_Scene_Lite",
+      origin: "local"
+    })
+
+    expect(
+      findMarketPluginForAdapter([marketListing], ownerInstalled, adapter(ownerInstalled))
+    ).toBe(marketListing)
+    expect(
+      findMarketPluginForAdapter([marketListing], whitelistInstalled, adapter(whitelistInstalled))
+    ).toBe(marketListing)
+    expect(
+      findMarketPluginForAdapter([marketListing], regularInstalled, adapter(regularInstalled))
+    ).toBe(marketListing)
+    expect(
+      findMarketPluginForAdapter([marketListing], localInstalled, adapter(localInstalled))
+    ).toBeUndefined()
+    expect(
+      findMarketPluginForAdapter([marketListing], undefined, adapter(regularInstalled))
+    ).toBe(marketListing)
   })
 })

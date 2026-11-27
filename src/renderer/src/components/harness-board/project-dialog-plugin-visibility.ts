@@ -19,8 +19,26 @@ export function findInstalledPluginForAdapter(
   )
 }
 
-function normalizeMatchKey(value: string): string {
-  return value.trim().toLocaleLowerCase()
+function normalizeMatchKey(value?: string): string {
+  return (value?.trim() || "").toLocaleLowerCase()
+}
+
+export function findMarketPluginForAdapter(
+  marketPlugins: MarketItem[],
+  installedPlugin: PluginMetadata | undefined,
+  adapter: HarnessAdapterRegistryItem
+): MarketItem | undefined {
+  if (installedPlugin?.origin === "local") return undefined
+
+  const adapterKeys = new Set([adapter.id, adapter.name].map(normalizeMatchKey).filter(Boolean))
+  return marketPlugins.find((marketPlugin) => {
+    if (installedPlugin && findInstalledPluginForMarketItem([installedPlugin], marketPlugin)) {
+      return true
+    }
+    return [marketPlugin.name, marketPlugin.id, marketPlugin.chinese_name].some((value) =>
+      adapterKeys.has(normalizeMatchKey(value))
+    )
+  })
 }
 
 export function findSelectedAdapter(
