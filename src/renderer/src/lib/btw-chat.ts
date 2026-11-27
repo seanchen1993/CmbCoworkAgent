@@ -26,7 +26,11 @@ interface SideTab {
   pending?: boolean
   skillRequests?: SideSkillRequest[]
 }
-interface SideTabs { tabs: SideTab[]; selected: Record<string, string> }
+interface SideTabs {
+  tabs: SideTab[]
+  selected: Record<string, string>
+  fullSideView: { parentId: string; showMain: boolean } | null
+}
 type ThreadContext = ReturnType<typeof useThreadContext>
 type FirstQuestionContext = Pick<ThreadContext,
   "getStreamData" | "getThreadState" | "initializeThread" | "subscribeToStream" | "subscribeToThreadState"> & {
@@ -34,7 +38,11 @@ type FirstQuestionContext = Pick<ThreadContext,
     "appendMessage" | "setDraftInput" | "setError" | "setActiveTurnStartTime">
 }
 
-export const useBtwChat = create<SideTabs>(() => ({ tabs: [], selected: {} }))
+export const useBtwChat = create<SideTabs>(() => ({ tabs: [], selected: {}, fullSideView: null }))
+
+export function setFullSideView(fullSideView: SideTabs["fullSideView"]): void {
+  useBtwChat.setState({ fullSideView })
+}
 export const BTW_QUEUE_CONFIGURATION_ERROR = "请核对辅助对话的模型和工作目录，消息已保留在队列中。"
 
 const desktopViewport = "(min-width: 768px)"
@@ -398,7 +406,9 @@ export async function openBtw(parentId: string, modelId: string, first?: FirstQu
       state.showCustomizeView === prev.showCustomizeView
   })
   const stopWatchingSelection = useBtwChat.subscribe((state, prev) => {
-    activate &&= state.selected[parentId] === prev.selected[parentId]
+    const fullViewChanged = state.fullSideView !== prev.fullSideView &&
+      (state.fullSideView?.parentId === parentId || prev.fullSideView?.parentId === parentId)
+    activate &&= state.selected[parentId] === prev.selected[parentId] && !fullViewChanged
   })
   const stopWatchingOverlay = onOpenResourcePanelOverlay(() => { activate = false })
   const { id, ordinal, thread } = await window.api.btw.create({
@@ -410,9 +420,12 @@ export async function openBtw(parentId: string, modelId: string, first?: FirstQu
   })
   if (isThreadRetired(parentId)) return
   registerSideThreadSummary(thread)
-  useBtwChat.setState(({ tabs, selected }) => ({
+  useBtwChat.setState(({ tabs, selected, fullSideView }) => ({
     tabs: [...tabs, { id, number: ordinal, parentId, firstInput: first?.text }],
-    selected: activate || !selected[parentId] ? { ...selected, [parentId]: id } : selected
+    selected: activate || !selected[parentId] ? { ...selected, [parentId]: id } : selected,
+    fullSideView: activate && fullSideView?.parentId === parentId && fullSideView.showMain
+      ? { parentId, showMain: false }
+      : fullSideView
   }))
   if (first) startFirstQuestion(id, first)
   if (activate) {

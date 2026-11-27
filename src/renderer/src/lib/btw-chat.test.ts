@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Thread, ModelConfig, QueuedMessage } from "@/types"
-import { closeBtw, drainHiddenBtwQueue, resumeVisibleBtwQueue, setBtwPendingInteraction, getSideQuestion, isBtwSubmissionBlocked, loadBtwThread, loadBtwWorkspaceFiles, openBtw, respondBtwSkillIntent, respondBtwSkillConfirmation, retryBtwSkillGeneration, subscribeBtwSkillEvolution, useBtwChat } from "./btw-chat"
+import { closeBtw, drainHiddenBtwQueue, resumeVisibleBtwQueue, setBtwPendingInteraction, getSideQuestion, isBtwSubmissionBlocked, loadBtwThread, loadBtwWorkspaceFiles, openBtw, respondBtwSkillIntent, respondBtwSkillConfirmation, retryBtwSkillGeneration, setFullSideView, subscribeBtwSkillEvolution, useBtwChat } from "./btw-chat"
 import { queueStorageKey } from "./queued-message-content"
 import { openResourcePanelOverlay } from "./resource-panel-overlay-events"
 import { registerSideThreadSummary, selectThreadSummary, useAppStore } from "./store"
@@ -99,7 +99,7 @@ function deferredStream(draftInput = "") {
 }
 
 afterEach(() => {
-  useBtwChat.setState({ tabs: [], selected: {} })
+  useBtwChat.setState(useBtwChat.getInitialState())
   useAppStore.setState({
     threads: [], sideThreads: new Map(), currentThreadId: null, models: [],
     skillGenerationByThread: new Map(), skillRetryContextByThread: new Map()
@@ -314,6 +314,43 @@ describe("辅助对话会话状态", () => {
     await opening
     expect(useBtwChat.getState().tabs.map(tab => tab.id)).toEqual([first, second, id])
     expect(useBtwChat.getState().selected[parentId]).toBe(second)
+  })
+
+  it("adds a late side tab without leaving the full-size main conversation", async () => {
+    const { parentId, id, create, created } = setup()
+    const existingId = `btw-${parentId}-${randomUUID()}`
+    useAppStore.setState({ rightModule: "btw" })
+    useBtwChat.setState({
+      tabs: [{ id: existingId, parentId, number: 1 }],
+      selected: { [parentId]: "new-tab" }
+    })
+    setFullSideView({ parentId, showMain: false })
+    let finishCreating!: () => void
+    create.mockReturnValueOnce(new Promise(resolve => { finishCreating = () => resolve(created) }))
+
+    const opening = openBtw(parentId, "model")
+    setFullSideView({ parentId, showMain: true })
+    finishCreating()
+
+    await expect(opening).resolves.toBe(id)
+    expect(useBtwChat.getState().tabs.map(tab => tab.id)).toEqual([existingId, id])
+    expect(useBtwChat.getState().selected[parentId]).toBe("new-tab")
+    expect(useBtwChat.getState().fullSideView).toEqual({ parentId, showMain: true })
+  })
+
+  it("reveals a new side tab opened from the full-size main conversation", async () => {
+    const { parentId, id } = setup()
+    const existingId = `btw-${parentId}-${randomUUID()}`
+    useAppStore.setState({ rightModule: "btw" })
+    useBtwChat.setState({
+      tabs: [{ id: existingId, parentId, number: 1 }],
+      selected: { [parentId]: existingId }
+    })
+    setFullSideView({ parentId, showMain: true })
+
+    await expect(openBtw(parentId, "model")).resolves.toBe(id)
+    expect(useBtwChat.getState().selected[parentId]).toBe(id)
+    expect(useBtwChat.getState().fullSideView).toEqual({ parentId, showMain: false })
   })
 
   it("does not expand a collapsed panel over an opened resource drawer", async () => {

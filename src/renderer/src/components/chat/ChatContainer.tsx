@@ -1011,6 +1011,7 @@ interface ChatContainerProps {
   restoredBotDraftError?: string | null
   threadId: string
   surface?: ChatSurface
+  visible?: boolean
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
   historyOnly?: boolean
@@ -1830,6 +1831,7 @@ export function ChatContainer({
   composerNotice,
   threadId,
   surface = "default",
+  visible = true,
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
   historyOnly = false,
@@ -1882,7 +1884,15 @@ export function ChatContainer({
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const mainComposerActionsRef = useMainComposerActionsRef(threadId, surface === "default")
-  useFloatingChatLayout(chatRootRef, threadId)
+  const adjustTextareaHeight = useCallback((): void => {
+    const textarea = inputRef.current
+    if (textarea) {
+      textarea.style.height = "auto"
+      const height = textarea.scrollHeight
+      if (height > 0) textarea.style.height = `${Math.min(height, 200)}px`
+    }
+  }, [])
+  useFloatingChatLayout(chatRootRef, threadId, adjustTextareaHeight)
   const [dismissedRemoteTipThreadIds, setDismissedRemoteTipThreadIds] = useState(
     loadRemoteThreadTipDismissals
   )
@@ -6054,9 +6064,13 @@ export function ChatContainer({
     }
     if (!question && clearComposer) {
       const app = useAppStore.getState()
-      const selected = useBtwChat.getState().selected[threadId]
+      const { selected: selectedTabs, fullSideView } = useBtwChat.getState()
+      const selected = selectedTabs[threadId]
       if (selected && !isBtwSubmissionBlocked(selected) && (app.rightModule !== "btw" || app.rightPanelCollapsed)) {
         const completeFocus = prepareBtwComposerFocus(threadId)
+        if (fullSideView?.parentId === threadId && fullSideView.showMain) {
+          useBtwChat.setState({ fullSideView: { parentId: threadId, showMain: false } })
+        }
         useAppStore.setState({ rightModule: "btw", rightPanelCollapsed: false })
         setInput("")
         completeFocus(selected)
@@ -8089,15 +8103,8 @@ export function ChatContainer({
   }
 
   // Auto-resize textarea based on content
-  const adjustTextareaHeight = useCallback((): void => {
-    const textarea = inputRef.current
-    if (textarea) {
-      textarea.style.height = "auto"
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-    }
-  }, [])
-
   useEffect(() => {
+    if (!visible) return
     if (textareaResizeFrameRef.current !== null) {
       cancelAnimationFrame(textareaResizeFrameRef.current)
     }
@@ -8111,7 +8118,7 @@ export function ChatContainer({
         textareaResizeFrameRef.current = null
       }
     }
-  }, [adjustTextareaHeight, input, composerReadOnly])
+  }, [adjustTextareaHeight, input, composerReadOnly, visible])
 
   useEffect(() => {
     if (surface !== "btw" || !stream || effectiveInputDisabled || !workspacePath) return
@@ -9337,7 +9344,7 @@ export function ChatContainer({
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
-        visible={!historyOnly && !showCustomizeView}
+        visible={visible && !historyOnly && !showCustomizeView}
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
@@ -10898,8 +10905,8 @@ export function ChatContainer({
                     {surface !== "bot" && <>
                       {agentCommitApproval && <AgentGitCommitDialog
                         key={agentCommitApproval.id}
-                        // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
-                        open={!showCustomizeView}
+                        // 提交审批通过 Portal 显示，跟随会话可见性，切回后继续处理。
+                        open={visible && !showCustomizeView}
                         threadId={threadId}
                         workspacePath={workspacePath}
                         suggestedMessage={agentCommitApproval.suggestedCommitMessage}
