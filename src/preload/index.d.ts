@@ -1107,6 +1107,7 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  generatedImages: import("../shared/generated-image").GeneratedImagesApi
   bots: import("../shared/bots/contracts").BotClient
   uiGuides: {
     getState(config: UiGuideConfig): Promise<UiGuideState>

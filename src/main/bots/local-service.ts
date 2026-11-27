@@ -391,7 +391,8 @@ export function getLocalBotHost(): LocalBotHost {
       // A successful board inspection also satisfies a subsequent Bot panel refresh.
       if (nextFeatureCheck.get(id) !== Infinity) nextFeatureCheck.set(id, Date.now() + 60_000)
     })
-    setWorkConversationLookup((threadId) => host?.conversationLinks.forThread(threadId) ?? null)
+    setWorkConversationLookup(threadId => host?.conversationLinks.forThread(threadId) ?? null,
+      botId => host?.getBot(botId))
     setBotHistoryInputSource({
       forkInputs: readForkInputProjections,
       imageInput: (bot, work, message, id) => getLocalBotHost().desktopAttachmentPreviewInput(bot, id, undefined, work, message),

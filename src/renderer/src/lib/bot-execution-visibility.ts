@@ -22,6 +22,7 @@ export function isBotExecutionTool(
   tool: ToolCall,
   result?: Pick<ToolResult, "content" | "is_error">
 ): boolean {
+  if (tool.name === "generate_image") return false
   // Questions and handoff controls have a live presentation. Approvals and custom
   // cards are protected separately by the caller, independently of the tool name.
   if (!result)
@@ -87,6 +88,10 @@ export function projectBotExecution(
       const status = liveToolStates?.get(key)?.status
       if (approvalKeys?.has(key) || status === "awaiting_approval") continue
       const result = results.get(key)
+      if (result?.repeatedGeneratedImage) {
+        foldedTools.add(key)
+        continue
+      }
       const attempt = result?.botReceipt
       const retryableFailure = result?.is_error && attempt?.kind === "attempt"
       const awaitingOutcome = activeStart >= 0 && index > activeStart && ((!result && status === "failed") || retryableFailure)

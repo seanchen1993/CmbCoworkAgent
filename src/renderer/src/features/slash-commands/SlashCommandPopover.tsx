@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react"
-import { Flag, MessageSquareText, Package2 } from "lucide-react"
+import { Flag, ImagePlus, MessageSquareText, Package2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { normalizeSkillId } from "@/lib/skill-ids"
 import type { SkillMetadata } from "@/types"
@@ -103,7 +103,8 @@ export function SlashCommandPopover({
                     />
                   )
                 } else {
-                  const Icon = command.id === "btw" ? MessageSquareText : Flag
+                  const Icon = command.id === "generate-image" ? ImagePlus :
+                    command.id === "btw" ? MessageSquareText : Flag
                   return (
                     <button
                       key={command.id}
@@ -111,6 +112,7 @@ export function SlashCommandPopover({
                       type="button"
                       role="option"
                       aria-selected={isSelected}
+                      aria-disabled={Boolean(command.disabledReason)}
                       onMouseEnter={() => onHoverIdx(idx)}
                       onMouseDown={command.id === "btw" ? e => { if (e.button === 0) e.preventDefault() } : undefined}
                       onClick={() => onSelectCommand(command)}
@@ -124,7 +126,7 @@ export function SlashCommandPopover({
                         {command.title}
                       </span>
                       <span className="text-sm text-muted-foreground truncate flex-1">
-                        {command.description}
+                        {command.disabledReason ?? command.description}
                       </span>
                       <span className="text-xs text-muted-foreground/60 shrink-0">
                         {command.usage ?? command.command}

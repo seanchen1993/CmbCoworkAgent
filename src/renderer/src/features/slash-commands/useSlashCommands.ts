@@ -11,6 +11,7 @@ export type SlashCommandItem = {
   description: string
   insertText: string
   keywords: string[]
+  disabledReason?: string
 }
 
 export type PopoverMode =
@@ -22,7 +23,7 @@ export type PopoverMode =
       skills: SkillMetadata[]
     }
 
-const GENERAL_SLASH_COMMANDS: SlashCommandItem[] = [
+export const GENERAL_SLASH_COMMANDS: SlashCommandItem[] = [
   {
     id: "goal",
     title: "目标",

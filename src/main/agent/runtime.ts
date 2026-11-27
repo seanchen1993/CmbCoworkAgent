@@ -1,3 +1,4 @@
+import { explicitImageCommandMiddleware } from "./image-generation-tool"
 import { createChatImageMiddleware, isDesktopChatImageScope, type ChatImageMessageScope } from "./chat-image-middleware"
 import { captureDesktopImageAccess } from "../chat-images"
 import { inspectImageRequest } from "../models/image-request"
@@ -7451,7 +7452,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 
   const inherited = getSideThreadContext(threadId)
   const agent = createDeepAgent({
-    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
+    middleware: [
+      ...explicitImageCommandMiddleware(options.additionalTools),
+      ...(traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [])
+    ],
     sideConversationMiddleware: inherited?.length
       ? createSideConversationMiddleware(inherited, mainModelInputBudget)
       : undefined,

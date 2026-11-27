@@ -9,6 +9,7 @@ import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
 import type { BotHistoryOwner } from "./history-input-projection"
 
 let lookup: ((threadId: string) => BotWorkItem | null) | undefined
+let botHome: ((botId: string) => { id: string; hostId: string; threadId: string } | undefined) | undefined
 type BotWorkIdentity = BotHistoryOwner
 type ThreadDeletionCheck = (
   threadId: string,
@@ -43,8 +44,19 @@ export function assertScopedBotWorkThreadDeletion(
   return true
 }
 /** Installed by the original local Host; no metadata or renderer field grants execution. */
-export function setWorkConversationLookup(resolve: typeof lookup) {
+export function setWorkConversationLookup(resolve: typeof lookup, resolveHome?: typeof botHome) {
   lookup = resolve
+  botHome = resolveHome
+}
+
+/** The primary private conversation has no work item. Require its original local Host definition. */
+export function isDesktopBotHome(threadId: string, metadata: Record<string, unknown>): boolean {
+  if (typeof metadata.botId !== "string" || metadata.botHostId !== "local" ||
+      ["botWorkId", "botAudienceKey", "botGroupId", "botMockBindingId", "botMockConversationId",
+        "botMockTransport", "remoteState", "remoteReadOnly", "remoteThread", "remoteImContext",
+        "imDeliveryContext", "targetKind"].some(key => metadata[key] != null)) return false
+  const owner = botHome?.(metadata.botId)
+  return owner?.hostId === "local" && owner.id === metadata.botId && owner.threadId === threadId
 }
 export function findBotWorkThreadOwner(threadId: string): BotWorkItem | null {
   return lookup?.(threadId) ?? null

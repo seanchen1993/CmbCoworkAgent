@@ -1,4 +1,7 @@
+import { parseGeneratedImageReceipt, type GeneratedImageReceipt } from "../generated-image"
+
 export interface BotDeliveredFile {
+  generatedImage?: GeneratedImageReceipt
   filePath: string
   name: string
   size: number
@@ -138,8 +141,9 @@ export function parseBotFileDelivery(content: unknown): BotDeliveredFile[] | nul
         return null
       seen.add(file.filePath)
     }
-    return result.files.map(({ filePath, name, size, attachmentPath, attachmentRoot }: BotDeliveredFile) => ({
+    return result.files.map(({ filePath, name, size, attachmentPath, attachmentRoot, generatedImage }: BotDeliveredFile) => ({
       filePath,
+      ...(parseGeneratedImageReceipt(generatedImage) ? { generatedImage: parseGeneratedImageReceipt(generatedImage) } : {}),
       name,
       size,
       ...(attachmentPath === undefined ? {} : { attachmentPath }),

@@ -26,6 +26,11 @@ export const ChatReplyActionsContext = createContext<{
 /** Presentation only. The existing message store and runtime remain the owners of turns. */
 export const ChatPresentationContext = createContext<"default" | "bot">("default")
 export const ChatDesktopWorkIdContext = createContext<string | undefined>(undefined)
+/** Desktop private and ordinary transcripts can read generated results. Group delivery has its own receipt. */
+export const ChatGeneratedImagesContext = createContext(true)
+export const ChatImageRegenerationContext = createContext<
+  ((userMessageId: string) => (() => void) | undefined) | null
+>(null)
 
 /** The ordinary workbench always keeps its existing execution presentation. */
 export const ChatExecutionDetailsContext = createContext(true)

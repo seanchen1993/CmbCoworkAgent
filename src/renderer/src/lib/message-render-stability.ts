@@ -188,7 +188,8 @@ function areToolResultAssociationsEqual(
 ): boolean {
   if (left === right) return true
   if (!left || !right) return false
-  return left.is_error === right.is_error && areStructuredValuesEqual(left.content, right.content)
+  return left.is_error === right.is_error && left.repeatedGeneratedImage === right.repeatedGeneratedImage &&
+    areStructuredValuesEqual(left.content, right.content)
 }
 
 function areToolCallStatesEqual(

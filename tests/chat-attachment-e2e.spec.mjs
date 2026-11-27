@@ -2,38 +2,16 @@
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
-import { _electron } from "playwright"
+import { join } from "node:path"
 import sharp from "sharp"
 
 import { visualDocx, visualXlsx } from "./support/document-attachment-fixtures.mjs"
-const root = resolve(import.meta.dirname, "..")
+import { launchAttachmentElectron } from "./support/launch-attachment-electron.mjs"
 const profile = await mkdtemp(join(tmpdir(), "chat-attachment-e2e-"))
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-  /^(path|systemroot|windir|comspec|pathext|os|processor_architecture|number_of_processors|programfiles.*)$/i.test(key)))
-for (const key of ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-  "XDG_CACHE_HOME", "CMB_COWORK_AGENT_HOME", "TEMP"]) {
-  env[key] = join(profile, key)
-  await mkdir(env[key])
-}
-env.HOME = env.USERPROFILE
-env.TMP = env.TEMP
-env.CMB_E2E_ELECTRON_BIN = createRequire(import.meta.url)("electron")
-env.CMB_E2E_DISABLE_GPU = "1"
-env.HTTPS_PROXY = env.HTTP_PROXY = "http://127.0.0.1:9"
-env.NO_PROXY = "localhost,127.0.0.1"
-const packaged = process.env.CHAT_ATTACHMENT_PACKAGED_EXECUTABLE
 let app
 try {
-  app = await _electron.launch({
-    executablePath: packaged || (process.platform === "win32"
-      ? join(root, "tests/support/electron-launcher.cmd") : env.CMB_E2E_ELECTRON_BIN),
-    args: [...(packaged ? [] : [join(root, "out/main/index.js")]),
-      "--disable-gpu", "--proxy-server=http://127.0.0.1:9", "--user-data-dir=" + join(profile, "electron")],
-    cwd: root, env, timeout: 60_000
-  })
+  app = await launchAttachmentElectron(profile)
   const page = await app.firstWindow()
   await page.waitForFunction(() => Boolean(window.api?.file?.parseBytes))
   const bytes = await sharp({ create: { width: 12, height: 6, channels: 3, background: "blue" } }).png().toBuffer()

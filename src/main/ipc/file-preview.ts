@@ -1,6 +1,7 @@
 import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
 import path from "node:path"
 import { assertChatAttachmentWindow } from "./chat-attachment-window"
+import { registerGeneratedImageHandlers } from "./generated-images"
 import type { ChatImageOwnerRequest, ChatImageStatusRequest, DraftChatImageRequest, DraftAttachmentImage } from "../../shared/file-attachment"
 import { threadIncarnationKey } from "../../shared/thread-incarnation"
 import {
@@ -307,6 +308,7 @@ function inlineMediaPolicy(mimeType: string, size: number): { allowed: boolean; 
 export function registerWorkspaceFilePreviewHandlers(
   ipcMain: IpcMain, getMainWindow: () => BrowserWindow | null = () => null
 ): void {
+  registerGeneratedImageHandlers(ipcMain, getMainWindow)
   ipcMain.handle("workspace:attachChatImage", async (event, request) => {
     assertChatAttachmentWindow(event, getMainWindow)
     const { stageWorkspaceChatImage } = await import("../workspace-chat-image")

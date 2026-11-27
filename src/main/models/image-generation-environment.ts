@@ -1,0 +1,10 @@
+// Capture the deployment credential before starting renderer, terminal, MCP or agent processes.
+export const imageGenerationEnvironment: NodeJS.ProcessEnv = {
+  CMB_IMAGE_GENERATION_ENDPOINT: process.env.CMB_IMAGE_GENERATION_ENDPOINT,
+  CMB_IMAGE_GENERATION_MODEL: process.env.CMB_IMAGE_GENERATION_MODEL,
+  CMB_IMAGE_GENERATION_API_KEY: process.env.CMB_IMAGE_GENERATION_API_KEY,
+  CMB_IMAGE_GENERATION_ENVIRONMENT: process.env.CMB_IMAGE_GENERATION_ENVIRONMENT,
+  CMB_IMAGE_GENERATION_RESPONSE_FORMAT: process.env.CMB_IMAGE_GENERATION_RESPONSE_FORMAT
+}
+
+delete process.env.CMB_IMAGE_GENERATION_API_KEY

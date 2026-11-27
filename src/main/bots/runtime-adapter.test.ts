@@ -449,6 +449,7 @@ function port(
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
         groupMessages: fixture.groupMessages,
+        groupImageGenerationRequest: () => undefined,
         groupTaskDeliveries: fixture.groupTaskDeliveries,
         groupTaskRequest: fixture.groupTaskRequest,
         peers: fixture.peers,
@@ -577,7 +578,8 @@ beforeEach(() => {
 describe("Bot Runtime integration", () => {
   it("activates only the host-resolved work skill in the worker's own runtime", async () => {
     const skill = { name: "review", path: "/synthetic/skills/review/SKILL.md" }
-    fixture.workInputContext.mockReturnValueOnce({ messages: [], totalMessages: 1, explicitSkill: skill } as any)
+    const input = { messages: [], totalMessages: 1, explicitSkill: skill }
+    fixture.workInputContext.mockReturnValueOnce(input)
     const worker: BotTask = { ...task, workId: "work", origin: { kind: "work", sourceTaskId: "main",
       sourceContext: { version: 1, references: [] } } }
     await port().acquire({ ...bot, allowedSkillNames: ["review"] }, worker)!
@@ -3425,14 +3427,14 @@ describe("Bot Runtime integration", () => {
   })
 
   it("requires the fixed initialized work Thread identity instead of recreating missing history", () => {
-    const work: any = {
+    const work = {
       id: "w",
       botId: "a",
       threadId: "work-thread",
       title: "Draft",
       audienceKey: "desktop",
       threadInitialized: true
-    }
+    } as BotWorkItem
     fixture.thread.mockReturnValue(null)
     expect(() =>
       prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
@@ -4825,14 +4827,13 @@ describe("Bot Runtime integration", () => {
       const owner = makeBot("Owner")
       const peer = makeBot("Reviewer")
       const leaf = makeBot("Checker")
-      let host!: LocalBotHost
       const runtime = createLocalBotRunPort(
         {} as BotMemoryService, () => host, {} as BotBrowserService, {} as BotMemoryMaintainer
       )
       const events: { task: BotTask; notifications: number }[] = []
       let ownerResults = 0
       const errors = vi.fn()
-      host = new LocalBotHost(store, {
+      const host: LocalBotHost = new LocalBotHost(store, {
         onAvailable: () => () => {},
         acquire: (_bot, current) => ({
           execute: async () => {
@@ -4959,7 +4960,6 @@ describe("Bot Runtime integration", () => {
           context.onRunTerminated?.({ outcome: "success", code: "done" })
           return { completion: Promise.resolve() }
         })
-        let host!: LocalBotHost
         const runtime = createLocalBotRunPort(
           { editVersion: () => 7, forPrompt: () => [] } as unknown as BotMemoryService,
           () => host,
@@ -4967,7 +4967,7 @@ describe("Bot Runtime integration", () => {
           { enqueue: fixture.summary } as unknown as BotMemoryMaintainer
         )
         const errors = vi.fn()
-        host = new LocalBotHost(store, runtime, 1, errors)
+        const host: LocalBotHost = new LocalBotHost(store, runtime, 1, errors)
         try {
           await vi.waitFor(() => expect(store.getTask(queued.id).state).toBe("completed"))
           expect(errors).not.toHaveBeenCalled()
@@ -6681,7 +6681,8 @@ describe("Bot steering uses the original runtime", () => {
   })
   it("carries a new explicit skill through a live work correction without trusting the routing note", async () => {
     const skill = { name: "review", path: "/synthetic/skills/review/SKILL.md" }
-    fixture.workInputContext.mockReturnValueOnce({ messages: [], totalMessages: 1, explicitSkill: skill } as any)
+    const input = { messages: [], totalMessages: 1, explicitSkill: skill }
+    fixture.workInputContext.mockReturnValueOnce(input)
     fixture.steer.mockResolvedValue({ queued: true })
     const running: BotTask = { ...task, workId: "work", origin: { kind: "work", sourceTaskId: "main" } }
     const addition: BotTask = { ...running, id: "revision", requestId: "revision-message", message: "Revise",
@@ -8527,10 +8528,10 @@ it("isolates authenticated IM peer browser owners while retaining their binding 
     fixture.thread.mockReturnValue(undefined)
     fixture.getBot.mockImplementation((id) => store.getBot(id))
     const runtime = createLocalBotRunPort(
-      { editVersion: () => 0, forPrompt: () => [] } as any,
+      { editVersion: () => 0, forPrompt: () => [] } as unknown as BotMemoryService,
       () => host,
-      {} as any,
-      { enqueue: () => {} } as any
+      {} as BotBrowserService,
+      { enqueue: () => {} } as unknown as BotMemoryMaintainer
     )
     const outputs: Array<{ thread: string; scope: unknown }> = []
     // This test exercises direct Runtime leases outside Host admission.

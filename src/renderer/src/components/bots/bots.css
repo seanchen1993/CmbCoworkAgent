@@ -2337,13 +2337,16 @@ button.bot-json-caret:focus-visible {
 }
 .bot-group-composer-fields {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-areas: "attach input send";
   align-items: end;
   column-gap: 12px;
 }
-.bot-group-composer-fields > .bot-icon-button {
+.bot-group-composer-tools {
   grid-area: attach;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .bot-group-composer-fields > .bot-group-input {
   grid-area: input;

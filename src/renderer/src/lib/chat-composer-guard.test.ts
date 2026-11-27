@@ -9,7 +9,8 @@ import { runFrozenImageOutbox, imageDeliveryAction, isActiveImageReceipt } from 
 import { canClaimQueuedMessage } from "./queued-message-content"
 import { appendBtwReferences, readBtwReferences } from "../../../shared/btw-references"
 import { BUILTIN_BROWSER_COMMAND } from "../features/builtin-browser/builtin-browser"
-import { BTW_SLASH_COMMANDS, buildSlashPopoverMode } from "../features/slash-commands/useSlashCommands"
+import { BTW_SLASH_COMMANDS, GENERAL_SLASH_COMMANDS, buildSlashPopoverMode } from "../features/slash-commands/useSlashCommands"
+import { hasImageGenerationComposer, imageGenerationCommand } from "../features/slash-commands/image-generation-command"
 
 vi.mock("@/components/ui/popover", () => ({
   Popover: ({ children }: { children: React.ReactNode }) => children,
@@ -305,6 +306,12 @@ function bindSideSubmit(overrides: Record<string, unknown>, route: Record<string
     useAtFileMentions: (params: { disabled: boolean }) => params,
     BUILTIN_BROWSER_COMMAND,
     BTW_SLASH_COMMANDS,
+    GENERAL_SLASH_COMMANDS,
+    hasImageGenerationComposer,
+    imageGenerationCommand,
+    supportsImageGeneration: true,
+    currentThread: { metadata: {} },
+    useImageGenerationAvailability: (enabled: boolean) => enabled ? { available: true } : undefined,
     isBtwSubmissionBlocked: () => false,
     getSideQuestion: () => undefined,
     liveSubmitPreparingThreads: new Set<string>(),
@@ -315,10 +322,12 @@ function bindSideSubmit(overrides: Record<string, unknown>, route: Record<string
   const predicateNames = [
     "SIDE_COMPOSER_SLASH_COMMANDS",
     "sideComposer",
-    "sideParentAvailable",
+    "activeOrdinaryComposer",
     "sideEntryAvailable",
     "btwAvailable",
     "isBtwInput",
+    "imageAvailability",
+    "generalCommands",
     "slash",
     "allowWorkspaceImages",
     "atFileMentions"
@@ -486,6 +495,22 @@ function bindQueuedReceipt(sideComposer = true) {
 }
 
 describe("Chat composer rendered decision guards", () => {
+  it("offers the host's image command only in eligible local foreground composers", () => {
+    const input = "/生成图片"
+    const commandIds = (props: Record<string, unknown>) =>
+      bindSideSubmit({ input, ...props }).slashMode.commands?.map((item: { id: string }) => item.id) ?? []
+    expect(commandIds({})).toContain("generate-image")
+    expect(commandIds({ surface: "bot", managedTurn: { supportsImageGeneration: true } }))
+      .toContain("generate-image")
+    for (const props of [{ surface: "harness-project" }, { currentThread: { metadata: { scheduledTaskId: "s" } } },
+      { surface: "bot", managedTurn: { supportsImageGeneration: false } }, { composerReadOnly: true }]) {
+      expect(commandIds(props)).not.toContain("generate-image")
+    }
+    const menu = bindSideSubmit({
+      input, useImageGenerationAvailability: () => ({ available: false, reason: "尚未配置生图服务" })
+    }).slashMode
+    expect(menu.commands).toMatchObject([{ id: "generate-image", disabledReason: "尚未配置生图服务" }])
+  })
   it("keeps the existing decision guards when a Bot adds its composer callbacks", () => {
     const managedTurn = { submitDraft: async () => {}, attachFiles: async () => {} }
     expectAvailability(renderComposer({ managedTurn }), false)

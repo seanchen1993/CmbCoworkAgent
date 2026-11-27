@@ -31,6 +31,7 @@ import {
   ChatHistorySourceContext,
   ChatPresentationContext,
   ChatDesktopWorkIdContext,
+  ChatGeneratedImagesContext,
   ChatReplySourceContext,
   ChatActivityPresentationContext,
   ChatExecutionDetailsContext,
@@ -772,7 +773,11 @@ export function BotConversationTools({
                         <ChatReplySourceContext.Provider value={replySource}>
                           <ChatUserTextPresentationContext.Provider value={presentUserText}>
                             <ChatUserImagePresentationContext.Provider value={presentUserImages}>
-                              {children}
+                              <ChatGeneratedImagesContext.Provider value={
+                                client.hostId === "local" && !groupId && !imConversationId
+                              }>
+                                {children}
+                              </ChatGeneratedImagesContext.Provider>
                             </ChatUserImagePresentationContext.Provider>
                           </ChatUserTextPresentationContext.Provider>
                         </ChatReplySourceContext.Provider>
