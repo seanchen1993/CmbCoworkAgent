@@ -73,6 +73,7 @@ import {
 } from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import {
+  BUILTIN_BROWSER_TOOL_USAGE_FILTER,
   FILTERED_TOOL_EXCLUDES,
   queryWithToolUsageMappingFallback
 } from "./dashboard-tool-usage-query"
@@ -6781,9 +6782,7 @@ async function fetchAdvancedFeatures(
             nested: { path: "toolUsage" },
             aggs: {
               in_app_browser: {
-                filter: {
-                  wildcard: { "toolUsage.name": "*inAppBrowser_*" }
-                },
+                filter: BUILTIN_BROWSER_TOOL_USAGE_FILTER,
                 aggs: {
                   calls: { sum: { field: "toolUsage.count" } },
                   traces: {

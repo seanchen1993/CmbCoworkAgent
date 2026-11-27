@@ -74,11 +74,11 @@ async function main(): Promise<void> {
     page.on("pageerror", (error) => errors.push(error.message))
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
     await page.getByRole("button", { name: "安装", exact: true }).click()
-    await page.getByRole("button", { name: "重装", exact: true }).waitFor()
+    await page.getByRole("button", { name: "安装", exact: true }).waitFor()
     assert.equal(await page.getByRole("button", { name: "编辑", exact: true }).count(), 0)
     await page.getByText("约束正文可以正常预览。", { exact: false }).waitFor()
     assert.equal(await page.getByText("文件预览需要授权").count(), 0)
-    await page.getByRole("button", { name: "重装", exact: true }).click()
+    await page.getByRole("button", { name: "安装", exact: true }).click()
     await page.screenshot({
       animations: "disabled",
       path: join(artifacts, "installed-and-knowledge-preview.png")

@@ -21,6 +21,17 @@ export const FILTERED_TOOL_EXCLUDES = [
   "write_todos"
 ]
 
+/** Tool names backed by the app's built-in browser, across regular and Bot conversations. */
+export const BUILTIN_BROWSER_TOOL_USAGE_FILTER = {
+  bool: {
+    should: [
+      { wildcard: { "toolUsage.name": "*inAppBrowser_*" } },
+      { term: { "toolUsage.name": "bot_browser" } }
+    ],
+    minimum_should_match: 1
+  }
+}
+
 /** Retry only a missing/conflicting nested mapping during a rolling upgrade. */
 export async function queryWithToolUsageMappingFallback<T>(
   execute: (body: Record<string, unknown>) => Promise<T>,

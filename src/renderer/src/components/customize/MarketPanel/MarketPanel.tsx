@@ -387,6 +387,22 @@ const localStorageHelper = {
   }
 }
 
+function canDeleteMarketItem(
+  item: MarketItem,
+  type: MarketItemType,
+  currentUserIdCandidates: Iterable<string>,
+  currentUserSapId?: string | null
+): boolean {
+  if (localStorageHelper.canDeleteItem(item.name, type)) return true
+  if (doesMarketUserIdMatchCurrentUser(item.user_id, currentUserIdCandidates, currentUserSapId)) {
+    return true
+  }
+
+  const itemIp = item.ip?.trim()
+  const localIp = localStorage.getItem("localIp")?.trim()
+  return Boolean(itemIp && localIp && itemIp === localIp)
+}
+
 interface MarketItemCardProps {
   item: MarketItem
   onOpenDetail: (item: MarketItem) => void
@@ -650,7 +666,7 @@ export function MarketItemCard({
                     onClick={handleUpdateInstall}
                   >
                     <Plus className="size-3" />
-                    重装
+                    安装
                   </Button>
                 )
               ) : installActionDisabled ? (
@@ -1375,7 +1391,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
           installedSkills.some((str) => item.name === str || item.filename?.includes(str))
         return {
           ...item,
-          canDelete: localStorageHelper.canDeleteItem(item.name, "skill"),
+          canDelete: canDeleteMarketItem(item, "skill", currentUserCandidateSet, currentUserSapId),
           installDisabledReason: uploadedSkillNames.has(normalizeSkillName(item.name))
             ? uploadedSkillDisabledReason
             : undefined,
@@ -1383,7 +1399,13 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
         }
       })
     )
-  }, [installedSkills, uploadedSkillNames, uploadedSkillDisabledReason])
+  }, [
+    currentUserCandidateSet,
+    currentUserSapId,
+    installedSkills,
+    uploadedSkillNames,
+    uploadedSkillDisabledReason
+  ])
 
   useEffect(() => {
     installedSkillsRef.current = installedSkills
@@ -1404,11 +1426,11 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     setMcpsData((prev) =>
       prev.map((item) => ({
         ...item,
-        canDelete: localStorageHelper.canDeleteItem(item.name, "mcp"),
+        canDelete: canDeleteMarketItem(item, "mcp", currentUserCandidateSet, currentUserSapId),
         ...buildMarketInstalledFlags(item, "mcp", installedMcps.includes(item.name))
       }))
     )
-  }, [installedMcps])
+  }, [currentUserCandidateSet, currentUserSapId, installedMcps])
 
   useEffect(() => {
     installedMcpsRef.current = installedMcps
@@ -1418,41 +1440,63 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     setPluginsData((prev) =>
       prev.map((item) => ({
         ...item,
-        canDelete: localStorageHelper.canDeleteItem(item.name, "plugin"),
+        canDelete: canDeleteMarketItem(item, "plugin", currentUserCandidateSet, currentUserSapId),
         ...buildMarketInstalledFlags(
           item, "plugin", Boolean(findInstalledPluginForMarketItem(installedPlugins, item))
         )
       }))
     )
-  }, [installedPlugins])
+  }, [currentUserCandidateSet, currentUserSapId, installedPlugins])
 
   useEffect(() => {
     installedPluginsRef.current = installedPlugins
   }, [installedPlugins])
 
   // 新增：更新安装功能
-  const confirmAndDeleteExistingLocalSkill = async (itemName: string): Promise<boolean> => {
-    if (!window.api?.skills?.list || !window.api?.skills?.delete) return true
+  const confirmAndReplaceExistingLocalItem = async (item: MarketItem): Promise<boolean> => {
+    const itemName = item.name || item.id || ""
+    if (!itemName) return true
+
     try {
-      const skillsMetadata = await window.api.skills.list()
-      const existingSkill = skillsMetadata.find(
-        (skill) =>
-          skill.source === "user" &&
-          normalizeSkillName(skill.name) === normalizeSkillName(itemName)
-      )
-      if (!existingSkill) return true
-      if (!window.confirm(`本地已存在技能「${existingSkill.name}」，安装后将覆盖本地版本，是否继续？`)) {
-        return false
+      if ((activeTab === "skill" || activeTab === "orgSkill") && window.api?.skills?.list) {
+        const skillsMetadata = await window.api.skills.list()
+        const existingSkill = skillsMetadata.find(
+          (skill) =>
+            skill.source === "user" &&
+            normalizeSkillName(skill.name) === normalizeSkillName(itemName)
+        )
+        if (!existingSkill) return true
+        if (!window.confirm(`本地已存在技能「${existingSkill.name}」，是否覆盖？`)) return false
+        if (!window.api.skills.delete) return true
+        const deleteResult = await window.api.skills.delete(existingSkill.path)
+        if (!deleteResult.success) {
+          toast.error(deleteResult.error || "删除本地技能失败")
+          return false
+        }
+        return true
       }
-      const deleteResult = await window.api.skills.delete(existingSkill.path)
-      if (!deleteResult.success) {
-        toast.error(deleteResult.error || "删除本地技能失败")
-        return false
+
+      if (activeTab === "mcp" && window.api?.mcp?.list) {
+        const mcpsMetadata = await window.api.mcp.list()
+        const existingMcp = mcpsMetadata.find((mcp) => mcp.name === itemName)
+        if (!existingMcp) return true
+        if (!window.confirm(`本地已存在 MCP「${existingMcp.name}」，是否覆盖？`)) return false
+        if (window.api.mcp.delete) {
+          await window.api.mcp.delete(existingMcp.id)
+        }
+        return true
       }
+
+      if (activeTab === "plugin") {
+        const existingPlugin = findInstalledPluginForMarketItem(installedPluginsRef.current, item)
+        if (!existingPlugin) return true
+        return window.confirm(`本地已存在 Plugin「${existingPlugin.name}」，是否覆盖？`)
+      }
+
       return true
     } catch (error) {
-      console.error("Failed to replace existing local skill:", error)
-      toast.error(error instanceof Error ? error.message : "覆盖本地技能失败")
+      console.error("Failed to replace existing local item:", error)
+      toast.error(error instanceof Error ? error.message : "覆盖本地项目失败")
       return false
     }
   }
@@ -1471,6 +1515,8 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
         return
       }
 
+      if (!(await confirmAndReplaceExistingLocalItem(item))) return
+
       if (activeTab === "plugin") {
         const response = await installMarketPluginUpdate(item)
 
@@ -1486,24 +1532,6 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
           setError(response.error || "更新安装失败")
         }
         return
-      }
-
-      // 根据类型处理已有的安装项目
-      if (activeTab === "skill") {
-        if (!(await confirmAndDeleteExistingLocalSkill(itemName))) return
-      } else if (activeTab === "mcp" && window.api?.mcp?.delete) {
-        try {
-          // 查找已安装的mcp路径
-          const mcpsMetadata = await window.api.mcp.list()
-          const existingMcp = mcpsMetadata.find((mcp) => mcp.name === itemName)
-
-          if (existingMcp) {
-            console.log(`Deleting existing mcp: ${existingMcp.id}`)
-            await window.api.mcp.delete(existingMcp.id)
-          }
-        } catch (deleteError) {
-          console.warn("Failed to delete existing mcp, continuing with install:", deleteError)
-        }
       }
 
       // 下载并安装最新版本
@@ -1579,7 +1607,12 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
 
         return {
           ...item,
-          canDelete: localStorageHelper.canDeleteItem(item.name, type),
+          canDelete: canDeleteMarketItem(
+            item,
+            type,
+            currentUserCandidateSet,
+            currentUserSapId
+          ),
           installDisabledReason:
             type === "skill" && uploadedSkillNameSetRef.current.has(normalizedSkillName)
               ? uploadedSkillDisabledReason
@@ -1673,7 +1706,13 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     return () => {
       cancelled = true
     }
-  }, [activeTab, reloadToken, uploadedSkillDisabledReason])
+  }, [
+    activeTab,
+    currentUserCandidateSet,
+    currentUserSapId,
+    reloadToken,
+    uploadedSkillDisabledReason
+  ])
 
   useEffect(() => {
     const previousActiveTab = previousActiveTabRef.current
@@ -2267,8 +2306,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
 
       if (
         !downloadToLocal &&
-        (activeTab === "skill" || activeTab === "orgSkill") &&
-        !(await confirmAndDeleteExistingLocalSkill(itemName))
+        !(await confirmAndReplaceExistingLocalItem(item))
       ) {
         return
       }

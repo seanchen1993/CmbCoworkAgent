@@ -335,7 +335,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                         disabled={updatingItems.has(getItemKey(selectedItem))}
                       >
                         <Zap className="size-3" />
-                        更新安装
+                        更新
                       </Button>
                     </UpdateVersionTooltip>
                   ) : (
@@ -347,7 +347,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                       disabled={updatingItems.has(getItemKey(selectedItem))}
                     >
                       <Zap className="size-3" />
-                      重新安装
+                      安装
                     </Button>
                   )
                 ) : selectedItem.installDisabledReason ? (

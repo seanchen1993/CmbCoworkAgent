@@ -1,9 +1,22 @@
 import { expect, it, vi } from "vitest"
 import { buildToolUsageAggs } from "../../shared/dashboard-tool-usage"
 import {
+  BUILTIN_BROWSER_TOOL_USAGE_FILTER,
   FILTERED_TOOL_EXCLUDES,
   queryWithToolUsageMappingFallback
 } from "./dashboard-tool-usage-query"
+
+it("counts regular and Bot built-in browser tools in the same metric", () => {
+  expect(BUILTIN_BROWSER_TOOL_USAGE_FILTER).toEqual({
+    bool: {
+      should: [
+        { wildcard: { "toolUsage.name": "*inAppBrowser_*" } },
+        { term: { "toolUsage.name": "bot_browser" } }
+      ],
+      minimum_should_match: 1
+    }
+  })
+})
 
 it("excludes both built-in shell result tools from complete and legacy rankings", () => {
   const query = buildToolUsageAggs(FILTERED_TOOL_EXCLUDES)
