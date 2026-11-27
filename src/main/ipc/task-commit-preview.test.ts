@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { ipcMain, type IpcMainInvokeEvent } from "electron"
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { buildGitPanelDiffState, buildGitPanelFileDiffState, registerModelHandlers } from "./models"
+import { prepareGitPanelWrite } from "../services/git-worktree-write-gate"
 import { resolveTaskCommitTarget } from "../services/task-commit-target"
 import { resolveGitOperationPath } from "../services/git-repository-discovery"
 
@@ -121,6 +122,125 @@ describe("Git panel task repository reads", { timeout: 30_000 }, () => {
     ])
   })
 
+  it("commits and discards only selected external files and rejects stale or widened writes", async () => {
+    const repo = mkdtempSync(path.join(container, "manual-"))
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "core.autocrlf", "false")
+    for (const file of ["same.txt", "other.txt"]) writeFileSync(path.join(repo, file), "base\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    mock.binding.mockResolvedValue({ workspacePath: workspace, version: "v1", repositoryPaths: [repo] })
+    const scope = { panelRepository: true, worktreePath: repo }
+    async function snapshot() {
+      const diff = await invoke("getGitPanelDiffs", { options: { ...scope, includeDiffs: false } })
+      expect(diff.success).toBe(true)
+      return { ...scope, panelBindingVersion: diff.panelBindingVersion, panelRevision: diff.panelRevision }
+    }
+    writeFileSync(path.join(repo, "same.txt"), "changed\n")
+    writeFileSync(path.join(repo, "other.txt"), "staged\n")
+    git(repo, "add", "other.txt")
+    const options = await snapshot()
+    const message = "C-1 #comment fix:manual selection #CMBDevClaw"
+    expect(await invoke("commitWorktree", { options, message })).toMatchObject({ success: false })
+    expect(await invoke("commitWorktree", { options, message, filePaths: ["same.txt"] })).toMatchObject({ success: true })
+    expect(git(repo, "diff", "HEAD^", "HEAD", "--name-only")).toBe("same.txt")
+    expect(git(repo, "diff", "--cached", "--name-only")).toBe("other.txt")
+    expect(await invoke("rejectWorktreeChanges", { options, filePaths: ["other.txt"] })).toMatchObject({ success: false })
+
+    const fresh = await snapshot()
+    for (const filePaths of [undefined, [], ["."], ["../chat/same.txt"]]) {
+      expect(await invoke("rejectWorktreeChanges", { options: fresh, filePaths })).toMatchObject({ success: false })
+    }
+    expect(await invoke("rejectWorktreeChanges", { options: fresh, filePaths: ["other.txt"] })).toMatchObject({ success: true })
+    expect(readFileSync(path.join(repo, "other.txt"), "utf8")).toBe("base\n")
+    git(repo, "rm", "--cached", "other.txt")
+    writeFileSync(path.join(repo, "other.txt"), "untracked replacement\n")
+    expect(await invoke("rejectWorktreeFile", { options: fresh, filePath: "other.txt" })).toMatchObject({ success: true })
+    expect(readFileSync(path.join(repo, "other.txt"), "utf8")).toBe("base\n")
+    expect(git(repo, "status", "--porcelain", "--", "other.txt")).toBe("")
+    expect(readFileSync(path.join(workspace, "same.txt"), "utf8")).toBe("chat copy\n")
+    linkSync(path.join(workspace, "same.txt"), path.join(repo, ".gitignore"))
+    const ignore = { options: fresh, targetPath: "logs", kind: "directory" }
+    expect(await invoke("addGitignoreEntry", ignore)).toMatchObject({ success: false })
+    expect(readFileSync(path.join(workspace, "same.txt"), "utf8")).toBe("chat copy\n")
+    rmSync(path.join(repo, ".gitignore"))
+    expect(await invoke("addGitignoreEntry", ignore)).toMatchObject({ success: true })
+    expect(readFileSync(path.join(repo, ".gitignore"), "utf8")).toContain("logs/")
+    expect(await invoke("addGitignoreEntry", {
+      options: fresh, targetPath: "pages/[id].tsx", kind: "file"
+    })).toMatchObject({ success: true })
+    expect(git(repo, "check-ignore", "--", "pages/[id].tsx", "pages/i.tsx")).toBe("pages/[id].tsx")
+    writeFileSync(path.join(repo, "new.txt"), "must survive a locked index\n")
+    git(repo, "add", "new.txt")
+    const indexLock = path.join(repo, ".git", "index.lock")
+    writeFileSync(indexLock, "other writer", { flag: "wx" })
+    try {
+      expect(await invoke("rejectWorktreeFile", { options: fresh, filePath: "new.txt" })).toMatchObject({ success: false })
+      expect(readFileSync(path.join(repo, "new.txt"), "utf8")).toBe("must survive a locked index\n")
+      expect(readFileSync(indexLock, "utf8")).toBe("other writer")
+    } finally {
+      rmSync(indexLock)
+    }
+    mock.binding.mockResolvedValue(null)
+    expect(await invoke("rejectWorktreeFile", { options: fresh, filePath: ".gitignore" })).toMatchObject({ success: false })
+  })
+
+  it("preserves the manual commit's original index on hook failure and honors a native index lock", async () => {
+    const repo = mkdtempSync(path.join(container, "manual-hook-"))
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "core.autocrlf", "false")
+    mock.binding.mockResolvedValue({ workspacePath: workspace, version: "v1", repositoryPaths: [repo] })
+    const scope = { panelRepository: true, worktreePath: repo }
+    const snapshot = async () => {
+      const diff = await invoke("getGitPanelDiffs", { options: { ...scope, includeDiffs: false } })
+      expect(diff.success).toBe(true)
+      return { ...scope, panelBindingVersion: diff.panelBindingVersion, panelRevision: diff.panelRevision }
+    }
+    writeFileSync(path.join(repo, "partial.txt"), "initial\n")
+    expect(await invoke("commitWorktree", {
+      message: "manual initial commit", filePaths: ["partial.txt"], options: await snapshot()
+    })).toMatchObject({ success: true })
+    git(repo, "checkout", "--detach", "-q")
+    const head = git(repo, "rev-parse", "HEAD")
+    writeFileSync(path.join(repo, "partial.txt"), "staged\n")
+    git(repo, "add", "partial.txt")
+    writeFileSync(path.join(repo, "partial.txt"), "worktree\n")
+    writeFileSync(path.join(repo, "new.txt"), "new\n")
+    const options = await snapshot()
+    const commit = () => invoke("commitWorktree", {
+      message: "C-1 #comment fix:manual selection #CMBDevClaw", filePaths: ["partial.txt", "new.txt"], options
+    })
+    const staged = git(repo, "ls-files", "--stage")
+    const lock = path.join(repo, ".git", "index.lock")
+    writeFileSync(lock, "another writer")
+    expect(await commit()).toMatchObject({ success: false })
+    expect(readFileSync(lock, "utf8")).toBe("another writer")
+    rmSync(lock)
+    const hook = path.join(repo, ".git", "hooks", "pre-commit")
+    writeFileSync(hook, "#!/bin/sh\ngit diff --cached --name-only > hook-selection\nexit 1\n", { mode: 0o755 })
+    git(repo, "config", "core.hooksPath", path.dirname(hook))
+    expect(await commit()).toMatchObject({ success: false })
+    expect(readFileSync(path.join(repo, "hook-selection"), "utf8").trim().split(/\r?\n/)).toEqual(["new.txt", "partial.txt"])
+    expect(git(repo, "rev-parse", "HEAD")).toBe(head)
+    expect(git(repo, "ls-files", "--stage")).toBe(staged)
+    expect(git(repo, "show", ":partial.txt")).toBe("staged")
+    rmSync(hook)
+    writeFileSync(path.join(repo, "index-only.txt"), "only indexed copy\n")
+    git(repo, "add", "index-only.txt")
+    rmSync(path.join(repo, "index-only.txt"))
+    expect(await invoke("commitWorktree", {
+      message: "selected file has disappeared", filePaths: ["index-only.txt"], options
+    })).toMatchObject({ success: false })
+    expect(git(repo, "show", ":index-only.txt")).toBe("only indexed copy")
+    expect(await commit()).toMatchObject({ success: true })
+    expect(git(repo, "show", "HEAD:partial.txt")).toBe("worktree")
+    expect(git(repo, "show", ":new.txt")).toBe("new")
+  })
+
   it("preserves the scope of a nested workspace and distinguishes a detached linked checkout", async () => {
     const nested = path.join(target, "session-folder")
     mkdirSync(nested)
@@ -180,6 +300,121 @@ describe("Git panel task repository reads", { timeout: 30_000 }, () => {
     mock.binding.mockResolvedValue(null)
     expect(await invoke("getGitPanelMeta", { options: repository })).toMatchObject({ success: false })
   })
+
+  it("pushes the reviewed external branch and pulls only from its own origin", async () => {
+    const fixture = mkdtempSync(path.join(container, "remote-"))
+    const local = path.join(fixture, "local")
+    const other = path.join(fixture, "other")
+    const bare = path.join(fixture, "origin.git")
+    git(fixture, "init", "--bare", "-q", bare)
+    git(fixture, "clone", "-q", target, local)
+    git(local, "remote", "set-url", "origin", bare)
+    git(local, "checkout", "-qb", "panel-topic")
+    // The current branch tracks an unrelated branch with the same tip; origin/panel-topic
+    // still needs to be published and the preview must offer that first push.
+    const originalBranch = git(target, "symbolic-ref", "--short", "HEAD")
+    git(local, "branch", "--set-upstream-to", `origin/${originalBranch}`, "panel-topic")
+    git(local, "branch", "unreviewed")
+    git(local, "config", "remote.origin.push", "refs/heads/unreviewed:refs/heads/unreviewed")
+    const head = git(local, "rev-parse", "HEAD")
+    const workspaceHead = git(sibling, "rev-parse", "HEAD")
+    const readOptions = { panelRepository: true, worktreePath: local, includePushability: true }
+    mock.binding.mockResolvedValue({
+      version: "v1", workspacePath: workspace, repositoryPaths: [local], cardNumber: "CARD"
+    })
+    const meta = await invoke("getGitPanelMeta", { options: readOptions })
+    expect(meta).toMatchObject({
+      success: true, worktreeBranch: "panel-topic", panelCardNumber: "CARD", hasPushableCommit: true
+    })
+    const writeOptions = { ...readOptions, panelBindingVersion: meta.panelBindingVersion, panelRevision: meta.panelRevision }
+    expect(await invoke("pullWorktree", { options: { panelRepository: true } })).toMatchObject({ success: false })
+    expect(await invoke("pushWorktree", { options: { ...writeOptions, worktreePath: sibling } })).toMatchObject({ success: false })
+    expect(await invoke("pushWorktree", { options: writeOptions }, {
+      sender: { id: 999 }
+    } as IpcMainInvokeEvent)).toMatchObject({ success: false })
+    git(local, "checkout", "-q", "unreviewed")
+    expect(await invoke("pushWorktree", { options: writeOptions })).toMatchObject({ success: false })
+    git(local, "checkout", "-q", "panel-topic")
+    const preparation = prepareGitPanelWrite()
+    const release = await preparation.reserve(local, Promise.resolve(git(local, "rev-parse", "--absolute-git-dir")))
+    try {
+      expect(await invoke("pushWorktree", { options: writeOptions })).toMatchObject({ success: false })
+    } finally {
+      release()
+      preparation.dispose()
+    }
+    expect(git(bare, "for-each-ref", "refs/heads")).toBe("")
+    expect(await invoke("pushWorktree", { options: writeOptions })).toMatchObject({ success: true })
+    expect(git(bare, "for-each-ref", "--format=%(refname)", "refs/heads")).toBe("refs/heads/panel-topic")
+    expect(git(bare, "rev-parse", "refs/heads/panel-topic")).toBe(head)
+    expect(git(local, "rev-parse", "--abbrev-ref", "@{upstream}")).toBe("origin/panel-topic")
+
+    git(fixture, "clone", "-q", "-b", "panel-topic", bare, other)
+    git(other, "-c", "user.name=test", "-c", "user.email=test@invalid.example",
+      "commit", "--allow-empty", "-qm", "new remote work")
+    git(other, "push", "-q", "origin", "panel-topic")
+    mock.currentBinding.mockReturnValue(null)
+    expect(await invoke("pullWorktree", { options: writeOptions })).toMatchObject({ success: false })
+    expect(git(local, "rev-parse", "HEAD")).toBe(head)
+    mock.currentBinding.mockReturnValue({ version: "v1" })
+    writeFileSync(path.join(local, "same.txt"), "pending local edit\n")
+    git(local, "config", "rebase.autoStash", "false")
+    expect(await invoke("pullWorktree", { options: writeOptions })).toMatchObject({ success: false })
+    expect(git(local, "rev-parse", "HEAD")).toBe(head)
+    git(local, "config", "rebase.autoStash", "true")
+    git(local, "config", "user.name", "test")
+    git(local, "config", "user.email", "test@invalid.example")
+    expect(await invoke("pullWorktree", { options: writeOptions })).toMatchObject({ success: true })
+    expect(readFileSync(path.join(local, "same.txt"), "utf8").trim()).toBe("pending local edit")
+    expect(git(local, "rev-parse", "HEAD")).toBe(git(other, "rev-parse", "HEAD"))
+    expect(git(sibling, "rev-parse", "HEAD")).toBe(workspaceHead)
+    expect(await invoke("pushWorktree", { options: writeOptions })).toMatchObject({ success: false })
+  })
+
+  it("rechecks a same-tip branch switch and authorization after the external pull fetch", async () => {
+    const fixture = mkdtempSync(path.join(container, "pull-race-"))
+    const writer = path.join(fixture, "writer")
+    const bare = path.join(fixture, "origin.git")
+    const repo = path.join(fixture, "local")
+    git(fixture, "clone", "-q", target, writer)
+    git(writer, "checkout", "-qb", "selected")
+    git(fixture, "clone", "--bare", "-q", writer, bare)
+    git(fixture, "clone", "-q", bare, repo)
+    git(repo, "branch", "same-tip")
+    const original = git(repo, "rev-parse", "HEAD")
+    git(writer, "-c", "user.name=QA", "-c", "user.email=qa@invalid.example", "commit", "--allow-empty", "-qm", "remote change")
+    git(writer, "push", "-q", bare, "selected")
+    const server = path.join(fixture, "upload-pack")
+    writeFileSync(server, [
+      "#!/bin/sh",
+      ': > "$0.started"',
+      'while test ! -f "$0.resume"; do sleep 0.1; done',
+      'exec git-upload-pack "$@"', ""
+    ].join("\n"), { mode: 0o755 })
+    git(repo, "config", "remote.origin.uploadpack", "'" + server.split(path.sep).join("/").replaceAll("'", "'\\''") + "'")
+    mock.binding.mockResolvedValue({ version: "v1", workspacePath: workspace, repositoryPaths: [repo] })
+    const scope = { panelRepository: true, worktreePath: repo }
+    const meta = await invoke("getGitPanelMeta", { options: scope })
+    const options = { ...scope, panelBindingVersion: meta.panelBindingVersion, panelRevision: meta.panelRevision }
+    for (const change of ["switch", "revoke"]) {
+      git(repo, "checkout", "-q", "selected")
+      rmSync(server + ".started", { force: true })
+      rmSync(server + ".resume", { force: true })
+      const pull = invoke("pullWorktree", { options })
+      try {
+        await vi.waitFor(() => expect(existsSync(server + ".started")).toBe(true), { timeout: 12_000 })
+        if (change === "switch") git(repo, "checkout", "-q", "same-tip")
+        else mock.currentBinding.mockReturnValue(null)
+      } finally {
+        writeFileSync(server + ".resume", "")
+        await pull
+      }
+      expect(await pull).toMatchObject({ success: false })
+      expect(git(repo, "rev-parse", "selected")).toBe(original)
+      expect(git(repo, "rev-parse", "same-tip")).toBe(original)
+      expect(git(repo, "for-each-ref", "refs/cmbdevclaw/pull/")).toBe("")
+    }
+  }, 60_000)
 
   it("keeps a workspace commit preview alive through an authorized panel read and unmount", async () => {
     const previewContext = { metadata: { workspacePath: target } }

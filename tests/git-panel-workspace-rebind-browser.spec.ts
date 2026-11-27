@@ -46,6 +46,8 @@ let failWorkspaceDiff = false
 let finishCatalog
 let cancelCatalog
 let canceledCatalog = false
+const externalWrites = []
+const externalSnapshot = { panelBindingVersion: "auth-v1", panelRevision: "list-head" }
 const gitRoot = () => workspacePath === newWorkspace ? "/new-repo" : oldWorkspace
 const base = { success: true, isGitRepo: true, isWorktree: false, taskId: threadId, hasPendingDiff: true }
 window.api = {
@@ -69,8 +71,15 @@ window.api = {
       filesChanged = listener
       return () => { if (filesChanged === listener) filesChanged = undefined }
     },
-    getGitPanelMeta: async () => {
+    getGitPanelMeta: async (_thread, options) => {
       metaReads++
+      if (options?.panelRepository && options.worktreePath === "/external") return {
+        ...base, ...externalSnapshot, repositoryRoots: ["/external"], worktreeBranch: "ext-main",
+        panelRevision: options.includePushability ? "preview-head" : "meta-head",
+        pendingCommits: options.includePushability
+          ? [{ hash: "1234567", message: "authorized pending commit", date: "" }]
+          : []
+      }
       const result = { ...base, repositoryRoots: [gitRoot()], worktreeBranch: branch }
       if (holdMeta) {
         holdMeta = false
@@ -90,14 +99,29 @@ window.api = {
       }
       return {
         ...base,
+        ...(options?.panelRepository ? externalSnapshot : {}),
         changedFilesTotal: 1,
-        repositories: [{ path: workspacePath, displayPath: ".", gitRoot: gitRoot() }],
+        repositories: options?.panelRepository
+          ? [{ path: options.worktreePath, displayPath: ".", gitRoot: options.worktreePath }]
+          : [{ path: workspacePath, displayPath: ".", gitRoot: gitRoot() }],
         files: [{ path: file, status: "modified", additions: 1, deletions: 0 }],
         totals: { fileCount: 1, additions: 1, deletions: 0 }
       }
     },
-    pushWorktree: () => new Promise(resolve => { finishPush = () => resolve({ success: true }) }),
-    pullWorktree: () => new Promise(resolve => { finishPull = resolve })
+    pushWorktree: (_thread, options) => {
+      if (options?.panelRepository) {
+        externalWrites.push({ action: "push", ...options })
+        return Promise.resolve({ success: true })
+      }
+      return new Promise(resolve => { finishPush = () => resolve({ success: true }) })
+    },
+    pullWorktree: (_thread, options) => {
+      if (options?.panelRepository) {
+        externalWrites.push({ action: "pull", ...options })
+        return Promise.resolve({ success: true })
+      }
+      return new Promise(resolve => { finishPull = resolve })
+    }
   }
 }
 function render() {
@@ -110,6 +134,7 @@ function render() {
   </>)
 }
 window.fixture = {
+  externalWrites,
   holdCatalog: () => { holdCatalog = true },
   finishCatalog: () => finishCatalog(),
   catalogWasCanceled: () => canceledCatalog,
@@ -284,6 +309,17 @@ render()
     await page.evaluate("window.fixture.changeExternalFile(); window.fixture.filesChanged('/external')")
     await page.getByRole("button", { name: "查看 after-commit.txt 的 diff" }).waitFor()
     assert.equal(await page.getByRole("button", { name: "查看 topic.txt 的 diff" }).count(), 0)
+    await pushTrigger.click()
+    await dialog.getByText("authorized pending commit").waitFor()
+    await push.click()
+    await dialog.waitFor({ state: "hidden" })
+    await page.getByRole("button", { name: "Pull 远端代码" }).click()
+    assert.deepEqual(await page.evaluate("window.fixture.externalWrites"), [
+      { action: "push", worktreePath: "/external", panelRepository: true,
+        panelBindingVersion: "auth-v1", panelRevision: "preview-head" },
+      { action: "pull", worktreePath: "/external", panelRepository: true,
+        panelBindingVersion: "auth-v1", panelRevision: "meta-head" }
+    ])
     await page.evaluate("window.fixture.failWorkspaceDiff()")
     await page.getByRole("button", { name: /^操作仓库/ }).click()
     await page.getByTitle("/workspace-child", { exact: true }).click()

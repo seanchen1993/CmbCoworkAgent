@@ -6,14 +6,15 @@
  * through Playwright. It proves that the repository selector is reachable and
  * that submitting the dialog commits only the selected linked worktree. It
  * also authorizes a same-named checkout outside the workspace and verifies
- * that the panel isolates its file list and diff until access is revoked.
+ * that panel commits, reverts and transfers to a local bare remote affect only
+ * the selected checkout until access is revoked.
  *
  * Run:
  *   npm run test:git:e2e
  */
 
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { rm as rmAsync } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
@@ -279,6 +280,8 @@ async function verifyAuthorizedPanel(
   await picker.click()
   await externalOption.click()
   await file("external-only.txt").waitFor()
+  await page.getByRole("button", { name: "Pull 远端代码", exact: true }).waitFor()
+  await page.getByRole("button", { name: "Push 推送", exact: true }).waitFor()
   await file("workspace-only.txt").waitFor({ state: "hidden" })
   await file("tracked.txt").click()
   const externalLine = page.getByText("reviewed external change", { exact: true })
@@ -305,7 +308,8 @@ async function verifyExternalTaskBinding(
   threadId: string,
   mainRepository: string,
   linkedWorktree: string,
-  external: string
+  external: string,
+  remote: string
 ): Promise<void> {
   writeFileSync(join(mainRepository, "workspace-only.txt"), "workspace only\n")
   writeFileSync(join(linkedWorktree, "linked-only.txt"), "linked only\n")
@@ -398,7 +402,7 @@ async function verifyExternalTaskBinding(
     "授权后可以连续打开有效的新预览"
   )
   const startingHead = git(external, ["rev-parse", "HEAD"])
-  git(external, ["checkout", "-q", "-b", "same-tip-branch"])
+  git(external, ["checkout", "-q", "-b", "same-tip-branch", "--track", "origin/same-tip-branch"])
   const stale = await submit(repeat)
   assert(
     !stale.success && Boolean(stale.error?.includes("变化")),
@@ -410,9 +414,16 @@ async function verifyExternalTaskBinding(
   assert(existsSync(join(external, ".git", "task-hook-receipt")), "外仓配置的提交钩子已验证候选暂存区")
   assert(git(external, ["log", "-1", "--format=%s"]) === message, "外部提交使用已保存的任务卡号")
 
-  await page.getByText("当前仓库没有待查看的文件改动", { exact: true }).waitFor()
+  await page.getByText("工作区状态正常", { exact: true }).waitFor()
   await page.getByText("分支 same-tip-branch", { exact: true }).waitFor()
   log("PASS 外部提交后当前面板自动更新分支并清空变更列表")
+  try {
+    await verifyAuthorizedPanelWrites(page, external, remote)
+  } catch (error) {
+    console.error("[git-e2e] External checkout", git(external, ["status", "--short", "--branch"]))
+    console.error("[git-e2e] Panel after write", await page.locator("body").innerText())
+    throw error
+  }
   writeFileSync(join(external, "tracked.txt"), "pending when access revoked\n")
   await page.getByRole("button", { name: "刷新", exact: true }).click()
   await page.getByRole("button", { name: "查看 tracked.txt 的 diff", exact: true }).click()
@@ -428,6 +439,111 @@ async function verifyExternalTaskBinding(
   await page.getByText(mainRepository, { exact: true }).waitFor()
   await page.getByText(external, { exact: true }).waitFor({ state: "hidden" })
   log("PASS 撤销后无需重开面板，外部仓库和 diff 消失，工作区仓库仍可选择")
+}
+
+async function verifyAuthorizedPanelWrites(
+  page: Page,
+  external: string,
+  remote: string
+): Promise<void> {
+  const receipt = join(external, ".git", "task-hook-receipt")
+  unlinkSync(receipt)
+  writeFileSync(join(external, "tracked.txt"), "manual commit from panel\n")
+  const unselected = join(external, "manual-unselected.txt")
+  writeFileSync(unselected, "keep until confirmed revert\n")
+  await page.getByRole("button", { name: "刷新", exact: true }).click()
+  await page.getByRole("checkbox", { name: "选择文件 tracked.txt", exact: true }).check()
+  await page.getByRole("button", { name: "Commit 提交", exact: true }).click()
+  const commit = page.getByRole("dialog").filter({ hasText: "Git Commit" })
+  await commit.getByText("1 文件", { exact: true }).waitFor()
+  await commit.getByText("QA-EXTERNAL", { exact: true }).waitFor()
+  await commit.locator("#git-commit-type").click()
+  await page.getByRole("option", { name: "fix", exact: true }).click()
+  await commit.locator("#git-message").fill("manual authorized commit")
+  await commit.locator("#git-commit-button").click()
+  await commit.waitFor({ state: "hidden", timeout: 30_000 })
+  const manualMessage = "QA-EXTERNAL #comment fix:manual authorized commit #CMBDevClaw"
+  assert(
+    git(external, ["log", "-1", "--format=%s"]) === manualMessage,
+    "授权仓库手动 Commit 使用预选卡号"
+  )
+  assert(
+    git(external, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]) === "tracked.txt" &&
+      existsSync(unselected) &&
+      existsSync(receipt),
+    "手动 Commit 仅提交勾选文件并执行仓库钩子"
+  )
+
+  const reject = page.getByRole("dialog").filter({ hasText: "选择要回退的文件" })
+  await page.getByRole("button", { name: "全部回退", exact: true }).click()
+  await reject.getByText("manual-unselected.txt", { exact: true }).waitFor()
+  await reject.getByRole("button", { name: "取消", exact: true }).click()
+  assert(existsSync(unselected), "取消回退保留授权仓库文件")
+  await page.getByRole("button", { name: "全部回退", exact: true }).click()
+  await reject.getByRole("button", { name: "确认回退", exact: true }).click()
+  await page.getByText("工作区状态正常", { exact: true }).waitFor()
+  assert(
+    !existsSync(unselected) && git(external, ["status", "--porcelain"]) === "",
+    "确认回退仅移除所选改动"
+  )
+
+  const remoteRef = "refs/heads/same-tip-branch"
+  const remoteBefore = git(remote, ["rev-parse", remoteRef])
+  const push = page.getByRole("button", { name: "Push 推送", exact: true })
+  const dialog = page.getByRole("dialog", { name: "Git 推送" })
+  await push.click()
+  await dialog.getByText(manualMessage, { exact: true }).waitFor()
+  await dialog.getByRole("button", { name: "取消", exact: true }).click()
+  assert(git(remote, ["rev-parse", remoteRef]) === remoteBefore, "取消 Push 保留远端分支")
+  await push.click()
+  await dialog.getByText(manualMessage, { exact: true }).waitFor()
+  await dialog.getByRole("button", { name: "Push 推送", exact: true }).click()
+  await dialog.waitFor({ state: "hidden", timeout: 30_000 })
+  assert(
+    git(remote, ["rev-parse", remoteRef]) === git(external, ["rev-parse", "HEAD"]),
+    "Push 将授权仓库最新提交发布到选中的远端分支"
+  )
+
+  const peer = join(dirname(remote), "remote-writer")
+  git(dirname(remote), ["clone", "-q", "-b", "same-tip-branch", remote, peer])
+  writeFileSync(join(peer, "incoming.txt"), "remote addition\n")
+  git(peer, ["add", "incoming.txt"])
+  git(peer, [
+    "-c",
+    "user.name=Remote Writer",
+    "-c",
+    "user.email=remote@example.invalid",
+    "commit",
+    "-qm",
+    "remote addition"
+  ])
+  git(peer, ["push", "-q", "origin", remoteRef])
+  await page.getByRole("button", { name: "Pull 远端代码", exact: true }).click()
+  await page
+    .getByText(/拉取成功/)
+    .first()
+    .waitFor({ timeout: 30_000 })
+  assert(
+    git(external, ["rev-parse", "HEAD"]) === git(peer, ["rev-parse", "HEAD"]) &&
+      readFileSync(join(external, "incoming.txt"), "utf8").trim() === "remote addition",
+    "Pull 将远端新增提交与文件拉到授权仓库"
+  )
+
+  const incomingFile = join(external, "incoming.txt")
+  writeFileSync(incomingFile, "discard from selected checkout\n")
+  writeFileSync(join(external, "panel-local.tmp"), "ignore this file\n")
+  await page.getByRole("button", { name: "刷新", exact: true }).click()
+  const incomingDiff = page.getByRole("button", { name: "查看 incoming.txt 的 diff", exact: true })
+  await incomingDiff.click()
+  await page.getByRole("button", { name: "回退文件", exact: true }).click()
+  await page.getByRole("button", { name: "确认回退", exact: true }).click()
+  await incomingDiff.waitFor({ state: "hidden" })
+  assert(readFileSync(incomingFile, "utf8").trim() === "remote addition", "授权仓库可以单独回退指定文件")
+  const localDiff = page.getByRole("button", { name: "查看 panel-local.tmp 的 diff", exact: true })
+  await page.getByRole("button", { name: "将 panel-local.tmp 加入 .gitignore", exact: true }).click()
+  await localDiff.waitFor({ state: "hidden" })
+  assert(git(external, ["check-ignore", "panel-local.tmp"]) === "panel-local.tmp" &&
+    existsSync(join(external, "panel-local.tmp")), "忽略规则在授权仓库生效并保留本地文件")
 }
 
 async function deleteWorkspaceThread(page: Page, threadId: string): Promise<void> {
@@ -503,12 +619,19 @@ async function main(): Promise<void> {
     const outside = join(testRoot, "outside")
     mkdirSync(outside)
     const external = join(outside, "main")
-    git(testRoot, ["clone", "-q", "--no-local", mainRepository, external])
+    const remote = join(testRoot, "origin.git")
+    git(testRoot, ["clone", "-q", "--bare", "--no-local", mainRepository, remote])
+    git(remote, ["update-ref", "refs/heads/same-tip-branch", initialCommit])
+    git(testRoot, ["clone", "-q", "--no-local", remote, external])
     git(external, ["checkout", "-q", "-b", EXTERNAL_BRANCH])
     git(external, ["config", "user.name", "Task Commit QA"])
     git(external, ["config", "user.email", "test@example.invalid"])
-    await verifyExternalTaskBinding(app, page, threadId, mainRepository, linkedWorktree, external)
-    assert(git(mainRepository, ["rev-parse", "HEAD"]) === mainHead, "外部提交保留会话内主仓库的 HEAD")
+    await verifyExternalTaskBinding(app, page, threadId, mainRepository, linkedWorktree, external, remote)
+    assert(git(mainRepository, ["rev-parse", "HEAD"]) === mainHead &&
+      git(linkedWorktree, ["rev-parse", "HEAD"]) === linkedHead &&
+      git(mainRepository, ["diff", "--name-only"]) === "tracked.txt" &&
+      existsSync(join(mainRepository, "workspace-only.txt")) && existsSync(join(linkedWorktree, "linked-only.txt")),
+      "授权仓库操作保留会话内主仓库和独立工作树的 HEAD 与待提交文件")
     log("ALL PASS multi-repository Git commit E2E")
   } finally {
     if (app) {

@@ -1,7 +1,7 @@
-import { BrowserWindow, type IpcMain } from "electron"
+import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { randomUUID } from "crypto"
 import { execFile, spawn } from "child_process"
-import { appendFile, lstat, mkdir, readFile, rename, writeFile, rm, stat } from "fs/promises"
+import { appendFile, lstat, mkdir, readFile, realpath, rename, writeFile, rm, stat, unlink } from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
 import { getThreadCore } from "../db"
@@ -12,6 +12,8 @@ import { withoutGitRepositoryOverrides } from "../services/git-environment"
 import { getGitRootForPath, resolveGitOperationPath } from "../services/git-repository-discovery"
 import { prepareGitPanelWrite, type GitPanelWritePreparation } from "../services/git-worktree-write-gate"
 import type { GitCommitHistoryRecord } from "../../shared/git-commit-history"
+import type { GitPanelOperationOptions } from "../../shared/git-panel-repository"
+import { openStableWritableFileHandle } from "../services/stable-file-handle"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 
 const execFileAsync = promisify(execFile)
@@ -1263,15 +1265,113 @@ function formatDurationMs(startMs: number): string {
   return `${Date.now() - startMs}ms`
 }
 
+interface PanelWriteTarget {
+  worktreePath: string
+  gitRoot: string
+  head?: string
+  assertCurrent?: () => Promise<void>
+}
+
+interface ExternalPanelAccess {
+  authorizeWrite: (
+    event: IpcMainInvokeEvent, threadId: string, options: GitPanelOperationOptions
+  ) => Promise<PanelWriteTarget>
+  readHistory: (
+    event: IpcMainInvokeEvent, threadId: string, scope?: string
+  ) => ReturnType<typeof getGitCommitHistoryForWorkspace>
+}
+
+export function assertExactPanelFiles(root: string, files: unknown): asserts files is string[] {
+  if (!Array.isArray(files) || !files.length || files.some((file) =>
+    typeof file !== "string" || file.includes("\0") ||
+    resolveWorktreeRelativeCandidate(root, file) !== file ||
+    file.split("/").some((part) => part.toLowerCase() === ".git")
+  )) throw new Error("请重新选择仓库内的具体文件")
+}
+
+async function assertExactRejectTarget(root: string, file: string): Promise<void> {
+  const absolute = path.join(root, file)
+  try {
+    if (!(await lstat(absolute)).isFile() || path.relative(absolute, await realpath(absolute))) {
+      throw new Error(`请选择普通文件：${file}`)
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+}
+
+async function resolvePanelWriteTarget(
+  workspacePath: string, threadId: string, event: IpcMainInvokeEvent,
+  options?: GitPanelOperationOptions, access?: ExternalPanelAccess
+): Promise<PanelWriteTarget | { error: string }> {
+  if (!options?.panelRepository) return resolveGitOperationPath(workspacePath, options?.worktreePath)
+  if (!access) throw new Error("请在桌面任务窗口操作授权仓库")
+  return access.authorizeWrite(event, threadId, options)
+}
+
+async function buildAuthorizedRejectPlan(
+  target: PanelWriteTarget, entries: GitPanelChangedFile[], files: string[]
+): Promise<ReturnType<typeof buildRejectPlan>> {
+  const selected = new Set(files.map((file) =>
+    path.relative(target.gitRoot, path.join(target.worktreePath, file)).split(path.sep).join("/")
+  ))
+  const touchedTargets = [...new Set(entries.flatMap((entry) =>
+    entry.status === "renamed" && entry.previousPath ? [entry.previousPath, entry.path] : [entry.path]
+  ))]
+  if (touchedTargets.some((file) => !selected.has(file))) {
+    throw new Error("回退范围已变化，请刷新后重新确认")
+  }
+  // A staged deletion and an untracked replacement can name the very same file.
+  // HEAD determines whether discard must restore that file or remove it.
+  const tracked = new Set<string>()
+  if (target.head) {
+    const chunks = await runGitWithChunkedLiteralPathspecs(
+      target.gitRoot, ["ls-tree", "-z", target.head], touchedTargets, { silent: true }
+    )
+    for (const chunk of chunks) {
+      for (const entry of chunk.split("\0")) {
+        if (!entry) continue
+        const tab = entry.indexOf("\t")
+        if (tab < 0 || !entry.slice(0, tab).includes(" blob ")) {
+          throw new Error("请选择可逐个回退的文件")
+        }
+        tracked.add(entry.slice(tab + 1))
+      }
+    }
+  }
+  return {
+    restoreTargets: touchedTargets.filter((file) => tracked.has(file)),
+    cleanTargets: touchedTargets.filter((file) => !tracked.has(file)),
+    touchedTargets
+  }
+}
+
+// These paths are new to HEAD (including rename destinations). Unstage each
+// literal entry before removing its file, including in an unborn repository.
+async function discardAuthorizedNewFiles(root: string, files: string[]): Promise<void> {
+  if (!files.length) return
+  await runGitWithChunkedLiteralPathspecs(root, ["rm", "--cached", "-f", "--ignore-unmatch"], files)
+  await runWithConcurrency(files, GIT_PANEL_REJECT_FS_CONCURRENCY, async (file) => {
+    await assertExactRejectTarget(root, file)
+    try {
+      await unlink(path.join(root, file))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  })
+}
+
 async function rejectWorktreePaths(params: {
   threadId: string
   filePaths?: string[]
-  options?: { worktreePath?: string }
+  options?: GitPanelOperationOptions
+  event: IpcMainInvokeEvent
+  access?: ExternalPanelAccess
 }): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> {
   const { threadId, filePaths, options } = params
   const startedAt = Date.now()
   const hasExplicitSelection = Array.isArray(filePaths)
-  const preparation = prepareGitPanelWrite()
+  const preparation = prepareGitPanelWrite(options?.panelRepository ? "exclusive-panel" : "panel")
   let releaseWrite: (() => void) | undefined
   try {
     const entryThread = getThreadCore(threadId)
@@ -1287,15 +1387,18 @@ async function rejectWorktreePaths(params: {
     const workspacePath = context.workspacePath
     const capturedGitMetadataIdentity = getGitMetadataIdentity(context.metadata)
 
-    const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
+    const target = await resolvePanelWriteTarget(workspacePath, threadId, params.event, options, params.access)
     if ("error" in target) return { success: false, error: target.error }
 
     const worktreePath = target.worktreePath
     const gitRoot = target.gitRoot
+    const external = options?.panelRepository === true
+    if (external) assertExactPanelFiles(worktreePath, filePaths)
     releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
     const explicitSelections = hasExplicitSelection
       ? (filePaths || [])
           .map((rawPath) => {
+            if (external) return { rawPath, primaryPath: rawPath, basenameFallbackPath: null }
             const primaryPath = explicitPathToWorktreeRelativePath(
               workspacePath,
               worktreePath,
@@ -1332,6 +1435,7 @@ async function rejectWorktreePaths(params: {
 
     for (const targetPath of targetPaths) {
       await assertRejectPathSafe(worktreePath, targetPath)
+      if (external) await assertExactRejectTarget(worktreePath, targetPath)
     }
 
     const statusStartedAt = Date.now()
@@ -1378,7 +1482,9 @@ async function rejectWorktreePaths(params: {
       return { success: true, revertedFileCount: 0 }
     }
 
-    const plan = buildRejectPlan(changedEntries)
+    const plan = external
+      ? await buildAuthorizedRejectPlan(target, changedEntries, targetPaths)
+      : buildRejectPlan(changedEntries)
     logGitStep(
       threadId,
       "reject_all",
@@ -1390,6 +1496,7 @@ async function rejectWorktreePaths(params: {
     }
     logGitTimestamp(threadId, "安全检查完成")
     const restoreStartedAt = Date.now()
+    await target.assertCurrent?.()
     await restorePathsToHead(gitRoot, plan.restoreTargets, { threadId, skipNormalize: true })
     logGitStep(
       threadId,
@@ -1397,8 +1504,12 @@ async function rejectWorktreePaths(params: {
       `restore 完成：${plan.restoreTargets.length} 个文件，耗时 ${formatDurationMs(restoreStartedAt)}`
     )
     const cleanStartedAt = Date.now()
-    await resetPathsFromIndex(gitRoot, plan.cleanTargets, { skipNormalize: true })
-    await cleanUntrackedPaths(gitRoot, plan.cleanTargets, { skipNormalize: true })
+    if (external) {
+      await discardAuthorizedNewFiles(gitRoot, plan.cleanTargets)
+    } else {
+      await resetPathsFromIndex(gitRoot, plan.cleanTargets, { skipNormalize: true })
+      await cleanUntrackedPaths(gitRoot, plan.cleanTargets, { skipNormalize: true })
+    }
     logGitStep(
       threadId,
       "reject_all",
@@ -1420,7 +1531,7 @@ async function rejectWorktreePaths(params: {
     const latestMetadata = parseThreadMetadata(latestThread?.metadata)
     const latestGitMetadataIdentity = getGitMetadataIdentity(latestMetadata)
     if (
-      matchesThreadIncarnation(latestThread, expectedThreadIncarnation) &&
+      !external && matchesThreadIncarnation(latestThread, expectedThreadIncarnation) &&
       gitMetadataIdentityEquals(latestGitMetadataIdentity, capturedGitMetadataIdentity)
     ) {
       mutateLatestThreadMetadata(threadId, (current) => {
@@ -1431,7 +1542,7 @@ async function rejectWorktreePaths(params: {
     }
 
     notifyWorkspaceFilesChanged(threadId, worktreePath)
-    if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
+    if (!external && path.resolve(workspacePath) !== path.resolve(worktreePath)) {
       notifyWorkspaceFilesChanged(threadId, workspacePath)
     }
 
@@ -1538,7 +1649,7 @@ function parseGitPanelCommitMessage(fullMessage: string): {
   }
 }
 
-async function getGitCommitHistoryForWorkspace(workspacePath: string): Promise<{
+export async function getGitCommitHistoryForWorkspace(workspacePath: string): Promise<{
   projectPath: string
   records: GitCommitHistoryRecord[]
 }> {
@@ -1610,11 +1721,47 @@ export function recordGitCommitHistoryAsync(
   })
 }
 
-export function registerGitPanelHandlers(ipcMain: IpcMain): void {
+async function addPanelIgnoreRule(
+  target: PanelWriteTarget, rule: string
+): Promise<boolean> {
+  const file = path.join(target.worktreePath, ".gitignore")
+  let opened: Awaited<ReturnType<typeof openStableWritableFileHandle>> | undefined
+  try {
+    let existing = ""
+    try {
+      if (target.assertCurrent) {
+        opened = await openStableWritableFileHandle(target.worktreePath, file, "append")
+        existing = await opened.handle.readFile("utf8")
+      } else {
+        existing = await readFile(file, "utf8")
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+    if (existing.split(/\r?\n/).some((line) => (target.assertCurrent ? line : line.trim()) === rule)) {
+      return true
+    }
+    const line = `${existing && !existing.endsWith("\n") ? "\n" : ""}${rule}\n`
+    await target.assertCurrent?.()
+    if (opened) {
+      await opened.assertPathIdentity()
+      await opened.handle.writeFile(line, "utf8")
+    } else if (target.assertCurrent) {
+      await writeFile(file, line, { encoding: "utf8", flag: "wx" })
+    } else {
+      await appendFile(file, line, "utf8")
+    }
+    return false
+  } finally {
+    await opened?.handle.close()
+  }
+}
+
+export function registerGitPanelHandlers(ipcMain: IpcMain, access?: ExternalPanelAccess): void {
   ipcMain.handle(
     "workspace:addGitignoreEntry",
     async (
-      _event,
+      event,
       {
         threadId,
         targetPath,
@@ -1624,42 +1771,28 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
         threadId: string
         targetPath: string
         kind: "file" | "directory"
-        options?: { worktreePath?: string }
+        options?: GitPanelOperationOptions
       }
     ) => {
-      const preparation = prepareGitPanelWrite()
+      const preparation = prepareGitPanelWrite(options?.panelRepository ? "exclusive-panel" : "panel")
       let releaseWrite: (() => void) | undefined
       try {
         const { workspacePath } = await getThreadWorkspaceContext(threadId)
         if (!workspacePath) {
           return { success: false, error: "未配置工作区" }
         }
-        const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
+        const target = await resolvePanelWriteTarget(workspacePath, threadId, event, options, access)
         if ("error" in target) {
           return { success: false, error: target.error }
         }
 
+        if (options?.panelRepository) assertExactPanelFiles(target.worktreePath, [targetPath])
         const entry = normalizeGitignoreEntry(targetPath, kind)
         releaseWrite = await reserveGitPanelWrite(target.worktreePath, preparation)
-        const gitignorePath = path.join(target.worktreePath, ".gitignore")
-        let existing = ""
-        try {
-          existing = await readFile(gitignorePath, "utf8")
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException)?.code
-          if (code !== "ENOENT") throw error
-        }
-
-        const existingEntries = existing
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-        const alreadyExists = existingEntries.includes(entry)
-        if (!alreadyExists) {
-          const prefix = existing.length === 0 || existing.endsWith("\n") ? "" : "\n"
-          await appendFile(gitignorePath, `${prefix}${entry}\n`, "utf8")
-        }
-
+        await target.assertCurrent?.()
+        // Git ignore rules are patterns; git rm below still receives the literal path.
+        const rule = options?.panelRepository ? "/" + entry.replace(/[\\*?[\] ]/g, "\\$&") : entry
+        const alreadyExists = await addPanelIgnoreRule(target, rule)
         await runGit(
           target.worktreePath,
           ["--literal-pathspecs", "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--", entry],
@@ -1667,7 +1800,7 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
         )
 
         notifyWorkspaceFilesChanged(threadId, target.worktreePath)
-        if (workspacePath !== target.worktreePath) {
+        if (!options?.panelRepository && workspacePath !== target.worktreePath) {
           notifyWorkspaceFilesChanged(threadId, workspacePath)
         }
 
@@ -1700,16 +1833,16 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:rejectWorktreeChanges",
     async (
-      _event,
+      event,
       {
         threadId,
         filePaths,
         options
-      }: { threadId: string; filePaths?: string[]; options?: { worktreePath?: string } }
+      }: { threadId: string; filePaths?: string[]; options?: GitPanelOperationOptions }
     ) => {
       try {
         logGitStep(threadId, "reject_all", `开始回退，选择文件数：${filePaths?.length ?? "全部"}`)
-        const result = await rejectWorktreePaths({ threadId, filePaths, options })
+        const result = await rejectWorktreePaths({ threadId, filePaths, options, event, access })
         if (result.success) {
           logGitStep(threadId, "reject_all", `完成，处理文件数：${result.revertedFileCount ?? 0}`)
         } else {
@@ -1727,16 +1860,16 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:rejectWorktreeFile",
     async (
-      _event,
+      event,
       {
         threadId,
         filePath,
         options
-      }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
+      }: { threadId: string; filePath: string; options?: GitPanelOperationOptions }
     ) => {
       try {
         logGitStep(threadId, "reject_file", `开始回退文件：${filePath}`)
-        const result = await rejectWorktreePaths({ threadId, filePaths: [filePath], options })
+        const result = await rejectWorktreePaths({ threadId, filePaths: [filePath], options, event, access })
         if (result.success) {
           logGitStep(threadId, "reject_file", `回退成功：${filePath}`)
         } else {
@@ -1753,8 +1886,13 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "git-panel:getCommitHistory",
-    async (_event, { threadId }: { threadId: string }) => {
+    async (event, { threadId, options }: { threadId: string; options?: GitPanelOperationOptions }) => {
       try {
+        if (options?.panelRepository) {
+          if (!access) throw new Error("请在桌面任务窗口查看授权仓库")
+          const history = await access.readHistory(event, threadId, options.worktreePath)
+          return { success: true, ...history }
+        }
         const workspacePath = getThreadWorkspacePath(threadId)
         if (!workspacePath) {
           return {
