@@ -342,7 +342,8 @@ export function invalidateRemovedTaskCommitMappings(
   projectId: string,
   slug: string,
   current: Map<string, string>
-): void {
+): string[] {
+  const invalidated: string[] = []
   const db = getDb()
   const rows =
     db.exec(
@@ -358,14 +359,17 @@ export function invalidateRemovedTaskCommitMappings(
     ) {
       db.run("DELETE FROM task_commit_bindings WHERE thread_id = ? AND version = ?", [id, version])
       checkedMappings.delete(String(version))
+      invalidated.push(String(id))
     }
   }
+  return invalidated
 }
 
 export function invalidateMissingTaskCommitFeatures(
   projectId: string,
   slugs: ReadonlySet<string>
-): void {
+): string[] {
+  const invalidated: string[] = []
   const db = getDb()
   const rows =
     db.exec(
@@ -377,5 +381,7 @@ export function invalidateMissingTaskCommitFeatures(
     if (slugs.has(String(slug))) continue
     db.run("DELETE FROM task_commit_bindings WHERE thread_id = ? AND version = ?", [id, version])
     checkedMappings.delete(String(version))
+    invalidated.push(String(id))
   }
+  return invalidated
 }

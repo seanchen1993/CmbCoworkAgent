@@ -25,6 +25,7 @@ export interface TaskCommitBindingEditor {
 }
 
 export interface TaskCommitBindingApi {
+  onChanged(callback: (threadId: string) => void): () => void
   read(threadId: string): Promise<TaskCommitBinding | null>
   open(threadId: string): Promise<TaskCommitBindingEditor>
   choose(token: string): Promise<string[]>

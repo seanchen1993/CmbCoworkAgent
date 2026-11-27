@@ -10,6 +10,7 @@ import { resolveGitOperationPath } from "../services/git-repository-discovery"
 
 const mock = vi.hoisted(() => ({
   binding: vi.fn(),
+  currentBinding: vi.fn(),
   dbRun: vi.fn(),
   thread: vi.fn(),
   projection: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../services/task-commit-binding", () => ({
   readTaskCommitBinding: mock.binding,
-  readCurrentTaskCommitBinding: () => ({ version: "v1" })
+  readCurrentTaskCommitBinding: mock.currentBinding
 }))
 vi.mock("../db", async (load) => ({
   ...(await load<typeof import("../db")>()),
@@ -79,9 +80,10 @@ beforeAll(() => {
   git(target, "add", ".")
   git(target, "commit", "-qm", "initial")
   git(target, "worktree", "add", "-qb", "sibling", sibling)
-  registerModelHandlers(ipcMain)
+  registerModelHandlers(ipcMain, (event) => event.sender.id === 77)
 })
 beforeEach(() => {
+  mock.currentBinding.mockReturnValue({ version: "v1" })
   mock.binding.mockResolvedValue({
     version: "v1",
     workspacePath: workspace,
@@ -93,6 +95,124 @@ beforeEach(() => {
   writeFileSync(path.join(target, "same.txt"), "target modified\n")
 })
 afterAll(() => rmSync(container, { recursive: true, force: true }))
+
+describe("Git panel task repository reads", { timeout: 30_000 }, () => {
+  const event = { sender: { id: 77, once: vi.fn() } } as unknown as IpcMainInvokeEvent
+  const repository = { worktreePath: target, panelRepository: true }
+  function invoke(
+    name: string,
+    input: Record<string, unknown> = {},
+    sender = event
+  ) {
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === "workspace:" + name
+    )![1]
+    return handler(sender, { threadId: "task", ...input })
+  }
+
+  it("lists both sources with their branches, deduplicating an authorized workspace checkout", async () => {
+    mock.projection.mockResolvedValue({ metadata: { workspacePath: sibling } })
+    mock.binding.mockResolvedValue({
+      workspacePath: sibling, repositoryPaths: [target, sibling], version: "v1"
+    })
+    expect(await invoke("listGitPanelRepositories")).toEqual([
+      { path: sibling, branch: "sibling", source: "workspace" },
+      { path: target, branch: git(target, "symbolic-ref", "--short", "HEAD"), source: "authorized" }
+    ])
+  })
+
+  it("preserves the scope of a nested workspace and distinguishes a detached linked checkout", async () => {
+    const nested = path.join(target, "session-folder")
+    mkdirSync(nested)
+    git(sibling, "checkout", "--detach", "-q")
+    try {
+      mock.projection.mockResolvedValue({ metadata: { workspacePath: nested } })
+      mock.binding.mockResolvedValue({
+        workspacePath: nested, repositoryPaths: [nested, sibling], version: "v1"
+      })
+      expect(await invoke("listGitPanelRepositories")).toEqual([
+        { path: nested, branch: git(target, "symbolic-ref", "--short", "HEAD"), source: "workspace" },
+        { path: sibling, branch: "HEAD（分离）", source: "authorized" }
+      ])
+    } finally {
+      git(sibling, "checkout", "-q", "sibling")
+      rmSync(nested, { recursive: true, force: true })
+    }
+  })
+
+  it("opens changes in an authorized checkout from a plain session without issuing a commit preview", async () => {
+    const branch = git(target, "symbolic-ref", "--short", "HEAD")
+    expect(await invoke("listGitPanelRepositories")).toEqual([
+      { path: target, branch, source: "authorized" }
+    ])
+    expect(await invoke("getGitPanelMeta", { options: repository })).toMatchObject({
+      success: true, worktreeBranch: branch, repositoryRoots: [target]
+    })
+    expect(await invoke("getGitPanelDiffs", {
+      options: { ...repository, includeCommitTarget: true, includeDiffs: false }
+    })).toMatchObject({ success: true, changedFiles: ["same.txt"], commitPreviewRevision: undefined })
+    const detail = await invoke("getGitPanelFileDiff", {
+      filePath: "same.txt", options: repository
+    })
+    expect(detail.file.diff).toContain("+target modified")
+    expect(detail.file.diff).not.toContain("chat copy")
+    for (const filePath of [".git/config", "../chat/same.txt", "."]) {
+      expect(await invoke("getGitPanelFileDiff", { filePath, options: repository })).toMatchObject({
+        success: false
+      })
+    }
+    expect(await invoke("getGitPanelDiffs", {
+      options: { worktreePath: sibling, panelRepository: true }
+    })).toMatchObject({ success: false })
+  })
+
+  it("rejects untrusted renderers, revoked bindings and stale in-flight results", async () => {
+    const other = { sender: { id: 78, once: vi.fn() } } as unknown as IpcMainInvokeEvent
+    await expect(invoke("listGitPanelRepositories", {}, other)).rejects.toThrow()
+    expect(await invoke("getGitPanelDiffs", { options: repository }, other)).toMatchObject({
+      success: false
+    })
+    mock.currentBinding.mockReturnValue(null)
+    expect(await invoke("listGitPanelRepositories")).toEqual([])
+    expect(await invoke("getGitPanelFileDiff", {
+      filePath: "same.txt", options: repository
+    })).toMatchObject({ success: false })
+    mock.binding.mockResolvedValue(null)
+    expect(await invoke("getGitPanelMeta", { options: repository })).toMatchObject({ success: false })
+  })
+
+  it("keeps a workspace commit preview alive through an authorized panel read and unmount", async () => {
+    const previewContext = { metadata: { workspacePath: target } }
+    mock.projection.mockResolvedValue(previewContext)
+    const cancelPanel = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === "workspace:cancelGitPanelReads"
+    )![1]
+    const previewOptions = { worktreePath: target, includeCommitTarget: true, includeDiffs: false }
+    const list = await invoke("getGitPanelDiffs", { options: previewOptions })
+    expect(list.commitPreviewRevision).toBeTruthy()
+
+    for (const [channel, preview] of [
+      ["getGitPanelDiffs", { options: previewOptions }],
+      ["getGitPanelFileDiff", { filePath: "same.txt", options: {
+        worktreePath: target, commitPreviewRevision: list.commitPreviewRevision
+      } }]
+    ] as const) {
+      let release!: () => void
+      mock.projection.mockImplementationOnce(() => new Promise((resolve) => {
+        release = () => resolve(previewContext)
+      }))
+      const result = Promise.allSettled([invoke(channel, preview)])
+      try {
+        const panel = await invoke(channel, { filePath: "same.txt", options: repository })
+        expect(panel.success).toBe(true)
+        cancelPanel(event, "panel")
+      } finally {
+        release()
+      }
+      await expect(result).resolves.toMatchObject([{ status: "fulfilled", value: { success: true } }])
+    }
+  })
+})
 
 describe("task-bound commit review", { timeout: 30_000 }, () => {
   it("reads only the registered worktree's changed files from a non-Git conversation", async () => {

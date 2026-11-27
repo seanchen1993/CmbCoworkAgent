@@ -17,7 +17,8 @@ import {
   nativeImage,
   powerSaveBlocker,
   shell,
-  type IpcMainEvent
+  type IpcMainEvent,
+  type IpcMainInvokeEvent
 } from "electron"
 import {
   isBrowserNativeMessagingHostLaunch,
@@ -1174,7 +1175,19 @@ if (browserNativeMessagingHostLaunch) {
     const deleteThread = registerThreadHandlers(ipcMain)
     registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow)
     registerThreadSearchHandlers(ipcMain)
-    registerModelHandlers(ipcMain)
+    // A locally built desktop can load the bundled file without a dev server.
+    const bundledRendererUrl = pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    const configuredRenderer = isDev && process.env["ELECTRON_RENDERER_URL"]
+      ? trustedMainRendererUrl
+      : import.meta.env.VITE_RENDER_URL
+    const trustedTaskRenderer = (event: IpcMainInvokeEvent): boolean => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false
+      const contents = mainWindow.webContents
+      return event.sender === contents && event.senderFrame === contents.mainFrame &&
+        isTaskCommitRendererUrl(contents.getURL(), bundledRendererUrl, configuredRenderer) &&
+        isTaskCommitRendererUrl(event.senderFrame?.url, bundledRendererUrl, configuredRenderer)
+    }
+    registerModelHandlers(ipcMain, trustedTaskRenderer)
     registerWorkspaceFilePreviewHandlers(ipcMain)
     registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)
@@ -1214,17 +1227,13 @@ if (browserNativeMessagingHostLaunch) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
-    // A locally built desktop can load the bundled file without a dev server.
-    const bundledRendererUrl = pathToFileURL(join(__dirname, "../renderer/index.html")).href
-    const configuredRenderer = isDev && process.env["ELECTRON_RENDERER_URL"]
-      ? trustedMainRendererUrl
-      : import.meta.env.VITE_RENDER_URL
-    registerTaskCommitBindingHandlers(ipcMain, (event) => {
-      if (!mainWindow || mainWindow.isDestroyed()) return false
+    registerTaskCommitBindingHandlers(ipcMain, trustedTaskRenderer, (threadId) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
       const contents = mainWindow.webContents
-      return event.sender === contents && event.senderFrame === contents.mainFrame &&
-        isTaskCommitRendererUrl(contents.getURL(), bundledRendererUrl, configuredRenderer) &&
-        isTaskCommitRendererUrl(event.senderFrame?.url, bundledRendererUrl, configuredRenderer)
+      if (!contents.isDestroyed() &&
+          isTaskCommitRendererUrl(contents.getURL(), bundledRendererUrl, configuredRenderer)) {
+        contents.send("taskCommitBinding:changed", threadId)
+      }
     })
     registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
