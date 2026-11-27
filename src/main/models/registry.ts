@@ -5,7 +5,7 @@ import {
   IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
   isIdleModelOutsideServiceHours
 } from "../../shared/idle-model-service-window"
-import type { RemoteModelCatalog, RemoteModelCatalogItem } from "../../shared/model-catalog"
+import { modelInputModalities, type RemoteModelCatalog, type RemoteModelCatalogItem } from "../../shared/model-catalog"
 import {
   MAODOU_PRO_MODEL_ID,
   MAODOU_PRO_MODEL_NAME,
@@ -237,6 +237,7 @@ function normalizeDefinition(
     id,
     name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : model,
     baseUrl: requireUrl(item.baseUrl),
+    inputModalities: modelInputModalities(item.inputModalities),
     model,
     apiKey,
     maxTokens: optionalNumber(

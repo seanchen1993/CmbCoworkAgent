@@ -45,6 +45,7 @@ import { matchesThreadIncarnation } from "../services/thread-incarnation"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
 import { projectVisibleChatSearchContent } from "../../shared/chat-search-visible-content"
 import type { ThreadDeletionService } from "./threads"
+import { assertChatAttachmentWindow } from "./chat-attachment-window"
 import { registerBotFileHandlers } from "./bot-files"
 import { configureBotFeatureWindow } from "../bots/feature-window"
 import { withCurrentHarnessFeature } from "../harness-board/feature-catalog-lifecycle"
@@ -79,7 +80,8 @@ export function registerBotHandlers(
   ipcMain: IpcMain,
   deleteThread?: ThreadDeletionService,
   im?: Pick<BuiltinRobotManager, "setBotHostResolver" | "botChannelStatus" | "requireBotChannel">,
-  getFeatureWindow?: () => BrowserWindow | null
+  getFeatureWindow?: () => BrowserWindow | null,
+  getChatWindow = getFeatureWindow
 ): void {
   if (getFeatureWindow) configureBotFeatureWindow(getFeatureWindow)
   setBotConversationDeletionService(deleteThread)
@@ -123,7 +125,7 @@ export function registerBotHandlers(
     console.error("[Bots] Local host unavailable", error)
   }
 
-  registerBotFileHandlers(ipcMain, hostFor)
+  registerBotFileHandlers(ipcMain, hostFor, getChatWindow)
   const desktopHost = (event: IpcMainInvokeEvent, hostId: unknown) => {
     if (
       !event.senderFrame ||
@@ -132,6 +134,10 @@ export function registerBotHandlers(
     )
       throw new BotError("CONFLICT", "此操作仅支持本机桌面窗口")
     return hostFor(hostId)
+  }
+  const desktopAttachmentHost = (event: IpcMainInvokeEvent, hostId: unknown) => {
+    if (getChatWindow) assertChatAttachmentWindow(event, getChatWindow)
+    return desktopHost(event, hostId)
   }
   const historyCursor = (value: unknown): string | undefined => {
     if (value === undefined) return undefined
@@ -532,9 +538,11 @@ export function registerBotHandlers(
   ipcMain.handle("bots:group:messages", (_event, hostId: unknown, id: unknown, cursor: unknown) =>
     hostFor(hostId).groupMessages(botIdentifier(id), parseGroupHistoryCursor(cursor))
   )
-  ipcMain.handle("bots:group:send", (_event, hostId: unknown, input: unknown) =>
-    hostFor(hostId).sendGroup(parseGroupMessage(input))
-  )
+  ipcMain.handle("bots:group:send", (event, hostId: unknown, input: unknown) => {
+    const request = parseGroupMessage(input)
+    const host = request.inputImageIds?.length ? desktopAttachmentHost(event, hostId) : hostFor(hostId)
+    return host.sendGroup(request)
+  })
   powerMonitor.on("resume", () => subscribedHost?.resume())
   ipcMain.handle(
     "bots:work:list",
@@ -599,7 +607,8 @@ export function registerBotHandlers(
   )
   ipcMain.handle("bots:work:create", (event, hostId: unknown, input: unknown) => {
     const request = parseCreateBotWork(input)
-    const host = (request.explicitSkill || request.imConversationId) ? desktopHost(event, hostId) : hostFor(hostId)
+    const host = request.inputFileIds?.length ? desktopAttachmentHost(event, hostId)
+      : request.explicitSkill || request.imConversationId ? desktopHost(event, hostId) : hostFor(hostId)
     return host.createWork(request)
   })
   ipcMain.handle("bots:work:lifecycle", (_event, hostId: unknown, input: unknown) => {
@@ -693,6 +702,15 @@ export function registerBotHandlers(
       hostFor(hostId).requestReceipts(
         botIdentifier(botId),
         parseBotRequestChecks(checks),
+        workId == null ? undefined : botIdentifier(workId)
+      )
+  )
+  ipcMain.handle(
+    "bots:cancel-queued-image-input",
+    (event, hostId: unknown, botId: unknown, check: unknown, workId: unknown) =>
+      desktopAttachmentHost(event, hostId).cancelQueuedImageInput(
+        botIdentifier(botId),
+        parseBotRequestChecks([check])[0],
         workId == null ? undefined : botIdentifier(workId)
       )
   )
@@ -792,7 +810,8 @@ export function registerBotHandlers(
   )
   ipcMain.handle("bots:send", (event, hostId: unknown, input: unknown) => {
     const request = parseSendBotMessage(input)
-    const host = request.explicitSkill || request.workId ? desktopHost(event, hostId) : hostFor(hostId)
+    const host = request.inputFileIds?.length ? desktopAttachmentHost(event, hostId)
+      : request.explicitSkill || request.workId ? desktopHost(event, hostId) : hostFor(hostId)
     return host.sendDesktopMessage(request)
   })
   ipcMain.handle(

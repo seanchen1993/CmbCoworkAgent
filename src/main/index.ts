@@ -17,7 +17,8 @@ import {
   nativeImage,
   powerSaveBlocker,
   shell,
-  type IpcMainEvent
+  type IpcMainEvent,
+  type IpcMainInvokeEvent
 } from "electron"
 import {
   isBrowserNativeMessagingHostLaunch,
@@ -342,6 +343,7 @@ import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { invalidateGitPanelHeadCaches, registerModelHandlers } from "./ipc/models"
 import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
+import { trackChatDocumentNavigation, trustedChatDocumentWindow } from "./ipc/chat-attachment-window"
 import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
 import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
 import {
@@ -388,6 +390,7 @@ import {
 } from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { isTaskCommitRendererUrl, registerTaskCommitBindingHandlers } from "./ipc/task-commit-binding"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { registerManagedLinkHandlers } from "./ipc/managed-links"
@@ -778,6 +781,7 @@ function createWindow(): void {
   // Only the trusted app frame may initiate a new embedded document. The built-in browser
   // has separate webContents and keeps its own navigation policy.
   const previewWebContents = mainWindow.webContents
+  trackChatDocumentNavigation(previewWebContents)
   previewWebContents.on("will-frame-navigate", (event) => {
     if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
   })
@@ -1144,6 +1148,8 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
+    void import("./chat-images").then(images => images.sweepChatImageStorage())
+      .catch(error => console.warn("[Main] 图片缓存清理失败", error))
     initializeNotificationRuntime()
     await notificationService.recover()
     // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
@@ -1165,13 +1171,30 @@ if (browserNativeMessagingHostLaunch) {
     startRegisteredGitHookEventSync()
 
     // Register IPC handlers
-    registerAgentHandlers(ipcMain)
+    const chatDocumentUrl = resolveTrustedRendererUrl(
+      (!app.isPackaged && process.env["ELECTRON_RENDERER_URL"]) || import.meta.env.VITE_RENDER_URL ||
+        pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    )
+    const getChatWindow = () => trustedChatDocumentWindow(mainWindow, chatDocumentUrl)
+    registerAgentHandlers(ipcMain, getChatWindow)
     registerWorkflowHandlers(ipcMain)
     const deleteThread = registerThreadHandlers(ipcMain)
-    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow)
+    registerBotHandlers(ipcMain, deleteThread, builtinRobotManager, () => mainWindow, getChatWindow)
     registerThreadSearchHandlers(ipcMain)
-    registerModelHandlers(ipcMain)
-    registerWorkspaceFilePreviewHandlers(ipcMain)
+    // A locally built desktop can load the bundled file without a dev server.
+    const bundledRendererUrl = pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    const configuredRenderer = isDev && process.env["ELECTRON_RENDERER_URL"]
+      ? trustedMainRendererUrl
+      : import.meta.env.VITE_RENDER_URL
+    const trustedTaskRenderer = (event: IpcMainInvokeEvent): boolean => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false
+      const contents = mainWindow.webContents
+      return event.sender === contents && event.senderFrame === contents.mainFrame &&
+        isTaskCommitRendererUrl(contents.getURL(), bundledRendererUrl, configuredRenderer) &&
+        isTaskCommitRendererUrl(event.senderFrame?.url, bundledRendererUrl, configuredRenderer)
+    }
+    registerModelHandlers(ipcMain, getChatWindow, trustedTaskRenderer)
+    registerWorkspaceFilePreviewHandlers(ipcMain, getChatWindow)
     registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
@@ -1210,6 +1233,14 @@ if (browserNativeMessagingHostLaunch) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
+    registerTaskCommitBindingHandlers(ipcMain, trustedTaskRenderer, (threadId) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      const contents = mainWindow.webContents
+      if (!contents.isDestroyed() &&
+          isTaskCommitRendererUrl(contents.getURL(), bundledRendererUrl, configuredRenderer)) {
+        contents.send("taskCommitBinding:changed", threadId)
+      }
+    })
     registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
     registerManagedLinkHandlers(ipcMain)

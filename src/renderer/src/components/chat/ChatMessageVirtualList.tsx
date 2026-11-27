@@ -735,8 +735,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         initialTopMostItemIndex={resolvedInitialTopMostItemIndex}
         alignToBottom
         atBottomThreshold={32}
-        // An empty list shares the welcome page's viewport. Only literal false disables Virtuoso's resize-driven scroll.
-        followOutput={visibleMessageIndexes.length === 0 ? false : () => false}
+        followOutput={false}
         atBottomStateChange={onAtBottomStateChange}
         defaultItemHeight={112}
         increaseViewportBy={{ top: 600, bottom: 900 }}

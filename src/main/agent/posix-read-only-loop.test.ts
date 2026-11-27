@@ -20,6 +20,11 @@ const review = (command: string) =>
 describe("bounded read-only POSIX for loops", () => {
   it.each([
     originalCommand,
+    "cd /Users/chenqiang/Desktop/cmbcowork-bash-first-test && ls -la .cmbdevclaw && " +
+      "for f in case-02-bash-first/result.json case-03-m3/result.json case-03-m25/result.json " +
+      'case-03-deepseek/result.json; do echo "===== $f"; /bin/cat "$f"; done; ' +
+      'echo "== git =="; git status --short 2>&1 | head -20; git log --oneline 2>&1 | head -10',
+    "for f in case/result.json; do /bin/ls -al case; cat case/result.json; done",
     "for c in HEAD main; do git show --stat $c; done",
     'for commit in HEAD HEAD~1; do git --no-pager log -n 1 --format="%h %s" "$commit"; done',
     'for rev in HEAD; do printf "%s\\n" "${rev}: $(git show -s --format=%s "$rev")"; done',
@@ -67,6 +72,7 @@ describe("bounded read-only POSIX for loops", () => {
     "for c in HEAD; do git show $c; done; git add -f .env",
     "for c in HEAD; do git show $c; done | git add -f .env",
     "for c in HEAD; do git update-index --add .env; done",
+    'ls -la .cmbdevclaw && for f in case/result.json; do /bin/cat "$f"; done; git commit -m test',
     "for c in HEAD; do git commit -m example -- a.ts; done",
     'for c in HEAD; do bash -c "git add -f .env"; done',
     "sh -c 'for c in HEAD; do bash -c \"git add -f .env\"; done'",
@@ -103,6 +109,14 @@ describe("bounded read-only POSIX for loops", () => {
     "git log -1 HEAD",
     "for c in HEAD; do git\r log $c; done",
     "for c in HEAD; do touch output.txt; done",
+    'for f in case/result.json; do cat "$other"; done',
+    'for f in case/result.json; do cat "prefix/$f"; done',
+    "for f in case/result.json; do cat -; done",
+    "for f in case/result.json; do cat; done",
+    "for f in case/result.json; do ls -R case; done",
+    'for f in case/result.json; do ls -la "$f"; done',
+    'for f in case/result.json; do echo "$(cat "$f")"; done',
+    'for f in case/result.json; do /tmp/cat "$f"; done',
     "for c in HEAD; do git show $c > output.txt; done",
     "for c in HEAD; do git show $c & done",
     "for c in HEAD; do git show $c; done >output.txt",

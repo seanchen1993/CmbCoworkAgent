@@ -2,6 +2,7 @@ import { runWithGitReadSignal } from "../services/git-read-context"
 
 export type GitReadFamily =
   | "panel"
+  | "commit-preview"
   | "changed-summary"
   | "summary"
   | "workspace-probe"

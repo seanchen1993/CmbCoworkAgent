@@ -53,9 +53,15 @@ export interface AgentRunDelivery {
 
 const runDeliveryStorage = new AsyncLocalStorage<{
   threadId: string
+  source: StandardTurnSource
   channel: string
   delivery: AgentRunDelivery
 }>()
+
+export function canDisplayTaskCommitReview(): boolean {
+  const current = runDeliveryStorage.getStore()
+  return !current || (current.source === "desktop" && current.delivery.isAvailable())
+}
 
 /** Runtime boundary events must follow the run's stream, including background Bot runs. */
 export function sendCurrentAgentRunStreamEvent(threadId: string, payload: unknown): boolean {
@@ -125,6 +131,8 @@ export interface AgentGoalControlResult {
  * that their lease or security policy belongs to the desktop.
  */
 export interface AgentRunExecutionContext {
+  /** Real renderer transports revalidate their originating document before sending pixels. */
+  validateChatDocument?: () => void
   source: StandardTurnSource
   /** Opt-in per-run model pin from a trusted caller; omitted callers keep global routing. */
   modelRoutingMode?: "pinned"
@@ -217,6 +225,13 @@ export interface AgentRunExecutionContext {
     memoryUserText?: string
     extraSystemPrompt?: string
   } | undefined
+  /** Main-process Bot admission only. Resolve the Hook-approved submission against its input receipts. */
+  prepareBotChatImages?: (submittedBody: string, signal: AbortSignal) =>
+    Promise<import("../../shared/file-attachment").SubmittedChatImage[]>
+  /** Revalidate live ownership immediately before a provider request uses a prepared Bot image. */
+  resumeBotChatImageMessageId?: string
+  onBotChatImageAdmission?: () => void
+  validateBotChatImageAccess?: () => void
   /** Trusted Bot history only. Missing ids stay unchanged; null excludes an unaccepted input. */
   persistedUserInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>
   /** Trusted Bot inbox only: the exact active main-model round can be superseded.
@@ -349,6 +364,7 @@ export async function startAgentRun(
     .run(
       {
         threadId: request.threadId,
+        source: context.source,
         channel: resolveAgentStreamRequestChannel(ambientChannel, request.streamRequestId),
         delivery
       },

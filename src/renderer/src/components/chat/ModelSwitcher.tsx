@@ -393,6 +393,7 @@ function ModelSwitcherImpl({
                 <CustomIcon className="size-3.5 shrink-0" />
                 <span className="flex-1 truncate">
                   {model.name}
+                  {model.inputModalities?.includes("image") && "（支持图片）"}
                   {!model.available
                     ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
                       ? "（非服务时段）"

@@ -37,6 +37,7 @@ const savedDraft = botDraftContentSchema.extend({
       id: identifier,
       text: z.string().max(30_000),
       targets: z.string().max(4096),
+      inputImageIds: z.array(identifier).max(3).optional(),
       mentions: z.string().max(64_000).optional(),
       replyToId: identifier.optional(),
       revision: z.number().int().nonnegative()

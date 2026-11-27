@@ -1,3 +1,4 @@
+import { redactCapturedImage } from "./capture-image-redaction"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { BaseCallbackHandler } from "@langchain/core/callbacks/base"
 import type { Callbacks } from "@langchain/core/callbacks/manager"
@@ -92,7 +93,7 @@ function recordSnapshot(key: string, session: CapturedSession, snapshot: unknown
           tool_calls: value.tool_calls,
           tool_call_id: value.tool_call_id,
           name: value.name
-        })
+        }, redactCapturedImage)
       ) as Record<string, unknown>
       if (!type || message.content === undefined) continue
       // Graph messages normally have stable IDs. The fallback deduplicates an

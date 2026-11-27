@@ -17,6 +17,7 @@ import { completeBotConversationTransition } from "./bot-conversation-transition
 import { applyCommittedThreadDeletion, useAppStore } from "./store"
 import {
   bindBotConversationDraft,
+  bindOrdinaryImageDraft,
   bindDetachedBotThreadDraft,
   hasBotThreadDraft,
   loadBotConversationDraft,
@@ -26,6 +27,7 @@ import {
   pruneBotConversationDrafts
 } from "./bot-conversation-draft"
 import { botThreadDraftKey } from "./bot-draft-storage"
+import { imageComposerSource } from "./image-outbox"
 import { parseFileBytes } from "../../../main/file-parser"
 import { findEnabledSkillSelection } from "./skill-ids"
 import type { ThreadDraftSkill } from "./thread-context"
@@ -50,6 +52,7 @@ const skill: SkillMetadata = {
 const skillIdentity = { name: skill.name, path: skill.path }
 const fixture = () => {
   let state = {
+    workspacePath: null as string | null,
     draftInput: "",
     draftBotMentions: undefined as BotMessageMention[] | undefined,
     draftAttachments: [] as FileAttachment[],
@@ -57,6 +60,7 @@ const fixture = () => {
     draftBotReplyTo: null as BotMessageReply | null,
     draftSkill: null as ThreadDraftSkill | null,
     draftBuiltinBrowser: false,
+    queuedMessages: [] as QueuedMessage[],
     messages: []
   }
   const listeners = new Set<() => void>()
@@ -107,6 +111,61 @@ beforeEach(() => {
   })
 })
 afterEach(() => vi.unstubAllGlobals())
+
+it("restores cold ordinary image drafts only to their incarnation and workspace and clears a consumed draft", () => {
+  const row: Thread = { thread_id: "img-thread", created_at: new Date(1), updated_at: new Date(1), status: "idle" }
+  const image = { filename: "pic.png", filePath: "", content: "", size: 10, mimeType: "image/webp",
+    truncated: false, image: { filename: "pic.png", width: 2, height: 2, draftWorkspace: "/original",
+      id: "10000000-2000-4000-8000-000000000123" } }
+  function open(thread: Thread, root: string) {
+    const session = fixture()
+    session.publish({ workspacePath: root })
+    const errors: string[] = []
+    const close = bindOrdinaryImageDraft(session.context, thread, root, error => { if (error) errors.push(error) })
+    return { session, close, errors }
+  }
+  const original = open(row, "/original")
+  original.session.publish({ draftInput: "compare", draftAttachments: [file, image] })
+  original.close()
+  expect(values.size).toBe(1)
+  expect(original.errors).toEqual([])
+  const detached = open(row, "/different")
+  expect(detached.session.state().draftAttachments).toEqual([])
+  detached.close()
+  const recreated = open({ ...row, created_at: new Date(2) }, "/original")
+  expect(recreated.session.state().draftAttachments).toEqual([])
+  recreated.close()
+  const recovered = open(row, "/original")
+  expect(recovered.session.state().draftAttachments).toEqual([file, image])
+  expect(recovered.session.state().draftInput).toBe("compare")
+  recovered.session.publish({ draftAttachments: [], draftInput: "" })
+  expect(values.size).toBe(0)
+  recovered.close()
+})
+
+it("recovers a crash after the complete outbox was saved but before its image composer was cleared", () => {
+  const row: Thread = { thread_id: "interrupted", created_at: new Date(1), updated_at: new Date(1), status: "idle" }
+  const image: FileAttachment = { filename: "figure.png", filePath: "", content: "", size: 10,
+    mimeType: "image/webp", truncated: false, image: { filename: "figure.png", width: 2, height: 2, draftWorkspace: "/work",
+      id: "10000000-2000-4000-8000-000000000123" } }
+  const original = fixture()
+  original.publish({ workspacePath: "/work" })
+  const close = bindOrdinaryImageDraft(original.context, row, "/work", () => {})
+  original.publish({ draftInput: "问题", draftAttachments: [image] })
+  const source = imageComposerSource(original.state())
+  close()
+  const durable = { id: "1880a326-a5f0-4869-a8cc-89ec9fee814b", text: "问题",
+    created_at: new Date(), updated_at: new Date(), chatImages: [{ id: image.image!.id, filename: image.filename, slot: 0 }],
+    imageDelivery: { workspacePath: "/work", incarnation: "legacy:1", source } }
+  const restored = fixture()
+  restored.publish({ workspacePath: "/work", queuedMessages: [durable] })
+  const unsubscribe = bindOrdinaryImageDraft(restored.context, row, "/work", () => {})
+  expect(restored.state().draftInput).toBe("")
+  expect(restored.state().draftAttachments).toEqual([])
+  expect(restored.state().queuedMessages).toEqual([durable])
+  expect(values.size).toBe(0)
+  unsubscribe()
+})
 
 describe("drafts that remain with an unlinked native thread", () => {
   const ref: BotOrdinaryThreadRef = {
@@ -216,7 +275,8 @@ describe("drafts that remain with an unlinked native thread", () => {
     const bytes = new TextEncoder().encode("field,value\n".repeat(6_000)).buffer
     const attachment = await parseFileBytes(`reading.${extension}`, bytes)
     expect(attachment.truncated).toBe(true)
-    expect(attachment.content.length).toBeGreaterThan(24_000)
+    expect(attachment.content.length).toBeGreaterThan(23_900)
+    expect(attachment.content.length).toBeLessThanOrEqual(24_000)
     const f = associationFixture()
     f.original.publish({ draftInput: "Use this attachment", draftAttachments: [attachment], draftSkill: skill })
     await f.complete()

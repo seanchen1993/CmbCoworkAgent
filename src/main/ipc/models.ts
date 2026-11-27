@@ -8,9 +8,10 @@ import {
 } from "electron"
 import Store from "electron-store"
 import { userIdentityKey } from "../../shared/user-identity"
+import { isValidTaskCommitCard } from "../../shared/task-commit-binding"
 import { isBtwThreadId } from "../../shared/btw-chat"
 import { randomUUID } from "crypto"
-import { getPersistedThreadWorkspaceBindings, getThreadCore as getThreadCoreSync } from "../db"
+import { getDb, getPersistedThreadWorkspaceBindings, getThreadCore as getThreadCoreSync } from "../db"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { execFile, spawn } from "child_process"
@@ -28,7 +29,7 @@ import {
   stopWatching
 } from "../services/workspace-watcher"
 import { trackEvent } from "../services/event-reporter"
-import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
+import { measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV, markInAppCommitProcessed } from "../services/git-hook-service"
 import { getTracesDir, parseStoredTraceLine } from "../agent/trace/collector"
@@ -42,6 +43,8 @@ import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
 import {
   collectSkippedUntrackedGitPanelDirs,
+  assertExactPanelFiles,
+  getGitCommitHistoryForWorkspace,
   recordGitCommitHistoryAsync,
   registerGitPanelHandlers
 } from "./git-panel"
@@ -50,7 +53,7 @@ import {
   type DiscoveredGitRepository,
   resolveGitOperationPath
 } from "../services/git-repository-discovery"
-import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
+import { normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../shared/workspace-path"
 import { getWorkflowWorktreeTimeoutMs } from "../../shared/agent-runtime-limits"
 import {
   isThreadMetadataHydrationWorkerUnavailable,
@@ -68,7 +71,11 @@ import { withoutGitRepositoryOverrides } from "../services/git-environment"
 import { prepareGitPanelWrite, type GitPanelWritePreparation } from "../services/git-worktree-write-gate"
 import { gitReadRequestCoordinator, type GitReadFamily } from "./git-read-request-coordinator"
 import {
+  chatImageExtensions,
+  chatUploadExtensions,
+  chatUploadLabel,
   MAX_ATTACHMENT_FILE_BYTES,
+  isVisualDocumentPath,
   MAX_ATTACHMENT_FILE_NAME_LENGTH,
   MAX_ATTACHMENT_PICKER_FILES,
   type AttachmentBytesParseRequest,
@@ -77,12 +84,22 @@ import {
 } from "../../shared/file-attachment"
 import type { ParsedAttachment } from "../file-parser"
 import { getFileAttachmentParserClient } from "../file-attachment-parser/client"
+import { assertChatAttachmentWindow } from "./chat-attachment-window"
 import {
   issueExternalFileReadGrant,
   resolveExternalFileReadGrant,
   revokeExternalFileReadGrantsForOwner
 } from "../services/external-file-read-tokens"
-import { openStableFileHandle } from "../services/stable-file-handle"
+import {
+  type TaskCommitCandidate,
+  captureEligibleTaskCommitPreview,
+  executeTaskBoundGitCommit
+} from "../services/task-bound-git-commit"
+import { forgetTaskCommitIndex, recoverPendingTaskIndex, rememberTaskCommitIndex } from "../services/task-commit-recovery"
+import type { GitPanelOperationOptions, GitPanelRepository, GitPanelSnapshot } from "../../shared/git-panel-repository"
+import { readCurrentTaskCommitBinding, readTaskCommitBinding } from "../services/task-commit-binding"
+import { resolveTaskCommitTarget } from "../services/task-commit-target"
+import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import { mutateLatestThreadMetadata, parseThreadMetadata } from "../services/thread-metadata"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import { LatestRequestGate } from "../services/latest-request-gate"
@@ -235,7 +252,8 @@ export interface GitPanelChangedFile {
   status: GitPanelFileStatus
 }
 
-interface GitPanelMetaStatePayload {
+interface GitPanelMetaStatePayload extends GitPanelSnapshot {
+  panelCardNumber?: string
   repositoryRoots?: string[]
   success: boolean
   isWorktree: boolean
@@ -250,7 +268,10 @@ interface GitPanelMetaStatePayload {
   error?: string
 }
 
-interface GitPanelDiffStatePayload {
+interface GitPanelDiffStatePayload extends GitPanelSnapshot {
+  commitPreviewRevision?: string
+  unavailableFileCount?: number
+  commitPreviewTarget?: { root: string; scope: string; branch: string }
   success: boolean
   isWorktree: boolean
   isGitRepo?: boolean
@@ -1632,9 +1653,11 @@ function reserveGitPanelWrite(
 async function runGitPushWithLfsCompat(
   threadId: string,
   worktreePath: string,
-  args: string[]
+  args: string[],
+  beforePush?: () => Promise<void>
 ): Promise<string> {
   try {
+    if (beforePush) await beforePush()
     return await runGit(worktreePath, args)
   } catch (error) {
     if (!isGitLfsVersionHookError(error)) {
@@ -1646,6 +1669,7 @@ async function runGitPushWithLfsCompat(
       "push",
       "检测到 Git LFS pre-push 版本误报，跳过 LFS pre-push hook 后重试一次"
     )
+    if (beforePush) await beforePush()
     return runGit(worktreePath, args, {
       env: {
         // Enterprise Windows Git setups can occasionally make the Git LFS hook
@@ -1663,6 +1687,7 @@ async function runGitWithLiteralPathspecs(
   args: string[],
   pathspecs: string[],
   options?: {
+    env?: NodeJS.ProcessEnv
     silent?: boolean
     timeoutMs?: number
     maxBufferBytes?: number
@@ -1718,7 +1743,8 @@ export async function pathExistsForGitAdd(worktreePath: string, relPath: string)
  */
 async function stageFilesForCommit(
   worktreePath: string,
-  pathspecs: string[]
+  pathspecs: string[],
+  env?: NodeJS.ProcessEnv
 ): Promise<{ existingPathspecs: string[]; removedPathspecs: string[] }> {
   const normalizedPathspecs = Array.from(
     new Set(pathspecs.map(normalizeGitRelativePath).filter(Boolean))
@@ -1738,15 +1764,77 @@ async function stageFilesForCommit(
 
   if (existingPathspecs.length > 0) {
     // 示例：git -C <repo> --literal-pathspecs add -- test/fibonacci.js
-    await runGitWithLiteralPathspecs(worktreePath, ["add"], existingPathspecs)
+    await runGitWithLiteralPathspecs(worktreePath, ["add"], existingPathspecs, { env })
   }
 
   if (removedPathspecs.length > 0) {
     // 示例：git -C <repo> --literal-pathspecs update-index --remove -- fibonacci.js
-    await runGitWithLiteralPathspecs(worktreePath, ["update-index", "--remove"], removedPathspecs)
+    await runGitWithLiteralPathspecs(worktreePath, ["update-index", "--remove"], removedPathspecs, { env })
   }
 
   return { existingPathspecs, removedPathspecs }
+}
+
+/** Git rewrites this working copy of the index during both staging and commit.
+ * Hold the native index lock so another writer cannot lose its staging when the
+ * successful commit's index is installed. A rejected native commit leaves the
+ * actual index byte-for-byte unchanged, including partially staged files.
+ */
+async function commitAuthorizedPanelSelection(
+  worktreePath: string,
+  files: string[],
+  message: string,
+  assertCurrent: () => Promise<void>
+): Promise<{ sha: string; warning?: string }> {
+  const gitIndex = (await runGit(worktreePath, ["rev-parse", "--git-path", "index"], { silent: true }))
+    .replace(/\r?\n$/, "")
+  const index = path.resolve(worktreePath, gitIndex)
+  const lock = index + ".lock"
+  const reservation = await fs.open(lock, "wx")
+  const candidate = index + ".panel-" + randomUUID()
+  const env = { GIT_INDEX_FILE: candidate }
+  let committed = false
+  let sha = ""
+  let warning: string | undefined
+  const identity = await reservation.stat({ bigint: true })
+  const ownsLock = async () => {
+    const current = await fs.lstat(lock, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null
+      throw error
+    })
+    return current?.dev === identity.dev && current.ino === identity.ino &&
+      current.birthtimeNs === identity.birthtimeNs
+  }
+  try {
+    try {
+      await fs.copyFile(index, candidate)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      // An unborn checkout can legitimately have no index yet.
+    }
+    await stageFilesForCommit(worktreePath, files, env)
+    await assertCurrent()
+    if (!(await ownsLock())) throw new Error("暂存区锁已更换，请刷新后重试")
+    await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], files, { env })
+    committed = true
+    sha = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true }).catch(() => "")).trim()
+    if (!(await ownsLock())) throw new Error("暂存区锁已更换")
+    await fs.rename(candidate, index)
+  } catch (error) {
+    if (!committed) throw error
+    warning = `提交已创建，安装暂存区失败。请保留 ${candidate} 以恢复暂存区。`
+  } finally {
+    try {
+      if (await ownsLock()) await fs.unlink(lock)
+      if (!committed) await fs.rm(candidate, { force: true })
+    } catch (error) {
+      console.warn("[GitPanel] failed to clean up manual commit index", error)
+      if (committed) warning ??= `提交已创建，清理暂存区锁失败，请检查 ${lock}。`
+    } finally {
+      await reservation.close().catch((error) => console.warn("[GitPanel] failed to close index lock", error))
+    }
+  }
+  return { sha, warning }
 }
 
 function isGitDirWorktree(gitDir: string): boolean {
@@ -1830,11 +1918,12 @@ async function getHeadCommitCached(
 async function resolvePushBaseRef(
   worktreePath: string,
   branch: string,
-  options?: { silent?: boolean }
+  options?: { silent?: boolean; originBranchOnly?: boolean }
 ): Promise<string | null> {
   const silent = Boolean(options?.silent)
 
-  const candidates = ["@{upstream}", `refs/remotes/origin/${branch}`]
+  const originRef = `refs/remotes/origin/${branch}`
+  const candidates = options?.originBranchOnly ? [originRef] : ["@{upstream}", originRef]
 
   for (const candidate of candidates) {
     try {
@@ -1912,13 +2001,13 @@ async function getPushabilitySnapshot(
   worktreePath: string,
   branch: string,
   baseCommit: string | null,
-  options?: { silent?: boolean }
+  options?: { silent?: boolean; originBranchOnly?: boolean }
 ): Promise<{
   hasPushableCommit: boolean
   pendingCommits: Array<{ hash: string; message: string; date: string }>
 }> {
   const silent = Boolean(options?.silent)
-  const pushBaseRef = await resolvePushBaseRef(worktreePath, branch, { silent })
+  const pushBaseRef = await resolvePushBaseRef(worktreePath, branch, options)
 
   if (pushBaseRef) {
     try {
@@ -2060,6 +2149,60 @@ function isMissingRemoteBranchError(error: unknown): boolean {
   )
 }
 
+async function pullAuthorizedBranch(
+  target: Awaited<ReturnType<typeof resolveAuthorizedGitPanelWrite>>,
+  branch: string
+): Promise<void> {
+  const repo = target.worktreePath
+  const temporaryRef = `refs/cmbdevclaw/pull/${randomUUID()}`
+  const quiet = { silent: true }
+  // Capture the fork point before fetch updates the origin tracking ref. It may
+  // be needed to replay just the user's commits when the upstream was rebased.
+  const [forkPoint, pullAutostash] = await Promise.all([
+    target.head
+      ? runGit(repo, ["merge-base", "--fork-point", `refs/remotes/origin/${branch}`, target.head], quiet)
+          .then((value) => value.trim(), () => "")
+      : "",
+    runGit(repo, ["config", "--bool", "--get", "pull.autoStash"], quiet)
+      .then((value) => value.trim(), () => "")
+  ])
+  await target.assertCurrent()
+  try {
+    // An IDE may change branches while the network is busy. Fetch into a ref
+    // private to this Pull, so another fetch cannot replace the integration tip.
+    await runGit(repo, ["fetch", "origin", `${target.branchRef}:${temporaryRef}`])
+    const tip = (await runGit(repo, ["rev-parse", "--verify", `${temporaryRef}^{commit}`], quiet)).trim()
+    let integrate: string[]
+    if (!target.head) {
+      if ((await runGit(repo, ["ls-files", "--cached", "-z"], quiet)).length) {
+        throw new Error("当前分支尚无提交且有暂存改动，请先处理改动后再拉取")
+      }
+      integrate = ["merge", "--ff-only", tip]
+    } else {
+      let upstream = tip
+      if (forkPoint) {
+        try {
+          await runGit(repo, ["merge-base", "--is-ancestor", forkPoint, tip], quiet)
+        } catch (error) {
+          if ((error as ExecFileError).code !== 1) throw error
+          upstream = forkPoint
+        }
+      }
+      integrate = [
+        "-c", "rebase.updateRefs=false",
+        ...(pullAutostash ? ["-c", `rebase.autoStash=${pullAutostash}`] : []),
+        "rebase", "--onto", tip, upstream
+      ]
+    }
+    await target.assertCurrent()
+    await runGit(repo, integrate)
+  } finally {
+    await runGit(repo, ["update-ref", "-d", temporaryRef], quiet).catch((error) => {
+      console.warn("[GitPanel] failed to remove temporary pull ref", temporaryRef, error)
+    })
+  }
+}
+
 const GIT_REBASE_CONFLICT_MESSAGE =
   "检测到代码冲突，已自动中止本次拉取。请前往 IDE 解决冲突后重试。冲突处理功能后续会上线，敬请期待。"
 
@@ -2193,6 +2336,133 @@ async function getContextGitRepositories(
     )
   }
   return repositories
+}
+
+type GitPanelContext = Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
+
+async function getGitPanelRepositories(
+  threadId: string,
+  context: GitPanelContext
+): Promise<GitPanelRepository[]> {
+  if (!context.workspacePath) return []
+  const [workspaceRepos, binding] = await Promise.all([
+    context.isGitRepo ? getContextGitRepositories(context) : [],
+    readTaskCommitBinding(threadId)
+  ])
+  const repositories = workspaceRepos.map(({ repoPath }): GitPanelRepository => ({
+    path: repoPath,
+    branch: null,
+    source: "workspace"
+  }))
+  if (binding && !path.relative(binding.workspacePath, context.workspacePath)) {
+    // Binding paths are canonical. Keep the workspace spelling and its read scope
+    // when the same checkout was also selected through a directory alias.
+    const registered = new Set(
+      await Promise.all(
+        repositories.map(async (repo) =>
+          getCacheKeyForPath(await fs.realpath(repo.path).catch(() => repo.path))
+        )
+      )
+    )
+    for (const scope of binding.repositoryPaths) {
+      const key = getCacheKeyForPath(scope)
+      if (!registered.has(key)) {
+        repositories.push({ path: scope, source: "authorized", branch: null })
+        registered.add(key)
+      }
+    }
+  }
+  await runWithConcurrency(repositories, GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY, async (repo) => {
+    try {
+      repo.branch = (await readCurrentBranch(repo.path, true)) ?? "HEAD（分离）"
+    } catch {
+      // A checkout can disappear mid-scan. Keep its path and the other branches usable.
+      throwIfGitReadCancelled()
+    }
+  })
+  if (binding && readCurrentTaskCommitBinding(threadId)?.version !== binding.version) {
+    return repositories.filter((repo) => repo.source === "workspace")
+  }
+  return repositories
+}
+
+async function resolveAuthorizedGitPanelScope(threadId: string, requestedPath?: string) {
+  const binding = await readTaskCommitBinding(threadId)
+  const worktreePath =
+    requestedPath && path.isAbsolute(requestedPath)
+      ? binding?.repositoryPaths.find((scope) => path.relative(scope, requestedPath) === "")
+      : undefined
+  if (!binding || !worktreePath) throw new Error("该仓库未获当前任务授权，请刷新 Git 面板")
+  const context: GitPanelContext = {
+    workspacePath: worktreePath,
+    metadata: {},
+    repositories: [],
+    isGitRepo: true,
+    isWorktree: await detectIsWorktreePath(worktreePath),
+    worktreeBaseCommit: null,
+    worktreeBranch: null
+  }
+  return { context, worktreePath, binding }
+}
+
+function assertPanelBinding(threadId: string, version: string): void {
+  if (readCurrentTaskCommitBinding(threadId)?.version !== version) {
+    throw new Error("当前任务的仓库授权已变更，请刷新 Git 面板")
+  }
+}
+
+export async function withAuthorizedGitPanelRead<T>(
+  threadId: string,
+  requestedPath: string | undefined,
+  read: (scope: GitPanelContext, repository: string, version: string, card: string) => Promise<T>
+): Promise<T> {
+  const { context, worktreePath, binding } = await resolveAuthorizedGitPanelScope(threadId, requestedPath)
+  const result = await read(context, worktreePath, binding.version, binding.cardNumber)
+  assertPanelBinding(threadId, binding.version)
+  return result
+}
+
+async function readPanelSnapshot<T>(
+  worktreePath: string,
+  version: string,
+  expected: GitPanelSnapshot,
+  read: () => Promise<T>
+): Promise<T & GitPanelSnapshot> {
+  const revision = await readCommitPreviewRevision(worktreePath)
+  if ((expected.panelRevision !== undefined && expected.panelRevision !== revision) ||
+      (expected.panelBindingVersion !== undefined && expected.panelBindingVersion !== version)) {
+    throw new Error("当前仓库或授权已变化，请刷新 Git 面板")
+  }
+  const result = await read()
+  if (revision !== await readCommitPreviewRevision(worktreePath)) {
+    throw new Error("读取期间仓库分支或提交已变更，请刷新 Git 面板")
+  }
+  return { ...result, panelBindingVersion: version, panelRevision: revision }
+}
+
+export async function resolveAuthorizedGitPanelWrite(
+  threadId: string,
+  options: GitPanelOperationOptions,
+  trusted: boolean
+) {
+  if (!trusted || options.panelRepository !== true) {
+    throw new Error("请在桌面任务窗口操作授权仓库")
+  }
+  const { context, worktreePath, binding } = await resolveAuthorizedGitPanelScope(threadId, options.worktreePath)
+  if (options.panelBindingVersion !== binding.version || !options.panelRevision) {
+    throw new Error("仓库授权或预览已变更，请刷新 Git 面板")
+  }
+  const target = await resolveGitOperationTarget(context, worktreePath)
+  if ("error" in target) throw new Error(target.error)
+  async function assertCurrent(): Promise<void> {
+    if (options.panelRevision !== await readCommitPreviewRevision(worktreePath)) {
+      throw new Error("当前仓库分支或提交已变更，请刷新 Git 面板")
+    }
+    assertPanelBinding(threadId, binding.version)
+  }
+  await assertCurrent()
+  const [, branchRef, head] = JSON.parse(options.panelRevision) as [string, string, string]
+  return { context, worktreePath, gitRoot: target.gitRoot, assertCurrent, branchRef, head }
 }
 
 function prefixRepositoryPath(repo: DiscoveredGitRepository, filePath: string): string {
@@ -2426,10 +2696,39 @@ function getTextContentLines(content: string): string[] {
   return lines
 }
 
+async function readUntrackedPreview(
+  worktreePath: string,
+  absPath: string
+): Promise<{
+  content: string | null
+  size: number
+}> {
+  const stat = await fs.lstat(absPath)
+  if (stat.isSymbolicLink()) {
+    const realParent = await fs.realpath(path.dirname(absPath))
+    const relative = path.relative(await fs.realpath(worktreePath), realParent)
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("文件路径不在当前工作区内")
+    }
+    const content = await fs.readlink(absPath)
+    return { content, size: Buffer.byteLength(content) }
+  }
+  const opened = await openStableFileHandle(worktreePath, absPath)
+  try {
+    const content =
+      opened.size > MAX_SYNTHETIC_DIFF_BYTES
+        ? null
+        : (await readStableFileHandleBounded(opened, MAX_SYNTHETIC_DIFF_BYTES)).toString("utf8")
+    return { size: opened.size, content }
+  } finally {
+    await opened.handle.close()
+  }
+}
+
 export async function buildGitPanelFileDiff(
   worktreePath: string,
   relPath: string,
-  options?: { silent?: boolean; status?: GitPanelFileStatus }
+  options?: { silent?: boolean; status?: GitPanelFileStatus; synthesizeUntracked?: boolean }
 ): Promise<GitPanelFileDiff | null> {
   const silent = Boolean(options?.silent)
   const fileStatus = options?.status ?? "modified"
@@ -2439,13 +2738,11 @@ export async function buildGitPanelFileDiff(
   }
 
   const absPath = path.resolve(worktreePath, targetPath)
-  let currentStat: Awaited<ReturnType<typeof fs.stat>> | null = null
 
   // Guard against directory-only entries (e.g. untracked directory placeholders).
   // Git panel should show file-level diffs only.
   try {
-    currentStat = await fs.stat(absPath)
-    if (currentStat.isDirectory()) {
+    if ((await fs.lstat(absPath)).isDirectory()) {
       return null
     }
   } catch {
@@ -2581,13 +2878,13 @@ export async function buildGitPanelFileDiff(
     hasDiffStats = additions > 0 || deletions > 0
   }
 
-  if (!hasDiffStats && !diffText.trim()) {
+  if (!hasDiffStats && !diffText.trim() && options?.synthesizeUntracked !== false) {
     // New untracked file: synthesize a minimal unified diff and stats.
     // To avoid loading huge files into memory, cap synthesized preview size.
     try {
-      const statForPreview = currentStat ?? (await fs.stat(absPath))
-      if (statForPreview.size > MAX_SYNTHETIC_DIFF_BYTES) {
-        const sizeKb = Math.max(1, Math.ceil(statForPreview.size / 1024))
+      const { content, size } = await readUntrackedPreview(worktreePath, absPath)
+      if (content === null) {
+        const sizeKb = Math.max(1, Math.ceil(size / 1024))
         additions = 1
         deletions = 0
         diffText =
@@ -2598,7 +2895,6 @@ export async function buildGitPanelFileDiff(
           "@@ -0,0 +1 @@\n" +
           `+[omitted ${sizeKb}KB new file preview for performance]`
       } else {
-        const content = await fs.readFile(absPath, "utf-8")
         const lines = getTextContentLines(content)
         additions = lines.length
         deletions = 0
@@ -2638,14 +2934,8 @@ async function estimateNewFileStats(
   if (!targetPath) return null
   const absPath = path.resolve(worktreePath, targetPath)
   try {
-    const stat = await fs.stat(absPath)
-    if (!stat.isFile()) return null
-    if (stat.size > MAX_SYNTHETIC_DIFF_BYTES) {
-      // 与 buildGitPanelFileDiff 的超大新文件分支保持一致：仅占位 1 行新增。
-      return { additions: 1, deletions: 0 }
-    }
-    const content = await fs.readFile(absPath, "utf-8")
-    return { additions: getTextContentLines(content).length, deletions: 0 }
+    const { content } = await readUntrackedPreview(worktreePath, absPath)
+    return { additions: content === null ? 1 : getTextContentLines(content).length, deletions: 0 }
   } catch {
     return null
   }
@@ -2674,6 +2964,7 @@ export async function buildGitPanelState(
     visibleFileLimit?: number
     statusUntrackedMode?: GitStatusUntrackedMode
     statusMaxBufferBytes?: number
+    combineMoves?: boolean
     signal?: AbortSignal
   }
 ): Promise<{
@@ -2738,11 +3029,10 @@ export async function buildGitPanelState(
     normalizedTrackedFiles,
     { filterByTracked, signal: options?.signal }
   )
-  const changedFileEntries = await combineFilesystemMovesForDisplay(
-    worktreePath,
-    rawChangedFileEntries,
-    { silent }
-  )
+  const changedFileEntries =
+    options?.combineMoves === false
+      ? rawChangedFileEntries
+      : await combineFilesystemMovesForDisplay(worktreePath, rawChangedFileEntries, { silent })
   const changedFiles = includeChangedFiles
     ? Array.from(
         new Set(
@@ -3151,14 +3441,14 @@ export async function resolveSelectedChangedFilesForGitOps(
   worktreePath: string,
   selectedFilePaths?: string[],
   trackedFiles: string[] = [],
-  options?: { excludeNewIgnored?: boolean }
+  options?: { excludeNewIgnored?: boolean; combineMoves?: boolean }
 ): Promise<string[]> {
   if (Array.isArray(selectedFilePaths) && selectedFilePaths.length === 0) return []
   const hasExplicitSelection = Array.isArray(selectedFilePaths)
   const changedEntries = await getChangedFileEntriesForGitOps(
     worktreePath,
     hasExplicitSelection ? selectedFilePaths : trackedFiles,
-    { includeAllWhenNoTracked: !hasExplicitSelection }
+    { includeAllWhenNoTracked: !hasExplicitSelection, combineMoves: options?.combineMoves }
   )
   const safeEntries = options?.excludeNewIgnored
     ? await excludeNewIgnoredEntriesFromAgentCommit(worktreePath, changedEntries)
@@ -3186,13 +3476,63 @@ async function getPostCommitChangedFilesForMetadata(
   return getChangedFilesFromEntries(changedEntries)
 }
 
-async function getHeadCommitStats(
+async function readCommitPreviewRevision(worktreePath: string): Promise<string> {
+  const missingRef = (error: unknown): string => {
+    if ((error as ExecFileError).code === 1) return ""
+    throw error
+  }
+  const [branch, head, gitDir] = await Promise.all([
+    runGit(worktreePath, ["symbolic-ref", "-q", "HEAD"], { silent: true }).catch(missingRef),
+    runGit(worktreePath, ["rev-parse", "--verify", "--quiet", "HEAD"], { silent: true }).catch(missingRef),
+    runGit(worktreePath, ["rev-parse", "--absolute-git-dir"], { silent: true })
+  ])
+  if (!branch.trim() && !head.trim()) throw new Error("无法确认当前提交分支")
+  return JSON.stringify([await fs.realpath(gitDir.trimEnd()), branch.trimEnd(), head.trimEnd()])
+}
+
+function describeCommitPreviewBranch(revision: string): string {
+  const [, ref, head] = JSON.parse(revision) as [string, string, string]
+  return ref ? ref.replace(/^refs\/heads\//, "") : `HEAD @ ${head.slice(0, 12)}`
+}
+
+interface TaskCommitPreview {
+  threadId: string
+  version: string
+  scope: string
+  revision: string
+  parent: string
+  branch: string
+  tree: string
+  files: Set<string>
+}
+
+const reviewedTaskCommits = new Map<string, TaskCommitPreview>()
+
+function getTaskCommitPreview(
+  token: string | undefined,
+  threadId: string,
+  version: string,
+  scope: string
+) {
+  const preview = token ? reviewedTaskCommits.get(token) : undefined
+  if (
+    !preview ||
+    preview.threadId !== threadId ||
+    preview.version !== version ||
+    path.relative(scope, preview.scope) !== ""
+  )
+    throw new Error("提交预览已过期，请重新加载变更")
+  return preview
+}
+
+async function getCommitStats(
   worktreePath: string,
+  commitSha: string,
   options?: { silent?: boolean }
 ): Promise<{ additions: number; deletions: number; fileCount: number }> {
   const out = await runGit(
     worktreePath,
-    ["show", "--numstat", "--format=", "--no-renames", "HEAD"],
+    ["show", "--numstat", "--format=", "--no-renames", commitSha],
     { silent: Boolean(options?.silent) }
   ).catch(() => "")
 
@@ -3215,6 +3555,58 @@ async function getHeadCommitStats(
     deletions: totals.deletions,
     fileCount
   }
+}
+
+interface PublishedTaskCommit {
+  threadId: string
+  workspacePath: string
+  worktreePath: string
+  commitSha: string
+  branch: string
+  message: string
+  commitTimeMs: number
+}
+
+/** Record the published object, including on receipt recovery after HEAD has moved. */
+export async function recordPublishedTaskCommit(
+  publication: PublishedTaskCommit,
+  origin: "task" | "panel" | "agent-dialog" = "task"
+): Promise<void> {
+  const { threadId, workspacePath, worktreePath, commitSha, branch, message, commitTimeMs } =
+    publication
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+    throw new Error("无法确认已提交的 Git 对象")
+  }
+  const relative = path.relative(workspacePath, worktreePath)
+  const cacheKey = getCacheKeyForPath(worktreePath)
+  headCommitCache.delete(cacheKey)
+  summaryCache.delete(cacheKey)
+  notifyWorkspaceFilesChanged(threadId, worktreePath, "meta")
+  if (relative) notifyWorkspaceFilesChanged(threadId, workspacePath, "meta")
+  const insideWorkspace =
+    relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative)
+  if (origin !== "agent-dialog" || !insideWorkspace) {
+    await recordGitCommitHistoryAsync({
+      workspacePath: origin === "panel" && insideWorkspace ? workspacePath : worktreePath,
+      branch,
+      commitSha,
+      fullMessage: message
+    })
+  }
+  // Empty snapshots tell the adoption tracker to read the actual committed blobs
+  // from this SHA. The current index can contain unrelated work or a later commit.
+  await measureForCommit([], commitSha, commitTimeMs, worktreePath)
+  await markInAppCommitProcessed(worktreePath, commitSha)
+  const stats = await getCommitStats(worktreePath, commitSha, { silent: true })
+  trackGitEventWithSkills("git.commit.created", threadId, {
+    repoPath: worktreePath,
+    branch,
+    commitSha,
+    filesChanged: stats.fileCount,
+    insertions: stats.additions,
+    deletions: stats.deletions,
+    triggeredBy: origin === "task" ? "agent" : "manual"
+  })
 }
 
 async function getGitPanelSummaryQuick(worktreePath: string): Promise<{
@@ -3315,6 +3707,7 @@ export async function buildGitPanelMetaState(
     includeSummary?: boolean
     refreshHead?: boolean
     includePushability?: boolean
+    panelRepository?: boolean
   }
 ): Promise<GitPanelMetaStatePayload> {
   if (!context.workspacePath) {
@@ -3403,7 +3796,7 @@ export async function buildGitPanelMetaState(
             workspacePath,
             worktreeBranch,
             targetMatchesContext ? context.worktreeBaseCommit : null,
-            { silent: true }
+            { silent: true, originBranchOnly: options?.panelRepository }
           )
         : Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
 
@@ -3636,26 +4029,33 @@ export async function buildGitPanelDiffState(
     statusUntrackedMode?: GitStatusUntrackedMode
     visibleFileLimit?: number
     worktreePath?: string
+    commitBindingVersion?: string
+    includeCommitTarget?: boolean
   }
 ): Promise<GitPanelDiffStatePayload> {
   if (!context.workspacePath) {
     return createEmptyGitPanelDiffState(threadId, { error: "未配置工作区" })
   }
 
-  if (!context.isGitRepo) {
+  if (!context.isGitRepo && !options?.commitBindingVersion) {
     return createEmptyGitPanelDiffState(threadId, {
       error: "当前任务未关联 Git 仓库，无法打开 Git Panel"
     })
   }
 
-  if (!options?.worktreePath) {
+  if (!options?.worktreePath && !options?.commitBindingVersion) {
     const repos = await getContextGitRepositories(context)
     if (repos.length > 1) {
       return buildMultiRepositoryGitPanelDiffState(threadId, context, repos, options)
     }
   }
 
-  const target = await resolveGitOperationTarget(context, options?.worktreePath)
+  const target = await resolveTaskCommitTarget(
+    threadId,
+    context.workspacePath,
+    options?.worktreePath,
+    options?.commitBindingVersion
+  )
   if ("error" in target) {
     return createEmptyGitPanelDiffState(threadId, {
       isWorktree: context.isWorktree,
@@ -3664,35 +4064,89 @@ export async function buildGitPanelDiffState(
     })
   }
 
-  const tracked = getTrackedLlmFiles(context.metadata)
+  const tracked = target.external ? [] : getTrackedLlmFiles(context.metadata)
+  const revision =
+    options?.commitBindingVersion || options?.includeCommitTarget
+      ? await readCommitPreviewRevision(target.worktreePath)
+      : undefined
   const [state, isWorktree] = await Promise.all([
     buildGitPanelState(target.worktreePath, tracked, {
       silent: true,
       // Git Panel is a workspace review surface. llmModifiedFiles can seed commit
       // attribution, but it must not hide user-created or manually edited files.
       includeAllWhenNoTracked: true,
-      includeDiffs: options?.includeDiffs ?? true,
-      includeChangedFiles: options?.includeChangedFiles ?? true,
+      includeDiffs: options?.commitBindingVersion ? false : (options?.includeDiffs ?? true),
+      includeChangedFiles: options?.commitBindingVersion
+        ? true
+        : (options?.includeChangedFiles ?? true),
       statusUntrackedMode: options?.statusUntrackedMode,
-      visibleFileLimit: options?.visibleFileLimit
+      visibleFileLimit: options?.visibleFileLimit,
+      combineMoves: !target.external
     }),
     getCacheKeyForPath(target.worktreePath) === getCacheKeyForPath(context.workspacePath)
       ? Promise.resolve(context.isWorktree)
       : detectIsWorktreePath(target.worktreePath)
   ])
-  const changedFilesTotal = state.changedFilesTotal
+  let changedFiles = state.changedFiles
+  let files = state.files
+  let unavailableFileCount = 0
+  let previewToken: string | undefined
+  if (revision && options?.commitBindingVersion) {
+    const visiblePaths = [...new Set(files.flatMap(file =>
+      file.previousPath ? [file.previousPath, file.path] : [file.path]
+    ))]
+    const [, branch, parent] = JSON.parse(revision) as [string, string, string]
+    const snapshot = await captureEligibleTaskCommitPreview(target.worktreePath, visiblePaths, parent)
+    const eligible = new Set(snapshot.files)
+    files = files.filter(file => eligible.has(file.path) && (!file.previousPath || eligible.has(file.previousPath)))
+    unavailableFileCount = state.files.length - files.length
+    changedFiles = [...new Set(files.flatMap(file => file.previousPath ? [file.previousPath, file.path] : [file.path]))]
+    if (changedFiles.length) {
+      previewToken = randomUUID()
+      reviewedTaskCommits.set(previewToken, {
+        threadId, version: options.commitBindingVersion, scope: target.worktreePath, revision,
+        parent, branch, tree: snapshot.tree, files: new Set(changedFiles)
+      })
+      if (reviewedTaskCommits.size > 64) reviewedTaskCommits.delete(reviewedTaskCommits.keys().next().value!)
+    }
+  }
+  if (revision && revision !== (await readCommitPreviewRevision(target.worktreePath))) {
+    return createEmptyGitPanelDiffState(threadId, { error: "预览期间工作树已变化，请刷新后重试" })
+  }
+  if (options?.commitBindingVersion) {
+    const current = await resolveTaskCommitTarget(
+      threadId,
+      context.workspacePath,
+      options.worktreePath,
+      options.commitBindingVersion
+    )
+    if ("error" in current) return createEmptyGitPanelDiffState(threadId, { error: current.error })
+  }
+  const changedFilesTotal = state.changedFilesTotal - unavailableFileCount
 
   return {
     success: true,
+    commitPreviewRevision: previewToken ?? revision,
+    commitPreviewTarget: revision
+      ? {
+          root: target.gitRoot,
+          scope: target.worktreePath,
+          branch: describeCommitPreviewBranch(revision)
+        }
+      : undefined,
     isWorktree,
     isGitRepo: true,
     taskId: threadId,
-    files: state.files,
-    changedFiles: state.changedFiles,
+    files,
+    changedFiles,
+    unavailableFileCount,
     changedFilesTotal,
     omittedFileCount: state.omittedFileCount,
     skippedDirs: state.skippedDirs,
-    totals: state.totals,
+    totals: unavailableFileCount ? files.reduce((total, file) => ({
+      fileCount: changedFilesTotal, additions: total.additions + file.additions,
+      deletions: total.deletions + file.deletions
+    }), { fileCount: changedFilesTotal, additions: 0, deletions: 0 }) : state.totals,
     hasPendingDiff: changedFilesTotal > 0,
     suggestedCommitMessage:
       changedFilesTotal > 0
@@ -3701,17 +4155,52 @@ export async function buildGitPanelDiffState(
   }
 }
 
+function* chunkGitPathspecs(paths: string[]) {
+  let group: string[] = []
+  let length = 0
+  for (const file of paths) {
+    const size = file.length * 2 + 3
+    if (group.length && length + size > 16_000) {
+      yield group
+      group = []
+      length = 0
+    }
+    group.push(file)
+    length += size
+  }
+  if (group.length) yield group
+}
+
+async function readReviewedFileDiff(
+  scope: string,
+  file: string,
+  preview: TaskCommitPreview
+): Promise<GitPanelFileDiff> {
+  const args = ["--no-ext-diff", "--no-textconv", "--no-renames", preview.parent, preview.tree]
+  const [diff, stats] = await Promise.all([
+    runGitWithLiteralPathspecs(scope, ["diff", ...args], [file], {
+      silent: true,
+      maxBufferBytes: GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES
+    }).catch((error) => {
+      if (!isMaxBufferExceededError(error)) throw error
+      return buildSyntheticNoticeDiff(file, "文件差异超过预览大小限制")
+    }),
+    runGitWithLiteralPathspecs(scope, ["diff", "--numstat", ...args], [file], { silent: true })
+  ])
+  return { path: file, diff, status: "modified", ...parseNumstatTotals(stats) }
+}
+
 export async function buildGitPanelFileDiffState(
   threadId: string,
   context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>,
   filePath: string,
-  options?: { worktreePath?: string }
+  options?: { worktreePath?: string; commitBindingVersion?: string; commitPreviewRevision?: string }
 ): Promise<GitPanelFileDiffPayload> {
   if (!context.workspacePath) {
     return createEmptyGitPanelFileDiffState(threadId, { error: "未配置工作区" })
   }
 
-  if (!context.isGitRepo) {
+  if (!context.isGitRepo && !options?.commitBindingVersion) {
     return createEmptyGitPanelFileDiffState(threadId, {
       error: "当前任务未关联 Git 仓库，无法打开 Git Panel"
     })
@@ -3721,7 +4210,7 @@ export async function buildGitPanelFileDiffState(
   let requestedPath: string | null
   let responsePath: string | null = null
 
-  if (!options?.worktreePath) {
+  if (!options?.worktreePath && !options?.commitBindingVersion) {
     const repos = await getContextGitRepositories(context)
     const resolvedRepoPath = repos.length > 1 ? resolveRepositoryFilePath(repos, filePath) : null
     if (resolvedRepoPath) {
@@ -3744,7 +4233,12 @@ export async function buildGitPanelFileDiffState(
       )
     }
   } else {
-    const target = await resolveGitOperationTarget(context, options.worktreePath)
+    const target = await resolveTaskCommitTarget(
+      threadId,
+      context.workspacePath,
+      options.worktreePath,
+      options.commitBindingVersion
+    )
     if ("error" in target) {
       return createEmptyGitPanelFileDiffState(threadId, {
         isWorktree: context.isWorktree,
@@ -3767,14 +4261,38 @@ export async function buildGitPanelFileDiffState(
     })
   }
 
+  const preview =
+    options?.commitBindingVersion && options.commitPreviewRevision
+      ? getTaskCommitPreview(
+          options.commitPreviewRevision,
+          threadId,
+          options.commitBindingVersion,
+          targetWorktreePath
+        )
+      : undefined
+  if (options?.commitBindingVersion && !preview?.files.has(requestedPath)) {
+    return createEmptyGitPanelFileDiffState(threadId, {
+      error: "文件不在当前提交的预览列表中，请刷新后重试"
+    })
+  }
   const isWorktree =
     getCacheKeyForPath(targetWorktreePath) === getCacheKeyForPath(context.workspacePath)
       ? context.isWorktree
       : await detectIsWorktreePath(targetWorktreePath)
 
-  const diff = await buildGitPanelFileDiff(targetWorktreePath, requestedPath, {
-    silent: true
-  })
+  const diff = preview
+    ? await readReviewedFileDiff(targetWorktreePath, requestedPath, preview)
+    : await buildGitPanelFileDiff(targetWorktreePath, requestedPath, { silent: true })
+  if (options?.commitBindingVersion) {
+    const current = await resolveTaskCommitTarget(
+      threadId,
+      context.workspacePath,
+      options.worktreePath,
+      options.commitBindingVersion
+    )
+    if ("error" in current)
+      return createEmptyGitPanelFileDiffState(threadId, { error: current.error })
+  }
 
   if (!diff) {
     return {
@@ -3803,6 +4321,40 @@ export async function buildGitPanelFileDiffState(
       path: responsePath ?? diff.path,
       diff: truncateGitPanelDiff(diff.diff, diff.path),
       diffLoaded: true
+    }
+  }
+}
+
+async function readAuthorizedGitPanelFileDiff(
+  threadId: string,
+  scope: GitPanelContext,
+  repository: string,
+  filePath: string
+): Promise<GitPanelFileDiffPayload> {
+  const candidate = resolveWorktreeRelativeCandidate(repository, filePath)
+  if (!candidate || candidate !== filePath) throw new Error("请选择仓库中的变更文件")
+  const changed = await getChangedFileEntriesForGitOps(repository, [candidate], {
+    silent: true,
+    combineMoves: false
+  })
+  const entry = changed.find((item) => item.path === candidate)
+  if (!entry) throw new Error("该文件不在当前仓库的变更列表中")
+  const diff = await buildGitPanelFileDiff(repository, candidate, {
+    silent: true,
+    status: entry.status,
+    synthesizeUntracked: entry.status === "untracked"
+  })
+  return {
+    success: true,
+    isGitRepo: true,
+    isWorktree: scope.isWorktree,
+    taskId: threadId,
+    file: {
+      ...entry,
+      diff: truncateGitPanelDiff(diff?.diff ?? "", candidate),
+      diffLoaded: true,
+      additions: diff?.additions ?? 0,
+      deletions: diff?.deletions ?? 0
     }
   }
 }
@@ -3953,6 +4505,7 @@ function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number
     source: config.source,
     model: config.model,
     description: config.baseUrl,
+    inputModalities: config.inputModalities ?? ["text"],
     available: isModelAvailable(config),
     selectable: isModelSelectable(config),
     notice: config.notice,
@@ -3972,7 +4525,11 @@ function modelProvidersFromConfigs(configs: ReturnType<typeof getModelConfigs>):
   }))
 }
 
-export function registerModelHandlers(ipcMain: IpcMain): void {
+export function registerModelHandlers(
+  ipcMain: IpcMain,
+  getMainWindow: () => BrowserWindow | null = () => null,
+  trustedTaskRenderer: (event: IpcMainInvokeEvent) => boolean = () => false
+): void {
   const workspaceScanCleanupOwners = new Set<number>()
   // List all effective models. The first call waits for the remote manifest so
   // the renderer does not briefly show fallback entries and then replace them.
@@ -4262,7 +4819,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     event.returnValue = app.getVersion()
   })
 
-  registerGitPanelHandlers(ipcMain)
+  registerGitPanelHandlers(ipcMain, {
+    authorizeWrite: (event, id, options) =>
+      resolveAuthorizedGitPanelWrite(id, options, trustedTaskRenderer(event)),
+    readHistory: (event, id, scope) => {
+      if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看仓库")
+      return withAuthorizedGitPanelRead(id, scope, (_context, repository) =>
+        getGitCommitHistoryForWorkspace(repository)
+      )
+    }
+  })
 
   // Get workspace path for a thread (from thread metadata)
   ipcMain.handle("workspace:get", async (_event, threadId?: string) => {
@@ -5311,6 +5877,19 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "workspace:listGitPanelRepositories",
+    (event, { threadId }: { threadId: string }) =>
+      gitReadRequestCoordinator.run(event.sender, "panel", "repositories", threadId, async () => {
+        if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看仓库")
+        const context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          requestScope: "git-panel-repositories"
+        })
+        return getGitPanelRepositories(threadId, context)
+      })
+  )
+
+  ipcMain.handle(
     "workspace:getGitPanelMeta",
     async (
       event,
@@ -5319,17 +5898,29 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         options
       }: {
         threadId: string
-        options?: {
-          worktreePath?: string
+        options?: GitPanelOperationOptions & {
           includeSummary?: boolean
           refreshHead?: boolean
           includePushability?: boolean
         }
       }
     ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "meta", threadId, async () => {
+      gitReadRequestCoordinator.run(event.sender, "panel",
+        options?.panelRepository && options.includePushability ? "push-preview" : "meta", threadId, async () => {
         let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
         try {
+          if (options?.panelRepository) {
+            if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看授权仓库")
+            return await withAuthorizedGitPanelRead(
+              threadId, options.worktreePath, (scope, repository, version, card) =>
+                readPanelSnapshot(repository, version, options, async () => ({
+                  ...await buildGitPanelMetaState(threadId, scope, {
+                    ...options, worktreePath: repository, refreshHead: true
+                  }),
+                  panelCardNumber: card
+                }))
+            )
+          }
           context = await resolveThreadWorkspaceContext(threadId, {
             webContentsId: event.sender.id,
             requestScope: "git-panel-meta"
@@ -5354,21 +5945,38 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         options
       }: {
         threadId: string
-        options?: {
+        options?: GitPanelOperationOptions & {
           includeDiffs?: boolean
           includeChangedFiles?: boolean
           statusUntrackedMode?: GitStatusUntrackedMode
           visibleFileLimit?: number
-          worktreePath?: string
+          commitBindingVersion?: string
+          includeCommitTarget?: boolean
         }
       }
-    ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "diffs", threadId, async () => {
+    ) => {
+      const family =
+        !options?.panelRepository && (options?.includeCommitTarget || options?.commitBindingVersion)
+          ? "commit-preview"
+          : "panel"
+      return gitReadRequestCoordinator.run(event.sender, family, "diffs", threadId, async () => {
         let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
         try {
+          if (options?.panelRepository) {
+            if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看授权仓库")
+            return await withAuthorizedGitPanelRead(
+              threadId, options.worktreePath, (scope, repository, version) =>
+                readPanelSnapshot(repository, version, options, () => buildGitPanelDiffState(threadId, scope, {
+                  ...options,
+                  worktreePath: repository,
+                  commitBindingVersion: undefined,
+                  includeCommitTarget: false
+                }))
+            )
+          }
           context = await resolveThreadWorkspaceContext(threadId, {
             webContentsId: event.sender.id,
-            requestScope: "git-panel-diffs"
+            requestScope: `git-${family}-diffs`
           })
           return await buildGitPanelDiffState(threadId, context, options)
         } catch (e) {
@@ -5379,6 +5987,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           })
         }
       })
+    }
   )
 
   ipcMain.handle(
@@ -5389,14 +5998,33 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         threadId,
         filePath,
         options
-      }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
-    ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "file-diff", threadId, async () => {
+      }: {
+        threadId: string
+        filePath: string
+        options?: GitPanelOperationOptions & {
+          commitBindingVersion?: string
+          commitPreviewRevision?: string
+        }
+      }
+    ) => {
+      const family =
+        !options?.panelRepository && (options?.commitPreviewRevision || options?.commitBindingVersion)
+          ? "commit-preview"
+          : "panel"
+      return gitReadRequestCoordinator.run(event.sender, family, "file-diff", threadId, async () => {
         let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
         try {
+          if (options?.panelRepository) {
+            if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看授权仓库")
+            return await withAuthorizedGitPanelRead(
+              threadId, options.worktreePath, (scope, repository, version) =>
+                readPanelSnapshot(repository, version, options,
+                  () => readAuthorizedGitPanelFileDiff(threadId, scope, repository, filePath))
+            )
+          }
           context = await resolveThreadWorkspaceContext(threadId, {
             webContentsId: event.sender.id,
-            requestScope: "git-panel-file-diff"
+            requestScope: `git-${family}-file-diff`
           })
           return await buildGitPanelFileDiffState(threadId, context, filePath, options)
         } catch (e) {
@@ -5407,6 +6035,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           })
         }
       })
+    }
   )
 
   ipcMain.handle(
@@ -5602,7 +6231,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:commitWorktree",
     async (
-      _event,
+      event,
       {
         threadId,
         message,
@@ -5612,10 +6241,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         threadId: string
         message: string
         filePaths?: string[]
-        options?: { worktreePath?: string; agentInitiated?: boolean }
+        options?: GitPanelOperationOptions & {
+          agentInitiated?: boolean
+          commitBindingVersion?: string
+          commitPreviewRevision?: string
+        }
       }
     ) => {
-      const preparation = prepareGitPanelWrite()
+      const preparation = prepareGitPanelWrite(options?.panelRepository ? "exclusive-panel" : "panel")
       let releaseWrite: (() => void) | undefined
       try {
         logGitStep(threadId, "commit", "开始提交")
@@ -5628,18 +6261,62 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         if (!matchesThreadIncarnation(getThreadCoreSync(threadId), commitThreadIncarnation)) {
           return { success: false, error: THREAD_INCARNATION_CHANGED_ERROR }
         }
-        if (!context.workspacePath || !context.isGitRepo) {
-          logGitStep(threadId, "commit", "失败：当前任务不在 Git 仓库中")
-          return { success: false, error: "当前任务不在 Git 仓库中" }
+        if (!context.workspacePath) return { success: false, error: "当前任务未配置工作区" }
+        const workspacePath = context.workspacePath
+        const authorized = options?.panelRepository
+          ? await resolveAuthorizedGitPanelWrite(threadId, options, trustedTaskRenderer(event))
+          : undefined
+        if (authorized) {
+          if (options?.agentInitiated || options?.commitBindingVersion || options?.commitPreviewRevision) {
+            throw new Error("请通过对应的提交预览确认操作")
+          }
+          assertExactPanelFiles(authorized.worktreePath, filePaths)
         }
-        const target = await resolveGitOperationTarget(context, options?.worktreePath)
-        if ("error" in target) {
-          logGitStep(threadId, "commit", `失败：${target.error}`)
-          return { success: false, error: target.error }
-        }
+        const resolveTarget = () =>
+          resolveTaskCommitTarget(
+            threadId,
+            workspacePath,
+            options?.worktreePath,
+            options?.commitBindingVersion
+          )
+        const target = authorized ? { ...authorized, external: true } : await resolveTarget()
+        if ("error" in target) return { success: false, error: target.error }
         const worktreePath = target.worktreePath
-        releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
-        const tracked = getTrackedLlmFiles(context.metadata)
+        const version = options?.commitBindingVersion
+        const preview = version
+          ? getTaskCommitPreview(options?.commitPreviewRevision, threadId, version, worktreePath)
+          : undefined
+        if (preview) {
+          const approved =
+            typeof message === "string"
+              ? message.match(
+                  /^([^\s#]+) #comment (?:fix|feat|refactor|docs|style|test|chore):([\s\S]+) #CMBDevClaw$/u
+                )
+              : null
+          if (!approved || !isValidTaskCommitCard(approved[1]) || !approved[2].trim()) {
+            return { success: false, error: "请选择有效的任务卡并填写提交说明" }
+          }
+          const recoveryError = await recoverPendingTaskIndex(target.gitRoot)
+          if (recoveryError) return { success: false, error: recoveryError }
+        } else {
+          releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
+        }
+        const checkReviewedCommit = async (): Promise<void> => {
+          if (!preview) return
+          const current = await resolveTarget()
+          if ("error" in current) throw new Error(current.error)
+          if (
+            path.relative(worktreePath, current.worktreePath) !== "" ||
+            preview.revision !== (await readCommitPreviewRevision(worktreePath))
+          ) {
+            throw new Error("预览的提交目标已变化，请重新发起提交")
+          }
+          if (!Array.isArray(filePaths) || !filePaths.length) {
+            throw new Error("请选择要提交的具体文件")
+          }
+        }
+        await checkReviewedCommit()
+        const tracked = target.external ? [] : getTrackedLlmFiles(context.metadata)
         const explicitFilePaths = Array.isArray(filePaths)
           ? filePaths.filter(
               (filePath): filePath is string =>
@@ -5650,7 +6327,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           worktreePath,
           explicitFilePaths ?? undefined,
           tracked,
-          { excludeNewIgnored: options?.agentInitiated === true }
+          {
+            excludeNewIgnored: Boolean(options?.agentInitiated || options?.commitBindingVersion),
+            combineMoves: !target.external
+          }
         )
         logGitStep(
           threadId,
@@ -5663,123 +6343,169 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "没有需要提交的改动" }
         }
 
-        logGitStep(threadId, "commit", `add 文件数：${filesToCommit.length}`)
-        // 这里会按文件是否存在拆分暂存命令：
-        // - 存在路径：git add -- <path>
-        // - 删除路径：git update-index --remove -- <path>
-        // 详见 stageFilesForCommit 上方注释中的 Windows 兼容说明和完整命令案例。
-        const stagedPaths = await stageFilesForCommit(worktreePath, filesToCommit)
-        logGitStep(
-          threadId,
-          "commit",
-          `暂存分组：add=[${stagedPaths.existingPathspecs.join(", ")}] remove=[${stagedPaths.removedPathspecs.join(", ")}]`
-        )
-        // Capture time is taken before the commit runs, so it is an exact upper
-        // bound on which generations can belong to this commit — passed to
-        // adoption measurement so later (post-capture) gens are not attributed here.
-        const adoptionCaptureTimeMs = Date.now()
-        const adoptionSnapshots = await captureStagedSnapshotsForCommit(worktreePath)
-        logGitStep(threadId, "commit", `commit message: ${message}`)
-        if (Array.isArray(filePaths) && filePaths.length > 0) {
-          await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], filesToCommit)
-        } else {
-          await runGit(worktreePath, ["commit", "-m", message])
+        const resolvedFiles = new Set(filesToCommit)
+        if (authorized && (resolvedFiles.size !== new Set(filePaths).size ||
+            !filePaths!.every((file) => resolvedFiles.has(file)))) {
+          throw new Error("已选文件的提交范围已变化，请刷新后重新选择")
         }
-        let commitSha: string | undefined
-        try {
-          commitSha =
-            (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() ||
-            undefined
-        } catch {
-          // best-effort: adoption can still be measured without the SHA
-        }
-        if (options?.agentInitiated !== true) {
-          const branch = await readCurrentBranch(worktreePath, true).catch(() => null)
-          // The thread can move before the renderer receives this commit result.
-          void recordGitCommitHistoryAsync({
-            workspacePath: context.workspacePath,
-            branch,
-            commitSha,
-            fullMessage: message
-          }).catch((error) => {
-            console.warn("[GitPanel] failed to record commit history:", error)
-          })
-        }
-        // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
-        void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(
-          () => null
-        )
-        if (adoptionSnapshots.length > 0) {
-          const durable = await measureForCommit(
-            adoptionSnapshots,
-            commitSha,
-            adoptionCaptureTimeMs,
-            worktreePath
-          )
-          if (!durable) {
-            console.warn(
-              `[GitPanel] adoption measurement queued for retry: commitSha=${commitSha ?? "unknown"}`
-            )
-          }
-        }
-        // The `manual` telemetry below is this commit's canonical
-        // git.commit.created. Record the sha as processed so the hook/reconcile
-        // backstop — which treats the durable commit job left by
-        // measureForCommit as "still needs its event" — does not emit a
-        // duplicate under the resolved git root (in monorepos that duplicate
-        // even shows up as a different repository name).
-        await markInAppCommitProcessed(worktreePath, commitSha)
-        const postChangedFiles = await getPostCommitChangedFilesForMetadata(
-          worktreePath,
-          tracked
-        ).catch(() => [])
-        const { getThreadCore } = await import("../db")
-        const thread = getThreadCore(threadId)
-        if (thread && matchesThreadIncarnation(thread, commitThreadIncarnation)) {
-          const latestMetadata = parseThreadMetadata(thread.metadata)
-          const latestWorkspacePath =
-            typeof latestMetadata.workspacePath === "string" ? latestMetadata.workspacePath : null
-          const commitWorkspacePath = context.workspacePath
-          if (commitWorkspacePath && latestWorkspacePath === commitWorkspacePath) {
-            mutateLatestThreadMetadata(threadId, (current) => {
-              replaceWorktreeLlmMetadata(current, commitWorkspacePath, worktreePath, {
-                changedFiles: postChangedFiles,
-                fileHistory: {},
-                recentlyRevertedFiles: []
-              })
-            })
-          }
-        }
-        notifyWorkspaceFilesChanged(threadId, worktreePath, "meta")
         if (
-          context.workspacePath &&
-          path.resolve(context.workspacePath) !== path.resolve(worktreePath)
+          preview &&
+          (!explicitFilePaths ||
+            explicitFilePaths.length !== filePaths?.length ||
+            new Set(explicitFilePaths).size !== filesToCommit.length ||
+            explicitFilePaths.some((file) => !preview.files.has(file) || !resolvedFiles.has(file)))
         ) {
-          notifyWorkspaceFilesChanged(threadId, context.workspacePath, "meta")
+          return { success: false, error: "已选文件的提交范围已变化，请刷新后重新选择" }
+        }
+        const adoptionCaptureTimeMs = Date.now()
+        let branch: string | null
+        let commitSha: string
+        let warning: string | undefined
+        if (preview && version) {
+          let prepared: TaskCommitCandidate | undefined
+          const result = await executeTaskBoundGitCommit({
+            worktreePath,
+            filePaths: filesToCommit,
+            message,
+            reviewed: true,
+            revalidate: () =>
+              checkReviewedCommit().then(
+                () => true,
+                () => false
+              ),
+            canPublish: () => readCurrentTaskCommitBinding(threadId)?.version === version,
+            onPrepared: async (candidate) => {
+              if (candidate.parent !== preview.parent || candidate.branch !== preview.branch) {
+                throw new Error("预览的提交分支已变化，请刷新后重试")
+              }
+              const selected = new Set(
+                filesToCommit.map((file) =>
+                  path
+                    .relative(target.gitRoot, path.join(worktreePath, file))
+                    .split(path.sep)
+                    .join("/")
+                )
+              )
+              if (
+                candidate.files.length !== selected.size ||
+                candidate.files.some((file) => !selected.has(file))
+              ) {
+                throw new Error("已选文件的提交范围已变化，请刷新后重试")
+              }
+              // Compare immutable trees over the reviewed subset, including modes and deletions.
+              if (candidate.tree !== preview.tree) {
+                for (const chunk of chunkGitPathspecs(candidate.files)) {
+                  try {
+                    await runGitWithLiteralPathspecs(
+                      target.gitRoot,
+                      [
+                        "diff",
+                        "--quiet",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        preview.tree,
+                        candidate.tree
+                      ],
+                      chunk,
+                      { silent: true }
+                    )
+                  } catch {
+                    throw new Error("已选文件内容自预览后发生变化，请刷新后重新确认")
+                  }
+                }
+              }
+              rememberTaskCommitIndex(threadId, target.gitRoot, candidate)
+              prepared = candidate
+            }
+          })
+          if (
+            prepared &&
+            (result.status === "review" ||
+              (result.status === "committed" && !result.needsIndexRecovery))
+          ) {
+            try {
+              forgetTaskCommitIndex(target.gitRoot, prepared)
+            } catch (error) {
+              console.warn(
+                "[GitPanel] could not clear reconciled index receipt",
+                prepared.sha,
+                error
+              )
+            }
+          }
+          if (result.status !== "committed") return { success: false, error: result.reason }
+          commitSha = result.sha
+          branch = result.branch.replace(/^refs\/heads\//, "")
+          warning = result.warning
+          reviewedTaskCommits.delete(options!.commitPreviewRevision!)
+          try {
+            const db = getDb()
+            for (const file of result.files) {
+              const fullPath = path.resolve(target.gitRoot, file)
+              db.run("DELETE FROM task_commit_edits WHERE thread_id=? AND version=? AND path=?", [
+                threadId,
+                version,
+                process.platform === "win32" ? fullPath.toLowerCase() : fullPath
+              ])
+            }
+          } catch (error) {
+            console.warn("[GitPanel] failed to clear published file evidence", commitSha, error)
+          }
+        } else if (authorized) {
+          branch = await readCurrentBranch(worktreePath, true).catch(() => null)
+          const result = await commitAuthorizedPanelSelection(
+            worktreePath, filesToCommit, message, authorized.assertCurrent
+          )
+          commitSha = result.sha
+          warning = result.warning
+        } else {
+          branch = await readCurrentBranch(worktreePath, true).catch(() => null)
+          await stageFilesForCommit(worktreePath, filesToCommit)
+          if (Array.isArray(filePaths) && filePaths.length > 0) {
+            await runGitWithLiteralPathspecs(worktreePath, ["commit", "-m", message], filesToCommit)
+          } else {
+            await runGit(worktreePath, ["commit", "-m", message])
+          }
+          commitSha = (
+            await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true }).catch(() => "")
+          ).trim()
+        }
+        // The commit has already succeeded. Failures below must not invite a second commit.
+        try {
+          await recordPublishedTaskCommit(
+            {
+              threadId,
+              workspacePath,
+              worktreePath,
+              commitSha,
+              branch: branch ?? "",
+              message,
+              commitTimeMs: adoptionCaptureTimeMs
+            },
+            options?.agentInitiated === true ? "agent-dialog" : "panel"
+          )
+          if (!target.external) {
+            const changedFiles = await getPostCommitChangedFilesForMetadata(worktreePath, tracked)
+            const thread = getThreadCoreSync(threadId)
+            if (
+              thread &&
+              matchesThreadIncarnation(thread, commitThreadIncarnation) &&
+              parseThreadMetadata(thread.metadata).workspacePath === workspacePath
+            ) {
+              mutateLatestThreadMetadata(threadId, (current) => {
+                replaceWorktreeLlmMetadata(current, workspacePath, worktreePath, {
+                  changedFiles,
+                  fileHistory: {},
+                  recentlyRevertedFiles: []
+                })
+              })
+            }
+          }
+        } catch (error) {
+          console.warn("[GitPanel] failed to record published commit", commitSha, error)
         }
         logGitStep(threadId, "commit", "提交成功")
-
-        // Operational telemetry (fire-and-forget, never blocks return)
-        void Promise.all([
-          getHeadCommitStats(worktreePath, { silent: true }),
-          getCurrentBranchCached(worktreePath, { silent: true })
-        ])
-          .then(([commitStats, branch]) => {
-            trackGitEventWithSkills("git.commit.created", threadId, {
-              repoPath: worktreePath,
-              branch: branch || "",
-              commitSha: commitSha ?? "",
-              filesChanged: commitStats.fileCount || filesToCommit.length,
-              insertions: commitStats.additions,
-              deletions: commitStats.deletions,
-              triggeredBy: "manual"
-            })
-          })
-          .catch((telemetryError) => {
-            console.warn("[GitPanel] failed to emit commit telemetry:", telemetryError)
-          })
-
-        return { success: true }
+        return { success: true, warning }
       } catch (e) {
         logGitStep(
           threadId,
@@ -5797,21 +6523,24 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:pushWorktree",
     async (
-      _event,
-      { threadId, options }: { threadId: string; options?: { worktreePath?: string } }
+      event,
+      { threadId, options }: { threadId: string; options?: GitPanelOperationOptions }
     ) => {
       logGitStep(threadId, "push", "开始推送流程")
       const steps: PushStepResult[] = []
-      const preparation = prepareGitPanelWrite()
+      const preparation = prepareGitPanelWrite(options?.panelRepository ? "exclusive-panel" : "panel")
       let releaseWrite: (() => void) | undefined
       try {
-        const context = await resolveThreadWorkspaceContext(threadId)
+        const authorized = options?.panelRepository
+          ? await resolveAuthorizedGitPanelWrite(threadId, options, trustedTaskRenderer(event))
+          : undefined
+        const context = authorized?.context ?? await resolveThreadWorkspaceContext(threadId)
         if (!context.workspacePath || !context.isGitRepo) {
           logGitStep(threadId, "push", "失败：当前任务不在 Git 仓库中")
           steps.push({ step: "final", status: "failed", detail: "当前任务不在 Git 仓库中" })
           return { success: false, error: "当前任务不在 Git 仓库中", steps }
         }
-        const target = await resolveGitOperationTarget(context, options?.worktreePath)
+        const target = authorized ?? await resolveGitOperationTarget(context, options?.worktreePath)
         if ("error" in target) {
           logGitStep(threadId, "push", `失败：${target.error}`)
           steps.push({ step: "final", status: "failed", detail: target.error })
@@ -5820,6 +6549,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const worktreePath = target.worktreePath
         releaseWrite = await reserveGitPanelWrite(worktreePath, preparation)
         const currentBranch = await readCurrentBranch(worktreePath, true)
+        if (authorized && (!currentBranch || authorized.branchRef !== `refs/heads/${currentBranch}` || !authorized.head)) {
+          throw new Error("请选择已有提交的本地分支后再推送")
+        }
         const branch = currentBranch ?? "HEAD"
 
         steps.push({
@@ -5854,14 +6586,28 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           `准备完成 upstream=${upstreamRef || "none"} defaultPush=${useDefaultPush ? "yes" : "no"} 用时=${Date.now() - pushPrepStartedAt}ms`
         )
         const pushRef = currentBranch === null ? "HEAD" : `refs/heads/${currentBranch}`
-        const pushArgs = useDefaultPush ? ["push"] : ["push", "-u", "origin", pushRef]
-        const pushLabel = useDefaultPush ? "push" : `push -u origin ${pushRef}`
+        // Pin the external push to the reviewed commit and branch even when a native
+        // checkout advances after confirmation or origin has custom push refspecs.
+        const pushArgs = authorized
+          ? ["-c", "remote.origin.mirror=false", "push", "--no-follow-tags", "origin", `${authorized.head}:${pushRef}`]
+          : useDefaultPush ? ["push"] : ["push", "-u", "origin", pushRef]
+        const pushLabel = authorized ? `push origin ${pushRef}` : useDefaultPush ? "push" : `push -u origin ${pushRef}`
 
         // Step 2: Push
         try {
           logGitStep(threadId, "push", `执行 ${pushLabel}`)
           const pushStartedAt = Date.now()
-          await runGitPushWithLfsCompat(threadId, worktreePath, pushArgs)
+          await runGitPushWithLfsCompat(threadId, worktreePath, pushArgs, authorized?.assertCurrent)
+          if (authorized && !useDefaultPush) {
+            // Pushing an object ID cannot establish upstream tracking through -u.
+            // The publication already succeeded even if tracking setup is unavailable.
+            try {
+              await authorized.assertCurrent()
+              await runGit(worktreePath, ["branch", "--set-upstream-to", `refs/remotes/origin/${branch}`, "--", branch])
+            } catch (cause) {
+              console.warn("[GitPush] could not set upstream after successful push:", cause)
+            }
+          }
           const pushElapsedMs = Date.now() - pushStartedAt
           logGitStep(threadId, "push", `${pushLabel} 成功，用时=${pushElapsedMs}ms`)
           steps.push({ step: "push", status: "ok", detail: `${pushLabel} 成功` })
@@ -5972,13 +6718,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:pullWorktree",
     async (
-      _event,
-      { threadId, options }: { threadId: string; options?: { worktreePath?: string } }
+      event,
+      { threadId, options }: { threadId: string; options?: GitPanelOperationOptions }
     ) => {
-      const preparation = prepareGitPanelWrite()
+      const preparation = prepareGitPanelWrite(options?.panelRepository ? "exclusive-panel" : "panel")
       try {
         logGitStep(threadId, "pull", "开始拉取远端代码")
-        const context = await resolveThreadWorkspaceContext(threadId)
+        const authorized = options?.panelRepository
+          ? await resolveAuthorizedGitPanelWrite(threadId, options, trustedTaskRenderer(event))
+          : undefined
+        const context = authorized?.context ?? await resolveThreadWorkspaceContext(threadId)
         if (!context.workspacePath || !context.isGitRepo) {
           logGitStep(threadId, "pull", "失败：当前任务不在 Git 仓库中")
           return { success: false, error: "当前任务不在 Git 仓库中" }
@@ -5996,23 +6745,30 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           }
           try {
             const currentBranch = await readCurrentBranch(worktreePath, true)
+            if (authorized && (!currentBranch || authorized.branchRef !== `refs/heads/${currentBranch}`)) {
+              throw new Error("请选择本地分支后再拉取")
+            }
             const branch = currentBranch ?? "HEAD"
             const pullRef = currentBranch === null ? "HEAD" : `refs/heads/${currentBranch}`
             logGitStep(threadId, "pull", `[${label}] 执行 pull --rebase origin ${pullRef}`)
             try {
-              await runGit(worktreePath, ["pull", "--rebase", "origin", pullRef])
+              if (authorized) await pullAuthorizedBranch(authorized, branch)
+              else await runGit(worktreePath, ["pull", "--rebase", "origin", pullRef])
               return { success: true, detail: `${label}: 拉取成功` }
             } catch (pullError) {
               if (isMissingRemoteBranchError(pullError)) {
                 logGitStep(threadId, "pull", `[${label}] 远端不存在分支 ${branch}，跳过`)
                 return { success: true, detail: `${label}: 远端不存在分支 ${branch}，无需拉取` }
               }
-              try {
-                await runGit(worktreePath, ["rebase", "--abort"])
-              } catch {
-                // ignore
+              const conflict = isGitRebaseConflictError(pullError)
+              if (!authorized || conflict) {
+                try {
+                  await runGit(worktreePath, ["rebase", "--abort"])
+                } catch {
+                  // The rebase may already have finished.
+                }
               }
-              if (isGitRebaseConflictError(pullError)) {
+              if (conflict) {
                 logGitStep(threadId, "pull", `[${label}] 检测到代码冲突，已执行 rebase --abort`)
                 return { success: false, detail: `${label}: ${GIT_REBASE_CONFLICT_MESSAGE}` }
               }
@@ -6053,14 +6809,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        const target = await resolveGitOperationTarget(context, options?.worktreePath)
+        const target = authorized ?? await resolveGitOperationTarget(context, options?.worktreePath)
         if ("error" in target) {
           logGitStep(threadId, "pull", `失败：${target.error}`)
           return { success: false, error: target.error }
         }
         const result = await pullOne(target.worktreePath, path.basename(target.worktreePath))
         if (!result.success) return { success: false, error: result.detail }
-        notifyWorkspaceFilesChanged(threadId, target.worktreePath)
+        notifyWorkspaceFilesChanged(threadId, target.worktreePath, authorized ? "meta" : "file")
         if (
           context.workspacePath &&
           path.resolve(context.workspacePath) !== path.resolve(target.worktreePath)
@@ -6096,7 +6852,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     })
   }
   const supportedAttachmentExtension = (fileName: string): boolean =>
-    [".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"].includes(path.extname(fileName).toLowerCase())
+    chatUploadExtensions.includes(path.extname(fileName).toLowerCase())
   const validAttachmentMaxLength = (maxLength: unknown): maxLength is number | undefined =>
     maxLength === undefined ||
     (Number.isSafeInteger(maxLength) &&
@@ -6115,6 +6871,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       error?: string
     }> => {
       try {
+        const assertSender = () => { assertChatAttachmentWindow(event, getMainWindow) }
+        assertSender()
         if (
           !request ||
           typeof request.grant !== "string" ||
@@ -6125,6 +6883,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         ) {
           return { success: false, error: "无效的附件解析请求" }
         }
+        const visualExtension = isVisualDocumentPath(request.filePath)
+        const imageScope = (request.threadId && visualExtension) ||
+          chatImageExtensions.includes(path.extname(request.filePath).toLowerCase())
+          ? (await import("../workspace-chat-image")).captureOrdinaryImageDraft(request.threadId ?? "", request.workspacePath, assertSender)
+          : undefined
         const resolved = await resolveExternalFileReadGrant(
           request.grant,
           event.sender.id,
@@ -6132,7 +6895,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         )
         if ("error" in resolved) return { success: false, error: resolved.error }
         if (!supportedAttachmentExtension(resolved.filePath)) {
-          return { success: false, error: "不支持的文件类型，仅支持 txt、md、csv、docx、xlsx、xls" }
+          return { success: false, error: "不支持的文件类型，仅支持 " + chatUploadLabel }
         }
         const opened = await openStableFileHandle(resolved.rootPath, resolved.filePath)
         try {
@@ -6146,6 +6909,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           }
           const payload = Uint8Array.from(buffer.subarray(0, bytesRead)).buffer
           attachAttachmentParserCleanup(event)
+          if (chatImageExtensions.includes(path.extname(opened.filePath).toLowerCase())) {
+            if (!imageScope) throw new Error("所选图片已变更，请重新选择。")
+            const { assertCurrent, root } = imageScope
+            assertCurrent()
+            const { stageChatImage } = await import("../chat-images")
+            const attachment = await stageChatImage(request.threadId ?? "", path.basename(opened.filePath), payload,
+              { beforePublish: assertCurrent, draftWorkspace: normalizeGitWorkspacePathKey(root ?? "") })
+            assertCurrent()
+            return { success: true, attachment }
+          }
           const attachment = await getFileAttachmentParserClient().parse(
             {
               kind: "bytes",
@@ -6153,10 +6926,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               bytes: payload
             },
             request.maxLength,
-            attachmentParseLatestKey(event.sender.id)
+            attachmentParseLatestKey(event.sender.id), Boolean(imageScope)
           )
           attachment.filePath = opened.filePath
-          return { success: true, attachment }
+          assertSender()
+          const { stageOrdinaryDocument } = await import("../workspace-chat-image")
+          return { success: true, attachment: await stageOrdinaryDocument(request.threadId ?? "", attachment, imageScope) }
         } finally {
           await opened.handle.close().catch(() => undefined)
         }
@@ -6177,6 +6952,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       request: AttachmentBytesParseRequest
     ): Promise<{ success: boolean; attachment?: ParsedAttachment; error?: string }> => {
       try {
+        const assertSender = () => { assertChatAttachmentWindow(event, getMainWindow) }
+        assertSender()
         if (
           !request ||
           typeof request.fileName !== "string" ||
@@ -6190,13 +6967,27 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         ) {
           return { success: false, error: "无效或过大的拖拽附件" }
         }
+        if (chatImageExtensions.includes(path.extname(request.fileName).toLowerCase())) {
+          const { captureOrdinaryImageDraft } = await import("../workspace-chat-image")
+          const { assertCurrent, root } = captureOrdinaryImageDraft(request.threadId ?? "", request.workspacePath, assertSender)
+          const { stageChatImage } = await import("../chat-images")
+          const attachment = await stageChatImage(request.threadId ?? "", path.basename(request.fileName), request.bytes,
+            { beforePublish: assertCurrent, draftWorkspace: normalizeGitWorkspacePathKey(root ?? "") })
+          assertCurrent()
+          return { success: true, attachment }
+        }
+        const { captureOrdinaryImageDraft, stageOrdinaryDocument } = await import("../workspace-chat-image")
+        const imageScope = request.threadId && isVisualDocumentPath(request.fileName)
+          ? captureOrdinaryImageDraft(request.threadId, request.workspacePath, assertSender)
+          : undefined
         attachAttachmentParserCleanup(event)
         const attachment = await getFileAttachmentParserClient().parse(
           { kind: "bytes", fileName: path.basename(request.fileName), bytes: request.bytes },
           request.maxLength,
-          attachmentParseLatestKey(event.sender.id)
+          attachmentParseLatestKey(event.sender.id), Boolean(imageScope)
         )
-        return { success: true, attachment }
+        assertSender()
+        return { success: true, attachment: await stageOrdinaryDocument(request.threadId ?? "", attachment, imageScope) }
       } catch (e) {
         return {
           success: false,
@@ -6208,13 +6999,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Open native file picker for chat attachments
   ipcMain.handle("file:select", async (event): Promise<AttachmentFileSelectionResult> => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win) return { canceled: true, files: [] }
+    const win = assertChatAttachmentWindow(event, getMainWindow)
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile", "multiSelections"],
       title: "选择附件",
-      filters: [{ name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }]
+      filters: [{ name: "支持的文件", extensions: chatUploadExtensions.map(ext => ext.slice(1)) }]
     })
+    assertChatAttachmentWindow(event, getMainWindow)
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true, files: [] }
     }
@@ -6241,8 +7032,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Get supported file extensions
   ipcMain.handle("file:supportedExtensions", async () => {
-    const { getSupportedExtensions } = await import("../file-parser")
-    return getSupportedExtensions()
+    return [...chatUploadExtensions]
   })
 }
 

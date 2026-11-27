@@ -40,7 +40,7 @@ vi.mock("../storage", () => ({
 }))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: () => fixtures.workspace }))
 vi.mock("../bots/local-service", () => ({ getLocalBotHost: () => fixtures.mediaHost }))
-vi.mock("../file-parser", () => ({ isSupportedFile: (name: string) => name.endsWith(".txt") }))
+vi.mock("../file-parser", () => ({ isSupportedFile: (name: string) => /\.(txt|docx)$/.test(name) }))
 vi.mock("../file-attachment-parser/client", () => ({
   getFileAttachmentParserClient: () => ({
     cancelLatest: vi.fn(),
@@ -65,7 +65,7 @@ vi.mock("../workspace-file-preview/client", async () => {
 import * as db from "../db"
 import { createBotDeliveryTools, createBotReturnFileTools } from "../bots/tools"
 import { findHistoricalBotWorkDelivery, type BotHistoricalDeliveryReference } from "../bots/delivery-receipt"
-import { botAttachmentReceiptKey, workAttachmentStorage } from "../bots/attachment-storage"
+import { botAttachmentReceiptKey, withStagedWorkAttachments, workAttachmentStorage } from "../bots/attachment-storage"
 import { projectSkillWorkInput } from "../bots/input-files"
 import { createLocalBotWorkHistory } from "../bots/work-history"
 import { createBotOrdinaryThreads } from "../bots/ordinary-threads"
@@ -75,6 +75,8 @@ import { registerBotFileHandlers } from "./bot-files"
 import { registerWorkspaceFilePreviewHandlers } from "./file-preview"
 import { handleWorkspaceFilePreviewProtocolRequest } from "../workspace-file-preview/media-protocol"
 
+let LocalSandbox: typeof import("../agent/local-sandbox").LocalSandbox
+
 beforeAll(async () => {
   fixtures.root = await realpath(await mkdtemp(join(tmpdir(), "bot-managed-attachment-")))
   fixtures.workspace = join(fixtures.root, "project")
@@ -82,10 +84,28 @@ beforeAll(async () => {
   fixtures.saved = join(fixtures.root, "saved.bin")
   await mkdir(fixtures.workspace)
   await db.initializeDatabase()
-})
+  // Load the sandbox once so an import timeout cannot leave a case running
+  // against the next case's shared workspace fixture.
+  const sandbox = await import("../agent/local-sandbox")
+  LocalSandbox = sandbox.LocalSandbox
+}, 35_000)
 afterAll(async () => {
   await db.closeDatabase()
   await rm(fixtures.root, { recursive: true, force: true })
+})
+
+it("publishes an import when the storage path uses a directory alias", async () => {
+  const { botImportDestination, publishStagedBotImport } = await import("../bots/file-copy")
+  const storage = join(fixtures.root, "canonical upload directory")
+  const alias = join(fixtures.root, "upload-alias")
+  await mkdir(storage)
+  await symlink(storage, alias, process.platform === "win32" ? "junction" : "dir")
+  await withStagedWorkAttachments(alias, async staging => {
+    const file = await botImportDestination(staging, "report.html")
+    await writeFile(file.path, "body")
+    await publishStagedBotImport(alias, staging, file.path)
+    expect(await readFile(join(storage, file.id), "utf8")).toBe("body")
+  })
 })
 
 it.each([false, true])("signs workspace @file against the original thread and keeps its selected bytes (work=%s)", async managed => {
@@ -102,7 +122,7 @@ it.each([false, true])("signs workspace @file against the original thread and ke
     id: "work", botId: "bot", threadId: thread.thread_id, audienceKey: "desktop",
     workspace: { kind: "directory", path: fixtures.workspace }
   } as BotWorkItem : undefined
-  const retainInputFile = vi.fn((_bot: string, attachment: FileAttachment, _path: string, _work?: string) =>
+  const retainInputFile = vi.fn<LocalBotHost["retainInputFile"]>((_bot, attachment) =>
     ({ ...attachment, botInputId: "input-id" }))
   const host = {
     getWork: () => work, getBot: () => ({ id: "bot", archived: false, threadId: managed ? "main" : thread.thread_id }),
@@ -140,7 +160,6 @@ it.each(["attach-workspace", "attach", "attach-bytes"] as const)(
   "keeps the model's %s attachment path on the selected version in a created default workspace task",
   { timeout: 10_000 },
   async (mode) => {
-    const { LocalSandbox } = await import("../agent/local-sandbox")
     const database = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
     const store = new BotStore(database)
     const requestId = "use-selected-report"
@@ -150,7 +169,7 @@ it.each(["attach-workspace", "attach", "attach-bytes"] as const)(
         if (task.requestId !== requestId || !work?.workspace) return null
         const rootDir = work.workspace.path
         return {
-          release() {},
+          release: vi.fn(),
           async execute(signal) {
             await host.verifyInputFilesForRun(task.id, task.id)
             const input = projectSkillWorkInput(task, host.inputFilesForTask(task.id))
@@ -251,6 +270,34 @@ it.each(["attach-workspace", "attach", "attach-bytes"] as const)(
   }
 )
 
+it.each([false, true])("leaves no version after a zero-budget text-only @document (managed=%s)", async managed => {
+  fixtures.workspace = join(fixtures.root, `mention-text-only-${managed}`)
+  await mkdir(fixtures.workspace)
+  const filename = "text-only.docx"
+  await writeFile(join(fixtures.workspace, filename), "document body")
+  const row = db.createThread(`mention-text-only-${managed}`, { workspacePath: fixtures.workspace })
+  const work = managed ? {
+    id: "work", botId: "bot", threadId: row.thread_id, audienceKey: "desktop",
+    workspace: { kind: "directory", path: fixtures.workspace }
+  } as BotWorkItem : undefined
+  const retainInputFile = vi.fn()
+  const host = {
+    getWork: () => work, getBot: () => ({ id: "bot", archived: false, threadId: row.thread_id }),
+    initializeWorkThread: vi.fn(), retainInputFile
+  } as unknown as LocalBotHost
+  const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
+  registerBotFileHandlers({
+    handle: (name: string, handler: Parameters<IpcMain["handle"]>[1]) => handlers.set(name, handler)
+  } as unknown as IpcMain, () => host)
+  const frame = {}, sender = { id: 12349, mainFrame: frame, once: vi.fn(), removeListener: vi.fn() }
+  const event = { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent
+  await expect(handlers.get("bots:files:attach-workspace")!(
+    event, "local", "bot", row.thread_id, filename, 0, work?.id)).rejects.toThrow("正文字数已达上限")
+  expect(await readdir(fixtures.workspace)).toEqual([filename])
+  if (managed) expect(await readdir(workAttachmentStorage(fixtures.workspace, work)!)).toEqual([])
+  expect(retainInputFile).not.toHaveBeenCalled()
+})
+
 it.each(["attach", "attach-bytes"] as const)("keeps a failed %s batch private and reuses a formal version after success", async (mode) => {
   fixtures.workspace = join(fixtures.root, mode)
   const picks = join(fixtures.root, `${mode}-picks`)
@@ -263,9 +310,11 @@ it.each(["attach", "attach-bytes"] as const)("keeps a failed %s batch private an
   } as BotWorkItem
   const retainInputFile = vi.fn((_bot: string, attachment: FileAttachment) =>
     ({ ...attachment, botInputId: `input-${attachment.filename}` }))
+  const retainImageSelection: LocalBotHost["retainImageSelection"] = (botId, _groupId, _workId, inputs) =>
+    inputs.map(({ attachment }) => retainInputFile(botId, attachment))
   const host = {
     getWork: () => work, getBot: () => ({ id: "bot", archived: false }),
-    initializeWorkThread: vi.fn(), retainInputFile
+    initializeWorkThread: vi.fn(), retainInputFile, retainImageSelection
   } as unknown as LocalBotHost
   const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
   registerBotFileHandlers({
@@ -329,11 +378,13 @@ it.each(["existing", "created"] as const)("keeps the exact project delivery afte
     conversation: { origin, state: "bound",
       ref: { kind: "local_thread", threadId: row.thread_id, incarnation: captureThreadIncarnation(row) } }
   } as BotWorkItem
-  const retainInputFile = vi.fn((_bot: string, attachment: FileAttachment, _path: string, _workId: string) =>
+  const retainInputFile = vi.fn<LocalBotHost["retainInputFile"]>((_bot, attachment) =>
     ({ ...attachment, botInputId: "input-id" }))
+  const retainImageSelection: LocalBotHost["retainImageSelection"] = (botId, _groupId, workId, inputs) =>
+    inputs.map(({ attachment, path }) => retainInputFile(botId, attachment, path, workId))
   const host = {
     getWork: () => work, getBot: () => ({ id: "bot", archived: false }),
-    initializeWorkThread: vi.fn(), retainInputFile, desktopDeliveryWorks: () => [work]
+    initializeWorkThread: vi.fn(), retainInputFile, retainImageSelection, desktopDeliveryWorks: () => [work]
   } as unknown as LocalBotHost
   const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
   registerBotFileHandlers({

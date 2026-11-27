@@ -70,6 +70,21 @@ describe("new Bot chat attachment handoff", () => {
     ).rejects.toThrow("收件人已切换")
   })
 
+  it("allows a visual selection when existing attachments leave no text budget", async () => {
+    const file = new File(["photo"], "photo.png")
+    const existing = [{ ...retained("existing.txt"), content: "x".repeat(24_000) }]
+    const image = { ...retained(file.name), content: "", mimeType: "image/png" }
+    const attachFileBytes = vi.fn().mockResolvedValue([image])
+    const client = { hostId: "local", attachFileBytes } as unknown as BotClient
+    const transfer = new BotDraftFileTransfer()
+    await expect(transfer.retain(client, "a", "group", [file], existing, () => true))
+      .resolves.toEqual([image])
+    expect(attachFileBytes).toHaveBeenCalledWith("a",
+      [{ fileName: file.name, bytes: expect.any(ArrayBuffer) }], 0, "group")
+    await expect(transfer.retain(client, "a", "group", [new File(["text"], "note.txt")], existing, () => true))
+      .rejects.toThrow("正文字数已达上限")
+  })
+
   it("shares retained files only within the same group and respects existing draft text budgets", async () => {
     const file = new File(["42"], "a.txt")
     const attachFileBytes = vi.fn().mockResolvedValue([retained("a.txt")])

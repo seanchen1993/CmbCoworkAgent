@@ -35,6 +35,7 @@ import {
   summaryRetryByteBudget
 } from "./context-compaction-recovery"
 import { BOT_PREPARED_USER_REQUEST_KEY } from "./agent-run-service"
+import { isDesktopChatImageScope } from "./chat-image-middleware"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -49,6 +50,7 @@ export interface TruncateArgsSettings {
 }
 
 export interface CmbSummarizationMiddlewareOptions {
+  chatImageMessageScope?: import("./chat-image-middleware").ChatImageMessageScope
   model: string | BaseChatModel | BaseLanguageModel
   /**
    * Optional non-thinking model used only after a summary response contains no
@@ -1343,6 +1345,27 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     return findSafeCutoffPoint(messages, rawCutoff)
   }
 
+  function outboundImageCount(message: BaseMessage | undefined): number {
+    const scope = options.chatImageMessageScope
+    if (!scope || !message) return 0
+    const bot = message.additional_kwargs?.cmb_chat_images_source === "bot"
+    if (isDesktopChatImageScope(scope) ? bot : !bot || !scope.messageId || message.id !== scope.messageId) return 0
+    const images = message.additional_kwargs?.cmb_chat_images
+    return Array.isArray(images) ? images.length : 0
+  }
+
+  function imageBudgetCutoff(messages: BaseMessage[]): number {
+    let count = 0
+    let nextUser = messages.length
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (!isRealUserMessage(messages[index])) continue
+      count += outboundImageCount(messages[index])
+      if (count > 3) return nextUser
+      nextUser = index
+    }
+    return 0
+  }
+
   function countTotalTokens(
     messages: BaseMessage[],
     systemMessage?: SystemMessage | unknown,
@@ -1356,7 +1379,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       tools && Array.isArray(tools) && tools.length > 0
         ? (tools as Array<Record<string, unknown>>)
         : null
-    return countTokensApproximately(countedMessages, toolsArray)
+    // Reserve context for normalized pixels before the final request materializes them.
+    const imageTokens = messages.reduce((sum, message) => sum + outboundImageCount(message) * 4096, 0)
+    return countTokensApproximately(countedMessages, toolsArray) + imageTokens
   }
 
   function reportedUsageTokens(message: AIMessage): { total: number; input: number | null } | null {
@@ -2129,7 +2154,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     const summaryAttemptBudget: SummaryAttemptBudget = {
       used: 0, limit: MAX_SUMMARY_MODEL_ATTEMPTS, diagnostics
     }
-    let cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
+    let cutoffIndex = Math.max(determineCutoffIndex(truncatedMessages, maxInputTokens),
+      imageBudgetCutoff(truncatedMessages))
     // DeepAgents Python refuses token-based compaction when it cannot preserve
     // any message. CmbCowork intentionally still supports summarizing one
     // oversized raw user/tool message, but a chained cutoff of 1 is different:
@@ -2257,6 +2283,13 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       })
     }
 
+    const latestUserIndex = truncatedMessages.map(isRealUserMessage).lastIndexOf(true)
+    const currentHasImages = outboundImageCount(truncatedMessages[latestUserIndex]) > 0
+    if (currentHasImages && latestUserIndex < cutoffIndex) {
+      if (noProgress || latestUserIndex === 0) throw new Error("当前图片轮次超出模型上下文，请减少图片后重试")
+      cutoffIndex = latestUserIndex
+    }
+
     const messagesToSummarize = truncatedMessages.slice(0, cutoffIndex)
     const preservedMessages = truncatedMessages.slice(cutoffIndex)
     const historyMessagesToSummarize = historySourceMessages.slice(0, cutoffIndex)
@@ -2346,6 +2379,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       )
     }
 
+    if (needsWholeConversationRetry && currentHasImages) {
+      throw new Error("当前图片轮次超出模型上下文，请减少图片后重试")
+    }
     if (needsWholeConversationRetry) {
       // Keep the active request available even when tool results follow it
       // and the byte fitter keeps only the edges of the transcript.
@@ -2531,7 +2567,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens, event)
 
       let rejectedRequest: { error: unknown } | undefined
-      if (!shouldSummarize(truncatedMessages, triggerTokens.tokens, maxInputTokens)) {
+      if (!imageBudgetCutoff(truncatedMessages) &&
+        !shouldSummarize(truncatedMessages, triggerTokens.tokens, maxInputTokens)) {
         try {
           return await handler({ ...request, messages: truncatedMessages })
         } catch (error) {

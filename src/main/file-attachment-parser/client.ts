@@ -1,8 +1,8 @@
 import type { Worker } from "node:worker_threads"
-import type { ParsedAttachment } from "../file-parser"
+import type { ParsedDocument } from "../file-parser"
 import {
   FILE_ATTACHMENT_PARSE_CANCELLED,
-  FILE_ATTACHMENT_PARSE_MAX_RESPONSE_BYTES,
+  isBoundedParseResponse,
   FILE_ATTACHMENT_PARSE_TIMEOUT,
   FILE_ATTACHMENT_PARSE_TIMEOUT_MS,
   type FileAttachmentParserSource,
@@ -12,7 +12,7 @@ import {
 type WorkerFactory = () => Promise<Worker>
 
 interface PendingRequest {
-  resolve: (attachment: ParsedAttachment) => void
+  resolve: (attachment: ParsedDocument) => void
   reject: (error: Error) => void
   cancellation: Int32Array
   latestKey: string
@@ -65,11 +65,7 @@ export class FileAttachmentParserClient {
       pending.reject(error)
       return
     }
-    if (
-      response.attachment.content.length > 32_000 ||
-      Buffer.byteLength(JSON.stringify(response.attachment), "utf8") >
-        FILE_ATTACHMENT_PARSE_MAX_RESPONSE_BYTES
-    ) {
+    if (!isBoundedParseResponse(response.attachment)) {
       pending.reject(new Error("Parsed attachment response exceeds the IPC budget"))
       return
     }
@@ -119,8 +115,9 @@ export class FileAttachmentParserClient {
   async parse(
     source: FileAttachmentParserSource,
     maxLength: number | undefined,
-    latestKey: string
-  ): Promise<ParsedAttachment> {
+    latestKey: string,
+    includeImageBytes = false
+  ): Promise<ParsedDocument> {
     if (this.closing) throw cancelledError("File attachment parser is closing")
     const requestId = this.nextRequestId++
     this.cancelLatest(latestKey)
@@ -156,6 +153,7 @@ export class FileAttachmentParserClient {
         requestId,
         source,
         maxLength,
+        includeImageBytes,
         cancellationBuffer
       }
       try {
@@ -196,15 +194,19 @@ export class FileAttachmentParserClient {
   }
 }
 
-let defaultClient: FileAttachmentParserClient | null = null
+const clients = new Map<"upload" | "preview", FileAttachmentParserClient>()
 
-export function getFileAttachmentParserClient(): FileAttachmentParserClient {
-  if (!defaultClient) defaultClient = new FileAttachmentParserClient()
-  return defaultClient
+export function getFileAttachmentParserClient(purpose: "upload" | "preview" = "upload"): FileAttachmentParserClient {
+  let client = clients.get(purpose)
+  if (!client) {
+    client = new FileAttachmentParserClient()
+    clients.set(purpose, client)
+  }
+  return client
 }
 
 export async function closeFileAttachmentParserWorker(): Promise<void> {
-  const client = defaultClient
-  defaultClient = null
-  await client?.close()
+  const active = [...clients.values()]
+  clients.clear()
+  await Promise.all(active.map(client => client.close()))
 }

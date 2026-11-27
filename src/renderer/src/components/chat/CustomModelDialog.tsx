@@ -44,6 +44,7 @@ interface CustomConfig {
   temperatureInput: string
   topPInput: string
   topKInput: string
+  imageInput: boolean
   interleavedThinking: boolean
   enableThinking: boolean
   enableThinkingEffort: boolean
@@ -83,6 +84,7 @@ interface CustomModelItem {
   temperature: number
   topP: number
   topK: number
+  inputModalities?: ("text" | "image")[]
   interleavedThinking?: boolean
   enableThinking?: boolean
   enableThinkingEffort?: boolean
@@ -171,6 +173,7 @@ function emptyConfig(limits: TokenLimits): CustomConfig {
     temperatureInput: String(limits.defaultTemperature),
     topPInput: String(limits.defaultTopP),
     topKInput: String(limits.defaultTopK),
+    imageInput: false,
     interleavedThinking: false,
     enableThinking: false,
     enableThinkingEffort: false,
@@ -196,6 +199,7 @@ function configFromItem(item: CustomModelItem, limits: TokenLimits): CustomConfi
     temperatureInput: String(item.temperature ?? limits.defaultTemperature),
     topPInput: String(item.topP ?? limits.defaultTopP),
     topKInput: String(item.topK ?? limits.defaultTopK),
+    imageInput: item.inputModalities?.includes("image") === true,
     interleavedThinking:
       defaultInterleavedThinkingForModel(item.model) && (item.interleavedThinking ?? true),
     enableThinking: item.enableThinking === true,
@@ -600,6 +604,7 @@ export function CustomModelDialog({
       } else {
         const result = await window.api.models.upsertCustomConfig({
           id: config.id,
+          inputModalities: config.imageInput ? ["text", "image"] : ["text"],
           name: config.name.trim(),
           baseUrl: config.baseUrl.trim(),
           model: config.model.trim(),
@@ -961,6 +966,14 @@ export function CustomModelDialog({
                   )}
                 </div>
               </div>
+
+              {config.source === "custom" && (
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={config.imageInput}
+                    onChange={event => setConfig({ ...config, imageInput: event.target.checked })} />
+                  此端点支持图片输入
+                </label>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">

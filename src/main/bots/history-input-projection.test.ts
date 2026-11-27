@@ -8,7 +8,7 @@ import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
 import { BOT_FORK_DELIVERY_BOUNDARY, botHistoryHidesTitle, botHistoryInputProjection, botHistoricalMessageReader,
-  botLegacyHistoryRequests, decorateBotHistoryPage, deleteBotThreadHistory, protectedBotHistoryTitle,
+  botLegacyHistoryRequests, historicalMessageImageInputs, decorateBotHistoryPage, deleteBotThreadHistory, protectedBotHistoryTitle,
   setBotHistoryInputSource } from "./history-input-projection"
 import { formatBotMessageReply } from "../../shared/bots/message-reply"
 import type { BotMessageReply } from "../../shared/bots/contracts"
@@ -119,6 +119,50 @@ it("reads exact verified reply origins before a native task is first opened", ()
     expect(store.historicalMessageOrigins(work.threadId, captureThreadIncarnation(row), [task.requestId], true)).toEqual([])
     expect(store.historicalMessageOrigins(work.threadId, captureThreadIncarnation(row), [task.requestId], true,
       { ...row, metadata: row.metadata.replace(work.id, "different-work") })).toEqual([])
+  } finally { db.close() }
+})
+
+it("keeps exact sent image inputs in native history across detachment without forwarding file authority", async () => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  try {
+    const store = new BotStore(db)
+    const bot = store.create({ name: "Reader", instructions: "", color: "#123456", modelRef: null })
+    const row = { created_at: 1, metadata: '{"cmb_thread_incarnation":"original"}' }
+    const ref = { kind: "local_thread" as const, threadId: "image-native", incarnation: captureThreadIncarnation(row) }
+    const work = store.conversations.prepare({ botId: bot.id, operationId: "image-link", conversation: ref,
+      title: "Native images", goal: "Continue" })
+    store.conversations.bound(bot.id, work.id, ref)
+    const file = store.retainInputFile(bot.id, { filename: "chart.png", filePath: "", content: "",
+      size: 3, mimeType: "image/png", truncated: false }, "/retained/chart.png", work.id)
+    const { attachmentModelBlocks } = buildAttachmentMessageParts([file], true)
+    const task = store.enqueue({ botId: bot.id, workId: work.id, requestId: "sent", message: attachmentModelBlocks,
+      inputFileIds: [file.botInputId!] })
+    store.transition(task.id, "running")
+    store.acceptDesktopImageInput(task.id)
+    store.settle(task.id, "completed", null)
+    setBotHistoryInputSource({ works: id => store.desktopDeliveryWorks(id), inputs: () => new Map(),
+      origins: (id, incarnation, ids, nativeRow) => store.historicalMessageOrigins(id, incarnation, ids, true, nativeRow),
+      imageInput: (botId, workId, message, input) => store.desktopMessageImageInput(botId, input, message, workId) })
+    const page = { messages: [{ id: "sent", role: "user", content: "Read", created_at: new Date() }] } as
+      { messages: import("../types").Message[] }
+    const check = async () => {
+      const decorated = await decorateBotHistoryPage(ref.threadId, page, () => row)
+      expect(decorated.messages[0].botHistoryInputOrigin).toEqual({ hasInputImages: true })
+      expect(historicalMessageImageInputs(ref.threadId, row, "sent").map(input => input.id)).toEqual([file.botInputId])
+      expect(historicalMessageImageInputs(ref.threadId, row, "copied-text")).toEqual([])
+      expect(historicalMessageImageInputs("other-thread", row, "sent")).toEqual([])
+      expect(historicalMessageImageInputs(ref.threadId, { ...row, metadata: "{}" }, "sent")).toEqual([])
+    }
+    await check()
+    store.conversations.beginDetach(bot.id, work.id, store.getWork(bot.id, work.id).version)
+    expect(historicalMessageImageInputs(ref.threadId, row, "sent")).toEqual([])
+    store.conversations.detached(bot.id, work.id)
+    await check()
+    const next = store.conversations.prepare({ botId: bot.id, operationId: "image-relink", conversation: ref,
+      title: "Second work", goal: "Continue" })
+    store.conversations.bound(bot.id, next.id, ref)
+    expect(() => store.desktopMessageImageInput(bot.id, file.botInputId!, "sent", next.id)).toThrow()
+    await check()
   } finally { db.close() }
 })
 
@@ -582,8 +626,8 @@ try {
       originKey: "mentions"
     }
   ]
-  for (const { originKey, ...input } of cases) {
-    const task = store.enqueue({ ...input, botId: bot.id, workId: work.id })
+  for (const { requestId, message, mentions, inputFileIds } of cases) {
+    const task = store.enqueue({ requestId, message, mentions, inputFileIds, botId: bot.id, workId: work.id })
     store.transition(task.id, "cancelled")
   }
   now += 32 * 86_400_000
@@ -743,7 +787,7 @@ it("erases only personal-IM input forwarded into a deleted desktop work, preserv
   const errors: unknown[] = []
   const host = new LocalBotHost(store, {
     onAvailable: () => () => {},
-    acquire: (_bot, task) => ({ release() {}, async execute() {
+    acquire: (_bot, task) => ({ release: vi.fn(), async execute() {
       if (task.mockSource) host.mockExecution(task)
       if (!task.workId && task.origin.kind === "mock") {
         source = task

@@ -1,11 +1,13 @@
 import { createHash, randomUUID, type Hash } from "node:crypto"
-import { createWriteStream } from "node:fs"
-import { mkdir, lstat, realpath, rename, rm, writeFile, link } from "node:fs/promises"
+import { createWriteStream, type BigIntStats } from "node:fs"
+import { mkdir, lstat, realpath, rename, rm, rmdir, writeFile, link } from "node:fs/promises"
 import { basename, dirname, join, relative, sep } from "node:path"
 import { Transform, Writable } from "node:stream"
 import { pipeline } from "node:stream/promises"
+import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
 import { openStableFileHandle } from "../services/stable-file-handle"
 import { MAX_ATTACHMENT_FILE_BYTES } from "../../shared/file-attachment"
+import { normalizeGitWorkspacePathKey } from "../../shared/workspace-path"
 
 export const MAX_BOT_IMPORT_FILE_BYTES = 100 * 1024 * 1024
 
@@ -115,10 +117,49 @@ async function streamBotFileCopy(
   }
 }
 
-async function ensureBotDeliveryDirectory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true, mode: 0o700 })
-  if ((await lstat(path)).isSymbolicLink() || (await realpath(path)) !== path)
+type BotDeliverySnapshotBatch = {
+  workspace: string
+  remember: (path: string, identity: BigIntStats) => void
+}
+
+const deliverySnapshotLocks = new AsyncKeyedLock()
+
+/** Hold other publishers off this store until the new links have committed receipts. */
+export async function withBotDeliverySnapshotBatch<T>(
+  workspace: string, run: (batch: BotDeliverySnapshotBatch) => Promise<T>
+): Promise<T> {
+  const root = await realpath(workspace)
+  return deliverySnapshotLocks.withKey(normalizeGitWorkspacePathKey(root), async () => {
+    const created: Array<{ path: string; identity: BigIntStats }> = []
+    try {
+      return await run({ workspace: root, remember: (path, identity) => created.push({ path, identity }) })
+    } catch (error) {
+      for (const { path, identity } of created.reverse()) {
+        await removeUncommittedSnapshotEntry(path, identity).catch((cleanupError: NodeJS.ErrnoException) => {
+          if (cleanupError.code !== "ENOENT" && cleanupError.code !== "ENOTEMPTY")
+            console.warn("[Bots] Could not roll back attachment snapshot", cleanupError.code)
+        })
+      }
+      throw error
+    }
+  })
+}
+
+async function removeUncommittedSnapshotEntry(path: string, identity: BigIntStats): Promise<void> {
+  if (await realpath(dirname(path)) !== dirname(path)) return
+  const current = await lstat(path, { bigint: true })
+  if (current.dev !== identity.dev || current.ino !== identity.ino ||
+      (await realpath(path)) !== path) return
+  if (identity.isDirectory() && current.isDirectory()) await rmdir(path)
+  else if (identity.isFile() && current.isFile()) await rm(path, { force: true })
+}
+
+async function ensureBotDeliveryDirectory(path: string, batch?: BotDeliverySnapshotBatch): Promise<void> {
+  const created = await mkdir(path, { recursive: true, mode: 0o700 })
+  const identity = await lstat(path, { bigint: true })
+  if (!identity.isDirectory() || (await realpath(path)) !== path)
     throw new Error("附件目录不能是符号链接")
+  if (created) batch?.remember(path, identity)
 }
 
 async function linkBotDeliverySnapshot(
@@ -126,12 +167,16 @@ async function linkBotDeliverySnapshot(
   source: string,
   attachmentPath: string,
   digest: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  batch?: BotDeliverySnapshotBatch
 ): Promise<string> {
   signal.throwIfAborted()
+  const identity = batch && await lstat(source, { bigint: true })
+  if (identity && !identity.isFile()) throw new Error("待保留的附件版本无效")
   try {
     // Publish complete bytes without replacing a version already in use.
     await link(source, attachmentPath)
+    if (identity) batch?.remember(attachmentPath, identity)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
     const existing = await lstat(attachmentPath)
@@ -146,16 +191,47 @@ async function linkBotDeliverySnapshot(
 
 /** Promote a snapshot made in this attachment operation's private staging directory. */
 export async function publishStagedBotDeliveryFile(
-  workspace: string, staging: string, source: string, signal: AbortSignal
+  batch: BotDeliverySnapshotBatch, staging: string, source: string, signal: AbortSignal
 ): Promise<string> {
   const [directory, digest, name, ...tail] = relative(staging, source).split(sep)
   if (directory !== ".bot-deliveries" || !/^[a-f0-9]{64}$/.test(digest) || !name || tail.length)
     throw new Error("待保留的附件版本无效")
-  const destination = join(await realpath(workspace), directory)
-  await ensureBotDeliveryDirectory(destination)
+  const destination = join(batch.workspace, directory)
+  await ensureBotDeliveryDirectory(destination, batch)
   const contentDirectory = join(destination, digest)
-  await ensureBotDeliveryDirectory(contentDirectory)
-  return linkBotDeliverySnapshot(workspace, source, join(contentDirectory, name), digest, signal)
+  await ensureBotDeliveryDirectory(contentDirectory, batch)
+  return linkBotDeliverySnapshot(batch.workspace, source, join(contentDirectory, name), digest, signal, batch)
+}
+
+/** Publish only this batch's separately editable workspace copy. */
+export async function publishStagedBotImport(workspace: string, staging: string, source: string) {
+  const [directory, id, name, ...tail] = relative(staging, source).split(sep)
+  if (directory !== "shared" || !/^[a-f0-9-]{36}$/.test(id) || !name || tail.length)
+    throw new Error("待导入的附件路径无效")
+  const root = await realpath(workspace)
+  const requestedShared = join(root, directory)
+  await mkdir(requestedShared, { recursive: true })
+  const shared = await realpath(requestedShared)
+  if ((await lstat(requestedShared)).isSymbolicLink() || dirname(shared) !== root)
+    throw new Error("资料目录不能是符号链接")
+  const destination = join(shared, id)
+  const path = join(destination, name)
+  const original = await lstat(source)
+  if (!original.isFile() || original.isSymbolicLink()) throw new Error("待导入的附件已变更")
+  await mkdir(destination)
+  try {
+    await rename(source, path)
+  } catch (error) {
+    await rmdir(destination).catch(() => undefined)
+    throw error
+  }
+  return async () => {
+    if (await realpath(destination) !== destination) return
+    const published = await lstat(path)
+    if (original.dev !== published.dev || original.ino !== published.ino) return
+    await rm(path, { force: true })
+    await rmdir(destination)
+  }
 }
 
 /** A public attachment keeps its sent bytes; the editable workspace file stays separate. */
@@ -168,7 +244,17 @@ export async function snapshotBotDeliveryFile(
   expected?: { digest: string; size: number }
 ): Promise<{ attachmentPath: string; size: number }> {
   signal.throwIfAborted()
-  const directory = join(await realpath(workspace), ".bot-deliveries")
+  const root = await realpath(workspace)
+  return deliverySnapshotLocks.withKey(normalizeGitWorkspacePathKey(root), () =>
+    snapshotBotDeliveryFileLocked(root, source, signal, sourceWorkspace, byteLimit, expected))
+}
+
+async function snapshotBotDeliveryFileLocked(
+  workspace: string, source: string, signal: AbortSignal, sourceWorkspace: string, byteLimit: number,
+  expected?: { digest: string; size: number }
+): Promise<{ attachmentPath: string; size: number }> {
+  signal.throwIfAborted()
+  const directory = join(workspace, ".bot-deliveries")
   await ensureBotDeliveryDirectory(directory)
   if (expected) {
     if (!/^[a-f0-9]{64}$/.test(expected.digest) || expected.size > byteLimit)
@@ -256,9 +342,10 @@ export async function botImportDestination(
   const directory = join(await realpath(workspace), "shared")
   await mkdir(directory, { recursive: true })
   if ((await lstat(directory)).isSymbolicLink()) throw new Error("资料目录不能是符号链接")
+  const safeName = Array.from(basename(sourceName), character =>
+    character.charCodeAt(0) < 32 ? "_" : character).join("")
   let name =
-    basename(sourceName)
-      .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    safeName.replace(/[<>:"/\\|?*]/g, "_")
       .replace(/[. ]+$/, "")
       .slice(-150) || "file"
   // A per-import directory keeps duplicate uploads distinct while preserving the

@@ -174,7 +174,7 @@ createRoot(document.getElementById("root")).render(<App />)
       name: "stub-right-panel-data",
       setup(builder) {
         builder.onResolve({
-          filter: /^(?:\.\.\/chat\/ChatContainer|@\/(?:lib\/(?:btw-chat|store|thread-context)|components\/(?:tabs\/FileViewer|panels\/(?:GitPanelView|SubagentPanel|SystemConstraintsPanel)|browser\/BrowserPanel|customize\/(?:LspPanel|ProjectPluginDevelopmentGuide))))$/
+          filter: /^(?:\.\.\/chat\/ChatContainer|@\/(?:lib\/(?:btw-chat|btw-composer-focus|store|thread-context)|components\/(?:tabs\/FileViewer|panels\/(?:GitPanelView|SubagentPanel|SystemConstraintsPanel)|browser\/BrowserPanel|customize\/(?:LspPanel|ProjectPluginDevelopmentGuide))))$/
         }, ({ path }) => ({ path, namespace: "right-panel-data" }))
         builder.onLoad({ filter: /.*/, namespace: "right-panel-data" }, ({ path }) => ({
           contents: path.endsWith("/btw-chat") ? `

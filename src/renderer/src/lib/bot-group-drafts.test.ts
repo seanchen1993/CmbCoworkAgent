@@ -34,6 +34,23 @@ describe("durable group drafts", () => {
     size: 12,
     truncated: false
   }
+  it("restores the frozen ordered group image receipts and targets after ACK loss", async () => {
+    const sendGroup = vi.fn().mockRejectedValueOnce(new Error("ACK lost")).mockResolvedValue(undefined)
+    const client = { hostId: "local", sendGroup } as unknown as BotClient
+    const images = [1, 2].map(i => ({
+      ...file, filename: "same.png", filePath: "", mimeType: "image/png",
+      botInputId: `input-00000000-0000-0000-0000-00000000000${i}`
+    }))
+    useBotGroupDrafts.getState().edit(key, { text: "compare", attachments: images, targets: ["a"] })
+    await sendGroupDraft(client, group)
+    const sent = sendGroup.mock.calls[0][0]
+    expect(sent).toMatchObject({ inputImageIds: images.map(image => image.botInputId), targetBotIds: ["a"] })
+    useBotGroupDrafts.setState({ drafts: {} })
+    useBotGroupDrafts.getState().restore(key)
+    await sendGroupDraft(client, group)
+    expect(sendGroup.mock.calls[1][0]).toEqual(sent)
+  })
+
   it("restores reply metadata and retries the same quote without dropping text, files or recipients", async () => {
     const sendGroup = vi
       .fn()

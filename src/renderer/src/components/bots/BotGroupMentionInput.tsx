@@ -29,6 +29,7 @@ import {
   groupEditorExtensions,
   groupEditorOffset,
   groupEditorPosition,
+  pasteBotEditorFiles,
   privateEditorContent,
   privateEditorDraft
 } from "@/lib/bot-group-editor"
@@ -125,17 +126,7 @@ function BotMentionInput<M extends Mention>({
         "aria-multiline": "true"
       },
       handleKeyDown: (view, event) => actions.current.key(view, event),
-      handlePaste: (_view, event) => {
-        const files = Array.from(event.clipboardData?.files ?? [])
-        if (files.length) {
-          event.preventDefault()
-          current.current.onPasteFiles(files)
-          return true
-        }
-        // Use the editor's paragraph/selection/clipboard semantics. The mention
-        // schema rejects HTML imports, so pasted labels cannot create recipients.
-        return false
-      },
+      handlePaste: (view, event) => pasteBotEditorFiles(view, event, current.current.onPasteFiles),
       handleDrop: (_view, event) => {
         // File drops bubble to the existing composer attachment handler.
         return Boolean(event.dataTransfer?.files.length)

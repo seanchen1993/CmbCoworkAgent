@@ -1681,8 +1681,15 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   assertSourceOrder(
     cancelBody,
     "flushPendingStreamTranscriptMessages(threadId, activeRunToken)",
-    "controller.abort()",
+    "stopDesktopRun(controller)",
     "explicit cancel also persists already-rendered chunks before aborting"
+  )
+  const stopStart = agentIpc.indexOf("function stopDesktopRun(")
+  assert(stopStart >= 0, "the desktop stop helper exists")
+  assertIncludes(
+    agentIpc.slice(stopStart, stopStart + 240),
+    "controller.abort()",
+    "the desktop stop helper aborts the physical run"
   )
 }
 
@@ -1879,16 +1886,15 @@ function testDrainGatedOnGoalNotActive(): void {
 }
 
 function testEnqueueBranchParksDraft(): void {
-  assertMatches(
-    chat,
-    /if \(willEnqueueWhileBusy \|\| queueRestoredDraft\) \{[\s\S]{0,1000}addQueuedMessage\(composedDraft\)/,
-    "busy branch parks the composed draft"
-  )
-  assertMatches(
-    chat,
-    /if \(queueRestoredDraft\) \{[\s\S]{0,500}if \(storageError\)[\s\S]{0,500}clearClaimedDraft\(\)/,
-    "a recovered Bot draft stays in the composer until the ordinary queue is durable"
-  )
+  const start = chat.indexOf("if (willEnqueueWhileBusy || queueRestoredDraft || composedDraft.chatImages?.length)")
+  assert(start >= 0, "busy, restored and image sends enter the parking branch")
+  const branch = chat.slice(start, chat.indexOf("setQueueAutoDrainSuppressed(false)", start))
+  assertSourceOrder(branch, "addQueuedMessage(composedDraft)", "clearSubmittedReply()",
+    "busy drafts enter the queue before the submitted reply is cleared")
+  assertSourceOrder(branch, "const error = persist()", "if (error)",
+    "a recovered draft checks the result of durable storage")
+  assertSourceOrder(branch, "if (error) { deleteQueuedMessage(composedDraft.id); setError(error); return }",
+    "clearClaimedDraft()", "a failed write keeps the recovered draft in the composer")
 }
 
 // ── Regression coverage for the codex-review fixes ──────────────────────────────
@@ -1940,8 +1946,8 @@ function testCancelSuppressesAutoDrain(): void {
   assertOccurrences(
     chat,
     "setQueueAutoDrainSuppressed(false)",
-    5,
-    "suppression clears for live enqueue/send, both guide fallbacks and explicit parked-draft resume"
+    6,
+    "suppression clears for enqueue/send, guide fallbacks, explicit resume and editing a rejected image"
   )
 }
 
@@ -1986,7 +1992,7 @@ function testQueuedSendHydratesAgentMode(): void {
   assert(submitQueuedMessageStart >= 0, "submitQueuedMessage not found")
   const submitQueuedMessageBody = chat.slice(
     submitQueuedMessageStart,
-    submitQueuedMessageStart + 7000
+    chat.indexOf("\n  )", submitQueuedMessageStart)
   )
   assertIncludes(
     submitQueuedMessageBody,
@@ -2005,16 +2011,16 @@ function testQueuedSendRevalidatesModelAndWorkspace(): void {
   assert(submitQueuedMessageStart >= 0, "submitQueuedMessage not found")
   const submitQueuedMessageBody = chat.slice(
     submitQueuedMessageStart,
-    submitQueuedMessageStart + 8000
+    chat.indexOf("\n  )", submitQueuedMessageStart)
   )
   assertIncludes(
     submitQueuedMessageBody,
-    "const selectedModel = queuedModel?.available",
+    ": queuedModel?.available ? queuedModel : currentSelectedModel",
     "queued send prefers its saved model only while it remains available"
   )
   assertIncludes(
     submitQueuedMessageBody,
-    ": currentSelectedModel?.available",
+    "const currentSelectedModel = models.find(model => model.id === currentModel && model.available)",
     "queued send falls back to the thread's current available model"
   )
   assertIncludes(
@@ -2044,7 +2050,7 @@ function testRetryReusesStableMessageId(): void {
   // duplicating it.
   assertIncludes(
     chat,
-    "appendVisibleUserMessageWithTime(displayContent, {\n        id: queued.id\n      })",
+    "appendVisibleUserMessageWithTime(displayContent, { id: queued.id })",
     "queued-send reuses queued.id for the optimistic bubble across retries"
   )
 }
@@ -2533,19 +2539,19 @@ function testTransportSupportsEveryAgentMode(): void {
 function testPreparedLiveSubmitAcceptsTheNextEnter(): void {
   const claimStart = chat.indexOf("// Claim the current composer payload before @file IO")
   assert(claimStart >= 0, "composer payload claim not found")
-  const claimBody = chat.slice(claimStart, claimStart + 1800)
-  assertSourceOrder(
-    claimBody,
-    'setInput("")',
-    "liveSubmitPreparingThreads.delete(threadId)",
-    "await resolveAtFileAttachments({",
-    "new input becomes queueable as soon as the original composer payload is claimed"
-  )
+  const readFiles = "await resolveAtFileAttachments({"
+  const end = chat.indexOf(readFiles, claimStart)
+  assert(end >= 0, "attachment resolution follows the composer claim")
+  const claimBody = chat.slice(claimStart, end + readFiles.length)
+  assertSourceOrder(claimBody, 'setInput("")', "liveSubmitPreparingThreads.delete(threadId)",
+    "a claimed plain-text draft releases live preparation")
+  assertSourceOrder(claimBody, "liveSubmitPreparingThreads.delete(threadId)", readFiles,
+    "a new plain-text input becomes queueable before attachment IO")
 }
 
 function testOrdinaryDeleteDoesNotCreateWithdrawalTombstone(): void {
   const deleteStart = chat.indexOf("const handleDeleteQueuedMessage = useCallback")
-  const deleteBody = chat.slice(deleteStart, deleteStart + 1400)
+  const deleteBody = chat.slice(deleteStart, chat.indexOf("\n  )", deleteStart))
   assertIncludes(
     deleteBody,
     "message.handoffRequestedAt || guidingQueuedMessageIdsRef.current.has(message.id)",
@@ -2706,8 +2712,9 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
     "the separate pump-only lock was removed; submitInFlightRef is the single source of truth"
   )
   const pumpEffectStart = chat.indexOf("if (queueAutoDrainSuppressed) return")
-  const pumpEffectEnd = chat.indexOf("\n  ])", pumpEffectStart)
-  assert(pumpEffectStart >= 0 && pumpEffectEnd > pumpEffectStart, "pump effect not found")
+  assert(pumpEffectStart >= 0, "pump effect not found")
+  const pumpEffectEnd = chat.indexOf("const reconcileBotDrafts", pumpEffectStart)
+  assert(pumpEffectEnd > pumpEffectStart, "queue pump effect has a complete boundary")
   const pumpEffectBody = chat.slice(pumpEffectStart, pumpEffectEnd)
   assertIncludes(
     pumpEffectBody,
@@ -2783,7 +2790,7 @@ function testSteerPathsGuardCoordinatorMarker(): void {
   assertOccurrences(
     chat,
     "guardCoordinatorPlainText(getQueuedDisplayContent(",
-    6,
+    7,
     "all remaining displayContent construction sites guard the coordinator marker; durable reconciliation uses DB content"
   )
 }
@@ -2839,7 +2846,7 @@ function testGuidedEditReconcilesBeforeDowngrading(): void {
 
 function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   const submitStart = chat.indexOf("const submitQueuedMessage = useCallback")
-  const submitBody = chat.slice(submitStart, submitStart + 9000)
+  const submitBody = chat.slice(submitStart, chat.indexOf("\n  )", submitStart))
   assertSourceOrder(
     submitBody,
     "await loadResolvedAgentMode()",

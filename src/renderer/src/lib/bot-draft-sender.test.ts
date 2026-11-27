@@ -8,7 +8,9 @@ import { getQueuedBotMessageInput, getQueuedModelContent } from "./queued-messag
 import { canonicalBotMessageInput } from "../../../shared/bots/message-mentions"
 import {
   BOT_REQUEST_RECEIPT_RETENTION_MS,
+  type BotClient,
   type BotMessageMention,
+  type BotRequestReceipt,
   type BotTask
 } from "../../../shared/bots/contracts"
 import type { QueuedMessage } from "../types"
@@ -146,6 +148,141 @@ function fixture() {
 }
 
 describe("Bot sends through the original durable draft queue", () => {
+  it("retains an exact host-queued visual request until it is admitted or explicitly withdrawn", async () => {
+    const f = fixture()
+    let state: BotRequestReceipt["state"] = "queued"
+    const snapshotId = "input-85a20833-5f39-4c99-bace-77f20d5d2955"
+    f.patch({ botInputFileIds: [snapshotId] })
+    const send = vi.fn<BotClient["send"]>(async input => ({
+      ...input, id: "task", state: "queued",
+      origin: { kind: "user", imageAdmission: "pending", inputFileIds: input.inputFileIds }
+    }) as BotTask)
+    const requestReceipts = vi.fn<BotClient["requestReceipts"]>(async (_botId, checks) =>
+      checks.map(({ requestId }) => ({ requestId, state })))
+    const cancelQueuedImageInput = vi.fn(async () => false)
+    const sender = () => new BotDraftSender({ send, requestReceipts, cancelQueuedImageInput },
+      "bot-1", f.queue, f.report, f.changed, () => 2000)
+    await sender().send(f.draft())
+    expect(f.draft().handoffRequestedAt).toBeInstanceOf(Date)
+    expect(f.draft().botInputFileIds).toEqual([snapshotId])
+
+    f.reload()
+    const restored = sender()
+    await restored.reconcile([f.draft()])
+    expect(restored.visualAdmissions.get(f.draft().id)).toBe("queued")
+    await restored.send(f.draft())
+    expect(send).toHaveBeenCalledOnce()
+    await restored.discard(f.draft())
+    expect(f.draft().id).toBe("request-1")
+    expect(f.report).toHaveBeenLastCalledWith(expect.stringContaining("已离开队列"))
+    expect(cancelQueuedImageInput).toHaveBeenCalledWith("bot-1", {
+      requestId: "request-1", messageHash: expect.stringMatching(/^[a-f0-9]{64}$/)
+    }, undefined)
+
+    state = "withdrawn"
+    cancelQueuedImageInput.mockResolvedValue(true)
+    await restored.discard(f.draft())
+    expect(f.draft()).toBeUndefined()
+    expect(restored.visualAdmissions.size).toBe(0)
+  })
+
+  it.each(["admit", "delete immediately after reload"] as const)(
+    "settles a visual skill draft in the originating chat when the destination work will %s",
+    async action => {
+      const f = fixture()
+      const botId = "bot-1", workId = "existing-work"
+      const skill = { name: "review", path: "/skills/review/SKILL.md" }
+      f.patch({
+        botExplicitSkill: skill, botSkillTarget: { kind: "work", workId },
+        botInputFileIds: ["input-85a20833-5f39-4c99-bace-77f20d5d2955"]
+      })
+      const send = vi.fn<BotClient["send"]>(async input => ({
+        ...input, id: "task", workId, state: "queued",
+        origin: { kind: "user", imageAdmission: "pending", inputFileIds: input.inputFileIds, explicitSkill: skill }
+      }) as BotTask)
+      let state: BotRequestReceipt["state"] = "queued"
+      const requestReceipts = vi.fn<BotClient["requestReceipts"]>(async (bot, checks, scope) => {
+        expect([bot, scope]).toEqual([botId, workId])
+        return checks.map(({ requestId }) => ({ requestId, state }))
+      })
+      const cancelQueuedImageInput = vi.fn<NonNullable<BotClient["cancelQueuedImageInput"]>>(async () => true)
+      const client = { send, requestReceipts, cancelQueuedImageInput }
+      const route = new BotDraftSender(client, botId, f.queue, f.report, f.changed,
+        () => 2000, { botId, workId }, "main-thread")
+      await route.send(f.draft())
+      expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        explicitSkill: skill, skillDraftFromMain: true, skillDraftSourceThreadId: "main-thread"
+      }))
+      expect(f.draft().botHandoffTarget).toEqual({ botId, workId })
+      f.reload()
+      const source = new BotDraftSender(client, botId, f.queue, f.report, f.changed, () => 2000)
+      const requestId = f.draft().id
+      if (action === "admit") {
+        await source.reconcile([f.draft()])
+        expect(source.visualAdmissions.get(requestId)).toBe("queued")
+        state = "accepted"
+        await source.reconcile([f.draft()])
+        expect(cancelQueuedImageInput).not.toHaveBeenCalled()
+      } else {
+        expect(source.visualAdmissions.size).toBe(0)
+        await source.discard(f.draft())
+        const check = { requestId, messageHash: expect.stringMatching(/^[a-f0-9]{64}$/) }
+        expect(requestReceipts).toHaveBeenCalledExactlyOnceWith(botId, [check], workId)
+        expect(cancelQueuedImageInput).toHaveBeenCalledExactlyOnceWith(botId, check, workId)
+      }
+      expect(f.draft()).toBeUndefined()
+      expect(source.visualAdmissions.size).toBe(0)
+      expect(send).toHaveBeenCalledOnce()
+    }
+  )
+
+  it("keeps a visual draft when immediately deleted after reload and main reports active admission", async () => {
+    const f = fixture()
+    f.patch({ handoffRequestedAt: new Date(1000), botInputFileIds: ["input-85a20833-5f39-4c99-bace-77f20d5d2955"] })
+    const requestReceipts = vi.fn<BotClient["requestReceipts"]>(async (_bot, checks) =>
+      checks.map(({ requestId }) => ({ requestId, state: "admitting" })))
+    const cancelQueuedImageInput = vi.fn(async () => false)
+    const sender = new BotDraftSender({ ...f.client, requestReceipts, cancelQueuedImageInput },
+      "bot-1", f.queue, f.report, f.changed, () => 2000)
+    await sender.discard(f.draft())
+    expect(f.draft()).toBeDefined()
+    expect(sender.visualAdmissions.get(f.draft().id)).toBe("admitting")
+    expect(cancelQueuedImageInput).not.toHaveBeenCalled()
+    expect(f.report).toHaveBeenLastCalledWith(expect.stringContaining("可停止当前运行"))
+  })
+
+  it("rechecks a visual receipt if admission changes during an older queued status read", async () => {
+    const f = fixture()
+    f.patch({ handoffRequestedAt: new Date(1500) })
+    let release!: (receipts: BotRequestReceipt[]) => void
+    const requestReceipts = vi.fn<BotClient["requestReceipts"]>()
+      .mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+      .mockResolvedValue([{ requestId: "request-1", state: "accepted" }])
+    const sender = new BotDraftSender({ ...f.client, requestReceipts }, "bot-1", f.queue, f.report, f.changed)
+    const reconciling = sender.reconcile([f.draft()])
+    await vi.waitFor(() => expect(requestReceipts).toHaveBeenCalledOnce())
+    const admitted = sender.reconcile([f.draft()])
+    release([{ requestId: "request-1", state: "queued" }])
+    await Promise.all([reconciling, admitted])
+    expect(requestReceipts).toHaveBeenCalledTimes(2)
+    expect(f.draft()).toBeUndefined()
+  })
+
+  it.each(["imageDelivery", "chatImages"] as const)("retains an ordinary %s record instead of replaying it as Bot text", async property => {
+    const f = fixture()
+    const sidecar = property === "imageDelivery"
+      ? { imageDelivery: { workspacePath: "/original", incarnation: "uuid:original", source: "" } }
+      : { chatImages: [{ id: "image", filename: "invoice.png", slot: 0 }] }
+    f.patch({ ...sidecar, handoffRequestedAt: new Date(1500) })
+    const draft = f.draft()
+    const sender = f.sender()
+    await sender.send(draft)
+    await sender.reconcile([draft])
+    expect(f.client.send).not.toHaveBeenCalled()
+    expect(f.client.requestReceipts).not.toHaveBeenCalled()
+    expect(f.draft()).toBe(draft)
+    expect(f.report).toHaveBeenLastCalledWith(expect.stringContaining("返回原会话"))
+  })
   it("clears a failed-send notice when transcript hydration confirms and removes the draft", async () => {
     const f = fixture(),
       sender = f.sender()
@@ -743,4 +880,20 @@ describe("Bot sends through the original durable draft queue", () => {
     expect(sender.sending.size).toBe(0)
     expect(f.changed).toHaveBeenCalledTimes(2)
   })
+})
+
+it("keeps a rejected image draft editable under a fresh request identity", async () => {
+  const f = fixture()
+  const before = f.draft()
+  const client = {
+    send: async () => { throw new Error("没有可用视觉模型") },
+    requestReceipts: async () => [{ requestId: before.id, state: "rejected" as const }]
+  }
+  const sender = new BotDraftSender(client, "bot-1", f.queue, f.report, f.changed)
+  await sender.send(before)
+  const after = f.draft()
+  expect(after.id).not.toBe(before.id)
+  expect(after.text).toBe(before.text)
+  expect(after.handoffRequestedAt).toBeUndefined()
+  expect(f.report).toHaveBeenCalledWith(expect.stringContaining("没有可用视觉模型"))
 })

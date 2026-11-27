@@ -99,6 +99,7 @@ export interface CompletedToolReplayObservation {
 
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
+  hasChatImages?: true
   historical_tool_replay_id?: string
   legacy_checkpoint_replay_of?: string
   provider_source_id?: string
@@ -260,6 +261,8 @@ export function mergeCheckpointAuthorityTranscriptMessage<
   const reasoning = base.reasoning || incoming.reasoning
   const merged = {
     ...base,
+    ...(base.role === "user" && incoming.role === "user" && base.id === incoming.id &&
+      incoming.hasChatImages ? { hasChatImages: true } : {}),
     ...(reasoning ? { reasoning } : {}),
     content: checkpointClearsToolCallContent
       ? base.content
@@ -641,6 +644,38 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
 }
 
+function* checkpointChatImageInputs(checkpoint: unknown) {
+  const channels = isRecord(checkpoint) ? checkpoint.channel_values : undefined
+  const event = isRecord(channels) ? channels._summarizationEvent : undefined
+  const cutoff = isRecord(event) && typeof event.cutoffIndex === "number" &&
+    Number.isSafeInteger(event.cutoffIndex) && event.cutoffIndex >= 0 ? event.cutoffIndex : 0
+  const messages = getCheckpointMessages(checkpoint)
+  for (let index = cutoff; index < messages.length; index++) {
+    const message = messages[index]
+    if (!isRecord(message) || getMessageRole(message) !== "user") continue
+    const metadata = getAdditionalKwargs(message)
+    const images = metadata?.cmb_chat_images
+    if (!Array.isArray(images) || !images.length) continue
+    const botInput = metadata?.cmb_chat_images_source === "bot"
+    yield { id: getMessageId(message, index), botInput }
+  }
+}
+
+export function checkpointHasChatImages(checkpoint: unknown, botMessageId?: string): boolean {
+  for (const input of checkpointChatImageInputs(checkpoint)) {
+    if (botMessageId ? input.botInput && input.id === botMessageId : !input.botInput) return true
+  }
+  return false
+}
+
+export function checkpointDesktopImageMessageIds(checkpoint: unknown): string[] {
+  const ids: string[] = []
+  for (const input of checkpointChatImageInputs(checkpoint)) {
+    if (!input.botInput && input.id) ids.push(input.id)
+  }
+  return ids
+}
+
 export interface CheckpointReplayTurns {
   hiddenAnchors: ReadonlySet<string>
   hiddenAssistants: ReadonlySet<string>
@@ -822,6 +857,9 @@ export function getForkReplayMessagePayload(value: unknown): unknown[] | undefin
       isRecord(call) ? [call.id, call.name, call.args, call.function] : call
     )
     return [role, content, calls, additional?.reasoning, additional?.function_call]
+  }
+  if (role === "user" && Array.isArray(additional?.cmb_chat_images) && additional.cmb_chat_images.length) {
+    return [role, content, additional.cmb_chat_images]
   }
   return [role, content]
 }

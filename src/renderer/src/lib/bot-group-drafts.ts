@@ -1,3 +1,4 @@
+import { botAttachmentIdentity } from "../../../shared/bots/input-files"
 import {
   rebaseGroupMentions,
   validGroupMentions,
@@ -7,7 +8,7 @@ import {
 import { botErrorMessage } from "./bot-error-message"
 import { create } from "zustand"
 import type { BotClient, BotGroup, SendBotGroupMessageInput } from "../../../shared/bots/contracts"
-import type { FileAttachment } from "../../../shared/file-attachment"
+import { attachmentFallbackText, type FileAttachment } from "../../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
 import { loadGroupDraft, saveGroupDraft, pruneSavedGroupDrafts } from "./bot-group-draft-storage"
 import { parseGroupMessage } from "../../../shared/bots/validation"
@@ -26,6 +27,7 @@ interface GroupDraft {
     id: string
     text: string
     targets: string
+    inputImageIds?: string[]
     mentions?: string
     replyToId?: string
     revision: number
@@ -150,6 +152,7 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
         requestId: request.id,
         text: request.text,
         targetBotIds: JSON.parse(request.targets),
+        ...(request.inputImageIds?.length ? { inputImageIds: request.inputImageIds } : {}),
         ...(request.replyToId ? { replyToId: request.replyToId } : {}),
         // Pre-upgrade requests omitted mention metadata; preserve that wire contract too.
         ...(request.mentions !== undefined ? { mentions: JSON.parse(request.mentions) } : {})
@@ -165,7 +168,7 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
     }
   } else {
     const text =
-      `${draft.text.trim() || (draft.attachments.length ? "请分析以下文件内容。" : "")}${buildAttachmentMessageParts(draft.attachments).attachmentModelBlocks}`.trim()
+      `${draft.text.trim() || attachmentFallbackText(draft.attachments)}${buildAttachmentMessageParts(draft.attachments).attachmentModelBlocks}`.trim()
     const mentions = validGroupMentions(draft.text, draft.mentions)
     const recipients = groupMessageRecipients(mentions, group.memberIds, {
       targets: draft.targets,
@@ -194,7 +197,9 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
       start: mention.start - leading,
       end: mention.end - leading
     }))
+    const inputImageIds = draft.attachments.flatMap(file => file.botInputId ? [file.botInputId] : [])
     request = {
+      ...(inputImageIds.length ? { inputImageIds } : {}),
       id: crypto.randomUUID(),
       text,
       targets: JSON.stringify(targetBotIds),
@@ -205,6 +210,7 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
     input = {
       groupId: group.id,
       requestId: request.id,
+      ...(inputImageIds.length ? { inputImageIds } : {}),
       text,
       targetBotIds,
       ...(request.replyToId ? { replyToId: request.replyToId } : {}),
@@ -241,7 +247,7 @@ export async function sendGroupDraft(client: BotClient, group: BotGroup): Promis
           attachments: error
             ? current.attachments
             : current.attachments.filter(
-                (file) => !draft.attachments.some((sent) => sent.filePath === file.filePath)
+                (file) => !draft.attachments.some(sent => botAttachmentIdentity(sent) === botAttachmentIdentity(file))
               ),
           request: error ? request : null
         })

@@ -3,6 +3,7 @@ import { BOT_BROWSER_PROMPT_PREFIX } from "../user-input-transport"
 
 /** Trusted desktop display metadata; never part of persisted or model input. */
 export type BotHistoryInputOrigin = {
+  hasInputImages?: true
   replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role">
   explicitSkill?: import("./skill-selection").BotSkillSelection
 }

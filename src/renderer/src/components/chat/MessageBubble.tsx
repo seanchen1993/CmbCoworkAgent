@@ -34,7 +34,8 @@ import {
   ChatFoldedToolCallsContext,
   ChatToolPresentationContext,
   ChatMessagePresentationContext,
-  ChatUserTextPresentationContext
+  ChatUserTextPresentationContext,
+  ChatUserImagePresentationContext
 } from "./chat-presentation-context"
 import { BotMessageActions } from "@/components/bots/BotMessageActions"
 import { BotDeliveredFiles } from "@/components/bots/BotDeliveredFile"
@@ -420,6 +421,7 @@ function MessageBubbleImpl({
   const foldedToolCalls = useContext(ChatFoldedToolCallsContext)
   const presentTool = useContext(ChatToolPresentationContext)
   const presentMessage = useContext(ChatMessagePresentationContext)
+  const presentUserImages = useContext(ChatUserImagePresentationContext)
   const presentUserText = useContext(ChatUserTextPresentationContext)
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -961,6 +963,7 @@ function MessageBubbleImpl({
                 : "bg-primary/10"
             )}
           >
+            {presentUserImages?.(message)}
             {staticReply && (
               <div className="bot-group-reply-preview" aria-label="原消息引用">
                 <Reply size={14} />

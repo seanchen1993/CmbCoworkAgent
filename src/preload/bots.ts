@@ -146,6 +146,10 @@ export const localBotsApi: BotClient = {
       groupId,
       workId
     ),
+  readGroupMessageImages: (groupId, messageId) =>
+    ipcRenderer.invoke("bots:files:read-group-message-images", LOCAL_BOT_HOST_ID, groupId, messageId),
+  readAttachmentImages: (botId, inputId, groupId, workId, messageId) =>
+    ipcRenderer.invoke("bots:files:read-attachment-images", LOCAL_BOT_HOST_ID, botId, inputId, groupId, workId, messageId),
   attachWorkspaceFile: (botId, threadId, fileId, maxChars, workId) =>
     ipcRenderer.invoke("bots:files:attach-workspace", LOCAL_BOT_HOST_ID, botId, threadId, fileId, maxChars, workId),
   exportFile: (botId, fileId, groupId, workId, suggestedName) =>
@@ -235,6 +239,8 @@ export const localBotsApi: BotClient = {
     ),
   requestReceipts: (botId, checks, workId) =>
     ipcRenderer.invoke("bots:request-receipts", LOCAL_BOT_HOST_ID, botId, checks, workId),
+  cancelQueuedImageInput: (botId, check, workId) =>
+    ipcRenderer.invoke("bots:cancel-queued-image-input", LOCAL_BOT_HOST_ID, botId, check, workId),
   exchangeHistory: (botId, taskId, groupId, before, workId, imConversationId) =>
     ipcRenderer.invoke(
       "bots:exchange-history",

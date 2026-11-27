@@ -8,7 +8,8 @@ import type { AgentRunTerminal } from "../agent/agent-run-service"
 import type { BotConversationToolSource, BotThreadRenameInput, BotThreadSummary } from "../../shared/bots/thread-history"
 import type { BotWorkDeletionIdentity, BotWorkDeletionRecord } from "./work-deletion"
 import type { BotInputHistoryResolver } from "./attachment-storage"
-import { BOT_INPUT_FILE_ID_PATTERN, parseBotInputFileIds, type BotInputFile } from "../../shared/bots/input-files"
+import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
+import { BOT_INPUT_FILE_ID_PATTERN, botInputImageCount, hasBotInputImages, parseBotInputFileIds, type BotInputFile } from "../../shared/bots/input-files"
 import type { FileAttachment } from "../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
 import {
@@ -25,7 +26,7 @@ import { BotWorkConversationJournal, OMIT_DERIVED_WORK_TITLE } from "./conversat
 import { localWorkConversationRef, readWorkConversationRecord } from "./conversation-link-validation"
 import { verifyWorkConversationThread, verifyWorkDeletionThread } from "./conversation-link-authority"
 import { matchesThreadIncarnation, type ThreadIncarnationRow } from "../services/thread-incarnation"
-import { clearBotWorkInputHistory, deleteBotThreadHistory, tracksBotInputPreparation, type BotHistoryOwner } from "./history-input-projection"
+import { clearBotWorkInputHistory, deleteBotThreadHistory, tracksBotInputPreparation, type BotHistoryOwner, type HistoricalBotMessageOrigin } from "./history-input-projection"
 import { upgradeWorkConversationSchema } from "./conversation-link-schema"
 import type {
   BotWorkItem,
@@ -476,6 +477,12 @@ export class BotStore {
         id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, payload TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS bot_input_files_owner ON bot_input_files(bot_id);
+      CREATE TABLE IF NOT EXISTS bot_group_image_inputs (
+        id TEXT PRIMARY KEY, group_id TEXT NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS bot_group_message_images (
+        message_id TEXT PRIMARY KEY, group_id TEXT NOT NULL, inputs_json TEXT NOT NULL, request_hash TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS bot_schedules (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_groups (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_group_discussions (group_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
@@ -1546,8 +1553,12 @@ export class BotStore {
       ])
     })
   }
-  private workSummary(row: Record<string, unknown>) {
-    const { goal, audienceKey, threadInitialized, ...summary } = this.work(row)
+  private workSummary(row: Record<string, unknown>): BotWorkSummary {
+    const summary: BotWorkSummary & Partial<Pick<BotWorkItem, "goal" | "audienceKey" | "threadInitialized">> =
+      this.work(row)
+    delete summary.goal
+    delete summary.audienceKey
+    delete summary.threadInitialized
     return summary
   }
   workSummaries(botId: string, workIds: string[], allowMissing?: true) {
@@ -3769,6 +3780,69 @@ export class BotStore {
     })
   }
 
+  managedImageSnapshotPaths(root: string): string[] {
+    const prefix = root + sep
+    return this.rows(`SELECT json_extract(payload,'$.filePath') AS path FROM bot_input_files
+      WHERE instr(json_extract(payload,'$.filePath'),?)=1
+      UNION SELECT json_extract(payload,'$.file.filePath') AS path FROM bot_group_image_inputs
+      WHERE instr(json_extract(payload,'$.file.filePath'),?)=1`, [prefix, prefix]).map(row => String(row.path))
+  }
+
+  retainImageSelection(botId: string, groupId: string | undefined, workId: string | undefined,
+    inputs: import("./image-import").PrivateImageInput[]): FileAttachment[] {
+    return this.transaction(() => inputs.map(({ attachment, path }) => groupId
+      ? this.retainGroupImage(groupId, attachment, path)
+      : this.retainInputFile(botId, attachment, path, workId)))
+  }
+
+  retainGroupImage(groupId: string, attachment: FileAttachment, snapshotPath: string): FileAttachment {
+    const group = this.getGroup(groupId)
+    if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除")
+    const id = `input-${randomUUID()}`
+    const retained = { ...attachment, botInputId: id }
+    const file: BotInputFile = {
+      id, botId: groupId, attachment: retained, blockHash: inputAttachmentHash(retained),
+      file: { filename: attachment.filename, filePath: snapshotPath, mimeType: attachment.mimeType,
+        size: attachment.size }
+    }
+    this.db.run("INSERT INTO bot_group_image_inputs(id,group_id,payload) VALUES(?,?,?)",
+      [id, groupId, JSON.stringify(file)])
+    this.changed()
+    return retained
+  }
+
+  groupImageInputs(groupId: string, ids: readonly string[]): BotInputFile[] {
+    return parseBotInputFileIds(ids).map(id => {
+      const row = this.rows("SELECT payload FROM bot_group_image_inputs WHERE group_id=? AND id=?",
+        [groupId, id])[0]
+      if (!row) throw new BotError("INVALID_INPUT", "图片不属于当前群聊")
+      return JSON.parse(String(row.payload)) as BotInputFile
+    })
+  }
+
+  groupMessageImageInputs(groupId: string, messageId: string): BotInputFile[] {
+    const row = this.rows(`SELECT i.inputs_json FROM bot_group_message_images i
+      JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
+      WHERE i.group_id=? AND i.message_id=? AND m.author_bot_id IS NULL`, [groupId, messageId])[0]
+    return row ? this.groupImageInputs(groupId, JSON.parse(String(row.inputs_json))).filter(hasBotInputImages) : []
+  }
+
+  groupImagesForTask(task: BotTask): BotInputFile[] {
+    if (task.origin.kind !== "group") return []
+    const { groupId, messageId } = task.origin
+    const group = this.getGroup(groupId)
+    const bot = this.getBot(task.botId)
+    const row = this.rows(`SELECT m.targets_json, i.inputs_json FROM bot_group_message_images i
+      JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
+      WHERE i.group_id=? AND i.message_id=?`, [groupId, messageId])[0]
+    if (!row) return []
+    const expected = "group-" + createHash("sha256").update(messageId + task.botId).digest("hex")
+    if (group.deleting || bot.deleting || bot.archived || !group.memberIds.includes(task.botId) ||
+      task.requestId !== expected || !JSON.parse(String(row.targets_json)).includes(task.botId))
+      throw new BotError("CONFLICT", "该任务的群图片授权已失效")
+    return this.groupImageInputs(groupId, JSON.parse(String(row.inputs_json)))
+  }
+
   inputFiles(botId: string, ids: readonly string[]): BotInputFile[] {
     this.getBot(botId)
     return this.readInputFiles(ids, botId)
@@ -3788,6 +3862,22 @@ export class BotStore {
       const { attachment, blockHash, workId, ...file } = JSON.parse(String(row.payload))
       return { id, botId: String(row.bot_id), file, ...(attachment ? { attachment, blockHash } : {}), ...(workId ? { workId } : {}) }
     })
+  }
+
+  desktopMessageImageInput(botId: string, inputId: string, messageId: string, workId?: string): BotInputFile {
+    const threadId = workId ? this.getWork(botId, workId).threadId : this.getBot(botId).threadId
+    const row = this.rows(`SELECT origin_json FROM bot_exchange_records WHERE bot_id=? AND thread_id=?
+      AND work_id IS ? AND request_id=? AND audience_key='desktop'
+      AND json_extract(origin_json,'$.kind')='user'
+      AND COALESCE(json_extract(origin_json,'$.imageAdmission'),'')!='withdrawn'
+      AND EXISTS (SELECT 1 FROM json_each(origin_json,'$.inputFileIds') WHERE value=?)`,
+      [botId, threadId, workId ?? null, messageId, inputId])[0]
+    if (!row) throw new BotError("NOT_FOUND", "此消息没有该附件")
+    const [file] = this.inputFiles(botId, [inputId])
+    // A skill dispatched from the private composer may retain its original private receipt.
+    if (file.workId !== workId && !(workId && !file.workId && JSON.parse(String(row.origin_json)).explicitSkill))
+      throw new BotError("INVALID_INPUT", "此附件不属于当前会话")
+    return file
   }
 
   desktopInputFiles(botId: string, ids: readonly string[], workId?: string): BotInputFile[] {
@@ -3860,6 +3950,12 @@ export class BotStore {
       }
       return this.enqueue(input)
     })
+  }
+
+  acceptDesktopImageInput(taskId: string): void {
+    this.db.run(`UPDATE bot_tasks SET origin_json=json_set(origin_json,'$.imageAdmission','accepted')
+      WHERE id=? AND state IN ('running','waiting_user') AND json_extract(origin_json,'$.imageAdmission')='pending'`, [taskId])
+    if (this.db.getRowsModified()) this.changed()
   }
 
   beginInputPreparation(taskId: string): void {
@@ -4054,7 +4150,7 @@ export class BotStore {
     }
     if (!requests.length || (requests.length === 1 && requests[0] === assignment)) return assignment
     // Keep source text literal; it cannot mint attachment, skill or internal-goal transport markers.
-    const sourceText = `[${requests.map(body => JSON.stringify(body).replace(/[<>\[\]]/g,
+    const sourceText = `[${requests.map(body => JSON.stringify(body).replace(/[<>[\]]/g,
       character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)).join(",")}]`
     const message = `${WORK_ASSIGNMENT_PREFIX}${assignment}${WORK_ASSIGNMENT_SOURCE}${sourceText}`
     // Large originals are still available in full via the scoped, paginated work input.
@@ -4224,8 +4320,13 @@ export class BotStore {
       if (inputFileIds.length && (origin.kind !== "user" || mockSource ||
           (targetWork && targetWork.audienceKey !== "desktop")))
         throw new BotError("INVALID_INPUT", "此附件引用只属于原私聊请求")
-      if (inputFileIds.length)
-        this.desktopInputFiles(input.botId, inputFileIds, input.skillDraftFromMain ? undefined : input.workId)
+      const files = inputFileIds.length
+        ? this.desktopInputFiles(input.botId, inputFileIds, input.skillDraftFromMain ? undefined : input.workId) : []
+      if (files.reduce((total, file) => total + botInputImageCount(file), 0) > 3)
+        throw new BotError("INVALID_INPUT", "每条消息最多发送 3 张图片，含文档内嵌图片")
+      if (origin.kind === "user" && files.some(hasBotInputImages) &&
+          !selectedMainBotSkill({ workId: input.workId, origin: { ...origin, explicitSkill }, message: input.message }))
+        origin = { ...origin, imageAdmission: "pending" }
       if (mentions.length && (origin.kind !== "user" || mockSource))
         throw new BotError("INVALID_INPUT", "仅本机用户消息可以提及 Bot")
       if (mockSource) {
@@ -4312,7 +4413,10 @@ export class BotStore {
           throw new BotError("CONFLICT", "提及的 Bot 已不可用，请重新选择")
       }
       if (origin.kind === "user" && mentions.length) origin = { ...origin, mentions }
-      if (origin.kind === "user" && inputFileIds.length) origin = { ...origin, inputFileIds }
+      if (origin.kind === "user" && inputFileIds.length) {
+        const visualInputFileIds = files.filter(hasBotInputImages).map(file => file.id)
+        origin = { ...origin, inputFileIds, visualInputFileIds }
+      }
       if (origin.kind === "user" && explicitSkill) origin = { ...origin, explicitSkill }
       if (input.replyToId !== undefined) {
         if (origin.kind !== "user")
@@ -4816,9 +4920,10 @@ export class BotStore {
     // A single SQLite read sees task pruning and receipt insertion atomically.
     const rows = this.rows(
       `SELECT request_id,bot_id,COALESCE(json_extract(origin_json,'$.groupId'),'') AS group_id,
-        message,NULL AS message_hash,work_id,origin_json FROM bot_tasks WHERE request_id IN (${placeholders})
-       UNION ALL SELECT request_id,bot_id,COALESCE(group_id,''),NULL,message_hash,work_id,NULL
-        FROM bot_task_receipts WHERE request_id IN (${placeholders})`,
+        message,NULL AS message_hash,work_id,origin_json,state FROM bot_tasks WHERE request_id IN (${placeholders})
+       UNION ALL SELECT r.request_id,r.bot_id,COALESCE(r.group_id,''),NULL,r.message_hash,r.work_id,a.origin_json,a.state
+        FROM bot_task_receipts r LEFT JOIN bot_exchange_archive a ON a.request_id=r.request_id AND a.bot_id=r.bot_id
+        WHERE r.request_id IN (${placeholders})`,
       [...ids, ...ids]
     )
     const byId = new Map<string, typeof rows>()
@@ -4853,7 +4958,35 @@ export class BotStore {
                 )
                 .digest("hex") === messageHash
       })
-      return { requestId, state: ownsAll && sameMessage ? "accepted" : "conflict" }
+      if (!ownsAll || !sameMessage) return { requestId, state: "conflict" }
+      if (matches.some(row => row.origin_json && JSON.parse(String(row.origin_json)).imageAdmission === "withdrawn"))
+        return { requestId, state: "withdrawn" }
+      const preparing = matches.find(row => row.origin_json && JSON.parse(String(row.origin_json)).imageAdmission === "pending")
+      if (preparing) return {
+        requestId,
+        state: preparing.state === "queued" ? "queued"
+          : preparing.state === "running" || preparing.state === "waiting_user" ? "admitting" : "rejected"
+      }
+      return { requestId, state: "accepted" }
+    })
+  }
+
+  /** A durable tombstone rejects late retries without disturbing the active task. */
+  cancelQueuedImageInput(botId: string, check: BotRequestCheck, workId?: string): boolean {
+    return this.transaction(() => {
+      const [receipt] = this.requestReceipts(botId, [check], workId)
+      if (receipt.state === "withdrawn") return true
+      if (receipt.state !== "queued") return false
+      const row = this.rows(`SELECT id FROM bot_tasks
+        WHERE request_id=? AND bot_id=? AND work_id IS ?
+          AND state='queued' AND mock_source_json IS NULL AND injected_into IS NULL
+          AND json_extract(origin_json,'$.kind')='user'
+          AND json_extract(origin_json,'$.imageAdmission')='pending'`,
+        [check.requestId, botId, workId ?? null])[0]
+      if (!row || this.taskCheckpoint(String(row.id))) return false
+      this.transition(String(row.id), "cancelled")
+      this.db.run("UPDATE bot_tasks SET origin_json=json_set(origin_json,'$.imageAdmission','withdrawn') WHERE id=?", [row.id])
+      return true
     })
   }
 
@@ -4932,7 +5065,7 @@ export class BotStore {
     messageIds: readonly string[],
     includeBound = false,
     nativeRow?: ThreadIncarnationRow
-  ): BotMessageOrigin[] {
+  ): HistoricalBotMessageOrigin[] {
     if (!messageIds.length) return []
     if (messageIds.length > 100) throw new BotError("INVALID_INPUT", "消息来源查询过多")
     const owners = this.desktopDeliveryWorks(threadId).filter(owner => {
@@ -4947,7 +5080,7 @@ export class BotStore {
         ? incarnation.token !== null && incarnation.token === prior.token : incarnation.legacyCreatedAt === prior.legacyCreatedAt
     }).map(owner => [owner.botId, owner.id])
     if (!owners.length) return []
-    return this.rows(`SELECT r.id,r.request_id,r.origin_json,r.state FROM bot_exchange_records r
+    return this.rows(`SELECT r.id,r.request_id,r.origin_json,r.state,r.bot_id,r.work_id FROM bot_exchange_records r
       LEFT JOIN bot_tasks live ON live.id=r.id
       WHERE r.thread_id=? AND r.audience_key='desktop' AND live.mock_source_json IS NULL
       AND r.request_id IN (SELECT value FROM json_each(?))
@@ -4955,8 +5088,11 @@ export class BotStore {
       AND json_extract(r.origin_json,'$.kind')='user'`, [threadId, JSON.stringify(messageIds), JSON.stringify(owners)])
       .flatMap(row => {
         const origin = JSON.parse(String(row.origin_json)) as Extract<BotTaskOrigin, { kind: "user" }>
-        if (!origin.explicitSkill && !origin.replyTo) return []
+        const ids = origin.imageAdmission === "withdrawn" ? undefined :
+          origin.inputFileIds?.filter(id => !origin.visualInputFileIds || origin.visualInputFileIds.includes(id))
+        if (!origin.explicitSkill && !origin.replyTo && !ids?.length) return []
         return [{ id: String(row.id), requestId: String(row.request_id), state: String(row.state) as BotTaskState,
+          ...(ids?.length ? { imageSelection: { botId: String(row.bot_id), workId: String(row.work_id), ids } } : {}),
           origin: { kind: "user" as const, ...(origin.explicitSkill ? { explicitSkill: origin.explicitSkill } : {}),
             ...(origin.replyTo ? { replyTo: origin.replyTo } : {}) } }]
       })
@@ -9192,7 +9328,8 @@ export class BotStore {
     const candidate = this.scheduledWorkResultCandidate(work)
     let settled: BotScheduledWorkSnapshot["result"]
     if (candidate && candidate.kind !== "pending") {
-      const { kind, ...result } = candidate
+      const result = { ...candidate }
+      Reflect.deleteProperty(result, "kind")
       settled = result
     }
     const result = settled ?? previousResult
@@ -9422,7 +9559,7 @@ export class BotStore {
       this.transition(task.id, error ? "failed" : "completed", error ?? null)
       if (kind !== "silent") {
         const title = (snapshot?.title ?? "原任务")
-          .replace(/\s+/g, " ").replace(/[\\`*_{}\[\]()<>|]/g, "\\$&")
+          .replace(/\s+/g, " ").replace(/[\\`*_{}[\]()<>|]/g, "\\$&")
         const workStatus = snapshot?.workState === "completed" ? "已标记完成。" : ""
         const lastExecution = snapshot?.resultDependencyUnavailable
           ? "最近一次成果所需服务当前不可用，请查看原任务。" : formatObservedWorkResult(snapshot?.result)
@@ -10177,6 +10314,8 @@ export class BotStore {
         "DELETE FROM bot_exchange_archive WHERE json_extract(origin_json,'$.groupId')=?",
         [id]
       )
+      this.db.run("DELETE FROM bot_group_message_images WHERE group_id=?", [id])
+      this.db.run("DELETE FROM bot_group_image_inputs WHERE group_id=?", [id])
       this.db.run("DELETE FROM bot_group_messages WHERE group_id=?", [id])
       this.db.run("DELETE FROM bot_groups WHERE id=?", [id])
       this.db.run("DELETE FROM bot_group_discussions WHERE group_id=?", [id])
@@ -10873,7 +11012,7 @@ export class BotStore {
     }
     return this.rows(
       `WITH page AS (SELECT * FROM bot_group_messages WHERE group_id=? AND ordinal${targeted ? "<=" : "<"}? ${includeQuestions ? "" : "AND question_json IS NULL"} ORDER BY ordinal DESC LIMIT 50)
-       SELECT m.*, COALESCE(d.id,da.id,r.id,ra.id) AS exchange_id,
+       SELECT m.*, i.message_id AS image_message_id, COALESCE(d.id,da.id,r.id,ra.id) AS exchange_id,
         COALESCE(d.bot_id,da.bot_id,r.bot_id,ra.bot_id) AS recipient_id,
         COALESCE(d.origin_json,da.origin_json,r.origin_json,ra.origin_json) AS exchange_origin,
         COALESCE(
@@ -10883,6 +11022,7 @@ export class BotStore {
         q.id AS reply_id,q.ordinal AS reply_ordinal,q.author_bot_id AS reply_author,
         substr(q.text,1,1000) AS reply_text,q.files_json AS reply_files
        FROM page m
+       LEFT JOIN bot_group_message_images i ON i.group_id=m.group_id AND i.message_id=m.id
        LEFT JOIN bot_group_messages q ON q.id=m.reply_to_id AND q.group_id=m.group_id
        LEFT JOIN bot_tasks d ON d.request_id=m.id
        LEFT JOIN bot_exchange_archive da ON da.request_id=m.id
@@ -10916,6 +11056,7 @@ export class BotStore {
           groupId: String(row.group_id),
           authorBotId: row.author_bot_id == null ? null : String(row.author_bot_id),
           text: String(row.text),
+          ...(row.image_message_id && row.author_bot_id == null ? { hasInputImages: true as const } : {}),
           ...(row.reply_id
             ? {
                 replyTo: {
@@ -10940,18 +11081,22 @@ export class BotStore {
         }
       })
   }
-  sendGroup(input: SendBotGroupMessageInput): boolean {
+  sendGroup(input: SendBotGroupMessageInput, checkImageRecipient?: (bot: BotDefinition) => void): boolean {
     input = parseGroupMessage(input)
     return this.transaction(() => {
       const group = this.getGroup(input.groupId)
       if (group.deleting) throw new BotError("CONFLICT", "群聊正在删除，请完成删除后重试")
       const targets = [...new Set(input.targetBotIds)].sort()
       const mentions = input.mentions?.length ? JSON.stringify(input.mentions) : null
-      const prior = this.rows("SELECT * FROM bot_group_messages WHERE id=?", [input.requestId])[0]
+      const images = input.inputImageIds?.length ? JSON.stringify(input.inputImageIds) : null
+      const inputHash = images ? createHash("sha256").update(input.text).digest("hex") : null
+      const prior = this.rows(`SELECT m.*, i.inputs_json, i.request_hash FROM bot_group_messages m
+        LEFT JOIN bot_group_message_images i ON i.message_id=m.id WHERE m.id=?`, [input.requestId])[0]
       if (prior) {
         if (
           prior.group_id !== group.id ||
-          prior.text !== input.text ||
+          (prior.inputs_json ?? null) !== images ||
+          (images ? prior.request_hash !== inputHash : prior.text !== input.text) ||
           prior.targets_json !== JSON.stringify(targets) ||
           (prior.reply_to_id ?? undefined) !== input.replyToId ||
           (prior.mentions_json ?? null) !== mentions
@@ -10997,6 +11142,24 @@ export class BotStore {
       }) : targets
       if (!recipients.length)
         throw new BotError("CONFLICT", "群内没有可接收任务的 Bot，请先恢复或添加成员")
+      if (images && checkImageRecipient) {
+        for (const id of recipients) checkImageRecipient(this.getBot(id))
+      }
+      let visibleText = input.text
+      if (images) {
+        const files = this.groupImageInputs(group.id, input.inputImageIds!)
+        if (files.reduce((total, file) => total + botInputImageCount(file), 0) > 3)
+          throw new BotError("INVALID_INPUT", "每条消息最多发送 3 张图片，含文档内嵌图片")
+        if (retainedInputFileIds(files, input.text).length !== files.length)
+          throw new BotError("INVALID_INPUT", "群图片与提交的附件不一致，请重新选择")
+        for (const file of files) {
+          const block = buildAttachmentMessageParts([file.attachment!]).attachmentModelBlocks.trim()
+          visibleText = visibleText.replace(block, () => `📎 ${file.file.filename}`)
+        }
+        this.db.run(`INSERT INTO bot_group_message_images
+          (message_id,group_id,inputs_json,request_hash) VALUES(?,?,?,?)`,
+          [input.requestId, group.id, images, inputHash])
+      }
       const participants = notifiedAuthor ? [...recipients, notifiedAuthor] : recipients
       const obsoleteDiscussion = this.groupDiscussionTask(group.id, input.requestId)
       if (obsoleteDiscussion && this.getTask(obsoleteDiscussion).state === "queued")
@@ -11007,14 +11170,14 @@ export class BotStore {
         [
           input.requestId,
           group.id,
-          input.text,
+          visibleText,
           JSON.stringify(targets),
           this.now(),
           mentions,
           input.replyToId ?? null
         ]
       )
-      this.noteActivity("group", group.id, input.text, false)
+      this.noteActivity("group", group.id, visibleText, false)
       const memberNames = new Map(group.memberIds.map((id) => [id, this.getBot(id).name]))
       const recent = this.groupMessages(group.id, undefined, false)
       const currentOrdinal = recent.find((item) => item.id === input.requestId)!.ordinal
@@ -11080,7 +11243,7 @@ export class BotStore {
                 replyAuthorId: replyAuthor,
                 addressedAsReplyAuthor: botId === replyAuthor
               }
-            )}. ${replyNotification ? "You are notified as the author of a quoted message, not an explicitly selected recipient. The quote alone assigns no work or tool permission. Only perform the part the current user explicitly assigns to the quoted author. Do not take over another participant's work. If no part is assigned to you, return exactly (pass) without tools or a public acknowledgement." : "Only the supplied recipients are selected; quoting another member does not add recipients."}\n\nUser request for group ${JSON.stringify(group.name)}:\n${input.text}`
+            )}. ${replyNotification ? "You are notified as the author of a quoted message, not an explicitly selected recipient. The quote alone assigns no work or tool permission. Only perform the part the current user explicitly assigns to the quoted author. Do not take over another participant's work. If no part is assigned to you, return exactly (pass) without tools or a public acknowledgement." : "Only the supplied recipients are selected; quoting another member does not add recipients."}\n\nUser request for group ${JSON.stringify(group.name)}:\n${replyNotification ? visibleText : input.text}`
           },
           replyNotification
             ? { kind: "discussion", groupId: group.id, messageId: input.requestId, round: 1 }

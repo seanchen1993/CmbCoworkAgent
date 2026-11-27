@@ -1,3 +1,6 @@
+import { toModelRef } from "../models/registry"
+import { eligibleChatImageModels } from "../models/image-candidates"
+import { isDesktopChatImageScope } from "./chat-image-middleware"
 import { resolve } from "node:path"
 import { isBtwThreadId } from "../../shared/btw-chat"
 import { SelectedModelUnavailableError } from "../models/selection-error"
@@ -45,7 +48,7 @@ import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
 import { requestedBotSkill } from "../bots/named-skill"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
-import { resolveModel, type RoutingContext, type RoutingResult } from "../routing"
+import { resolveImageRoutingContinuity, resolveModel, type RoutingContext, type RoutingResult } from "../routing"
 import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
 import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { intersectSkillNames } from "../../shared/skill-selection"
@@ -754,6 +757,7 @@ export async function prepareStandardUserPrompt({
 }
 
 export interface StandardTurnRoutingInput {
+  requiresImages?: boolean
   taskSource: RoutingContext["taskSource"]
   message?: string
   threadId: string
@@ -774,6 +778,23 @@ export async function resolveStandardTurnRouting(
   input: StandardTurnRoutingInput
 ): Promise<PreparedStandardTurnRouting> {
   const managedModelId = getManagedRunModelOverride(input.threadId, input.managedExecution)
+  if (input.requiresImages) {
+    const pinned = Boolean(managedModelId) || (input.routingMode ?? getGlobalRoutingMode()) === "pinned"
+    const eligible = eligibleChatImageModels(managedModelId || input.requestedModelId, pinned)
+    const continuity = !pinned && input.taskSource === "chat" && input.threadId
+      ? resolveImageRoutingContinuity(input.threadId, input.continuation,
+        new Set(eligible.filter(config => config != null).map(toModelRef))) : undefined
+    const first = (continuity && eligible.find(config => config && toModelRef(config) === continuity.modelId)) || eligible[0]
+    if (!first) throw new Error("当前没有可用的视觉模型，请切换到支持图片输入的模型")
+    const effectiveModelId = toModelRef(first)
+    const primaryTier = first.tier ?? "premium"
+    const orderedModelIds = [...new Set([first, ...eligible].flatMap(config =>
+      config && (config === first || config.tier !== "economy") ? [toModelRef(config)] : []))]
+    return { effectiveModelId, primaryTier, orderedModelIds, result: {
+      resolvedModelId: effectiveModelId, resolvedTier: primaryTier, routeReason: continuity?.reason ?? "image-input",
+      fallbackChain: orderedModelIds.slice(1), layer: pinned ? "pinned" : continuity ? "thread" : "layer1"
+    } }
+  }
   if (managedModelId) {
     return {
       result: {
@@ -946,6 +967,10 @@ export function prepareStandardThreadRuntimeFactory(
         input.remotePolicy
       ),
       ...(botContextBudget !== undefined ? { contextBudgetTokens: botContextBudget } : {}),
+      // Only the foreground desktop caller or the Bot Host can grant media access.
+      chatImageMessageScope: (input.source === "desktop" && isDesktopChatImageScope(callerOptions.chatImageMessageScope)) ||
+        (input.source === "bot" && !isDesktopChatImageScope(callerOptions.chatImageMessageScope))
+        ? callerOptions.chatImageMessageScope : undefined,
       // Keep ordinary commands attached to the transport's cancellation and permit.
       ...(input.runLease.owner !== "desktop" && { autoBackgroundHandoff: false }),
       modelId

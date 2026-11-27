@@ -19,6 +19,7 @@ export function projectWorkInputAttachment(file: BotInputFile, snapshotPath = fi
   const original = file.attachment
   if (!original || !file.blockHash || inputAttachmentHash(original) !== file.blockHash)
     throw new Error("原草稿附件已不可用，请重新选择")
+  if (!original.filePath && /^image\/(png|jpeg|webp)$/.test(original.mimeType)) return { ...original }
   const quotedPath = JSON.stringify(original.filePath)
   const sourceReference = [
     `Original file retained in your workspace: ${quotedPath}.`,
@@ -27,7 +28,9 @@ export function projectWorkInputAttachment(file: BotInputFile, snapshotPath = fi
     (original.truncated && reference.startsWith(original.content)))
   const retainedReference = `Original file retained at ${JSON.stringify(snapshotPath)}.`
   const content = sourceReference
-    ? retainedReference + original.content.slice(sourceReference.length)
+    ? original.content.length < sourceReference.length
+      ? retainedReference.slice(0, original.content.length)
+      : retainedReference + original.content.slice(sourceReference.length)
     : original.content
   return { ...original, filePath: snapshotPath, content }
 }
@@ -80,7 +83,7 @@ export async function verifyInputFiles(files: readonly BotInputFile[], signal: A
   }
 }
 
-function inputFileSnapshot(file: BotInputFile) {
+export function inputFileSnapshot(file: BotInputFile) {
   const path = file.file.filePath
   const directory = dirname(dirname(path))
   const digest = basename(dirname(path))

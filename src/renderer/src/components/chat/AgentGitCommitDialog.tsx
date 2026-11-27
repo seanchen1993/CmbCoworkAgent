@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { CheckCircle2, GitCommitHorizontal, Loader2 } from "lucide-react"
+import { toast } from "sonner"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import {
@@ -23,6 +24,7 @@ import {
   resolveCommitWorktreePath,
   shouldAutoDismissEmptyAgentCommitSelection
 } from "@/lib/agent-git-commit-selection"
+import { isValidTaskCommitCard } from "../../../../shared/task-commit-binding"
 import type { TaskCardItem } from "../../../../shared/task-card-types"
 
 const COMMIT_TYPES = [
@@ -171,6 +173,8 @@ interface AgentGitCommitDialogProps {
   suggestedFileBasePath?: string
   /** Preferred Git operation target, normally the repository root. */
   suggestedGitWorktreePath?: string
+  commitBindingVersion?: string
+  reviewReason?: string
   /** Concrete targets when the Agent invoked commit from a multi-repository parent. */
   suggestedGitRepositories?: AgentGitRepositoryOption[]
   /** Where suggestedFilePaths came from. */
@@ -195,6 +199,8 @@ export function AgentGitCommitDialog({
   suggestedFilePaths,
   suggestedFileBasePath,
   suggestedGitWorktreePath,
+  commitBindingVersion,
+  reviewReason,
   suggestedGitRepositories = [],
   suggestedFileSelectionSource,
   onCommitted,
@@ -204,7 +210,27 @@ export function AgentGitCommitDialog({
   const diffListRequestIdRef = useRef(0)
   const emptySelectionResolvedRef = useRef(false)
   const [dialogContent, setDialogContent] = useState<HTMLDivElement | null>(null)
-  const { cardNumber, handleCardNumberChange, persistNow } = useWorkspaceTaskCard(workspacePath)
+  const [error, setError] = useState<string | null>(null)
+  const workspaceCard = useWorkspaceTaskCard(commitBindingVersion ? undefined : workspacePath)
+  const [boundCard, setBoundCard] = useState<string | null>(null)
+  const cardNumber = commitBindingVersion ? (boundCard ?? "") : workspaceCard.cardNumber
+  useEffect(() => {
+    if (!commitBindingVersion) return
+    let active = true
+    void window.api.taskCommitBinding
+      .read(threadId)
+      .then((binding) => {
+        if (!active) return
+        if (binding?.version === commitBindingVersion) setBoundCard(binding.cardNumber)
+        else setError("任务提交设置已变更，请取消并重新发起提交")
+      })
+      .catch(() => {
+        if (active) setError("无法读取当前任务的提交设置，请重新打开提交弹窗")
+      })
+    return () => {
+      active = false
+    }
+  }, [commitBindingVersion, threadId])
   const [selectedGitWorktreePath, setSelectedGitWorktreePath] = useState<string | undefined>(() => {
     if (suggestedGitWorktreePath) return suggestedGitWorktreePath
     return suggestedGitRepositories.length === 1 ? suggestedGitRepositories[0].path : undefined
@@ -213,7 +239,8 @@ export function AgentGitCommitDialog({
   const repositoryMissing = repositorySelectionRequired && !selectedGitWorktreePath
   const commitWorktreePath = resolveCommitWorktreePath(
     workspacePath,
-    selectedGitWorktreePath
+    selectedGitWorktreePath,
+    Boolean(commitBindingVersion)
   )
   // Seed type + message from the agent's suggestion. The parent remounts this dialog
   // (via a key tied to the approval id) for each new commit, so lazy initializers give
@@ -227,18 +254,23 @@ export function AgentGitCommitDialog({
   const [commitType, setCommitType] = useState<CommitType>(initialSuggestion.type ?? "fix")
   const [commitMessage, setCommitMessage] = useState(initialSuggestion.message)
   const [running, setRunning] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   // Changed files + diffs for the thread workspace, so the user can review and adjust the
   // agent-selected commit scope. Mirrors the data the Git Panel shows.
   const [diff, setDiff] = useState<{
     files: DiffFile[]
+    commitPreviewRevision?: string
+    commitPreviewTarget?: { root: string; scope: string; branch: string }
     changedFiles?: string[]
     totals: { fileCount: number; additions: number; deletions: number }
     omittedFileCount: number
+    unavailableFileCount: number
   } | null>(null)
   // Starts true so the first paint shows "加载中"; the fetch's finally clears it. The
   // dialog is remounted per commit (keyed on the approval id), so this re-initializes.
   const [diffLoading, setDiffLoading] = useState(!repositorySelectionRequired)
+  const [visibleFileLimit, setVisibleFileLimit] = useState(200)
+  const preserveSelectionOnReload = useRef(false)
+  const [previewAttempt, setPreviewAttempt] = useState(0)
   const [diffError, setDiffError] = useState<string | null>(null)
   // Per-file lazy diff loading: only the file the user is viewing has its patch fetched.
   const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
@@ -271,6 +303,7 @@ export function AgentGitCommitDialog({
     }
     const requestId = ++diffListRequestIdRef.current
     let cancelled = false
+    const preserveSelection = preserveSelectionOnReload.current
     setDiff(null)
     setDiffLoading(true)
     setDiffError(null)
@@ -281,7 +314,10 @@ export function AgentGitCommitDialog({
         includeDiffs: false,
         includeChangedFiles: true,
         statusUntrackedMode: "normal",
-        worktreePath: commitWorktreePath
+        worktreePath: commitWorktreePath,
+        includeCommitTarget: true,
+        visibleFileLimit: commitBindingVersion ? visibleFileLimit : undefined,
+        commitBindingVersion
       })
       .then((res) => {
         if (cancelled || requestId !== diffListRequestIdRef.current) return
@@ -293,12 +329,17 @@ export function AgentGitCommitDialog({
         setFileDiffErrors({})
         setDiff({
           files: res.files ?? [],
+          commitPreviewRevision: res.commitPreviewRevision,
+          commitPreviewTarget: res.commitPreviewTarget,
           changedFiles: res.changedFiles ?? [],
           totals: res.totals,
+          unavailableFileCount: res.unavailableFileCount ?? 0,
           omittedFileCount: res.omittedFileCount ?? 0
         })
-        setSelectedCommitPaths(
-          buildInitialSelectedPaths(res.files ?? [], initialSuggestedFilePaths, res.changedFiles ?? [], {
+        const available = new Set(res.changedFiles ?? [])
+        setSelectedCommitPaths(previous => preserveSelection
+          ? new Set([...previous].filter(file => available.has(file)))
+          : buildInitialSelectedPaths(res.files ?? [], initialSuggestedFilePaths, res.changedFiles ?? [], {
             suggestedBasePath: initialSuggestedFileBasePath,
             repositoryRootPath: selectedGitWorktreePath,
             suggestedPathKind: initialFileSelectionSource,
@@ -319,13 +360,16 @@ export function AgentGitCommitDialog({
   }, [
     open,
     threadId,
+    previewAttempt,
+    visibleFileLimit,
     initialSuggestedFilePaths,
     initialSuggestedFileBasePath,
     initialFileSelectionSource,
     selectedGitWorktreePath,
     repositoryMissing,
     workspacePath,
-    commitWorktreePath
+    commitWorktreePath,
+    commitBindingVersion
   ])
 
   const selectedFile = useMemo(
@@ -350,7 +394,9 @@ export function AgentGitCommitDialog({
 
       try {
         const res = await window.api.workspace.getGitPanelFileDiff(threadId, filePath, {
-          worktreePath: commitWorktreePath
+          worktreePath: commitWorktreePath,
+          commitBindingVersion,
+          commitPreviewRevision: diff?.commitPreviewRevision
         })
         if (requestId !== diffListRequestIdRef.current || res.taskId !== activeThreadIdRef.current) return
         if (!res.success || !res.file) {
@@ -401,7 +447,7 @@ export function AgentGitCommitDialog({
         }
       }
     },
-    [threadId, diff?.files, fileDiffLoadingPaths, commitWorktreePath]
+    [threadId, diff?.files, diff?.commitPreviewRevision, fileDiffLoadingPaths, commitWorktreePath, commitBindingVersion]
   )
 
   useEffect(() => {
@@ -447,7 +493,7 @@ export function AgentGitCommitDialog({
 
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
-  const cardMissing = !cardValue
+  const cardMissing = commitBindingVersion ? !isValidTaskCommitCard(cardValue) : !cardValue
   const messageMissing = !messageValue
   const fileSelectionPending = diffLoading
   const fileSelectionFailed = Boolean(diffError)
@@ -457,6 +503,7 @@ export function AgentGitCommitDialog({
 
   useEffect(() => {
     if (emptySelectionResolvedRef.current || repositoryMissing || !diff) return
+    if (commitBindingVersion && diff.omittedFileCount) return
     if (
       !shouldAutoDismissEmptyAgentCommitSelection({
         selectionSource: initialFileSelectionSource,
@@ -473,6 +520,7 @@ export function AgentGitCommitDialog({
     onCommitted({ success: false, error: AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE })
   }, [
     diff,
+    commitBindingVersion,
     fileSelectionFailed,
     fileSelectionPending,
     initialFileSelectionSource,
@@ -497,15 +545,21 @@ export function AgentGitCommitDialog({
         threadId,
         finalMessage,
         selectedCommitFilePaths,
-        { worktreePath: commitWorktreePath, agentInitiated: true }
+        {
+          worktreePath: commitWorktreePath,
+          agentInitiated: true,
+          commitBindingVersion,
+          commitPreviewRevision: diff?.commitPreviewRevision
+        }
       )
       if (!result.success) {
         setError(result.error || "提交失败")
         setRunning(false)
         return
       }
+      if (result.warning) toast.warning(result.warning)
       // Remember the card actually committed with for this workspace.
-      persistNow(cardValue)
+      if (!commitBindingVersion) workspaceCard.persistNow(cardValue)
       onCommitted({ success: true, commitMessage: finalMessage })
     } catch (e) {
       setError(e instanceof Error ? e.message : "提交失败")
@@ -552,13 +606,37 @@ export function AgentGitCommitDialog({
         <div className="flex shrink-0 items-center gap-2 px-5 py-4 border-b border-border/70">
           <GitCommitHorizontal className="size-4 text-status-info" />
           <div className="text-[16px] font-semibold">Agent 请求提交</div>
+          {commitBindingVersion && !repositoryMissing && <button
+            type="button"
+            disabled={running || diffLoading}
+            className="ml-auto text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+            onClick={() => {
+              setError(null)
+              preserveSelectionOnReload.current = Boolean(diff)
+              setPreviewAttempt(current => current + 1)
+            }}
+          >
+            刷新预览
+          </button>}
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="rounded-xl border border-border/70 bg-muted/25 p-3 mx-4 mt-4 space-y-2">
           <div className="text-xs text-muted-foreground">
-            Agent 想要提交当前工作区改动。请选择任务卡片并确认，将按 CMB 规范生成 commit message。
+            {reviewReason || "请确认本次提交的任务卡、文件和提交信息。"}
           </div>
+          {diff?.commitPreviewTarget && (
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+              <dt className="text-muted-foreground">目标仓库</dt>
+              <dd className="break-all">{diff.commitPreviewTarget.root}</dd>
+              <dt className="text-muted-foreground">分支</dt>
+              <dd className="break-all">{diff.commitPreviewTarget.branch}</dd>
+              {diff.commitPreviewTarget.scope !== diff.commitPreviewTarget.root && <>
+                <dt className="text-muted-foreground">提交目录</dt>
+                <dd className="break-all">{diff.commitPreviewTarget.scope}</dd>
+              </>}
+            </dl>
+          )}
           {repositorySelectionRequired && (
             <div className="space-y-1.5 border-t border-border/60 pt-2">
               <div className="flex items-center justify-between text-xs">
@@ -579,6 +657,8 @@ export function AgentGitCommitDialog({
                   setDiffError(null)
                   setSelectedCommitPaths(new Set())
                   setSelectedFilePath(null)
+                  preserveSelectionOnReload.current = false
+                  setVisibleFileLimit(200)
                   setSelectedGitWorktreePath(value)
                 }}
                 disabled={running}
@@ -728,11 +808,25 @@ export function AgentGitCommitDialog({
                 )}
               </div>
             </div>
-            {diff.omittedFileCount > 0 && (
-              <div className="text-[11px] text-muted-foreground">
-                另有 {diff.omittedFileCount} 个文件因体积过大未展示明细
-              </div>
-            )}
+          </div>
+        )}
+        {diff && diff.unavailableFileCount > 0 && <p className="mx-4 mt-2 text-[11px] text-muted-foreground">
+          已略过 {diff.unavailableFileCount} 项未形成可提交文件改动的记录（如子模块或仅暂存的内容）。
+        </p>}
+        {diff && diff.omittedFileCount > 0 && (
+          <div className="mx-4 mt-2 text-[11px] text-muted-foreground">
+            另有 {diff.omittedFileCount} 个文件未展示
+            {commitBindingVersion && <button
+              type="button"
+              className="ml-2 underline"
+              disabled={running || diffLoading}
+              onClick={() => {
+                preserveSelectionOnReload.current = true
+                setVisibleFileLimit(current => current + 200)
+              }}
+            >
+              加载更多文件
+            </button>}
           </div>
         )}
 
@@ -759,13 +853,18 @@ export function AgentGitCommitDialog({
               portalContainer={dialogContent}
               value={cardNumber}
               onValueChange={(nextValue, card?: TaskCardItem | null) =>
-                handleCardNumberChange(nextValue, card)
+                commitBindingVersion
+                  ? setBoundCard(nextValue)
+                  : workspaceCard.handleCardNumberChange(nextValue, card)
               }
               autoSelect={false}
-              disabled={running}
+              disabled={running || (Boolean(commitBindingVersion) && boundCard === null)}
               placeholder="选择任务卡片"
               className={cn(cardMissing && "border-destructive/50 focus-visible:ring-destructive/40")}
             />
+            {commitBindingVersion && cardValue && cardMissing && <p className="text-xs text-destructive">
+              卡号最多 256 个字符，请移除空白、控制字符和 #。
+            </p>}
           </div>
 
           <div className="space-y-1.5">

@@ -37,6 +37,14 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
       owner(botId)
       return client.requestReceipts(botId, checks, work.id)
     },
+    ...(client.cancelQueuedImageInput ? {
+      cancelQueuedImageInput: (botId: string, check: import("../../../shared/bots/contracts").BotRequestCheck, workId?: string) => {
+        owner(botId)
+        if (workId !== undefined && workId !== work.id)
+          throw new BotError("INVALID_INPUT", "工作会话目标不一致")
+        return client.cancelQueuedImageInput!(botId, check, work.id)
+      }
+    } : {}),
     messageReply: (botId, messageId) => {
       owner(botId)
       return client.messageReply(botId, messageId, work.id)
@@ -78,6 +86,14 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
       owner(botId, groupId)
       return client.attachFileBytes(botId, files, maxChars, undefined, work.id)
     },
+    ...(client.readAttachmentImages ? {
+      readAttachmentImages: (botId: string, inputId: string, groupId?: string, requestedWorkId?: string, messageId?: string) => {
+        owner(botId, groupId)
+        if (requestedWorkId !== undefined && requestedWorkId !== work.id)
+          throw new BotError("INVALID_INPUT", "工作会话目标不一致")
+        return client.readAttachmentImages!(botId, inputId, undefined, work.id, messageId)
+      }
+    } : {}),
     ...(client.attachWorkspaceFile ? {
       attachWorkspaceFile: (botId: string, threadId: string, fileId: string, maxChars: number) => {
         owner(botId)

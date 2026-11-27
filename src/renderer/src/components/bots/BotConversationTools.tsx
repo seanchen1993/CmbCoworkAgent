@@ -1,5 +1,6 @@
 import { isBotContinuationReceipt } from "../../../../shared/bots/turn-feedback"
 import { botGroupReceipt } from "@/lib/bot-group-receipt"
+import { MessageImageGallery } from "@/components/chat/MessageImageGallery"
 import { BotHistorySources } from "./BotHistorySources"
 import { BotWorkInstruction } from "./BotWorkInstruction"
 import { toast } from "sonner"
@@ -37,6 +38,7 @@ import {
   ChatMessageVisibilityContext,
   ChatMessagePresentationContext,
   ChatUserTextPresentationContext,
+  ChatUserImagePresentationContext,
   ChatToolPresentationContext
 } from "../chat/chat-presentation-context"
 import { botWorkCardIds, botWorkReceipt, loadBotWorkCardTitles } from "@/lib/bot-work-receipt"
@@ -233,6 +235,19 @@ export function BotConversationTools({
           },
     [client, botId, groupId, taskByMessage, loadedOriginWindow, originWindow]
   )
+  const presentUserImages = useCallback((message: Message) => {
+    const read = client.readAttachmentImages
+    if (!read || !threadId || groupId || imConversationId) return null
+    const origin = taskByMessage.get(message.id)?.origin
+    if (origin?.kind !== "user" || origin.imageAdmission === "withdrawn") return null
+    // Older send receipts carry all selected IDs. The reader returns [] for text-only files.
+    const ids = origin.visualInputFileIds ?? origin.inputFileIds
+    return ids?.map(id => {
+      const key = JSON.stringify([client.hostId, botId, desktopWorkId, threadId, message.id, id])
+      return <MessageImageGallery key={key} sourceKey={key}
+        read={() => read.call(client, botId, id, undefined, desktopWorkId, message.id)} />
+    })
+  }, [botId, client, desktopWorkId, groupId, imConversationId, taskByMessage, threadId])
   const presentUserText = useCallback(
     (message: Message, text: string) => {
       if (groupId || typeof message.content !== "string") return text
@@ -756,7 +771,9 @@ export function BotConversationTools({
                       >
                         <ChatReplySourceContext.Provider value={replySource}>
                           <ChatUserTextPresentationContext.Provider value={presentUserText}>
-                            {children}
+                            <ChatUserImagePresentationContext.Provider value={presentUserImages}>
+                              {children}
+                            </ChatUserImagePresentationContext.Provider>
                           </ChatUserTextPresentationContext.Provider>
                         </ChatReplySourceContext.Provider>
                       </ChatActivityPresentationContext.Provider>

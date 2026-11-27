@@ -1,3 +1,6 @@
+import { botAttachmentIdentity } from "../../../../shared/bots/input-files"
+import { MessageImageGallery } from "@/components/chat/MessageImageGallery"
+import { AttachmentImagePreview } from "@/components/chat/AttachmentImagePreview"
 import { BotGroupMentionInput, type BotGroupInputControl } from "./BotGroupMentionInput"
 import {
   displayedGroupMentions,
@@ -73,6 +76,8 @@ import {
 import {
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_PICKER_FILES,
+  MAX_ATTACHMENT_TOTAL_CHARS,
+  type DraftAttachmentImage,
   type FileAttachment
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
@@ -178,6 +183,11 @@ export function BotGroupConversation({
   const [older, setOlder] = useState(true)
   const refreshRef = useRef<() => void>(() => {})
   const members = bots.filter((bot) => group.memberIds.includes(bot.id))
+  const attachmentBotId = members.find(bot => !bot.archived && !bot.deleting)?.id
+  const readAttachmentImages = useCallback(async (file: FileAttachment) => {
+    if (!attachmentBotId || !file.botInputId) return []
+    return await client.readAttachmentImages?.(attachmentBotId, file.botInputId, group.id) ?? []
+  }, [attachmentBotId, client, group.id])
   const filePreviewThreadId = `group-files-${group.id}`
   const [fileWorkspace, setFileWorkspace] = useState<{
     client: BotClient
@@ -228,10 +238,11 @@ export function BotGroupConversation({
     }
     const currentDraft = useBotGroupDrafts.getState().drafts[draftKey] ?? EMPTY_GROUP_DRAFT
     const count = MAX_ATTACHMENT_PICKER_FILES - currentDraft.attachments.length
-    const chars =
-      24_000 - currentDraft.attachments.reduce((sum, file) => sum + file.content.length, 0)
-    if (count < 1 || chars < 1) {
-      setError("一次最多添加 3 个附件，提取正文合计不超过 24,000 字符。")
+    const chars = Math.max(
+      0, MAX_ATTACHMENT_TOTAL_CHARS - currentDraft.attachments.reduce((sum, file) => sum + file.content.length, 0)
+    )
+    if (count < 1) {
+      setError("一次最多添加 3 个附件。")
       return
     }
     const generation = attachmentGeneration.current
@@ -793,6 +804,12 @@ export function BotGroupConversation({
                                     </span>
                                   </button>
                                 )}
+                                {item.hasInputImages && client.readGroupMessageImages && (
+                                  <MessageImageGallery
+                                    sourceKey={JSON.stringify([client.hostId, group.id, item.id])}
+                                    read={() => client.readGroupMessageImages!(group.id, item.id)}
+                                  />
+                                )}
                                 <GroupMessageMarkdown
                                   message={item}
                                   text={displayText}
@@ -950,6 +967,7 @@ export function BotGroupConversation({
               inputRef={inputRef}
               editDraft={editDraft}
               attach={attach}
+              readAttachmentImages={readAttachmentImages}
               send={send}
               jumpToReply={jumpToReply}
               hasQuestions={questions.length > 0}
@@ -1032,6 +1050,7 @@ function GroupComposer({
   inputRef,
   editDraft,
   attach,
+  readAttachmentImages,
   send,
   jumpToReply,
   hasQuestions
@@ -1044,6 +1063,7 @@ function GroupComposer({
   inputRef: RefObject<BotGroupInputControl | null>
   editDraft: (patch: Parameters<ReturnType<typeof useBotGroupDrafts.getState>["edit"]>[1]) => void
   attach: (files?: File[]) => Promise<void>
+  readAttachmentImages: (file: FileAttachment) => Promise<DraftAttachmentImage[]>
   send: (event: React.FormEvent) => Promise<void>
   jumpToReply: (reply: { id: string; ordinal: number }) => Promise<void>
   hasQuestions: boolean
@@ -1125,9 +1145,10 @@ function GroupComposer({
         <div className="flex flex-wrap gap-2 pb-2">
           {draft.attachments.map((file) => (
             <span
-              key={file.filePath}
+              key={botAttachmentIdentity(file)}
               className="inline-flex max-w-full items-center gap-2 rounded-xl bg-muted px-3 py-1.5 text-xs"
             >
+              <AttachmentImagePreview attachment={file} read={readAttachmentImages} />
               <span className="truncate">{file.filename}</span>
               <button
                 type="button"
@@ -1136,7 +1157,7 @@ function GroupComposer({
                 disabled={attaching || draft.sending}
                 onClick={() =>
                   editDraft({
-                    attachments: draft.attachments.filter((item) => item.filePath !== file.filePath)
+                    attachments: draft.attachments.filter(item => botAttachmentIdentity(item) !== botAttachmentIdentity(file))
                   })
                 }
               >

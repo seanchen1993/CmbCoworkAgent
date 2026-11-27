@@ -58,6 +58,30 @@ it("owns the first transferred clone and deletes it only after successful work c
   expect(restarted.inputFiles(peer.id, [peerFile.botInputId!])).toHaveLength(1)
 })
 
+it("erases visual input IDs from the deleted task and its stored command receipt", () => {
+  const f = fixture()
+  const image = f.store.retainInputFile(f.bot.id, {
+    filename: "figure.png", filePath: "", content: "", mimeType: "image/png", size: 20, truncated: false
+  }, `/fixture/.bot-deliveries/${"b".repeat(64)}/figure.png`, f.created.work.id)
+  const sent = f.store.enqueue({
+    botId: f.bot.id, workId: f.created.work.id, requestId: "figure-question",
+    message: "Describe this" + buildAttachmentMessageParts([image], true).attachmentModelBlocks,
+    inputFileIds: [image.botInputId!]
+  })
+  expect(sent.origin).toMatchObject({ visualInputFileIds: [image.botInputId] })
+  f.store.transition(sent.id, "cancelled")
+  // Work commands retain a second copy of the input; exercise the persisted task envelope as well.
+  f.db.run("UPDATE bot_work_commands SET receipt=json_set(receipt,'$.task',json(?)) WHERE json_extract(receipt,'$.work.id')=?",
+    [JSON.stringify(sent), f.created.work.id])
+  expect(f.db.getRowsModified()).toBeGreaterThan(0)
+  const version = f.store.getWork(f.bot.id, f.created.work.id).version
+  const stopping = f.store.beginWorkDeletion({ ...f.target, version })
+  f.store.advanceWorkDeletion(f.store.advanceWorkDeletion(stopping, "ready"), "deleted")
+  expect(f.store.getTask(sent.id).origin).not.toHaveProperty("visualInputFileIds")
+  const rows = f.db.exec("SELECT json_extract(receipt,'$.task.origin.visualInputFileIds') FROM bot_work_commands WHERE json_extract(receipt,'$.task.id')=?", [sent.id])
+  expect(rows[0].values).toEqual([[null]])
+})
+
 it.each(["live", "archived"] as const)("binds a legacy cloned ID from exact %s creation evidence before history disappears", location => {
   const f = fixture()
   f.legacy()

@@ -212,6 +212,17 @@ describe("builtin model registry", () => {
     expect(getModelConfigByRef("builtin:idle-ultra")).toBeNull()
   })
 
+  it("uses only explicitly advertised image input for a remote model", async () => {
+    state.manifest = { modelCatalog: { schemaVersion: 1, models: [
+      { id: "vision", model: "vision", baseUrl: "https://example.test/v1",
+        inputModalities: ["text", "image"] },
+      { id: "text", model: "text", baseUrl: "https://example.test/v1" }
+    ] } }
+    await refreshBuiltinModelCatalog(true)
+    expect(getModelConfigByRef("builtin:vision")?.inputModalities).toEqual(["text", "image"])
+    expect(getModelConfigByRef("builtin:text")?.inputModalities).toEqual(["text"])
+  })
+
   it("publishes canonical Maodou names and locks their display name and request model", async () => {
     configureIdleModel()
     state.overrides["idle-ultra"] = { name: "旧 Pro 名称", maxTokens: 256_000 }

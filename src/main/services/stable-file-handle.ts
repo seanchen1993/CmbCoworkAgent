@@ -194,7 +194,8 @@ export async function readStableFileHandleBounded(
  */
 export async function openStableWritableFileHandle(
   trustedRootPath: string,
-  candidatePath: string
+  candidatePath: string,
+  mode: "write" | "append" = "write"
 ): Promise<StableWritableFileHandle> {
   const absoluteCandidate = path.resolve(candidatePath)
   const [realRoot, initialRealCandidate] = await Promise.all([
@@ -209,7 +210,7 @@ export async function openStableWritableFileHandle(
   const nonBlocking = process.platform === "win32" ? 0 : (constants.O_NONBLOCK ?? 0)
   const handle = await open(
     absoluteCandidate,
-    constants.O_RDWR | noFollow | nonBlocking
+    constants.O_RDWR | noFollow | nonBlocking | (mode === "append" ? constants.O_APPEND : 0)
   )
 
   const assertPathIdentity = async (): Promise<void> => {

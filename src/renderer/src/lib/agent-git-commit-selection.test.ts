@@ -384,6 +384,11 @@ describe("Agent git commit selection", () => {
   })
 
   it("clamps a parent repository root to a subdirectory workspace", () => {
+    expect(resolveCommitWorktreePath("C:/chat", "D:/source", true)).toBe("D:/source")
+    expect(resolveCommitWorktreePath("C:/chat", "D:/source")).toBe("C:/chat")
+    expect(resolveCommitWorktreePath("C:/workspace/app", "C:/workspace", true)).toBe(
+      "C:/workspace/app"
+    )
     expect(resolveCommitWorktreePath("C:/workspace/packages/app", "C:/workspace")).toBe(
       "C:/workspace/packages/app"
     )

@@ -11,6 +11,18 @@ import type { BotMessageMention } from "../../../shared/bots/contracts"
 import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
 import { validGroupMentions, type BotGroupMention } from "./bot-group-mentions"
 
+/** Insert the text part through the editor's normal parser; consume a file gesture only once. */
+export function pasteBotEditorFiles(view: Pick<EditorView, "pasteText">, event: ClipboardEvent,
+  attach: (files: File[]) => void): boolean {
+  const files = Array.from(event.clipboardData?.files ?? [])
+  if (!files.length) return false
+  event.preventDefault()
+  const text = event.clipboardData?.getData("text/plain")
+  if (text) view.pasteText(text)
+  attach(files)
+  return true
+}
+
 // Adapted from Grok's rich-text-editor.tsx: a plain prompt with inline mention atoms,
 // native history and paragraph serialization. Durable state remains the existing draft.
 export function groupEditorContent(

@@ -9,7 +9,8 @@ import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover"
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "../ui/context-menu"
-import { ChatContainer, focusBtwPaneComposer, prepareBtwComposerFocus } from "../chat/ChatContainer"
+import { focusBtwPaneComposer, prepareBtwComposerFocus } from "@/lib/btw-composer-focus"
+import { ChatContainer } from "../chat/ChatContainer"
 import { useBtwComposerToolbarHeight } from "../chat/use-floating-chat-layout"
 import { SkillGenerationCard } from "./RightPanel"
 
@@ -354,19 +355,13 @@ export function BtwPane(props: BtwViewProps) {
     void loadBtwThread(id, parentId).catch(console.error)
   }, [id, hasSummary, parentId])
   const options = [
-    { label: "文件", detail: "从目录中选择一个文件", icon: FolderOpen, open: () => {
-      closeLauncher(parentId)
-      useAppStore.getState().requestOpenRightPanelSection(parentId, "files")
-    } },
-    { label: "浏览器", detail: "浏览网页和预览应用。", icon: Globe, open: () => {
-      closeLauncher(parentId)
-      useAppStore.getState().requestOpenBrowserPanel()
-    } },
-    { label: "审查", detail: "查看代码变更与差异。", icon: FileDiff, open: () => {
-      closeLauncher(parentId)
-      useAppStore.getState().setRightModule("git")
-    } },
-    { label: "辅助对话", detail: "在侧边面板中继续对话。", icon: MessageSquareText, open: () => {
+    { kind: "files", label: "文件", detail: "从目录中选择一个文件", icon: FolderOpen },
+    { kind: "browser", label: "浏览器", detail: "浏览网页和预览应用。", icon: Globe },
+    { kind: "git", label: "审查", detail: "查看代码变更与差异。", icon: FileDiff },
+    { kind: "btw", label: "辅助对话", detail: "在侧边面板中继续对话。", icon: MessageSquareText }
+  ] as const
+  function openLauncherOption(kind: (typeof options)[number]["kind"]): void {
+    if (kind === "btw") {
       if (opening.current) return
       opening.current = true
       const completeFocus = prepareBtwComposerFocus(parentId)
@@ -374,15 +369,21 @@ export function BtwPane(props: BtwViewProps) {
         completeFocus(undefined)
         toast.error(error instanceof Error ? error.message : "无法创建辅助对话。")
       }).finally(() => { opening.current = false })
-    } }
-  ]
+      return
+    }
+    closeLauncher(parentId)
+    const app = useAppStore.getState()
+    if (kind === "files") app.requestOpenRightPanelSection(parentId, "files")
+    else if (kind === "browser") app.requestOpenBrowserPanel()
+    else app.setRightModule("git")
+  }
   if (!id) return null
   return (
     <aside ref={paneRef} aria-label="辅助对话" data-btw-pane={mainTabVisible ? undefined : id} tabIndex={-1} data-thread-floating-chat="true" className={cn("relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background", mainTabVisible && "[&>:not(header)]:hidden")}>
       <BtwTabs {...props} />
       {id === launcher ? <div className="mx-auto w-full max-w-2xl overflow-auto px-6 py-8">
         <h2 className="mb-4 font-semibold">新标签页</h2>
-        {options.map(({label, detail, icon: Icon, open}) => <button type="button" key={label} onClick={open}
+        {options.map(({kind, label, detail, icon: Icon}) => <button type="button" key={kind} onClick={() => openLauncherOption(kind)}
           className="flex w-full items-center gap-3 rounded-lg p-3 text-left hover:bg-muted">
           <Icon className="size-4" /><span className="flex flex-col text-sm">{label}<small className="text-xs text-muted-foreground">{detail}</small></span>
         </button>)}

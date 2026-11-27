@@ -115,6 +115,7 @@ it("retains source identity after normal task pruning without retaining the requ
   expect(f.store.pruneTaskHistory()).toBe(1)
   expect(() => f.store.getTask(task.id)).toThrow()
   expect(f.store.messageOrigins(f.bot.id, [input.requestId])[0].origin).toEqual(task.origin)
+  expect(f.store.desktopMessageImageInput(f.bot.id, file.botInputId!, input.requestId).id).toBe(file.botInputId)
   expect(f.db.exec("SELECT message FROM bot_exchange_archive WHERE id=?", [task.id])[0].values).toEqual([[null]])
   const check = (message: string, ids?: string[]) => ({ requestId: input.requestId,
     messageHash: createHash("sha256").update(canonicalBotMessageInput(message, undefined, ids)).digest("hex") })
@@ -160,6 +161,10 @@ it.each(["new", "existing"] as const)("uses the retained main-chat bytes for a s
   }
   const task = target === "new" ? work.task : f.store.enqueue(send)
   const restarted = new BotStore(f.db)
+  expect(restarted.desktopMessageImageInput(f.bot.id, selection.botInputId!, task.requestId, work.work.id).id)
+    .toBe(selection.botInputId)
+  expect(() => restarted.desktopMessageImageInput(f.bot.id, selection.botInputId!, task.requestId)).toThrow()
+  expect(() => restarted.desktopMessageImageInput(f.bot.id, selection.botInputId!, "other", work.work.id)).toThrow()
   expect(task.message).toBe(message)
   const digest = createHash("sha256").update(canonicalBotMessageInput(message, undefined, inputFileIds, explicitSkill)).digest("hex")
   expect(restarted.requestReceipts(f.bot.id, [{ requestId: task.requestId, messageHash: digest }], work.work.id)[0].state).toBe("accepted")

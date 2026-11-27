@@ -14,6 +14,62 @@ permissions:
   contents: write
 
 jobs:
+  windows-attachment-regressions:
+    name: Attachment regressions (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci --include=optional
+
+      - name: Enable and verify file symlinks on the ephemeral runner
+        shell: pwsh
+        run: |
+          $developerMode = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+          if (-not (Test-Path $developerMode)) { New-Item -Path $developerMode -Force | Out-Null }
+          New-ItemProperty -Path $developerMode -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
+          node --input-type=module -e "import { mkdtemp, symlink, writeFile, lstat, rm } from 'node:fs/promises'; import { join } from 'node:path'; import { tmpdir } from 'node:os'; const root = await mkdtemp(join(tmpdir(), 'attachment-symlink-')); try { await writeFile(join(root, 'target'), 'test'); const link = join(root, 'link'); await symlink('target', link, 'file'); if (!(await lstat(link)).isSymbolicLink()) throw Error('Expected a file symlink'); } finally { await rm(root, { recursive: true, force: true }); }"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Run attachment and symlink regressions
+        run: >-
+          npx vitest run --maxWorkers=2 --hookTimeout=35000
+          src/main/ipc/bot-attachment-storage.test.ts
+          src/main/ipc/bot-files.test.ts
+          src/main/ipc/attachment-security.test.ts
+          src/main/bots/input-file-deletion.test.ts
+          src/main/bots/history-input-projection.test.ts
+          src/main/bots/input-files.test.ts
+          src/main/bots/input-images.test.ts
+          src/main/bots/delivery-receipt-path.test.ts
+          src/main/file-parser.test.ts
+          src/main/file-attachment-parser/client.test.ts
+          src/main/chat-images.test.ts
+          src/main/workspace-chat-image.test.ts
+          src/main/ipc/managed-background-cancellation.test.ts
+          src/shared/attachment-message-parts.test.ts
+          src/shared/agent-runtime-settings-integration.test.ts
+          src/renderer/src/features/mentions/atFileAttachments.test.ts
+          src/renderer/src/lib/image-outbox.test.ts
+          src/renderer/src/components/chat/chat-message-virtual-list-initial-position.test.ts
+          src/renderer/src/components/chat/chat-scroll-runtime-harness.test.ts
+          src/renderer/src/lib/load-visible-message-images.test.ts
+          src/renderer/src/lib/bot-work-client.test.ts
+          src/renderer/src/lib/chat-composer-guard.test.ts
+          src/renderer/src/lib/bot-draft-sender.test.ts
+          src/renderer/src/lib/bot-conversation-transition.test.ts
+
+      - name: Exercise image send and cancellation in Electron
+        run: npm run test:chat-attachments:e2e
+
   # ------------------------------------------------------------------
   # Linux 专用:在老 glibc 容器里编 node-pty 原生模块
   # ------------------------------------------------------------------
@@ -123,12 +179,14 @@ jobs:
       #   - electron-winstaller: install 是给 Windows installer 选 7z 架构,
       #     Linux 打 deb 用不到这个工具。
       #   - node-pty: 正是我们故意要跳过的对象,由 manylinux artifact 替代。
+      #   - sharp: @img optional packages supply the native module and libvips.
+      #     The build matrix verifies WebP decoding with the installed binary.
       - name: Audit packages with install/postinstall scripts
         shell: bash
         run: |
           set -euxo pipefail
           # 已确认 --ignore-scripts 跳过这些包是安全的(理由见上方注释)
-          EXPECTED="electron electron-winstaller esbuild node-pty"
+          EXPECTED="electron electron-winstaller esbuild node-pty sharp"
 
           actual=$(node -e "
             const fs = require('fs'), path = require('path');
@@ -367,6 +425,21 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: npm ci --ignore-scripts --include=optional
+
+      - name: Verify sharp image codec
+        shell: bash
+        run: |
+          node <<'NODE'
+          const sharp = require("sharp")
+          const assert = require("node:assert/strict")
+          async function verify() {
+            const pixel = Buffer.from([12, 34, 56])
+            const webp = await sharp(pixel, { raw: { width: 1, height: 1, channels: 3 } })
+              .webp({ lossless: true }).toBuffer()
+            assert.deepEqual(await sharp(webp).raw().toBuffer(), pixel)
+          }
+          verify().catch(error => { console.error(error); process.exitCode = 1 })
+          NODE
 
       # Windows 侧仅校验 prebuild 已存在,不重新编译。
       # node-pty 自带 prebuilds/win32-x64/pty.node 可直接用,rebuild 反而需要
