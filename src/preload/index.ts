@@ -1,4 +1,4 @@
-import type { GitPanelRepository } from "../shared/git-panel-repository"
+import type { GitPanelOperationOptions, GitPanelRepository, GitPanelSnapshot } from "../shared/git-panel-repository"
 import type { GitGraphPage } from "../shared/git-graph"
 import type { TaskCommitBindingApi } from "../shared/task-commit-binding"
 import type {
@@ -1996,14 +1996,12 @@ const api = {
       ipcRenderer.invoke("workspace:listGitPanelRepositories", { threadId }),
     getGitPanelMeta: (
       threadId: string,
-      options?: {
-        worktreePath?: string
-        panelRepository?: boolean
+      options?: GitPanelOperationOptions & {
         includeSummary?: boolean
         refreshHead?: boolean
         includePushability?: boolean
       }
-    ): Promise<{
+    ): Promise<GitPanelSnapshot & {
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -2011,13 +2009,14 @@ const api = {
       changedFilesTotal?: number
       hasPendingDiff: boolean
       hasPushableCommit: boolean
+      panelCardNumber?: string
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
       repositoryRoots?: string[]
       worktreeBranch?: string | null
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelMeta", { threadId, options }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelMeta", { threadId, options }) as Promise<GitPanelSnapshot & {
         success: boolean
         isWorktree: boolean
         isGitRepo?: boolean
@@ -2025,6 +2024,7 @@ const api = {
         changedFilesTotal?: number
         hasPendingDiff: boolean
         hasPushableCommit: boolean
+        panelCardNumber?: string
         pendingCommits?: Array<{ hash: string; message: string; date: string }>
         trackedFiles?: string[]
         repositoryRoots?: string[]
@@ -2034,17 +2034,15 @@ const api = {
     },
     getGitPanelDiffs: (
       threadId: string,
-      options?: {
+      options?: GitPanelOperationOptions & {
         includeDiffs?: boolean
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
-        worktreePath?: string
-        panelRepository?: boolean
         commitBindingVersion?: string
         includeCommitTarget?: boolean
       }
-    ): Promise<{
+    ): Promise<GitPanelSnapshot & {
       commitPreviewRevision?: string
       unavailableFileCount?: number
       commitPreviewTarget?: { root: string; scope: string; branch: string }
@@ -2070,7 +2068,7 @@ const api = {
       suggestedCommitMessage?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId, options }) as Promise<{
+      return ipcRenderer.invoke("workspace:getGitPanelDiffs", { threadId, options }) as Promise<GitPanelSnapshot & {
         commitPreviewRevision?: string
         unavailableFileCount?: number
         commitPreviewTarget?: { root: string; scope: string; branch: string }
@@ -2100,9 +2098,7 @@ const api = {
     getGitPanelFileDiff: (
       threadId: string,
       filePath: string,
-      options?: {
-        worktreePath?: string
-        panelRepository?: boolean
+      options?: GitPanelOperationOptions & {
         commitBindingVersion?: string
         commitPreviewRevision?: string
       }
@@ -2147,7 +2143,7 @@ const api = {
       threadId: string,
       targetPath: string,
       kind: "file" | "directory",
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ): Promise<{
       success: boolean
       entry?: string
@@ -2288,7 +2284,7 @@ const api = {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string; agentInitiated?: boolean; commitBindingVersion?: string; commitPreviewRevision?: string }
+      options?: GitPanelOperationOptions & { agentInitiated?: boolean; commitBindingVersion?: string; commitPreviewRevision?: string }
     ): Promise<{ success: boolean; error?: string; warning?: string }> => {
       return ipcRenderer.invoke("workspace:commitWorktree", {
         threadId,
@@ -2303,7 +2299,7 @@ const api = {
     },
     pushWorktree: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ): Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -2327,7 +2323,7 @@ const api = {
     },
     pullWorktree: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ): Promise<{ success: boolean; detail?: string; error?: string }> => {
       return ipcRenderer.invoke("workspace:pullWorktree", { threadId, options }) as Promise<{
         success: boolean
@@ -2338,7 +2334,7 @@ const api = {
     rejectWorktreeChanges: (
       threadId: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> => {
       return ipcRenderer.invoke("workspace:rejectWorktreeChanges", {
         threadId,
@@ -2353,7 +2349,7 @@ const api = {
     rejectWorktreeFile: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:rejectWorktreeFile", {
         threadId,
@@ -5054,14 +5050,15 @@ const api = {
   },
   gitPanel: {
     getCommitHistory: (
-      threadId: string
+      threadId: string,
+      options?: GitPanelOperationOptions
     ): Promise<{
       success: boolean
       projectPath: string | null
       records: GitCommitHistoryRecord[]
       error?: string
     }> =>
-      ipcRenderer.invoke("git-panel:getCommitHistory", { threadId }) as Promise<{
+      ipcRenderer.invoke("git-panel:getCommitHistory", { threadId, options }) as Promise<{
         success: boolean
         projectPath: string | null
         records: GitCommitHistoryRecord[]

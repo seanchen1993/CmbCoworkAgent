@@ -2008,11 +2008,11 @@ export function RightPanel({
     !hooksOpen &&
     !lspOpen
   const handleOpenGitFileFolder = useCallback(
-    async (filePath: string): Promise<void> => {
+    async (filePath: string, repositoryPath?: string): Promise<void> => {
       try {
         const resolved = resolveResourcePreviewPaths(
           filePath,
-          workspacePath ?? null,
+          repositoryPath ?? workspacePath ?? null,
           window.electron.process.platform,
           "relative"
         )

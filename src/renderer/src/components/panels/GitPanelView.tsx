@@ -29,9 +29,8 @@ import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { toast } from "sonner"
 import { GitCommitDialog } from "./GitCommitDialog"
 import type { CommitType } from "./GitCommitDialog"
-import { AuthorizedGitPanel } from "./AuthorizedGitPanel"
 import { GitPanelRepositoryPicker } from "./GitPanelRepositoryPicker"
-import type { GitPanelRepository } from "../../../../shared/git-panel-repository"
+import type { GitPanelRepository, GitPanelSnapshot } from "../../../../shared/git-panel-repository"
 import { GitPushDialog } from "./GitPushDialog"
 import { GitRejectDialog, type GitRejectFile } from "./GitRejectDialog"
 import {
@@ -73,7 +72,12 @@ function isDiffUnsupportedFile(filePath: string): boolean {
   return isBinaryFile(fileName)
 }
 
-type GitPanelMetaState = {
+function panelWriteSnapshot(state?: GitPanelSnapshot | null): GitPanelSnapshot {
+  return { panelBindingVersion: state?.panelBindingVersion, panelRevision: state?.panelRevision }
+}
+
+type GitPanelMetaState = GitPanelSnapshot & {
+  panelCardNumber?: string
   repositoryRoots?: string[]
   success: boolean
   isWorktree: boolean
@@ -113,7 +117,7 @@ function hasCheckoutRefresh(
     : roots.size > 0
 }
 
-type GitPanelDiffState = {
+type GitPanelDiffState = GitPanelSnapshot & {
   success: boolean
   isWorktree: boolean
   isGitRepo?: boolean
@@ -334,7 +338,7 @@ interface GitPanelViewProps {
   threadId: string
   workspacePath: string | null
   initialGitContext?: ThreadGitContext | null
-  onOpenFileFolder?: (filePath: string) => void
+  onOpenFileFolder?: (filePath: string, repositoryPath?: string) => void
 }
 
 export function GitPanelView(props: GitPanelViewProps): React.JSX.Element {
@@ -384,12 +388,7 @@ function TaskGitPanel(props: GitPanelViewProps): React.JSX.Element {
   const selected = catalog.find((repository) => repository.path === selectedPath) ??
     (catalog.length && catalog.every((repository) => repository.source === "authorized") ? catalog[0] : null)
   const select = (repository: GitPanelRepository | null) => setSelectedPath(repository?.path ?? null)
-  if (selected?.source === "authorized") {
-    return <AuthorizedGitPanel key={JSON.stringify([selected.path, bindingRevision])}
-      threadId={threadId} repository={selected} onRefresh={reloadCatalog}
-      picker={<GitPanelRepositoryPicker repositories={catalog} selected={selected}
-        onOpen={reloadCatalog} onSelect={select} />} />
-  }
+  const authorized = selected?.source === "authorized" ? selected : undefined
   return (
     <div className="flex h-full min-h-0 flex-col">
       {catalogError && (
@@ -398,8 +397,16 @@ function TaskGitPanel(props: GitPanelViewProps): React.JSX.Element {
           <button type="button" onClick={reloadCatalog} className="underline">重试</button>
         </div>
       )}
-      <GitPanelWorkspaceView {...props} catalog={catalog} onReloadCatalog={reloadCatalog}
-        onSelectRepository={select} initialRepositoryPath={selected?.path} />
+      <GitPanelWorkspaceView
+        key={authorized ? JSON.stringify([authorized.path, authorized.branch, bindingRevision]) : "workspace"}
+        {...props}
+        workspacePath={authorized?.path ?? props.workspacePath}
+        authorizedRepository={authorized}
+        catalog={catalog}
+        onReloadCatalog={reloadCatalog}
+        onSelectRepository={select}
+        initialRepositoryPath={authorized ? undefined : selected?.path}
+      />
     </div>
   )
 }
@@ -408,6 +415,7 @@ function GitPanelWorkspaceView({
   threadId,
   workspacePath,
   initialGitContext,
+  authorizedRepository,
   onOpenFileFolder,
   catalog,
   onReloadCatalog,
@@ -418,7 +426,23 @@ function GitPanelWorkspaceView({
   onReloadCatalog: () => void
   onSelectRepository: (repository: GitPanelRepository | null) => void
   initialRepositoryPath?: string
+  authorizedRepository?: GitPanelRepository
 }): React.JSX.Element {
+  const authorizedPath = authorizedRepository?.path
+  const readTarget = useCallback((repo?: GitRepositoryInfo | null) => {
+    if (authorizedPath) return { worktreePath: authorizedPath, panelRepository: true as const }
+    return repo ? { worktreePath: repo.path } : undefined
+  }, [authorizedPath])
+  const writeTarget = useCallback((repo?: GitRepositoryInfo | null, state?: GitPanelSnapshot | null) => {
+    const target = readTarget(repo)
+    if (!authorizedPath) return target
+    if (!state?.panelBindingVersion || !state.panelRevision) {
+      throw new Error("请刷新 Git 面板，重新确认目标仓库后再操作")
+    }
+    return { ...target, panelBindingVersion: state.panelBindingVersion, panelRevision: state.panelRevision }
+  }, [authorizedPath, readTarget])
+  const commitSnapshot = useRef<GitPanelSnapshot>({})
+  const rejectSnapshot = useRef<GitPanelSnapshot>({})
   const showCustomizeView = useAppStore((state) => state.showCustomizeView)
   const metaRequestIdRef = useRef(0)
   const diffRequestIdRef = useRef(0)
@@ -444,7 +468,7 @@ function GitPanelWorkspaceView({
   const [rejectDialogLoading, setRejectDialogLoading] = useState(false)
   const [rejectDialogSelectionSeed, setRejectDialogSelectionSeed] = useState(0)
   const { handleCardNumberChange: persistWorkspaceCardChange, persistNow: persistWorkspaceCard } =
-    useWorkspaceTaskCard(workspacePath)
+    useWorkspaceTaskCard(authorizedPath ? null : workspacePath)
   const [commitCardNumber, setCommitCardNumber] = useState("")
   const [commitType, setCommitType] = useState<CommitType | "">("")
   const [commitMessage, setCommitMessage] = useState("")
@@ -467,7 +491,7 @@ function GitPanelWorkspaceView({
   const [diffReloadVersion, setDiffReloadVersion] = useState(0)
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [ignoringPath, setIgnoringPath] = useState<string | null>(null)
-  const [pendingRevertFile, setPendingRevertFile] = useState<GitPanelDiffFile | null>(null)
+  const [pendingRevertFile, setPendingRevertFile] = useState<(GitPanelDiffFile & GitPanelSnapshot) | null>(null)
   const [pulling, setPulling] = useState(false)
   const selectionScopeRef = useRef(ALL_REPOSITORIES_VALUE)
   const initialMetaState = useMemo(
@@ -593,7 +617,11 @@ function GitPanelWorkspaceView({
           (async () => {
             try {
               const nextMeta = await window.api.workspace.getGitPanelMeta(
-                threadId, scope.diffPendingRoots.size ? { refreshHead: true } : undefined
+                threadId, {
+                  ...readTarget(),
+                  refreshHead: Boolean(authorizedPath || scope.diffPendingRoots.size),
+                  includePushability: authorizedPath ? false : undefined
+                }
               )
               if (requestId !== metaRequestIdRef.current) return
               panelRootsRef.current = nextMeta.repositoryRoots
@@ -618,6 +646,7 @@ function GitPanelWorkspaceView({
           (async () => {
             try {
               const nextDiff = await window.api.workspace.getGitPanelDiffs(threadId, {
+                ...readTarget(),
                 includeDiffs: false,
                 includeChangedFiles: false,
                 statusUntrackedMode: "normal"
@@ -649,7 +678,7 @@ function GitPanelWorkspaceView({
 
       await Promise.allSettled(tasks)
     },
-    [threadId, showToast]
+    [threadId, showToast, readTarget, authorizedPath]
   )
 
   useEffect(() => {
@@ -710,7 +739,7 @@ function GitPanelWorkspaceView({
     return repositories.find((repo) => repo.path === commitRepositoryPath) ?? null
   }, [commitRepositoryPath, hasMultipleRepositories, repositories])
   const checkoutRefreshPending = hasCheckoutRefresh(checkoutRefreshRoots, activeRepository)
-  const activeRepositoryLabel = activeRepository?.displayPath ?? "全部仓库"
+  const activeRepositoryLabel = authorizedPath ?? activeRepository?.displayPath ?? "全部仓库"
   const visibleDiffFiles = useMemo(() => {
     const files = diffState?.files ?? []
     if (!activeRepository) return files
@@ -882,7 +911,9 @@ function GitPanelWorkspaceView({
     const requestId = ++pushMetaRequestIdRef.current
     setPushMetaLoading(true)
     setPushMetaState(null)
-    const targetOptions = activeRepository ? { worktreePath: activeRepository.path } : undefined
+    const targetOptions = authorizedPath
+      ? { ...readTarget(), includePushability: true, includeSummary: false, refreshHead: true }
+      : readTarget(activeRepository)
 
     void window.api.workspace
       .getGitPanelMeta(threadId, targetOptions)
@@ -912,7 +943,7 @@ function GitPanelWorkspaceView({
     return () => {
       pushMetaRequestIdRef.current += 1
     }
-  }, [activeRepository, showToast, submitAction, threadId])
+  }, [activeRepository, authorizedPath, readTarget, showToast, submitAction, threadId])
 
   useEffect(() => {
     if (!diffState?.success) return
@@ -989,11 +1020,13 @@ function GitPanelWorkspaceView({
     if (hasCheckoutRefresh(operationScope.current.diffPendingRoots, inferredRepository)) return
     commitMetaRequestIdRef.current += 1
     resetCommitForm()
+    commitSnapshot.current = panelWriteSnapshot(diffState)
+    if (authorizedPath && metaState?.panelCardNumber) setCommitCardNumber(metaState.panelCardNumber)
     setCommitRepositoryPath(inferredRepository?.path ?? null)
     setCommitMetaState(null)
     setCommitMetaLoading(Boolean(inferredRepository))
     setSubmitAction("commit")
-  }, [getSelectedOperationPaths, resetCommitForm, resolveActionRepository])
+  }, [authorizedPath, diffState, getSelectedOperationPaths, metaState?.panelCardNumber, resetCommitForm, resolveActionRepository])
 
   const selectCommitRepository = useCallback((repositoryPath: string): void => {
     commitMetaRequestIdRef.current += 1
@@ -1056,7 +1089,7 @@ function GitPanelWorkspaceView({
     const scope = operationScope.current
     const isCurrent = () => !canceled && operationScope.current === scope
     void window.api.gitPanel
-      .getCommitHistory(threadId)
+      .getCommitHistory(threadId, readTarget())
       .then((result) => {
         if (!isCurrent()) return
         const records = result.success ? result.records : []
@@ -1070,7 +1103,7 @@ function GitPanelWorkspaceView({
     return () => {
       canceled = true
     }
-  }, [submitAction, threadId])
+  }, [readTarget, submitAction, threadId])
 
   const loadFileDiff = useCallback(
     async (filePath: string): Promise<void> => {
@@ -1109,7 +1142,7 @@ function GitPanelWorkspaceView({
         const result = await window.api.workspace.getGitPanelFileDiff(
           threadId,
           requestFilePath,
-          repo ? { worktreePath: repo.path } : undefined
+          readTarget(repo)
         )
         if (!isLatestFileRequest() || result.taskId !== activeThreadIdRef.current) return
         if (!result.success || !result.file) {
@@ -1138,7 +1171,7 @@ function GitPanelWorkspaceView({
         }
       }
     },
-    [threadId, repositories, refresh]
+    [threadId, repositories, refresh, readTarget]
   )
 
   const toggleFileExpanded = useCallback(
@@ -1223,6 +1256,7 @@ function GitPanelWorkspaceView({
       if (rejectInFlightRef.current || Date.now() < suppressFileChangeRefreshUntilRef.current) {
         return
       }
+      if (authorizedPath && data.changeType === "meta") onReloadCatalog()
       schedulePanelRefresh(data.changeType === "meta", PANEL_REFRESH_DEBOUNCE_MS)
     })
     return () => {
@@ -1230,7 +1264,7 @@ function GitPanelWorkspaceView({
       fileRefreshTimerRef.current = null
       cleanup()
     }
-  }, [threadId, workspacePath, schedulePanelRefresh])
+  }, [authorizedPath, onReloadCatalog, threadId, workspacePath, schedulePanelRefresh])
 
   const captureOperation = useCallback((repository?: GitRepositoryInfo | null) => {
     const scope = operationScope.current
@@ -1298,7 +1332,7 @@ function GitPanelWorkspaceView({
         const result = await window.api.workspace.rejectWorktreeChanges(
           threadId,
           requestFilePaths,
-          actionRepository ? { worktreePath: actionRepository.path } : undefined
+          writeTarget(actionRepository, rejectSnapshot.current)
         )
         if (!result.success) throw new Error(result.error || "回滚失败")
         if (!operation.finishedInCurrentCheckout("文件已回退", false)) return
@@ -1318,6 +1352,7 @@ function GitPanelWorkspaceView({
     },
     [
       captureOperation,
+      writeTarget,
       threadId,
       hasMultipleRepositories,
       refresh,
@@ -1331,6 +1366,7 @@ function GitPanelWorkspaceView({
   const openRejectDialog = useCallback(() => {
     if (!threadId || hasCheckoutRefresh(operationScope.current.diffPendingRoots, activeRepository)) return
     const requestId = ++rejectDialogRequestIdRef.current
+    rejectSnapshot.current = panelWriteSnapshot(diffState)
     const initialFiles = formatFilesForRejectDialog(visibleDiffFiles)
     setRejectDialogFiles(initialFiles)
     setRejectDialogOmittedFileCount(activeRepository ? 0 : (diffState?.omittedFileCount ?? 0))
@@ -1344,7 +1380,7 @@ function GitPanelWorkspaceView({
         includeChangedFiles: false,
         statusUntrackedMode: "all",
         visibleFileLimit: GIT_REJECT_DIALOG_FILE_LIMIT,
-        worktreePath: activeRepository?.path
+        ...readTarget(activeRepository)
       })
       .then((result) => {
         if (
@@ -1357,6 +1393,7 @@ function GitPanelWorkspaceView({
           setRejectDialogLoading(false)
           return
         }
+        rejectSnapshot.current = panelWriteSnapshot(result)
         const nextFiles = formatFilesForRejectDialog(result.files ?? [])
         setRejectDialogOmittedFileCount(result.omittedFileCount ?? 0)
         setRejectDialogFiles(nextFiles)
@@ -1371,7 +1408,8 @@ function GitPanelWorkspaceView({
   }, [
     threadId,
     activeRepository,
-    diffState?.omittedFileCount,
+    diffState,
+    readTarget,
     formatFilesForRejectDialog,
     showToast,
     visibleDiffFiles
@@ -1442,18 +1480,19 @@ function GitPanelWorkspaceView({
             threadId,
             finalMessage ?? "",
             requestSelectedPaths,
-            actionRepository ? { worktreePath: actionRepository.path } : undefined
+            writeTarget(actionRepository, commitSnapshot.current)
           )
           if (!result.success) throw new Error(result.error || "提交失败")
-          if (!operation.finishedInCurrentCheckout("提交成功", true)) return
-          showToast("提交成功", "success")
+          if (!operation.finishedInCurrentCheckout(result.warning || "提交成功", true)) return
+          if (result.warning) toast.warning(result.warning)
+          else showToast("提交成功", "success")
           insertLog("commit成功")
           // Remember the card actually committed with for this workspace.
           persistWorkspaceCard(commitCardNumber.trim())
         } else {
           const result = await window.api.workspace.pushWorktree(
             threadId,
-            actionRepository ? { worktreePath: actionRepository.path } : undefined
+            writeTarget(actionRepository, pushMetaState)
           )
           if (!result.success) throw new Error(result.error || "推送失败")
           if (!operation.finishedInCurrentCheckout("推送成功", true)) return
@@ -1486,6 +1525,8 @@ function GitPanelWorkspaceView({
       captureOperation,
       threadId,
       commitCardNumber,
+      pushMetaState,
+      writeTarget,
       commitType,
       commitMessage,
       diffState?.hasPendingDiff,
@@ -1503,7 +1544,7 @@ function GitPanelWorkspaceView({
   )
 
   const handleRevertFile = useCallback(
-    async (file: GitPanelDiffFile) => {
+    async (file: GitPanelDiffFile & GitPanelSnapshot) => {
       if (!threadId) return
       const filePath = file.path
       const actionRepository = getFileRepository(filePath, repositories)
@@ -1520,7 +1561,7 @@ function GitPanelWorkspaceView({
         const result = await window.api.workspace.rejectWorktreeChanges(
           threadId,
           requestFilePaths,
-          actionRepository ? { worktreePath: actionRepository.path } : undefined
+          writeTarget(actionRepository, file)
         )
         if (!result.success) throw new Error(result.error || "文件回退失败")
         if (!operation.finishedInCurrentCheckout(`已回退文件：${filePath}`, false)) return
@@ -1532,7 +1573,7 @@ function GitPanelWorkspaceView({
         if (operation.inPanel()) setRevertingFilePath(null)
       }
     },
-    [allowGitWrite, captureOperation, threadId, refresh, repositories, showToast]
+    [allowGitWrite, captureOperation, threadId, refresh, repositories, showToast, writeTarget]
   )
 
   const handleAddGitignoreEntry = useCallback(
@@ -1549,7 +1590,7 @@ function GitPanelWorkspaceView({
           threadId,
           requestPath,
           kind,
-          repo ? { worktreePath: repo.path } : undefined
+          writeTarget(repo, diffState)
         )
         if (!result.success) throw new Error(result.error || "写入 .gitignore 失败")
         if (!operation.finishedInCurrentCheckout("已应用 .gitignore 规则", true)) return
@@ -1574,7 +1615,7 @@ function GitPanelWorkspaceView({
         if (operation.inPanel()) setIgnoringPath(null)
       }
     },
-    [allowGitWrite, captureOperation, ignoringPath, refresh, showToast, threadId]
+    [allowGitWrite, captureOperation, diffState, ignoringPath, refresh, showToast, threadId, writeTarget]
   )
 
   const confirmPendingRevertFile = useCallback(() => {
@@ -1591,7 +1632,7 @@ function GitPanelWorkspaceView({
     try {
       const result = await window.api.workspace.pullWorktree(
         threadId,
-        activeRepository ? { worktreePath: activeRepository.path } : undefined
+        writeTarget(activeRepository, metaState)
       )
       if (!result.success) throw new Error(result.error || "拉取失败")
       if (!operation.finishedInCurrentCheckout(result.detail || "拉取成功", true)) return
@@ -1602,7 +1643,7 @@ function GitPanelWorkspaceView({
     } finally {
       if (operation.inPanel()) setPulling(false)
     }
-  }, [allowGitWrite, captureOperation, threadId, activeRepository, unresolvedRepository, refresh, showToast])
+  }, [allowGitWrite, captureOperation, threadId, activeRepository, metaState, unresolvedRepository, refresh, showToast, writeTarget])
 
   const activeRepositoryCheckoutPending = hasPendingCheckout(pendingCheckoutRoots, activeRepository)
   const commitRepositoryCheckoutPending = hasPendingCheckout(pendingCheckoutRoots, commitRepository)
@@ -1626,7 +1667,7 @@ function GitPanelWorkspaceView({
   const workspaceName = workspacePath
     ? workspacePath.split(/[\\/]/).filter(Boolean).pop() || workspacePath
     : "未关联路径"
-  const branchName = metaState?.worktreeBranch || "-"
+  const branchName = metaState?.worktreeBranch || authorizedRepository?.branch || "-"
   const totalChangedFiles = diffState?.changedFilesTotal ?? metaState?.changedFilesTotal ?? 0
   const omittedFileCount = diffState?.omittedFileCount ?? 0
   const skippedDirs = diffState?.skippedDirs ?? []
@@ -1875,7 +1916,7 @@ function GitPanelWorkspaceView({
                   aria-label="打开文件夹"
                   align="end"
                   stopPropagation
-                  onClick={() => onOpenFileFolder?.(file.path)}
+                  onClick={() => onOpenFileFolder?.(file.path, authorizedPath)}
                 />
               )}
               {showGitignoreAction && (
@@ -1906,7 +1947,7 @@ function GitPanelWorkspaceView({
                 open={pendingRevertFile?.path === file.path}
                 onOpenChange={(open) => {
                   if (revertingFilePath) return
-                  setPendingRevertFile(open ? file : null)
+                  setPendingRevertFile(open ? { ...file, ...panelWriteSnapshot(diffState) } : null)
                 }}
               >
                 <PopoverAnchor asChild>
@@ -1931,7 +1972,7 @@ function GitPanelWorkspaceView({
                           revertingFilePath !== file.path &&
                           "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground"
                       )}
-                      onClick={() => setPendingRevertFile(file)}
+                      onClick={() => setPendingRevertFile({ ...file, ...panelWriteSnapshot(diffState) })}
                     />
                   </span>
                 </PopoverAnchor>
@@ -2174,7 +2215,7 @@ function GitPanelWorkspaceView({
     isSameGitWorkspacePath(repository.path, activeRepositoryPath)) ??
     (workspaceRepositories.length === 1 ? workspaceRepositories[0] : null)
   const repositoryPicker = pickerRepositories.length > 0 && (
-    <GitPanelRepositoryPicker repositories={pickerRepositories} selected={pickedWorkspace}
+    <GitPanelRepositoryPicker repositories={pickerRepositories} selected={authorizedRepository ?? pickedWorkspace}
       onOpen={onReloadCatalog} onSelect={(repository) => {
         onSelectRepository(repository)
         if (repository?.source !== "authorized") {
@@ -2186,6 +2227,7 @@ function GitPanelWorkspaceView({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-background-elevated">
       <div className="sticky top-0 z-10 shrink-0 border-b border-border/70 bg-background-elevated/90 backdrop-blur">
+        {!hasGitRepo && repositoryPicker && <div className="px-2.5 pt-2">{repositoryPicker}</div>}
         <div className="bg-background-elevated px-2.5 py-2">
           {isInitialMetaLoading ? (
             <>
@@ -2204,7 +2246,8 @@ function GitPanelWorkspaceView({
           ) : (
             <>
               <div className="text-[11px] text-muted-foreground truncate flex items-center gap-1 flex-wrap">
-                <span className="font-semibold text-foreground">{workspaceName}</span>
+                <span className="font-semibold text-foreground" title={workspacePath ?? undefined}>{workspaceName}</span>
+                {authorizedPath && <span>本任务授权</span>}
                 <span>•</span>
                 {isInitialDiffLoading ? (
                   <>
@@ -2778,7 +2821,7 @@ function GitPanelWorkspaceView({
       <GitPushDialog
         open={!checkoutRefreshPending && submitAction === "push"}
         running={running === "push"}
-        submitDisabled={activeRepositoryCheckoutPending}
+        submitDisabled={activeRepositoryCheckoutPending || Boolean(authorizedPath && !pushMetaState?.panelRevision)}
         loading={pushMetaLoading}
         branch={
           pushMetaState?.worktreeBranch ||
@@ -2787,7 +2830,7 @@ function GitPanelWorkspaceView({
           "-"
         }
         pendingCommits={
-          pushMetaLoading ? undefined : (pushMetaState?.pendingCommits ?? metaState?.pendingCommits)
+          pushMetaLoading ? undefined : (pushMetaState?.pendingCommits ?? (authorizedPath ? undefined : metaState?.pendingCommits))
         }
         onOpenChange={(open) => {
           if (!open) {

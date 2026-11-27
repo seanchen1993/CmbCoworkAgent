@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { prepareGitPanelWrite } from "../services/git-worktree-write-gate"
 
 type Handler = (_event: unknown, payload: unknown) => Promise<unknown>
 const { handlers, thread } = vi.hoisted(() => ({
@@ -33,6 +34,33 @@ vi.mock("../services/code-adoption-push-updater", () => ({
 const panelBusy = /当前工作树正在切换或创建分支/
 const checkoutBusy = /当前工作树正在执行 Git 面板写入/
 const branchChanged = /当前工作树已切换分支/
+
+it("excludes overlapping panel writes to the same authorized checkout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "authorized-gate-"))
+  const first = prepareGitPanelWrite("exclusive-panel")
+  const other = prepareGitPanelWrite("exclusive-panel")
+  const workspace = prepareGitPanelWrite()
+  try {
+    const release = await first.reserve(root, Promise.resolve(root))
+    try {
+      await expect(other.reserve(root, Promise.resolve(root))).rejects.toThrow()
+      await expect(workspace.reserve(root, Promise.resolve(root))).rejects.toThrow()
+    } finally {
+      release()
+    }
+    const releaseWorkspace = await workspace.reserve(root, Promise.resolve(root))
+    try {
+      await expect(other.reserve(root, Promise.resolve(root))).rejects.toThrow()
+    } finally {
+      releaseWorkspace()
+    }
+  } finally {
+    first.dispose()
+    other.dispose()
+    workspace.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 describe.skipIf(process.platform === "win32")("Git panel and checkout write exclusion", () => {
   let harness: string

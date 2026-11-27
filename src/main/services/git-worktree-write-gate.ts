@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises"
 import path from "node:path"
 
-type WorktreeWriteKind = "checkout" | "panel" | "task-commit"
+type WorktreeWriteKind = "checkout" | "panel" | "task-commit" | "exclusive-panel"
 
 const activeWrites = new Map<string, { kind: WorktreeWriteKind; count: number }>()
 const preparingPanelWrites = new Set<Set<string>>()
@@ -26,7 +26,8 @@ function beginWrite(gitDir: string, kind: WorktreeWriteKind): () => void {
   const key = gitWorktreeWriteKey(gitDir)
   const current = activeWrites.get(key)
   const active = current ?? { kind, count: 0 }
-  if (current && (current.kind === "task-commit" || kind === "task-commit")) {
+  const exclusive = (value: WorktreeWriteKind) => value === "task-commit" || value === "exclusive-panel"
+  if (current && (exclusive(current.kind) || exclusive(kind))) {
     throw new Error("当前工作树正在执行 Git 写入，请等待操作完成后再提交或切换分支")
   }
   if (active.kind !== kind) {
@@ -43,7 +44,7 @@ function beginWrite(gitDir: string, kind: WorktreeWriteKind): () => void {
   }
 }
 
-// The checkout reservation includes queued checkouts. Panel writes can overlap
+// The checkout reservation includes queued checkouts. Ordinary workspace panel writes can overlap
 // with one another, and no panel write may start between queued checkouts.
 export function beginGitCheckoutWrite(gitDir: string): (headChanged: boolean) => void {
   const release = beginWrite(gitDir, "checkout")
@@ -64,7 +65,7 @@ export interface GitPanelWritePreparation {
 // The panel cannot identify its worktree until after async repository discovery.
 // Remember checkouts that finish in that gap, then compare the physical Git directory.
 export function prepareGitPanelWrite(
-  kind: "panel" | "task-commit" = "panel"
+  kind: Exclude<WorktreeWriteKind, "checkout"> = "panel"
 ): GitPanelWritePreparation {
   const changedWorktrees = new Set<string>()
   preparingPanelWrites.add(changedWorktrees)
