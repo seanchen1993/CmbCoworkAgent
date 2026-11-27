@@ -86,7 +86,6 @@ const fixture = vi.hoisted(() => ({
   recordQuestionResult: vi.fn(),
   publishMessage: vi.fn(() => ({ groupId: "g", messageId: "sent-message" })),
   groupMessages: vi.fn<() => BotGroupMessage[]>(() => []),
-  groupImageGenerationRequest: vi.fn<LocalBotHost["groupImageGenerationRequest"]>(),
   groupTaskDeliveries: vi.fn<(groupId: string, taskId: string, authorBotId: string, includeHandoffFiles?: boolean) => Pick<BotGroupMessage, "id" | "authorBotId" | "files">[]>(),
   groupTaskRequest: vi.fn<(taskId: string) => Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null>(
     () => null
@@ -450,7 +449,6 @@ function port(
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
         groupMessages: fixture.groupMessages,
-        groupImageGenerationRequest: fixture.groupImageGenerationRequest,
         groupTaskDeliveries: fixture.groupTaskDeliveries,
         groupTaskRequest: fixture.groupTaskRequest,
         peers: fixture.peers,
@@ -544,7 +542,6 @@ beforeEach(() => {
   fixture.profileContinuation.mockReturnValue(null)
   fixture.commandUserRequest.mockReset().mockReturnValue(null)
   fixture.groupCheckpoint.mockReset().mockReturnValue(undefined)
-  fixture.groupImageGenerationRequest.mockReset()
   fixture.armResultReview.mockReset().mockReturnValue(true)
   fixture.resultReviewActive.mockReset().mockReturnValue(false)
   fixture.commandIds.mockReset().mockReturnValue([])
@@ -580,8 +577,7 @@ beforeEach(() => {
 describe("Bot Runtime integration", () => {
   it("activates only the host-resolved work skill in the worker's own runtime", async () => {
     const skill = { name: "review", path: "/synthetic/skills/review/SKILL.md" }
-    const input = { messages: [], totalMessages: 1, explicitSkill: skill }
-    fixture.workInputContext.mockReturnValueOnce(input)
+    fixture.workInputContext.mockReturnValueOnce({ messages: [], totalMessages: 1, explicitSkill: skill } as any)
     const worker: BotTask = { ...task, workId: "work", origin: { kind: "work", sourceTaskId: "main",
       sourceContext: { version: 1, references: [] } } }
     await port().acquire({ ...bot, allowedSkillNames: ["review"] }, worker)!
@@ -2991,33 +2987,6 @@ describe("Bot Runtime integration", () => {
     }
   )
 
-  it("settles an original group image checkpoint from its published receipt without running the model", async () => {
-    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
-    const groupTask: BotTask = {
-      ...task,
-      threadId: "group-g-a",
-      origin: { kind: "group", groupId: "g", messageId: "request" }
-    }
-    fixture.groupCheckpoint.mockReturnValue("checkpoint-after-image-publication")
-    fixture.groupImageGenerationRequest.mockReturnValue({
-      text: "画一张海报",
-      instanceKey: "host-bound-human-post",
-      published: true
-    })
-    const result = await port()
-      .acquire(bot, groupTask)!
-      .execute(new AbortController().signal, vi.fn())
-    expect(result).toMatchObject({
-      state: "completed",
-      explicitGroupMessages: true,
-      publicContribution: true
-    })
-    expect(fixture.groupImageGenerationRequest).toHaveBeenCalledWith("g", "request", bot.id)
-    expect(fixture.start).not.toHaveBeenCalled()
-    expect(fixture.groupTaskDeliveries).not.toHaveBeenCalled()
-    expect(fixture.publishMessage).not.toHaveBeenCalled()
-  })
-
   it("uses the original run to post actual group text while keeping private final scratch invisible", async () => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
     const groupTask: BotTask = {
@@ -3456,14 +3425,14 @@ describe("Bot Runtime integration", () => {
   })
 
   it("requires the fixed initialized work Thread identity instead of recreating missing history", () => {
-    const work = {
+    const work: any = {
       id: "w",
       botId: "a",
       threadId: "work-thread",
       title: "Draft",
       audienceKey: "desktop",
       threadInitialized: true
-    } as BotWorkItem
+    }
     fixture.thread.mockReturnValue(null)
     expect(() =>
       prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
@@ -4856,15 +4825,14 @@ describe("Bot Runtime integration", () => {
       const owner = makeBot("Owner")
       const peer = makeBot("Reviewer")
       const leaf = makeBot("Checker")
+      let host!: LocalBotHost
       const runtime = createLocalBotRunPort(
         {} as BotMemoryService, () => host, {} as BotBrowserService, {} as BotMemoryMaintainer
       )
       const events: { task: BotTask; notifications: number }[] = []
       let ownerResults = 0
       const errors = vi.fn()
-      const host: LocalBotHost = new LocalBotHost(
-        store,
-        {
+      host = new LocalBotHost(store, {
         onAvailable: () => () => {},
         acquire: (_bot, current) => ({
           execute: async () => {
@@ -4991,6 +4959,7 @@ describe("Bot Runtime integration", () => {
           context.onRunTerminated?.({ outcome: "success", code: "done" })
           return { completion: Promise.resolve() }
         })
+        let host!: LocalBotHost
         const runtime = createLocalBotRunPort(
           { editVersion: () => 7, forPrompt: () => [] } as unknown as BotMemoryService,
           () => host,
@@ -4998,7 +4967,7 @@ describe("Bot Runtime integration", () => {
           { enqueue: fixture.summary } as unknown as BotMemoryMaintainer
         )
         const errors = vi.fn()
-        const host: LocalBotHost = new LocalBotHost(store, runtime, 1, errors)
+        host = new LocalBotHost(store, runtime, 1, errors)
         try {
           await vi.waitFor(() => expect(store.getTask(queued.id).state).toBe("completed"))
           expect(errors).not.toHaveBeenCalled()
@@ -6712,8 +6681,7 @@ describe("Bot steering uses the original runtime", () => {
   })
   it("carries a new explicit skill through a live work correction without trusting the routing note", async () => {
     const skill = { name: "review", path: "/synthetic/skills/review/SKILL.md" }
-    const input = { messages: [], totalMessages: 1, explicitSkill: skill }
-    fixture.workInputContext.mockReturnValueOnce(input)
+    fixture.workInputContext.mockReturnValueOnce({ messages: [], totalMessages: 1, explicitSkill: skill } as any)
     fixture.steer.mockResolvedValue({ queued: true })
     const running: BotTask = { ...task, workId: "work", origin: { kind: "work", sourceTaskId: "main" } }
     const addition: BotTask = { ...running, id: "revision", requestId: "revision-message", message: "Revise",
@@ -8559,10 +8527,10 @@ it("isolates authenticated IM peer browser owners while retaining their binding 
     fixture.thread.mockReturnValue(undefined)
     fixture.getBot.mockImplementation((id) => store.getBot(id))
     const runtime = createLocalBotRunPort(
-      { editVersion: () => 0, forPrompt: () => [] } as unknown as BotMemoryService,
+      { editVersion: () => 0, forPrompt: () => [] } as any,
       () => host,
-      {} as BotBrowserService,
-      { enqueue: () => {} } as unknown as BotMemoryMaintainer
+      {} as any,
+      { enqueue: () => {} } as any
     )
     const outputs: Array<{ thread: string; scope: unknown }> = []
     // This test exercises direct Runtime leases outside Host admission.

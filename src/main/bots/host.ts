@@ -1,4 +1,3 @@
-import type { GeneratedGroupImageSource } from "../../shared/generated-image"
 import { eligibleChatImageModels } from "../models/image-candidates"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
 import { getGlobalRoutingMode } from "../storage"
@@ -1906,15 +1905,6 @@ export class LocalBotHost {
     this.requireRunning()
     return this.store.groupTaskDeliveries(groupId, taskId, authorBotId, includeHandoffFiles)
   }
-  groupGeneratedImage(source: GeneratedGroupImageSource, includePixels: boolean) {
-    this.requireRunning()
-    return this.store.groupGeneratedImage(source, includePixels)
-  }
-
-  groupImageGenerationRequest(groupId: string, messageId: string, botId: string) {
-    return this.store.groupImageGenerationRequest(groupId, messageId, botId)
-  }
-
   groupTaskRequest(taskId: string): Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null {
     this.requireRunning()
     return this.store.groupTaskRequest(taskId)

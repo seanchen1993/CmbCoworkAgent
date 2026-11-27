@@ -1,5 +1,4 @@
 import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
-import type { GeneratedImagesApi } from "../shared/generated-image"
 import type { GitGraphPage } from "../shared/git-graph"
 import type { TaskCommitBindingApi } from "../shared/task-commit-binding"
 import type {
@@ -746,12 +745,6 @@ async function invokeProjectAgent<T>(
 }
 
 const api = {
-  generatedImages: {
-    availability: () => ipcRenderer.invoke("generated-images:availability"),
-    lookup: (source) => ipcRenderer.invoke("generated-images:lookup", source),
-    read: (source, variant) => ipcRenderer.invoke("generated-images:read", source, variant),
-    save: (source) => ipcRenderer.invoke("generated-images:save", source)
-  } satisfies GeneratedImagesApi,
   bots: localBotsApi,
   uiGuides: {
     getState: (config: UiGuideConfig): Promise<UiGuideState> =>

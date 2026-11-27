@@ -53,11 +53,6 @@ jobs:
           src/main/file-parser.test.ts
           src/main/file-attachment-parser/client.test.ts
           src/main/chat-images.test.ts
-          src/main/models/image-generation.test.ts
-          src/main/agent/image-generation-tool.test.ts
-          src/main/generated-images.test.ts
-          src/main/ipc/generated-images.test.ts
-          src/main/bots/generated-image-delivery.test.ts
           src/main/workspace-chat-image.test.ts
           src/main/ipc/managed-background-cancellation.test.ts
           src/shared/attachment-message-parts.test.ts
@@ -68,28 +63,12 @@ jobs:
           src/renderer/src/components/chat/chat-scroll-runtime-harness.test.ts
           src/renderer/src/lib/load-visible-message-images.test.ts
           src/renderer/src/lib/bot-work-client.test.ts
-          src/renderer/src/lib/bot-execution-visibility.test.ts
           src/renderer/src/lib/chat-composer-guard.test.ts
           src/renderer/src/lib/bot-draft-sender.test.ts
           src/renderer/src/lib/bot-conversation-transition.test.ts
 
-      - name: Verify one image producer per human group message
-        run: npx vitest run src/main/bots/group-discussion.test.ts -t "selects one image producer"
-
-      - name: Verify recovery after the group image is published
-        run: npx vitest run src/main/bots/runtime-adapter.test.ts -t "settles an original group image checkpoint"
-
       - name: Exercise image send and cancellation in Electron
         run: npm run test:chat-attachments:e2e
-
-      - name: Exercise generated images in chats and groups in Electron
-        run: node tests/chat-generation-e2e.spec.mjs
-
-      - name: Verify generated image display and interaction
-        run: |
-          node tests/generated-image-display.spec.mjs
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          npx tsx tests/slash-commands-ui.spec.ts
 
   # ------------------------------------------------------------------
   # Linux 专用:在老 glibc 容器里编 node-pty 原生模块

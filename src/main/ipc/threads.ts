@@ -727,14 +727,6 @@ async function copyForkedThreadMessages(input: {
       const legacy = botLegacyHistoryRequests(input.sourceThreadId, input.sourceRow,
         inputs.filter(message => message.text === null).map(message => message.id))
       const { copyBoundChatImages, getChatImageHistoryProjections } = await import("../chat-images")
-      if (
-        messages.some((message) =>
-          message.tool_calls?.some((call) => call.name === "generate_image")
-        )
-      ) {
-        const { copyGeneratedImageGrants } = await import("../generated-images")
-        copyGeneratedImageGrants(input.sourceThreadId, input.targetThreadId, messages)
-      }
       const userIds = messages.filter(item => item.role === "user").map(item => item.id)
       for (const id of getChatImageHistoryProjections(input.sourceThreadId, userIds).keys()) {
         await copyBoundChatImages(input.sourceThreadId, input.targetThreadId, id)

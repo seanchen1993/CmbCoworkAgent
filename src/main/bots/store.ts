@@ -1,5 +1,3 @@
-import { MAX_GROUP_IMAGE_BYTES, takeStagedGroupImage } from "./generated-image-delivery"
-import type { GeneratedGroupImageSource } from "../../shared/generated-image"
 import { admittedWorkDelivery } from "./work-result-settlement"
 import { isLocalBotWork, matchesBotWorkAudience, type BotWorkDispatchSource } from "../../shared/bots/work"
 import { BotWorkInvalidations } from "./work-invalidation"
@@ -179,7 +177,6 @@ import {
   type BotGroup,
   type BotGroupInput,
   type BotGroupMessage,
-  type BotGroupMention,
   type BotGroupHistoryCursor,
   type BotConversationActivity,
   type BotReadKind,
@@ -492,17 +489,6 @@ export class BotStore {
       CREATE TABLE IF NOT EXISTS bot_group_messages (ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
         group_id TEXT NOT NULL, author_bot_id TEXT, text TEXT NOT NULL, targets_json TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS bot_group_history ON bot_group_messages(group_id, ordinal);
-      CREATE TABLE IF NOT EXISTS bot_group_generated_images (
-        group_id TEXT NOT NULL, message_id TEXT NOT NULL, file_index INTEGER NOT NULL,
-        source_id TEXT NOT NULL, action_id TEXT NOT NULL, digest TEXT NOT NULL,
-        pixels BLOB NOT NULL CHECK(typeof(pixels)='blob' AND length(pixels) BETWEEN 1 AND ${MAX_GROUP_IMAGE_BYTES}),
-        PRIMARY KEY (group_id,message_id,file_index), UNIQUE (group_id,action_id)
-      );
-      CREATE INDEX IF NOT EXISTS bot_group_generated_sources ON bot_group_generated_images(group_id,source_id);
-      CREATE TRIGGER IF NOT EXISTS bot_group_generated_message_deleted AFTER DELETE ON bot_group_messages BEGIN
-        DELETE FROM bot_group_generated_images WHERE group_id=OLD.group_id
-          AND (message_id=OLD.id OR source_id=OLD.id);
-      END;
       CREATE TABLE IF NOT EXISTS bot_message_reactions (
         scope_kind TEXT NOT NULL CHECK(scope_kind IN ('thread','group')),
         scope_id TEXT NOT NULL, message_id TEXT NOT NULL, emoji TEXT NOT NULL, added_at INTEGER NOT NULL,
@@ -579,12 +565,6 @@ export class BotStore {
         )
       )
         db.run("ALTER TABLE bot_group_messages ADD COLUMN files_json TEXT")
-      db.run(`CREATE TRIGGER IF NOT EXISTS bot_group_generated_files_changed
-        AFTER UPDATE OF files_json ON bot_group_messages BEGIN
-          DELETE FROM bot_group_generated_images WHERE group_id=OLD.group_id AND message_id=OLD.id
-            AND json_extract(NEW.files_json, '$.files[' || file_index || '].generatedImage.actionId')
-              IS NOT action_id;
-        END`)
       if (
         !this.rows("PRAGMA table_info(bot_group_messages)").some(
           (column) => column.name === "mentions_json"
@@ -4594,40 +4574,6 @@ export class BotStore {
   }
 
   /** Resolve the original room request, even after later messages or history pagination. */
-  groupImageGenerationRequest(groupId: string, messageId: string, botId: string) {
-    const row = this.rows(
-      `SELECT u.text, u.targets_json, u.mentions_json, u.ordinal,
-      EXISTS(SELECT 1 FROM bot_group_generated_images i
-        JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
-        WHERE i.group_id=u.group_id AND i.source_id=u.id AND m.author_bot_id=?
-        AND json_extract(m.files_json,'$.files[' || i.file_index || '].generatedImage.actionId')=i.action_id
-      ) AS published FROM bot_group_messages u
-      WHERE u.group_id=? AND u.id=? AND u.author_bot_id IS NULL`,
-      [botId, groupId, messageId]
-    )[0]
-    if (!row) return
-    const group = this.getGroup(groupId)
-    if (group.deleting || !group.memberIds.includes(botId)) return
-    const targets = JSON.parse(String(row.targets_json)) as string[]
-    const owner = targets.find((id) => {
-      if (!group.memberIds.includes(id)) return false
-      const bot = this.getBot(id)
-      return !bot.archived && !bot.deleting
-    })
-    if (owner !== botId) return
-    let text = String(row.text)
-    const mentions: BotGroupMention[] = row.mentions_json
-      ? JSON.parse(String(row.mentions_json))
-      : []
-    for (const mention of [...mentions].sort((a, b) => b.start - a.start))
-      text = text.slice(0, mention.start) + text.slice(mention.end)
-    return {
-      text: text.trim(),
-      instanceKey: JSON.stringify([group.hostId, groupId, row.ordinal]),
-      published: Boolean(row.published)
-    }
-  }
-
   groupTaskRequest(taskId: string): Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null {
     const task = this.getTask(taskId)
     if (task.origin.kind !== "bot" || !task.origin.groupId) return null
@@ -10868,25 +10814,7 @@ export class BotStore {
         throw new BotError("CONFLICT", "群成员或工作区已改变")
       const content = JSON.stringify({ kind: "bot-file-delivery", files })
       if (!parseBotFileDelivery(content)) throw new BotError("INVALID_INPUT", "附件交付记录无效")
-      const generatedId = files.length === 1 && files[0].generatedImage?.actionId
-      if (
-        files.some((file) => file.generatedImage) &&
-        (!generatedId || callId !== `generated-image:${generatedId}`)
-      )
-        throw new BotError("INVALID_INPUT", "生成图片需要独立的群交付记录")
-      const id =
-        generatedId && callId === `generated-image:${generatedId}`
-          ? `group-image-${createHash("sha256")
-              .update(JSON.stringify([groupId, generatedId]))
-              .digest("hex")}`
-          : `files-${taskId}-${createHash("sha256").update(callId).digest("hex")}`
-      const snapshot = generatedId ? takeStagedGroupImage(files[0]) : undefined
-      if (
-        snapshot &&
-        this.groupImageGenerationRequest(groupId, snapshot.group.messageId, bot.id)?.instanceKey !==
-          snapshot.group.instanceKey
-      )
-        throw new BotError("CONFLICT", "群图片授权已变化")
+      const id = `files-${taskId}-${createHash("sha256").update(callId).digest("hex")}`
       const prior = this.rows("SELECT files_json,text FROM bot_group_messages WHERE id=?", [id])[0]
       if (prior) {
         if (prior.files_json !== content || prior.text !== text)
@@ -10912,20 +10840,6 @@ export class BotStore {
           mentions.length ? JSON.stringify(mentions) : null
         ]
       )
-      if (snapshot) {
-        this.db.run(
-          `INSERT INTO bot_group_generated_images
-          (group_id,message_id,file_index,source_id,action_id,digest,pixels) VALUES(?,?,0,?,?,?,?)`,
-          [
-            groupId,
-            id,
-            snapshot.group.messageId,
-            generatedId,
-            createHash("sha256").update(snapshot.bytes).digest("hex"),
-            snapshot.bytes
-          ]
-        )
-      }
       this.countDiscussionPost(groupId, task)
       this.noteActivity(
         "group",
@@ -11075,24 +10989,6 @@ export class BotStore {
     }))
     return [...deliveries, ...forwardedDeliveries]
   }
-  /** The group feed reads metadata only. Pixel access requires the current, exact public receipt. */
-  groupGeneratedImage(source: GeneratedGroupImageSource, includePixels: boolean) {
-    const group = this.getGroup(source.groupId)
-    if (group.deleting) throw new BotError("NOT_FOUND", "群图片已不可用")
-    const row = this.rows(
-      `SELECT i.digest${includePixels ? ", i.pixels" : ""}
-      FROM bot_group_generated_images i
-      JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
-      JOIN bot_group_messages u ON u.group_id=i.group_id AND u.id=i.source_id
-      WHERE i.group_id=? AND i.message_id=? AND i.file_index=? AND i.action_id=?
-        AND m.author_bot_id IS NOT NULL AND u.author_bot_id IS NULL
-        AND json_extract(m.files_json,'$.files[' || i.file_index || '].generatedImage.actionId')=i.action_id`,
-      [source.groupId, source.messageId, source.fileIndex, source.actionId]
-    )[0]
-    if (!row) throw new BotError("NOT_FOUND", "群消息中的生成图片已不可用")
-    return { digest: String(row.digest), pixels: row.pixels }
-  }
-
   groupMessages(
     groupId: string,
     cursor?: BotGroupHistoryCursor,

@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/context-menu"
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
-import { GeneratedImageToolResult } from "./GeneratedImagePreview"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
@@ -27,7 +26,6 @@ import React, { useContext, useEffect, useMemo, useRef, useState } from "react"
 import {
   ChatReplyActionsContext,
   ChatPresentationContext,
-  ChatGeneratedImagesContext,
   ChatDesktopWorkIdContext,
   ChatActivityPresentationContext,
   ChatMessageIdentityContext,
@@ -352,7 +350,6 @@ function GoalNoticeBody({ text, threadId }: { text: string; threadId?: string })
 interface ToolResultInfo {
   content: string | unknown
   is_error?: boolean
-  repeatedGeneratedImage?: true
 }
 
 interface MessageBubbleProps {
@@ -411,7 +408,6 @@ function MessageBubbleImpl({
 }: MessageBubbleProps): React.JSX.Element | null {
   const replyActions = useContext(ChatReplyActionsContext)
   const presentation = useContext(ChatPresentationContext)
-  const allowGeneratedImages = useContext(ChatGeneratedImagesContext)
   const desktopWorkId = useContext(ChatDesktopWorkIdContext)
   const historicalReply = useMemo(() => message.role === "user" && typeof message.content === "string"
     ? verifiedBotMessageReply(message.content, message.botHistoryInputOrigin?.replyTo)?.reply : undefined,
@@ -1332,19 +1328,6 @@ function MessageBubbleImpl({
                 )
               }
 
-              if (resolvedToolCall.name === "generate_image" && allowGeneratedImages) {
-                if (result?.repeatedGeneratedImage) return null
-                return (
-                  <GeneratedImageToolResult
-                    key={JSON.stringify([threadId, message.id, toolId])}
-                    threadId={threadId}
-                    messageId={message.id}
-                    callId={resolvedToolCall.id}
-                    result={result}
-                    running={inferredStatus === "running" || inferredStatus === "queued"}
-                  />
-                )
-              }
               const presented =
                 presentation === "bot" &&
                 !showExecutionDetails &&

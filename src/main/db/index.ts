@@ -5,7 +5,6 @@ import { THREAD_DIRECTORY_VISIBLE_SQL } from "../thread-metadata-hydration/summa
 import { publishedThreadMessageFragmentsSql } from "./thread-message-fragment-storage"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import { ensureUiGuideSchema } from "./ui-guide-store"
-import { ensureGeneratedImageSchema } from "./generated-image-schema"
 import {
   getDbPath,
   getMemorySessionOptInMigrationState,
@@ -447,7 +446,6 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
     )
   `)
 
-  ensureGeneratedImageSchema(db)
   db.run(`
     CREATE TABLE IF NOT EXISTS thread_messages (
       thread_id TEXT NOT NULL,
@@ -5804,21 +5802,6 @@ export function replaceThreadMessageId(
       if (target && (from || to) && (source.content_json !== target.content_json ||
         target.role !== "user" || Boolean(from) !== Boolean(to) ||
         from?.[1] !== to?.[1] || from?.[2] !== to?.[2])) return false
-      // A generated result is bound to one original user action. Never merge it into
-      // another occupied user row or alias that belongs to a different generation.
-      const generatedOwners =
-        database.exec(
-          `SELECT user_id, original_user_id FROM generated_image_grants
-        WHERE thread_id=? AND (user_id IN (?,?) OR original_user_id=?)`,
-          [threadId, fromId, toId, toId]
-        )[0]?.values ?? []
-      if (generatedOwners.length && (target || generatedOwners.some(([id]) => id !== fromId)))
-        return false
-      if (generatedOwners.length)
-        database.run(
-          "UPDATE generated_image_grants SET user_id=? WHERE thread_id=? AND user_id=?",
-          [toId, threadId, fromId]
-        )
       if (from && !to) {
         database.run("UPDATE chat_image_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
           [toId, threadId, fromId])
@@ -6575,10 +6558,6 @@ export function mergeThreadValues(
 
 export function deleteThread(threadId: string): void {
   const database = getDb()
-  const generated = database.exec(
-    "SELECT 1 FROM generated_image_grants WHERE thread_id=? LIMIT 1",
-    [threadId]
-  )[0]?.values.length
   threadMessageIdAliases.delete(threadId)
   database.run("BEGIN")
   try {
@@ -6614,10 +6593,6 @@ export function deleteThread(threadId: string): void {
   }
   saveToDisk()
   publishThreadDirectoryIdentityChanged(threadId)
-  if (generated)
-    void import("../generated-images")
-      .then((images) => images.sweepGeneratedImageStorage())
-      .catch(() => console.warn("[DB] 生成图片缓存清理失败"))
 }
 
 export interface ThreadGoalEventRow {

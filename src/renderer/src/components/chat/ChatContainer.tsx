@@ -39,18 +39,10 @@ import {
   ChatExecutionDetailsContext,
   ChatFoldedToolCallsContext,
   ChatDesktopWorkIdContext,
-  ChatGeneratedImagesContext,
-  ChatImageRegenerationContext,
   ChatToolPresentationContext,
   ChatUserImagePresentationContext
 } from "./chat-presentation-context"
 import { MessageImageGallery } from "./MessageImageGallery"
-import {
-  generatedImageDraftText,
-  hasImageGenerationComposer,
-  imageGenerationCommand,
-  useImageGenerationAvailability
-} from "@/features/slash-commands/image-generation-command"
 import { QueuedMessageActions } from "./QueuedMessageActions"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botMessageHasEntranceBody } from "@/lib/bot-message-entrance"
@@ -216,7 +208,6 @@ import {
 } from "@/features/builtin-browser/chat-integration"
 import {
   BTW_SLASH_COMMANDS,
-  GENERAL_SLASH_COMMANDS,
   findInlineSlashQuery,
   isBareGoalSlashCommandInput,
   isGoalSlashControlCommandInput,
@@ -995,7 +986,6 @@ const BotPrivateMentionInput = React.lazy(() => import("@/components/bots/BotGro
   .then((module) => ({ default: module.BotPrivateMentionInput })))
 
 export interface ManagedChatTurn {
-  supportsImageGeneration?: boolean
   /** Host-selected Bot skills; null/omitted keeps the ordinary catalog. */
   allowedSkillNames?: string[] | null
   /** Optional Bot task ownership UI; ordinary conversations have neither slot nor styling. */
@@ -3847,7 +3837,6 @@ export function ChatContainer({
   const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
   const desktopWorkId = useContext(ChatDesktopWorkIdContext)
-  const supportsImageGeneration = useContext(ChatGeneratedImagesContext)
   const searchExpandsExecutionDetails = searchOpen && surface !== "bot"
   const searchBodyOnly = surface === "bot" && !showExecutionDetails
   const replySource = useContext(ChatReplySourceContext)
@@ -5893,8 +5882,7 @@ export function ChatContainer({
     resumeVisibleBtwQueue(threadId)
     return () => drainHiddenBtwQueue(threadId, threadContext)
   }, [sideComposer, threadId, threadContext])
-  const activeOrdinaryComposer = useAppStore(
-    (state) =>
+  const sideParentAvailable = useAppStore(state =>
     state.mainView === "thread" && state.currentThreadId === threadId && !state.showCustomizeView &&
     state.workerFocusView?.threadId !== threadId &&
     state.subagentFocusView?.threadId !== threadId &&
@@ -5902,9 +5890,7 @@ export function ChatContainer({
   )
   // The focus split reserves the right side for the selected agent's record.
   const sideEntryAvailable = desktopBtw && surface === "default" && !managedTurn &&
-    !readOnly &&
-    Boolean(workspacePath) &&
-    activeOrdinaryComposer
+    !readOnly && Boolean(workspacePath) && sideParentAvailable
   const historyWorkspace = (surface === "default" || surface === "btw") && !managedTurn && !readOnly && workspacePath
     ? normalizeGitWorkspacePathKey(workspacePath) || "/" : null
   const promptHistory = usePromptHistory(historyWorkspace, threadId, input, draftPromptHistoryCursor, setInput)
@@ -5925,66 +5911,6 @@ export function ChatContainer({
     () => sideComposer ? findInlineSlashQuery(input, inputCaret) : null,
     [sideComposer, input, inputCaret]
   )
-  const imageAvailability = useImageGenerationAvailability(
-    supportsImageGeneration &&
-      (surface === "bot" || activeOrdinaryComposer) &&
-      !readOnly &&
-      !composerReadOnly &&
-      !managedTurn?.textOnlyReason &&
-      hasImageGenerationComposer(
-        surface,
-        threadId,
-        currentThread?.metadata,
-        managedTurn ? Boolean(managedTurn.supportsImageGeneration) : undefined
-      )
-  )
-  const findImageRegeneration = useCallback(
-    (id: string) => {
-      if (!imageAvailability?.available) return
-      const position = visibleMessageIndexById.get(id)
-      const message =
-        position === undefined ? undefined : displayMessages[visibleMessageIndexes[position]]
-      if (
-        message?.role !== "user" ||
-        message.content_is_projection ||
-        message.content_preview_notice
-      )
-        return
-      const text = generatedImageDraftText(message.content)
-      if (!text) return
-      return () => {
-        const draft = threadContext.getThreadState(threadId)
-        if (
-          draft.draftInput ||
-          draft.draftAttachments.length ||
-          draft.draftMentionedWorkspaceFiles.length ||
-          draft.draftSkill ||
-          draft.draftBuiltinBrowser ||
-          draft.draftBotReplyTo
-        ) {
-          toast.info("请先处理输入框中的草稿")
-          return
-        }
-        setInput(text)
-        const editor = botInputRef.current ?? inputRef.current
-        editor?.focus()
-      }
-    },
-    [
-      visibleMessageIndexById,
-      visibleMessageIndexes,
-      displayMessages,
-      imageAvailability,
-      setInput,
-      threadContext,
-      threadId
-    ]
-  )
-  const generalCommands = managedTurn
-    ? [BUILTIN_BROWSER_COMMAND]
-    : btwAvailable
-      ? BTW_SLASH_COMMANDS
-      : GENERAL_SLASH_COMMANDS
   const slash = useSlashCommands({
     input: managedTurn?.textOnlyReason || composerReadOnly || promptHistory.browsing ? "" :
       sideComposer ? sideSlash?.query ?? "" : input,
@@ -5994,19 +5920,9 @@ export function ChatContainer({
     showEmptyResults: !sideComposer,
     generalCommands: managedTurn?.textOnlyReason
       ? []
-      : surface === "btw"
-        ? SIDE_COMPOSER_SLASH_COMMANDS
-        : imageAvailability
-          ? [
-              ...generalCommands,
-              {
-                ...imageGenerationCommand,
-                disabledReason: imageAvailability.available
-                  ? undefined
-                  : (imageAvailability.reason ?? "尚未配置生图服务")
-              }
-            ]
-          : generalCommands
+      : managedTurn
+        ? [BUILTIN_BROWSER_COMMAND]
+        : surface === "btw" ? SIDE_COMPOSER_SLASH_COMMANDS : btwAvailable ? BTW_SLASH_COMMANDS : undefined
   })
   const loadMoreWorkspaceMentionFiles = useCallback(
     async (signal: AbortSignal) => {
@@ -6317,10 +6233,6 @@ export function ChatContainer({
   }
 
   const applySlashCommand = (command: SlashCommandItem) => {
-    if (command.disabledReason) {
-      toast.error(command.disabledReason)
-      return
-    }
     if (command.id === "btw") {
       if (btwAvailable) void openSideQuestion("")
       return
@@ -10212,7 +10124,6 @@ export function ChatContainer({
                   >
                     <ChatFoldedToolCallsContext.Provider value={foldedTools}>
                     <ChatUserImagePresentationContext.Provider value={presentUserImages}>
-                        <ChatImageRegenerationContext.Provider value={findImageRegeneration}>
                     <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
                       <ChatMessageVirtualList
                         historyWindowRevision={historyWindowRevision}
@@ -10283,7 +10194,6 @@ export function ChatContainer({
                         footer={chatMessageListFooter}
                       />
                     </ChatToolPresentationContext.Provider>
-                        </ChatImageRegenerationContext.Provider>
                     </ChatUserImagePresentationContext.Provider>
                     </ChatFoldedToolCallsContext.Provider>
                   </ChatExecutionDetailsContext.Provider>

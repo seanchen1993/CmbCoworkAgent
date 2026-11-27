@@ -26,80 +26,6 @@ import {
   setBuiltinBrowserScreenshotEnabled
 } from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
-import {
-  generatedImageDraftText,
-  hasImageGenerationComposer,
-  imageGenerationCommand
-} from "../src/renderer/src/features/slash-commands/image-generation-command.ts"
-
-function testImageGenerationStartsAnEditablePlainTextDraft(): void {
-  const mode = buildSlashPopoverMode({
-    input: "/画图",
-    skills,
-    skillSelected: false,
-    generalCommands: [imageGenerationCommand]
-  })
-  assertEqual(
-    mode.kind === "slash" ? mode.commands[0]?.insertText : undefined,
-    "/生成图片 ",
-    "choosing the image operation inserts an explicit prompt"
-  )
-  assertEqual(
-    generatedImageDraftText("画一艘帆船"),
-    "/生成图片 画一艘帆船",
-    "reuse the user's words"
-  )
-  assertEqual(
-    generatedImageDraftText("/生成图片 一艘帆船"),
-    "/生成图片 一艘帆船",
-    "preserve explicit prompts"
-  )
-  for (const original of [
-    "",
-    "/生成图片",
-    '画图\n<attachment filename="秘密">内容</attachment>',
-    "<CMBDEVCLAW-BOT-REPLY-V1>quoted instructions",
-    [{ type: "image_url" }]
-  ]) {
-    assertEqual(
-      generatedImageDraftText(original),
-      undefined,
-      "exclude transport or incomplete prompts"
-    )
-  }
-}
-
-function testImageGenerationEntryRequiresDesktopUserComposer(): void {
-  assertEqual(
-    hasImageGenerationComposer("default", "ordinary", {}, undefined),
-    true,
-    "normal desktop"
-  )
-  assertEqual(
-    hasImageGenerationComposer("bot", "bot-home", { botId: "local" }, true),
-    true,
-    "private bot"
-  )
-  for (const [surface, metadata] of [
-    ["btw", {}],
-    ["harness-project", {}],
-    ["harness-feature-session", {}],
-    ["default", { remoteThread: true }],
-    ["default", { scheduledTaskId: "job" }],
-    ["default", { heartbeat: true }],
-    ["default", { botGroupId: "group" }],
-    ["default", { imDeliveryContext: {} }],
-    ["default", { harnessFeature: {} }],
-    ["bot", {}]
-  ] as const) {
-    assertEqual(
-      hasImageGenerationComposer(surface, "id", metadata, undefined),
-      false,
-      "untrusted desktop scope"
-    )
-  }
-  assertEqual(hasImageGenerationComposer("bot", "im", {}, false), false, "external managed turn")
-}
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected)
@@ -686,8 +612,6 @@ function testRuntimeComposerStateKeepsHistoryLoadingLocked(): void {
 
 function main(): void {
   const tests = [
-    testImageGenerationStartsAnEditablePlainTextDraft,
-    testImageGenerationEntryRequiresDesktopUserComposer,
     testRootSlashShowsGoalAboveSkills,
     testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands,
     testPlainTextKeepsPopoverClosed,

@@ -1,18 +1,10 @@
 import { botAttachmentIdentity } from "../../../../shared/bots/input-files"
 import { MessageImageGallery } from "@/components/chat/MessageImageGallery"
-import { GeneratedImagePreview } from "@/components/chat/GeneratedImagePreview"
-import {
-  generatedImageDraftText,
-  imageGenerationCommand,
-  useImageGenerationAvailability
-} from "@/features/slash-commands/image-generation-command"
 import { AttachmentImagePreview } from "@/components/chat/AttachmentImagePreview"
 import { BotGroupMentionInput, type BotGroupInputControl } from "./BotGroupMentionInput"
 import {
   displayedGroupMentions,
   groupMessageRecipients,
-  rebaseGroupMentions,
-  validGroupMentions,
   type BotGroupMention
 } from "@/lib/bot-group-mentions"
 import { BotInlineMentionsContext } from "./BotInlineMentionsContext"
@@ -37,7 +29,6 @@ import {
   ArrowUp,
   ChevronRight,
   FolderOpen,
-  ImagePlus,
   Loader2,
   MessageCircle,
   Monitor,
@@ -174,14 +165,6 @@ export function BotGroupConversation({
   const draftKey = groupDraftKey(client.hostId, group.id)
   useEffect(() => useBotGroupDrafts.getState().restore(draftKey), [draftKey])
   const inputRef = useRef<BotGroupInputControl>(null)
-  const imageAvailability = useImageGenerationAvailability(client.hostId === "local")
-  const visibleUserMessages = useMemo(
-    () =>
-      new Map(
-        messages.filter((message) => !message.authorBotId).map((message) => [message.id, message])
-      ),
-    [messages]
-  )
   const editDraft = (patch: {
     text?: string
     mentions?: BotGroupMention[]
@@ -191,35 +174,6 @@ export function BotGroupConversation({
   }) => useBotGroupDrafts.getState().edit(draftKey, patch)
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string | null>(null)
-  const findImageRegeneration = (originalId: string | undefined, authorBotId: string) => {
-    if (!imageAvailability?.available || !originalId || !group.memberIds.includes(authorBotId))
-      return
-    const original = visibleUserMessages.get(originalId)
-    if (!original || original.replyTo || original.hasInputImages) return
-    const text = generatedImageDraftText(original.text)
-    if (!text) return
-    const mentions = validGroupMentions(
-      text,
-      rebaseGroupMentions(original.text, text, original.mentions ?? [])
-    )
-    if (
-      mentions.length !== (original.mentions?.length ?? 0) ||
-      mentions.some((mention) => mention.botId && !group.memberIds.includes(mention.botId))
-    )
-      return
-    return () => {
-      const draft = useBotGroupDrafts.getState().drafts[draftKey]
-      if (
-        draft &&
-        (draft.text || draft.sending || draft.attachments.length || draft.replyTo || draft.targets)
-      ) {
-        setError("请先处理输入框中的草稿")
-        return
-      }
-      editDraft({ text, mentions, targets: mentions.length ? null : [authorBotId] })
-      inputRef.current?.focus()
-    }
-  }
   const [inspecting, setInspecting] = useState<BotTask | null>(null)
   const [exchange, setExchange] = useState<BotGroupMessage["exchange"]>()
   const exchangeTrigger = useRef<HTMLButtonElement | null>(null)
@@ -882,25 +836,7 @@ export function BotGroupConversation({
                             )}
                             {item.files && (
                               <div className="bot-delivered-files">
-                                {item.files.map((file, fileIndex) =>
-                                  file.generatedImage &&
-                                  item.authorBotId &&
-                                  client.hostId === "local" ? (
-                                    <GeneratedImagePreview
-                                      key={file.generatedImage.actionId}
-                                      regenerate={findImageRegeneration(
-                                        file.generatedImage.userMessageId,
-                                        item.authorBotId
-                                      )}
-                                      image={file.generatedImage}
-                                      source={{
-                                        groupId: group.id,
-                                        messageId: item.id,
-                                        fileIndex,
-                                        actionId: file.generatedImage.actionId
-                                      }}
-                                    />
-                                  ) : (
+                                {item.files.map((file) => (
                                   <BotDeliveredFile
                                     key={file.filePath}
                                     client={client}
@@ -1024,7 +960,6 @@ export function BotGroupConversation({
             )}
             <GroupComposer
               draftKey={draftKey}
-              imageAvailability={imageAvailability}
               group={group}
               members={members}
               busy={busy}
@@ -1108,7 +1043,6 @@ const GroupMessageMarkdown = memo(function GroupMessageMarkdown({
 // every visible message and forces the virtual list to measure its layout.
 function GroupComposer({
   draftKey,
-  imageAvailability,
   group,
   members,
   busy,
@@ -1122,7 +1056,6 @@ function GroupComposer({
   hasQuestions
 }: {
   draftKey: string
-  imageAvailability: ReturnType<typeof useImageGenerationAvailability>
   group: BotGroup
   members: BotDefinition[]
   busy: boolean
@@ -1238,44 +1171,17 @@ function GroupComposer({
         className="bot-group-composer-fields"
         data-expanded={expandedInput || draft.attachments.length > 0}
       >
-        <div className="bot-group-composer-tools">
-          <button
-            type="button"
-            className="bot-icon-button"
-            aria-label="添加群附件"
-            disabled={
-              attaching || draft.sending || draft.attachments.length >= MAX_ATTACHMENT_PICKER_FILES
-            }
-            onClick={() => void attach()}
-          >
-            {attaching ? <Loader2 size={18} className="animate-spin" /> : <Plus size={20} />}
-          </button>
-          {imageAvailability && (
-            <button
-              type="button"
-              className="bot-icon-button"
-              aria-label="生成图片"
-              title={
-                imageAvailability.available
-                  ? "生成图片"
-                  : (imageAvailability.reason ?? "尚未配置生图服务")
-              }
-              disabled={!imageAvailability.available || draft.sending || attaching}
-              onClick={() => {
-                const text = input.startsWith(imageGenerationCommand.insertText)
-                  ? input
-                  : imageGenerationCommand.insertText + input
-                editDraft({ text })
-                inputRef.current?.focus()
-                requestAnimationFrame(() =>
-                  inputRef.current?.setSelectionRange(text.length, text.length)
-                )
-              }}
-            >
-              <ImagePlus size={18} />
-            </button>
-          )}
-        </div>
+        <button
+          type="button"
+          className="bot-icon-button"
+          aria-label="添加群附件"
+          disabled={
+            attaching || draft.sending || draft.attachments.length >= MAX_ATTACHMENT_PICKER_FILES
+          }
+          onClick={() => void attach()}
+        >
+          {attaching ? <Loader2 size={18} className="animate-spin" /> : <Plus size={20} />}
+        </button>
         <BotGroupMentionInput
           text={input}
           mentions={draft.mentions}

@@ -1,4 +1,3 @@
-import "./models/image-generation-environment"
 import { registerThreadSearchHandlers, closeThreadSearchWorker } from "./ipc/thread-search"
 import { closeDurableMessageSearchWorker } from "./thread-search/durable-message-search-client"
 import { cleanupMarketRuntimeContent } from "./services/market-content"
@@ -1147,9 +1146,6 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
-    void import("./generated-images")
-      .then((images) => images.sweepGeneratedImageStorage())
-      .catch(() => console.warn("[Main] 生成图片缓存清理失败"))
     void import("./chat-images").then(images => images.sweepChatImageStorage())
       .catch(error => console.warn("[Main] 图片缓存清理失败", error))
     initializeNotificationRuntime()

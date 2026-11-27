@@ -1,4 +1,3 @@
-import { isGeneratedImageId } from "../../shared/generated-image"
 import type { BotMemoryContext } from "../../shared/bots/memory-scope"
 import { tool } from "langchain"
 import { z } from "zod"
@@ -198,7 +197,7 @@ export function createBotDeliveryTools(
   signal: AbortSignal,
   publish?: BotFileCapture,
   peer?: BotPeerDeliveryFiles,
-  publicGroup: boolean | ((actionId: string) => Promise<BotDeliveredFile>) = false,
+  publicGroup = false,
   storageRoot?: string,
   receiptWorkId?: string,
   resolveInput?: (reference: string) => BotInputFile | undefined,
@@ -206,13 +205,7 @@ export function createBotDeliveryTools(
   resolveHistoricalDelivery?: BotHistoricalDelivery
 ): DynamicStructuredTool[] {
   return createBotFileTools(workspacePath, signal, publish, peer, publicGroup ? "group" : "private",
-    storageRoot,
-    receiptWorkId,
-    resolveInput,
-    receiptThreadKey,
-    resolveHistoricalDelivery,
-    typeof publicGroup === "function" ? publicGroup : undefined
-  )
+    storageRoot, receiptWorkId, resolveInput, receiptThreadKey, resolveHistoricalDelivery)
 }
 
 /** Private collaboration output is not a successful public delivery. */
@@ -237,8 +230,7 @@ function createBotFileTools(
   receiptWorkId?: string,
   resolveInput?: (reference: string) => BotInputFile | undefined,
   receiptThreadKey?: string,
-  resolveHistoricalDelivery?: BotHistoricalDelivery,
-  generatedFile?: (actionId: string) => Promise<BotDeliveredFile>
+  resolveHistoricalDelivery?: BotHistoricalDelivery
 ): DynamicStructuredTool[] {
   const publicGroup = mode === "group"
   const name = mode === "return" ? "bot_return_files" : "bot_deliver_files"
@@ -282,15 +274,8 @@ function createBotFileTools(
           // alone never authorizes an import; it must match this host-owned receipt.
           const selected: Array<{ path: string; root: string; peer: boolean; retained?: BotDeliveredFile;
             reference?: BotDeliveredFile; localPath?: string; input?: BotInputFile; markdownSource?: BotDeliveryMarkdownSource }> = []
-          const delivered = new Map<string, BotDeliveredFile>()
           for (const fileId of files) {
             signal.throwIfAborted()
-            if (generatedFile && isGeneratedImageId(fileId)) {
-              if (files.length !== 1) throw new Error("生成图片需要单独交付")
-              const file = await generatedFile(fileId)
-              delivered.set(file.filePath, file)
-              continue
-            }
             const historical = await resolveHistoricalDelivery?.(fileId)
             if (historical) {
               selected.push({ path: historical.path, root: historical.root, peer: false,
@@ -362,6 +347,7 @@ function createBotFileTools(
               path, root: workspacePath, peer: false, localPath: fileId
             })
           }
+          const delivered = new Map<string, BotDeliveredFile>()
           const selectedPeers: BotSelectedPeerFile[] = []
           const localFiles = new Map<string, string>()
           const markdownOrigins = new Map<string, BotDeliveryMarkdownSource>()
@@ -482,12 +468,7 @@ function createBotFileTools(
           // The adapter must distinguish an explicit local declaration from an
           // absolute peer receipt that happens to use the same shared path.
           publicationStarted = true
-          const generatedId = generatedFile && deliveredFiles[0]?.generatedImage?.actionId
-          const publication = publish?.(
-            deliveredFiles,
-            generatedId ? `generated-image:${generatedId}` : callId,
-            content,
-            selectedPaths,
+          const publication = publish?.(deliveredFiles, callId, content, selectedPaths,
             selectedPeers.length ? selectedPeers : undefined,
             ...(input.interim || input.selectionReason ? [{ interim: input.interim, selectionReason: input.selectionReason }] as const : []))
           const receipt = {
