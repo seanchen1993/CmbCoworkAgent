@@ -4595,8 +4595,13 @@ export class BotStore {
 
   /** Resolve the original room request, even after later messages or history pagination. */
   groupImageGenerationRequest(groupId: string, messageId: string, botId: string) {
-    const row = this.rows(`SELECT text, targets_json, mentions_json, ordinal FROM bot_group_messages
-      WHERE group_id=? AND id=? AND author_bot_id IS NULL`, [groupId, messageId])[0]
+    const row = this.rows(`SELECT u.text, u.targets_json, u.mentions_json, u.ordinal,
+      EXISTS(SELECT 1 FROM bot_group_generated_images i
+        JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
+        WHERE i.group_id=u.group_id AND i.source_id=u.id AND m.author_bot_id=?
+        AND json_extract(m.files_json,'$.files[' || i.file_index || '].generatedImage.actionId')=i.action_id
+      ) AS published FROM bot_group_messages u
+      WHERE u.group_id=? AND u.id=? AND u.author_bot_id IS NULL`, [botId, groupId, messageId])[0]
     if (!row) return
     const group = this.getGroup(groupId)
     if (group.deleting || !group.memberIds.includes(botId)) return
@@ -4611,7 +4616,8 @@ export class BotStore {
     const mentions: BotGroupMention[] = row.mentions_json ? JSON.parse(String(row.mentions_json)) : []
     for (const mention of [...mentions].sort((a, b) => b.start - a.start))
       text = text.slice(0, mention.start) + text.slice(mention.end)
-    return { text: text.trim(), instanceKey: JSON.stringify([group.hostId, groupId, row.ordinal]) }
+    return { text: text.trim(), instanceKey: JSON.stringify([group.hostId, groupId, row.ordinal]),
+      published: Boolean(row.published) }
   }
 
   groupTaskRequest(taskId: string): Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null {

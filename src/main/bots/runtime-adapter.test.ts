@@ -86,6 +86,7 @@ const fixture = vi.hoisted(() => ({
   recordQuestionResult: vi.fn(),
   publishMessage: vi.fn(() => ({ groupId: "g", messageId: "sent-message" })),
   groupMessages: vi.fn<() => BotGroupMessage[]>(() => []),
+  groupImageGenerationRequest: vi.fn<LocalBotHost["groupImageGenerationRequest"]>(),
   groupTaskDeliveries: vi.fn<(groupId: string, taskId: string, authorBotId: string, includeHandoffFiles?: boolean) => Pick<BotGroupMessage, "id" | "authorBotId" | "files">[]>(),
   groupTaskRequest: vi.fn<(taskId: string) => Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null>(
     () => null
@@ -449,7 +450,7 @@ function port(
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
         groupMessages: fixture.groupMessages,
-        groupImageGenerationRequest: () => undefined,
+        groupImageGenerationRequest: fixture.groupImageGenerationRequest,
         groupTaskDeliveries: fixture.groupTaskDeliveries,
         groupTaskRequest: fixture.groupTaskRequest,
         peers: fixture.peers,
@@ -543,6 +544,7 @@ beforeEach(() => {
   fixture.profileContinuation.mockReturnValue(null)
   fixture.commandUserRequest.mockReset().mockReturnValue(null)
   fixture.groupCheckpoint.mockReset().mockReturnValue(undefined)
+  fixture.groupImageGenerationRequest.mockReset()
   fixture.armResultReview.mockReset().mockReturnValue(true)
   fixture.resultReviewActive.mockReset().mockReturnValue(false)
   fixture.commandIds.mockReset().mockReturnValue([])
@@ -2988,6 +2990,23 @@ describe("Bot Runtime integration", () => {
       ])).toContain("bot_send_message")
     }
   )
+
+  it("settles an original group image checkpoint from its published receipt without running the model", async () => {
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    const groupTask: BotTask = {
+      ...task, threadId: "group-g-a", origin: { kind: "group", groupId: "g", messageId: "request" }
+    }
+    fixture.groupCheckpoint.mockReturnValue("checkpoint-after-image-publication")
+    fixture.groupImageGenerationRequest.mockReturnValue({
+      text: "画一张海报", instanceKey: "host-bound-human-post", published: true
+    })
+    const result = await port().acquire(bot, groupTask)!.execute(new AbortController().signal, vi.fn())
+    expect(result).toMatchObject({ state: "completed", explicitGroupMessages: true, publicContribution: true })
+    expect(fixture.groupImageGenerationRequest).toHaveBeenCalledWith("g", "request", bot.id)
+    expect(fixture.start).not.toHaveBeenCalled()
+    expect(fixture.groupTaskDeliveries).not.toHaveBeenCalled()
+    expect(fixture.publishMessage).not.toHaveBeenCalled()
+  })
 
   it("uses the original run to post actual group text while keeping private final scratch invisible", async () => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })

@@ -76,6 +76,9 @@ jobs:
       - name: Verify one image producer per human group message
         run: npx vitest run src/main/bots/group-discussion.test.ts -t "selects one image producer"
 
+      - name: Verify recovery after the group image is published
+        run: npx vitest run src/main/bots/runtime-adapter.test.ts -t "settles an original group image checkpoint"
+
       - name: Exercise image send and cancellation in Electron
         run: npm run test:chat-attachments:e2e
 

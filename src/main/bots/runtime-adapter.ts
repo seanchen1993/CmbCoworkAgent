@@ -1064,6 +1064,16 @@ export function createLocalBotRunPort(
           if (work) getHost().initializeWorkThread(bot.id, work.id)
           else if (mock) getHost().initializeMockThread(task)
           const checkpointId = canDeferBotTask(task) ? getHost().taskCheckpoint(task.id) : undefined
+          const groupOrigin = task.origin.kind === "group" ? task.origin : undefined
+          const groupDraw = groupOrigin && !mock && !simulated
+            ? getHost().groupImageGenerationRequest(groupOrigin.groupId, groupOrigin.messageId, bot.id) : undefined
+          // The host can commit the public image before the private graph records its tool result.
+          // A restored original turn already delivered to this group needs no private file or model.
+          if (checkpointId && groupDraw?.published) {
+            signal.throwIfAborted()
+            return { state: "completed", result: "图片已生成。", explicitGroupMessages: true,
+              publicContribution: true }
+          }
           // Success may finish notification input handling before its retained commands settle.
           // Continue that task's checkpoint without claiming the same workflow result twice.
           const consumedWorkflow = Boolean(checkpointId) &&
@@ -1584,9 +1594,6 @@ export function createLocalBotRunPort(
                 })
               : originalMessage
           const tracksPreparedInput = tracksBotInputPreparation(task)
-          const groupOrigin = task.origin.kind === "group" ? task.origin : undefined
-          const groupDraw = groupOrigin && !mock && !simulated
-            ? getHost().groupImageGenerationRequest(groupOrigin.groupId, groupOrigin.messageId, bot.id) : undefined
           const drawPrompt = groupDraw?.text ?? (task.origin.kind === "user" && !work?.source &&
             !work?.resultReviewState ? memoryUserText(task) : "")
           const drawIntent = !mock && !simulated && !previewThreadId && (!checkpointId || groupDraw)

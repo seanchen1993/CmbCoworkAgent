@@ -81,7 +81,11 @@ describe("group image publication", () => {
   it("requires host provenance and keeps independent, group-scoped pixels after the producer is removed", async () => {
     const f = room(), file = await f.stage()
     expect(() => f.publish({ ...file })).toThrow("宿主交付记录")
+    expect(f.store.groupImageGenerationRequest(f.group.id, promptId, f.task.botId)?.published).toBe(false)
     f.publish(file)
+    expect(f.store.groupImageGenerationRequest(f.group.id, promptId, f.task.botId)?.published).toBe(true)
+    expect(f.store.groupImageGenerationRequest(f.other.id, promptId, f.task.botId)).toBeUndefined()
+    expect(f.store.groupImageGenerationRequest(f.group.id, promptId, "other-bot")).toBeUndefined()
     f.db.run("DELETE FROM bot_tasks WHERE id=?", [f.task.id])
     vi.mocked(readGeneratedImageForDelivery).mockRejectedValue(new Error("production thread deleted"))
     const saved = await readDeliveredGeneratedImage(f.source, "original", () => {})
