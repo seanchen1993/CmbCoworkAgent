@@ -46,6 +46,7 @@ import {
   setStoredDefaultModelId,
   setBuiltinModelOverride as setStoredBuiltinModelOverride,
   type BuiltinModelOverride,
+  type StoredBuiltinModelOverride,
   type CustomModelConfig
 } from "../storage"
 import { fetchLatestJson } from "../updater/checker"
@@ -343,13 +344,12 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
 }
 
 function getLockedContextWindow(config: CustomModelConfig): number | undefined {
-  if (
-    config.transport === "idle-gateway" &&
-    (config.model === "ultra" || config.idleModelEnvironment === "production")
-  ) {
-    return config.maxTokens
-  }
-  return undefined
+  return config.transport === "idle-gateway" && config.model === "ultra" ? config.maxTokens : undefined
+}
+
+function getProContextOverrideField(config: CustomModelConfig): "maxTokens" | "productionMaxTokens" | undefined {
+  if (config.transport !== "idle-gateway" || config.model !== "pro") return undefined
+  return config.idleModelEnvironment === "uat" ? "maxTokens" : "productionMaxTokens"
 }
 
 function normalizeOverride(
@@ -359,7 +359,7 @@ function normalizeOverride(
   if (!override) return {}
   const enableThinking = optionalBoolean(override.enableThinking, base.enableThinking ?? false)
   const normalized: BuiltinModelOverride = {
-    ...(typeof override.name === "string" && override.name.trim()
+    ...(base.transport !== "idle-gateway" && typeof override.name === "string" && override.name.trim()
       ? { name: override.name.trim() }
       : {}),
     maxTokens: optionalNumber(
@@ -415,8 +415,9 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
     try {
       const stored = overrides[base.id]
       const lockedMaxTokens = getLockedContextWindow(base)
+      const contextField = getProContextOverrideField(base) ?? "maxTokens"
       override = normalizeOverride(
-        stored && lockedMaxTokens !== undefined ? { ...stored, maxTokens: lockedMaxTokens } : stored,
+        stored ? { ...stored, maxTokens: lockedMaxTokens ?? stored[contextField] } : undefined,
         base
       )
     } catch (error) {
@@ -450,6 +451,7 @@ export function getBuiltinModelPublicConfigs(): BuiltinModelPublicConfig[] {
       "baseUrl",
       "model",
       "apiKey",
+      ...(config.transport === "idle-gateway" ? ["name" as const] : []),
       ...(getLockedContextWindow(config) !== undefined ? ["maxTokens" as const] : [])
     ]
   }))
@@ -566,6 +568,9 @@ export function getModelByTier(tier: "premium" | "economy"): ResolvedModelConfig
 export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverride): void {
   const base = getBaseDefinitions().find((item) => item.id === id)
   if (!base) throw new Error("未找到内置模型")
+  if (base.transport === "idle-gateway" && input.name !== undefined && input.name !== base.name) {
+    throw new Error(`${base.name}的显示名称由系统管理`)
+  }
   const lockedMaxTokens = getLockedContextWindow(base)
   if (
     lockedMaxTokens !== undefined &&
@@ -601,15 +606,19 @@ function persistBuiltinModelOverride(
   base: BuiltinModelDefinition,
   override: BuiltinModelOverride
 ): void {
-  if (base.id === MAODOU_PRO_MODEL_ID && base.idleModelEnvironment === "production") {
-    // Keep Pro's UAT context override when saving or resetting production settings.
-    const uatMaxTokens = getBuiltinModelOverrides()[base.id]?.maxTokens
-    if (uatMaxTokens !== undefined) override.maxTokens = uatMaxTokens
+  const stored: StoredBuiltinModelOverride = { ...override }
+  const contextField = getProContextOverrideField(base)
+  if (contextField) {
+    const otherContextField = contextField === "maxTokens" ? "productionMaxTokens" : "maxTokens"
+    const otherContextWindow = getBuiltinModelOverrides()[base.id]?.[otherContextField]
+    delete stored.maxTokens
+    if (override.maxTokens !== undefined) stored[contextField] = override.maxTokens
+    if (otherContextWindow !== undefined) stored[otherContextField] = otherContextWindow
   }
-  if (Object.keys(override).length === 0) {
+  if (Object.keys(stored).length === 0) {
     resetStoredBuiltinModelOverride(base.id)
   } else {
-    setStoredBuiltinModelOverride(base.id, override)
+    setStoredBuiltinModelOverride(base.id, stored)
   }
   notifyModelChanges()
 }

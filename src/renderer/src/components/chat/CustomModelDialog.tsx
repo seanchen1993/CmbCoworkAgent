@@ -451,7 +451,10 @@ export function CustomModelDialog({
   const topPError = getTopPError(config.topPInput, tokenLimits)
   const topKError = getTopKError(config.topKInput, tokenLimits)
   const canToggleKeyVisibility = config.apiKey.trim().length > 0
+  const nameLocked = config.lockedFields?.includes("name") ?? false
+  const managedFields = nameLocked ? "显示名称、连接信息、模型模式" : "连接信息、模型模式"
   const duplicateNameError =
+    !nameLocked &&
     config.name.trim() &&
     allConfigs.some(
       (item) =>
@@ -581,7 +584,7 @@ export function CustomModelDialog({
       if (config.source === "builtin") {
         if (!config.id) throw new Error("内置模型 ID 不能为空")
         await window.api.models.updateBuiltinConfig(config.id, {
-          name: config.name.trim(),
+          ...(nameLocked ? {} : { name: config.name.trim() }),
           maxTokens: parsedMaxTokens,
           maxOutputTokens: parsedMaxOutputTokens,
           temperature: parsedTemperature,
@@ -721,8 +724,8 @@ export function CustomModelDialog({
           <DialogDescription>
             {config.source === "builtin"
               ? config.lockedFields?.includes("maxTokens")
-                ? `连接信息、模型模式和 ${Number(config.maxTokensInput) / 1_000}k 上下文窗口由系统管理。`
-                : "连接信息由系统管理；你可以调整上下文、采样、思考和路由参数。"
+                ? `${managedFields}和 ${Number(config.maxTokensInput) / 1_000}k 上下文窗口由系统管理。`
+                : `${managedFields}由系统管理。可调整上下文、采样、思考和路由参数。`
               : "配置兼容 OpenAI 接口格式的模型服务。"}
           </DialogDescription>
         </DialogHeader>
@@ -809,9 +812,10 @@ export function CustomModelDialog({
                 <Input
                   className="h-8"
                   value={config.name}
+                  disabled={nameLocked}
                   onChange={(e) => setConfig((c) => ({ ...c, name: e.target.value }))}
                   placeholder="例如：DeepSeek Chat（生产）"
-                  autoFocus
+                  autoFocus={!nameLocked}
                 />
                 {duplicateNameError && (
                   <p className="text-xs text-destructive">{duplicateNameError}</p>

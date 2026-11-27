@@ -212,8 +212,10 @@ describe("builtin model registry", () => {
     expect(getModelConfigByRef("builtin:idle-ultra")).toBeNull()
   })
 
-  it("publishes distinct managed Pro and Ultra configs with locked production context", async () => {
+  it("publishes canonical Maodou names and locks their display name and request model", async () => {
     configureIdleModel()
+    state.overrides["idle-ultra"] = { name: "旧 Pro 名称", maxTokens: 256_000 }
+    state.overrides["maodou-ultra"] = { name: "旧 Ultra 名称" }
     state.manifest = {
       modelCatalog: {
         schemaVersion: 1,
@@ -241,7 +243,7 @@ describe("builtin model registry", () => {
     const configs = getBuiltinModelPublicConfigs()
     const pro = configs.find((item) => item.id === "idle-ultra")!
     const ultra = configs.find((item) => item.id === "maodou-ultra")!
-    expect(pro.lockedFields).toContain("maxTokens")
+    expect(pro.lockedFields).toEqual(["baseUrl", "model", "apiKey", "name"])
     expect(pro.notice).toBeUndefined()
     expect(pro).not.toHaveProperty("apiKey")
     expect(ultra).toMatchObject({
@@ -251,14 +253,12 @@ describe("builtin model registry", () => {
       enableThinking: true,
       enableThinkingEffort: true,
       thinkingEffort: "high",
-      lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"],
+      lockedFields: ["baseUrl", "model", "apiKey", "name", "maxTokens"],
       notice: expect.stringContaining("北京时间 22:00 至次日 07:00")
     })
-    expect(() => updateBuiltinModelOverride("idle-ultra", { maxTokens: 256_000 })).toThrow(
-      "固定为 200k"
-    )
-    state.overrides["idle-ultra"] = { maxTokens: 256_000 }
-    expect(getModelConfigByRef("builtin:idle-ultra")?.maxTokens).toBe(200_000)
+    for (const id of ["idle-ultra", "maodou-ultra"]) {
+      expect(() => updateBuiltinModelOverride(id, { name: "新的显示名称" })).toThrow("显示名称由系统管理")
+    }
   })
 
   it("does not reuse another built-in model's credential for the idle gateway", () => {
@@ -267,37 +267,38 @@ describe("builtin model registry", () => {
     expect(getModelConfigByRef("builtin:idle-ultra")?.apiKey).toBeUndefined()
   })
 
-  it("saves an editable UAT context window separately from production's fixed window", () => {
+  it("edits and resets Pro context per environment, including saved UAT overrides", () => {
     configureIdleModel()
     const id = "idle-ultra"
     const ref = "builtin:idle-ultra"
-    state.idleModelUseUat = true
+    state.overrides[id] = { maxTokens: 256_000 }
     expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)).toMatchObject({
       maxTokens: 200_000,
-      lockedFields: ["baseUrl", "model", "apiKey"]
+      lockedFields: ["baseUrl", "model", "apiKey", "name"]
     })
     expect(() => updateBuiltinModelOverride(id, { maxTokens: 31_999 })).toThrow("32000~1000000")
     expect(() =>
       updateBuiltinModelOverride(id, { maxTokens: 32_000, maxOutputTokens: 28_000 })
     ).toThrow("compaction trigger")
-    updateBuiltinModelOverride(id, { maxTokens: 256_000 })
-    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
+    updateBuiltinModelOverride(id, { maxTokens: 240_000 })
+    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(240_000)
+    expect(state.overrides[id]).toEqual({ maxTokens: 256_000, productionMaxTokens: 240_000 })
     expect(getModelConfigByRef("builtin:maodou-ultra")?.maxTokens).toBe(128_000)
-
-    state.idleModelUseUat = false
-    expect(getBuiltinModelPublicConfigs().find((model) => model.id === id)).toMatchObject({
-      maxTokens: 200_000,
-      lockedFields: ["baseUrl", "model", "apiKey", "maxTokens"]
-    })
-    updateBuiltinModelOverride(id, { maxTokens: 200_000, temperature: 0.3 })
-    expect(state.overrides[id]).toEqual({ maxTokens: 256_000, temperature: 0.3 })
-    resetBuiltinModelOverride(id)
-    expect(state.overrides[id]).toEqual({ maxTokens: 256_000 })
 
     state.idleModelUseUat = true
     expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(256_000)
+    updateBuiltinModelOverride(id, { maxTokens: 260_000 })
+    expect(state.overrides[id]).toEqual({ maxTokens: 260_000, productionMaxTokens: 240_000 })
     resetBuiltinModelOverride(id)
     expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(200_000)
+    expect(state.overrides[id]).toEqual({ productionMaxTokens: 240_000 })
+    updateBuiltinModelOverride(id, { maxTokens: 256_000 })
+
+    state.idleModelUseUat = false
+    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(240_000)
+    resetBuiltinModelOverride(id)
+    expect(getAvailableModelConfigOrDefault(ref)?.maxTokens).toBe(200_000)
+    expect(state.overrides[id]).toEqual({ maxTokens: 256_000 })
   })
 
   it.each([false, true])("locks Ultra at 128k with a stale context override (UAT %s)", (useUat) => {

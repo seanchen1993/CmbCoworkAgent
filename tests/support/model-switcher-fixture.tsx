@@ -119,14 +119,14 @@ Object.assign(window, {
       getBuiltinConfigs: async () =>
         gatewayModels.map((item) => ({
           ...item,
-          lockedFields: ["baseUrl", "model", "apiKey", ...(!useUat || item.model === "ultra" ? ["maxTokens"] : [])],
+          lockedFields: ["baseUrl", "model", "apiKey", "name", ...(item.model === "ultra" ? ["maxTokens"] : [])],
           notice: gatewayNotice(item.model),
           unavailableReason: gatewayUnavailableReason(item.model)
         })),
       getCustomConfigs: async () => [],
       getDefault: async () => pro.ref,
-      updateBuiltinConfig: async (_id: string, config: { name: string; maxTokens: number }) => {
-        settingsWrites.names.push(config.name)
+      updateBuiltinConfig: async (_id: string, config: { name?: string; maxTokens: number }) => {
+        if (config.name !== undefined) settingsWrites.names.push(config.name)
         settingsWrites.maxTokens.push(config.maxTokens)
       },
       setDefault: async (id: string) => {

@@ -4,7 +4,7 @@ export type ModelTier = "premium" | "economy"
 export type ModelThinkingEffort = "low" | "high" | "max"
 export type ModelTransport = "idle-gateway"
 export type IdleModelEnvironment = "production" | "uat"
-export type BuiltinModelLockedField = "baseUrl" | "model" | "apiKey" | "maxTokens"
+export type BuiltinModelLockedField = "name" | "baseUrl" | "model" | "apiKey" | "maxTokens"
 
 // Pro already uses this persisted ID in defaults, overrides and thread metadata.
 export const MAODOU_PRO_MODEL_ID = "idle-ultra"

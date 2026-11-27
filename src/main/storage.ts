@@ -1650,6 +1650,11 @@ export interface BuiltinModelOverride {
   tier?: "premium" | "economy"
 }
 
+export interface StoredBuiltinModelOverride extends BuiltinModelOverride {
+  /** Pro's existing maxTokens field stores the UAT context override. */
+  productionMaxTokens?: number
+}
+
 export interface UserInfoConfig {
   sapId?: string //8
   ystId?: string //6
@@ -2017,13 +2022,13 @@ export function getStoredIdleModelUseUat(): boolean {
 
 const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"
 
-export function getBuiltinModelOverrides(): Record<string, BuiltinModelOverride> {
+export function getBuiltinModelOverrides(): Record<string, StoredBuiltinModelOverride> {
   const raw = getSettingsStore().get(BUILTIN_MODEL_OVERRIDES_KEY, {}) as unknown
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
-  return raw as Record<string, BuiltinModelOverride>
+  return raw as Record<string, StoredBuiltinModelOverride>
 }
 
-export function setBuiltinModelOverride(id: string, override: BuiltinModelOverride): void {
+export function setBuiltinModelOverride(id: string, override: StoredBuiltinModelOverride): void {
   const normalizedId = id.trim()
   if (!normalizedId) throw new Error("内置模型 ID 不能为空")
   const current = getBuiltinModelOverrides()
