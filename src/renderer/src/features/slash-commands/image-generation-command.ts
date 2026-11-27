@@ -11,8 +11,11 @@ export function hasImageGenerationComposer(
   managed: boolean | undefined
 ) {
   if (managed !== undefined) return managed && surface === "bot"
-  return surface === "default" && !isBtwThreadId(threadId) &&
+  return (
+    surface === "default" &&
+    !isBtwThreadId(threadId) &&
     Boolean(metadata && hasOrdinaryBotConversationShape(metadata))
+  )
 }
 
 export const imageGenerationCommand: SlashCommandItem = {

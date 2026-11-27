@@ -5806,12 +5806,19 @@ export function replaceThreadMessageId(
         from?.[1] !== to?.[1] || from?.[2] !== to?.[2])) return false
       // A generated result is bound to one original user action. Never merge it into
       // another occupied user row or alias that belongs to a different generation.
-      const generatedOwners = database.exec(`SELECT user_id, original_user_id FROM generated_image_grants
+      const generatedOwners =
+        database.exec(
+          `SELECT user_id, original_user_id FROM generated_image_grants
         WHERE thread_id=? AND (user_id IN (?,?) OR original_user_id=?)`,
-        [threadId, fromId, toId, toId])[0]?.values ?? []
-      if (generatedOwners.length && (target || generatedOwners.some(([id]) => id !== fromId))) return false
-      if (generatedOwners.length) database.run("UPDATE generated_image_grants SET user_id=? WHERE thread_id=? AND user_id=?",
-        [toId, threadId, fromId])
+          [threadId, fromId, toId, toId]
+        )[0]?.values ?? []
+      if (generatedOwners.length && (target || generatedOwners.some(([id]) => id !== fromId)))
+        return false
+      if (generatedOwners.length)
+        database.run(
+          "UPDATE generated_image_grants SET user_id=? WHERE thread_id=? AND user_id=?",
+          [toId, threadId, fromId]
+        )
       if (from && !to) {
         database.run("UPDATE chat_image_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
           [toId, threadId, fromId])
@@ -6568,7 +6575,10 @@ export function mergeThreadValues(
 
 export function deleteThread(threadId: string): void {
   const database = getDb()
-  const generated = database.exec("SELECT 1 FROM generated_image_grants WHERE thread_id=? LIMIT 1", [threadId])[0]?.values.length
+  const generated = database.exec(
+    "SELECT 1 FROM generated_image_grants WHERE thread_id=? LIMIT 1",
+    [threadId]
+  )[0]?.values.length
   threadMessageIdAliases.delete(threadId)
   database.run("BEGIN")
   try {
@@ -6604,8 +6614,10 @@ export function deleteThread(threadId: string): void {
   }
   saveToDisk()
   publishThreadDirectoryIdentityChanged(threadId)
-  if (generated) void import("../generated-images").then(images => images.sweepGeneratedImageStorage())
-    .catch(() => console.warn("[DB] 生成图片缓存清理失败"))
+  if (generated)
+    void import("../generated-images")
+      .then((images) => images.sweepGeneratedImageStorage())
+      .catch(() => console.warn("[DB] 生成图片缓存清理失败"))
 }
 
 export interface ThreadGoalEventRow {

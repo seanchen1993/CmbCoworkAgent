@@ -748,9 +748,9 @@ async function invokeProjectAgent<T>(
 const api = {
   generatedImages: {
     availability: () => ipcRenderer.invoke("generated-images:availability"),
-    lookup: source => ipcRenderer.invoke("generated-images:lookup", source),
+    lookup: (source) => ipcRenderer.invoke("generated-images:lookup", source),
     read: (source, variant) => ipcRenderer.invoke("generated-images:read", source, variant),
-    save: source => ipcRenderer.invoke("generated-images:save", source)
+    save: (source) => ipcRenderer.invoke("generated-images:save", source)
   } satisfies GeneratedImagesApi,
   bots: localBotsApi,
   uiGuides: {

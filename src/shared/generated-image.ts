@@ -38,13 +38,33 @@ export function isGeneratedImageId(id: unknown): id is string {
 export function parseGeneratedImageReceipt(value: unknown): GeneratedImageReceipt | undefined {
   if (typeof value === "string") {
     if (value.length > 2048) return
-    try { value = JSON.parse(value) } catch { return }
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return
+    }
   }
   if (!value || typeof value !== "object") return
-  const { kind, actionId, width, height, mimeType, userMessageId } = value as Partial<GeneratedImageReceipt>
-  if (kind !== "generated-image" || !isGeneratedImageId(actionId) || mimeType !== "image/png" ||
-      typeof width !== "number" || !Number.isSafeInteger(width) || width < 1 ||
-      typeof height !== "number" || !Number.isSafeInteger(height) || height < 1) return
-  return { kind, actionId, width, height, mimeType,
-    ...(typeof userMessageId === "string" && userMessageId.length <= 1024 && { userMessageId }) }
+  const { kind, actionId, width, height, mimeType, userMessageId } =
+    value as Partial<GeneratedImageReceipt>
+  if (
+    kind !== "generated-image" ||
+    !isGeneratedImageId(actionId) ||
+    mimeType !== "image/png" ||
+    typeof width !== "number" ||
+    !Number.isSafeInteger(width) ||
+    width < 1 ||
+    typeof height !== "number" ||
+    !Number.isSafeInteger(height) ||
+    height < 1
+  )
+    return
+  return {
+    kind,
+    actionId,
+    width,
+    height,
+    mimeType,
+    ...(typeof userMessageId === "string" && userMessageId.length <= 1024 && { userMessageId })
+  }
 }

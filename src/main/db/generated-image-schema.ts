@@ -41,13 +41,17 @@ export function ensureGeneratedImageSchema(db: NativeSqliteAdapter): void {
   // were introduced. Upgrading the schema never guesses an old group message or workspace.
   db.withImmediateWriteTransaction(() => {
     const hasColumn = (table: string, column: string) =>
-      db.exec(`PRAGMA table_info(${table})`)[0].values.some(row => row[1] === column)
+      db.exec(`PRAGMA table_info(${table})`)[0].values.some((row) => row[1] === column)
     if (!hasColumn("generated_image_grants", "original_user_id")) {
-      db.run("ALTER TABLE generated_image_grants ADD COLUMN original_user_id TEXT NOT NULL DEFAULT ''")
+      db.run(
+        "ALTER TABLE generated_image_grants ADD COLUMN original_user_id TEXT NOT NULL DEFAULT ''"
+      )
       db.run("UPDATE generated_image_grants SET original_user_id=user_id")
     }
     if (!hasColumn("generated_image_actions", "public_message_id")) {
-      db.run("ALTER TABLE generated_image_actions ADD COLUMN public_message_id TEXT NOT NULL DEFAULT ''")
+      db.run(
+        "ALTER TABLE generated_image_actions ADD COLUMN public_message_id TEXT NOT NULL DEFAULT ''"
+      )
     }
   })
 }

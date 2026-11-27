@@ -67,12 +67,24 @@ async function readResponse(response: Response): Promise<unknown> {
 }
 
 function decodePayload(payload: unknown): Buffer {
-  if (!payload || typeof payload !== "object" || !("data" in payload) ||
-      !Array.isArray(payload.data) || payload.data.length !== 1) throw invalidResult()
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !("data" in payload) ||
+    !Array.isArray(payload.data) ||
+    payload.data.length !== 1
+  )
+    throw invalidResult()
   const item = payload.data[0]
   const value: unknown = item?.b64_json
-  if (typeof value !== "string" || !value.length || value.length > 4 * Math.ceil(maxImageBytes / 3) ||
-      value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) throw invalidResult()
+  if (
+    typeof value !== "string" ||
+    !value.length ||
+    value.length > 4 * Math.ceil(maxImageBytes / 3) ||
+    value.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(value)
+  )
+    throw invalidResult()
   const bytes = Buffer.from(value, "base64")
   if (bytes.length > maxImageBytes || !bytes.subarray(0, 8).equals(pngSignature)) {
     throw invalidResult()
@@ -81,8 +93,12 @@ function decodePayload(payload: unknown): Buffer {
 }
 
 async function decodePng(bytes: Buffer): Promise<GeneratedImageResult> {
-  if (bytes.length < 45 || bytes.readUInt32BE(8) !== 13 ||
-      bytes.toString("latin1", 12, 16) !== "IHDR") throw invalidResult()
+  if (
+    bytes.length < 45 ||
+    bytes.readUInt32BE(8) !== 13 ||
+    bytes.toString("latin1", 12, 16) !== "IHDR"
+  )
+    throw invalidResult()
   const width = bytes.readUInt32BE(16)
   const height = bytes.readUInt32BE(20)
   if (!width || !height || Math.max(width, height) > 8192 || width * height > maxInputPixels) {
@@ -90,7 +106,7 @@ async function decodePng(bytes: Buffer): Promise<GeneratedImageResult> {
   }
   // libvips can decode just the first APNG frame. Only publish a complete static PNG.
   let complete = false
-  for (let offset = 8; offset + 12 <= bytes.length;) {
+  for (let offset = 8; offset + 12 <= bytes.length; ) {
     const length = bytes.readUInt32BE(offset)
     const type = bytes.toString("latin1", offset + 4, offset + 8)
     offset += length + 12
@@ -106,7 +122,8 @@ async function decodePng(bytes: Buffer): Promise<GeneratedImageResult> {
     const preview = await sharp(bytes, { failOn: "warning", limitInputPixels: maxInputPixels })
       .timeout({ seconds: 15 })
       .resize(512, 512, { fit: "inside", withoutEnlargement: true })
-      .webp({ quality: 82 }).toBuffer()
+      .webp({ quality: 82 })
+      .toBuffer()
     return { bytes, width, height, mimeType: "image/png", preview }
   } catch {
     throw invalidResult()
@@ -145,12 +162,26 @@ export function getImageGenerationDeployment(
     throw invalidConfig()
   }
   const loopback = ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)
-  if ((url.protocol !== "https:" && !(loopback && url.protocol === "http:")) ||
-      url.username || url.password || url.search || url.hash) throw invalidConfig()
-  const id = createHash("sha256").update(JSON.stringify([
-    "images-base64-png-v1", env.CMB_IMAGE_GENERATION_ENVIRONMENT || "custom", url.href,
-    model, format || "default", key
-  ])).digest("hex")
+  if (
+    (url.protocol !== "https:" && !(loopback && url.protocol === "http:")) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    throw invalidConfig()
+  const id = createHash("sha256")
+    .update(
+      JSON.stringify([
+        "images-base64-png-v1",
+        env.CMB_IMAGE_GENERATION_ENVIRONMENT || "custom",
+        url.href,
+        model,
+        format || "default",
+        key
+      ])
+    )
+    .digest("hex")
   return {
     id,
     async generate(prompt, signal) {
@@ -170,7 +201,10 @@ export function getImageGenerationDeployment(
           signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
           headers: { authorization: "Bearer " + key, "content-type": "application/json" },
           body: JSON.stringify({
-            model, prompt: prompt.trim(), n: 1, ...(format ? { response_format: format } : {})
+            model,
+            prompt: prompt.trim(),
+            n: 1,
+            ...(format ? { response_format: format } : {})
           })
         })
         if (!response.ok) {

@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { registerGeneratedImageHandlers } from "./generated-images"
 
 const { dialog, loadThread, loadGroup } = vi.hoisted(() => ({
-  dialog: { showSaveDialog: vi.fn() }, loadThread: vi.fn(), loadGroup: vi.fn()
+  dialog: { showSaveDialog: vi.fn() },
+  loadThread: vi.fn(),
+  loadGroup: vi.fn()
 }))
 vi.mock("electron", () => ({ dialog }))
 vi.mock("../generated-images", () => ({ readGeneratedImage: loadThread }))
@@ -25,26 +27,47 @@ function bridge() {
   const handlers = new Map<string, Handler>()
   const webContents = { isDestroyed: () => false, mainFrame: {} }
   const win = { webContents, isDestroyed: () => false } as unknown as BrowserWindow
-  const event = { sender: webContents, senderFrame: webContents.mainFrame } as unknown as IpcMainInvokeEvent
-  registerGeneratedImageHandlers({ handle: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as IpcMain,
-    () => win)
-  const invoke = (method: string, ...args: unknown[]) => handlers.get("generated-images:" + method)!(event, ...args)
+  const event = {
+    sender: webContents,
+    senderFrame: webContents.mainFrame
+  } as unknown as IpcMainInvokeEvent
+  registerGeneratedImageHandlers(
+    {
+      handle: (name: string, handler: Handler) => handlers.set(name, handler)
+    } as unknown as IpcMain,
+    () => win
+  )
+  const invoke = (method: string, ...args: unknown[]) =>
+    handlers.get("generated-images:" + method)!(event, ...args)
   return { handlers, invoke, event }
 }
 
 describe("generated image desktop IPC", () => {
   it("requires the main frame and one authority, and returns only authorized media", async () => {
     const { invoke, event, handlers } = bridge()
-    const source = { groupId: "group", messageId: "group-message", fileIndex: 0, actionId: randomUUID() }
+    const source = {
+      groupId: "group",
+      messageId: "group-message",
+      fileIndex: 0,
+      actionId: randomUUID()
+    }
     loadGroup.mockImplementation(async (_, variant, verify) => {
       verify()
-      return { bytes: Buffer.from("group"), mimeType: variant === "original" ? "image/png" : "image/webp" }
+      return {
+        bytes: Buffer.from("group"),
+        mimeType: variant === "original" ? "image/png" : "image/webp"
+      }
     })
     expect(await invoke("read", source, "original")).toBe("data:image/png;base64,Z3JvdXA=")
     await expect(invoke("read", { ...source, threadId: "private" }, "original")).rejects.toThrow()
     await expect(invoke("read", source, "unbounded")).rejects.toThrow()
-    await expect(handlers.get("generated-images:read")!(
-      { ...event, senderFrame: {} } as IpcMainInvokeEvent, source, "thumbnail")).rejects.toThrow("主窗口")
+    await expect(
+      handlers.get("generated-images:read")!(
+        { ...event, senderFrame: {} } as IpcMainInvokeEvent,
+        source,
+        "thumbnail"
+      )
+    ).rejects.toThrow("主窗口")
     expect(loadGroup).toHaveBeenCalledTimes(1)
     expect(loadThread).not.toHaveBeenCalled()
   })
@@ -56,8 +79,17 @@ describe("generated image desktop IPC", () => {
     buffers.push(path)
     const output = join(path, "image.png")
     await writeFile(output, "original destination")
-    const assertCurrent = vi.fn().mockImplementationOnce(() => {}).mockImplementationOnce(() => { throw Error("撤回") })
-    loadThread.mockResolvedValue({ bytes: Buffer.from("PNG output"), mimeType: "image/png", assertCurrent })
+    const assertCurrent = vi
+      .fn()
+      .mockImplementationOnce(() => {})
+      .mockImplementationOnce(() => {
+        throw Error("撤回")
+      })
+    loadThread.mockResolvedValue({
+      bytes: Buffer.from("PNG output"),
+      mimeType: "image/png",
+      assertCurrent
+    })
     dialog.showSaveDialog.mockResolvedValue({ filePath: output })
     await expect(invoke("save", source)).rejects.toThrow("撤回")
     expect(await readFile(output, "utf8")).toBe("original destination")

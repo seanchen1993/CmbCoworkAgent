@@ -4595,29 +4595,37 @@ export class BotStore {
 
   /** Resolve the original room request, even after later messages or history pagination. */
   groupImageGenerationRequest(groupId: string, messageId: string, botId: string) {
-    const row = this.rows(`SELECT u.text, u.targets_json, u.mentions_json, u.ordinal,
+    const row = this.rows(
+      `SELECT u.text, u.targets_json, u.mentions_json, u.ordinal,
       EXISTS(SELECT 1 FROM bot_group_generated_images i
         JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
         WHERE i.group_id=u.group_id AND i.source_id=u.id AND m.author_bot_id=?
         AND json_extract(m.files_json,'$.files[' || i.file_index || '].generatedImage.actionId')=i.action_id
       ) AS published FROM bot_group_messages u
-      WHERE u.group_id=? AND u.id=? AND u.author_bot_id IS NULL`, [botId, groupId, messageId])[0]
+      WHERE u.group_id=? AND u.id=? AND u.author_bot_id IS NULL`,
+      [botId, groupId, messageId]
+    )[0]
     if (!row) return
     const group = this.getGroup(groupId)
     if (group.deleting || !group.memberIds.includes(botId)) return
     const targets = JSON.parse(String(row.targets_json)) as string[]
-    const owner = targets.find(id => {
+    const owner = targets.find((id) => {
       if (!group.memberIds.includes(id)) return false
       const bot = this.getBot(id)
       return !bot.archived && !bot.deleting
     })
     if (owner !== botId) return
     let text = String(row.text)
-    const mentions: BotGroupMention[] = row.mentions_json ? JSON.parse(String(row.mentions_json)) : []
+    const mentions: BotGroupMention[] = row.mentions_json
+      ? JSON.parse(String(row.mentions_json))
+      : []
     for (const mention of [...mentions].sort((a, b) => b.start - a.start))
       text = text.slice(0, mention.start) + text.slice(mention.end)
-    return { text: text.trim(), instanceKey: JSON.stringify([group.hostId, groupId, row.ordinal]),
-      published: Boolean(row.published) }
+    return {
+      text: text.trim(),
+      instanceKey: JSON.stringify([group.hostId, groupId, row.ordinal]),
+      published: Boolean(row.published)
+    }
   }
 
   groupTaskRequest(taskId: string): Pick<BotGroupMessage, "id" | "text" | "createdAt"> | null {
@@ -10861,14 +10869,24 @@ export class BotStore {
       const content = JSON.stringify({ kind: "bot-file-delivery", files })
       if (!parseBotFileDelivery(content)) throw new BotError("INVALID_INPUT", "附件交付记录无效")
       const generatedId = files.length === 1 && files[0].generatedImage?.actionId
-      if (files.some(file => file.generatedImage) && (!generatedId || callId !== `generated-image:${generatedId}`))
+      if (
+        files.some((file) => file.generatedImage) &&
+        (!generatedId || callId !== `generated-image:${generatedId}`)
+      )
         throw new BotError("INVALID_INPUT", "生成图片需要独立的群交付记录")
-      const id = generatedId && callId === `generated-image:${generatedId}`
-        ? `group-image-${createHash("sha256").update(JSON.stringify([groupId, generatedId])).digest("hex")}`
-        : `files-${taskId}-${createHash("sha256").update(callId).digest("hex")}`
+      const id =
+        generatedId && callId === `generated-image:${generatedId}`
+          ? `group-image-${createHash("sha256")
+              .update(JSON.stringify([groupId, generatedId]))
+              .digest("hex")}`
+          : `files-${taskId}-${createHash("sha256").update(callId).digest("hex")}`
       const snapshot = generatedId ? takeStagedGroupImage(files[0]) : undefined
-      if (snapshot && this.groupImageGenerationRequest(groupId, snapshot.group.messageId, bot.id)?.instanceKey !==
-          snapshot.group.instanceKey) throw new BotError("CONFLICT", "群图片授权已变化")
+      if (
+        snapshot &&
+        this.groupImageGenerationRequest(groupId, snapshot.group.messageId, bot.id)?.instanceKey !==
+          snapshot.group.instanceKey
+      )
+        throw new BotError("CONFLICT", "群图片授权已变化")
       const prior = this.rows("SELECT files_json,text FROM bot_group_messages WHERE id=?", [id])[0]
       if (prior) {
         if (prior.files_json !== content || prior.text !== text)
@@ -10895,10 +10913,18 @@ export class BotStore {
         ]
       )
       if (snapshot) {
-        this.db.run(`INSERT INTO bot_group_generated_images
+        this.db.run(
+          `INSERT INTO bot_group_generated_images
           (group_id,message_id,file_index,source_id,action_id,digest,pixels) VALUES(?,?,0,?,?,?,?)`,
-          [groupId, id, snapshot.group.messageId, generatedId,
-            createHash("sha256").update(snapshot.bytes).digest("hex"), snapshot.bytes])
+          [
+            groupId,
+            id,
+            snapshot.group.messageId,
+            generatedId,
+            createHash("sha256").update(snapshot.bytes).digest("hex"),
+            snapshot.bytes
+          ]
+        )
       }
       this.countDiscussionPost(groupId, task)
       this.noteActivity(
@@ -11053,14 +11079,16 @@ export class BotStore {
   groupGeneratedImage(source: GeneratedGroupImageSource, includePixels: boolean) {
     const group = this.getGroup(source.groupId)
     if (group.deleting) throw new BotError("NOT_FOUND", "群图片已不可用")
-    const row = this.rows(`SELECT i.digest${includePixels ? ", i.pixels" : ""}
+    const row = this.rows(
+      `SELECT i.digest${includePixels ? ", i.pixels" : ""}
       FROM bot_group_generated_images i
       JOIN bot_group_messages m ON m.group_id=i.group_id AND m.id=i.message_id
       JOIN bot_group_messages u ON u.group_id=i.group_id AND u.id=i.source_id
       WHERE i.group_id=? AND i.message_id=? AND i.file_index=? AND i.action_id=?
         AND m.author_bot_id IS NOT NULL AND u.author_bot_id IS NULL
         AND json_extract(m.files_json,'$.files[' || i.file_index || '].generatedImage.actionId')=i.action_id`,
-      [source.groupId, source.messageId, source.fileIndex, source.actionId])[0]
+      [source.groupId, source.messageId, source.fileIndex, source.actionId]
+    )[0]
     if (!row) throw new BotError("NOT_FOUND", "群消息中的生成图片已不可用")
     return { digest: String(row.digest), pixels: row.pixels }
   }

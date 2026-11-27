@@ -54,16 +54,24 @@ function fixture(count = 2, duplicateNames = false) {
 
 describe("public group turn admission", () => {
   it("selects one image producer for the current human post and excludes quoted instructions", () => {
-    const f = fixture(), [a, b] = f.members
+    const f = fixture(),
+      [a, b] = f.members
     f.send("previous", [a.id])
     const text = `@${b.name} 画一张海报`
-    f.store.sendGroup({ requestId: "draw", groupId: f.group.id, text, targetBotIds: [b.id],
+    f.store.sendGroup({
+      requestId: "draw",
+      groupId: f.group.id,
+      text,
+      targetBotIds: [b.id],
       mentions: [{ start: 0, end: b.name.length + 1, label: b.name, botId: b.id }],
-      replyToId: "previous" })
+      replyToId: "previous"
+    })
     expect(f.store.groupImageGenerationRequest(f.group.id, "draw", b.id)?.text).toBe("画一张海报")
     expect(f.store.groupImageGenerationRequest(f.group.id, "draw", a.id)).toBeUndefined()
     f.send("broadcast", [a.id, b.id])
-    const claims = f.members.map(bot => f.store.groupImageGenerationRequest(f.group.id, "broadcast", bot.id))
+    const claims = f.members.map((bot) =>
+      f.store.groupImageGenerationRequest(f.group.id, "broadcast", bot.id)
+    )
     expect(claims.filter(Boolean)).toHaveLength(1)
     expect(f.store.groupImageGenerationRequest(f.group.id, "missing", a.id)).toBeUndefined()
   })

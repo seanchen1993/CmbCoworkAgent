@@ -1,7 +1,11 @@
 import { botAttachmentIdentity } from "../../../../shared/bots/input-files"
 import { MessageImageGallery } from "@/components/chat/MessageImageGallery"
 import { GeneratedImagePreview } from "@/components/chat/GeneratedImagePreview"
-import { generatedImageDraftText, imageGenerationCommand, useImageGenerationAvailability } from "@/features/slash-commands/image-generation-command"
+import {
+  generatedImageDraftText,
+  imageGenerationCommand,
+  useImageGenerationAvailability
+} from "@/features/slash-commands/image-generation-command"
 import { AttachmentImagePreview } from "@/components/chat/AttachmentImagePreview"
 import { BotGroupMentionInput, type BotGroupInputControl } from "./BotGroupMentionInput"
 import {
@@ -171,8 +175,13 @@ export function BotGroupConversation({
   useEffect(() => useBotGroupDrafts.getState().restore(draftKey), [draftKey])
   const inputRef = useRef<BotGroupInputControl>(null)
   const imageAvailability = useImageGenerationAvailability(client.hostId === "local")
-  const visibleUserMessages = useMemo(() =>
-    new Map(messages.filter(message => !message.authorBotId).map(message => [message.id, message])), [messages])
+  const visibleUserMessages = useMemo(
+    () =>
+      new Map(
+        messages.filter((message) => !message.authorBotId).map((message) => [message.id, message])
+      ),
+    [messages]
+  )
   const editDraft = (patch: {
     text?: string
     mentions?: BotGroupMention[]
@@ -183,17 +192,27 @@ export function BotGroupConversation({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string | null>(null)
   const findImageRegeneration = (originalId: string | undefined, authorBotId: string) => {
-    if (!imageAvailability?.available || !originalId || !group.memberIds.includes(authorBotId)) return
+    if (!imageAvailability?.available || !originalId || !group.memberIds.includes(authorBotId))
+      return
     const original = visibleUserMessages.get(originalId)
     if (!original || original.replyTo || original.hasInputImages) return
     const text = generatedImageDraftText(original.text)
     if (!text) return
-    const mentions = validGroupMentions(text, rebaseGroupMentions(original.text, text, original.mentions ?? []))
-    if (mentions.length !== (original.mentions?.length ?? 0) ||
-        mentions.some(mention => mention.botId && !group.memberIds.includes(mention.botId))) return
+    const mentions = validGroupMentions(
+      text,
+      rebaseGroupMentions(original.text, text, original.mentions ?? [])
+    )
+    if (
+      mentions.length !== (original.mentions?.length ?? 0) ||
+      mentions.some((mention) => mention.botId && !group.memberIds.includes(mention.botId))
+    )
+      return
     return () => {
       const draft = useBotGroupDrafts.getState().drafts[draftKey]
-      if (draft && (draft.text || draft.sending || draft.attachments.length || draft.replyTo || draft.targets)) {
+      if (
+        draft &&
+        (draft.text || draft.sending || draft.attachments.length || draft.replyTo || draft.targets)
+      ) {
         setError("请先处理输入框中的草稿")
         return
       }
@@ -863,15 +882,25 @@ export function BotGroupConversation({
                             )}
                             {item.files && (
                               <div className="bot-delivered-files">
-                                {item.files.map((file, fileIndex) => file.generatedImage &&
-                                  item.authorBotId && client.hostId === "local" ? (
-                                  <GeneratedImagePreview key={file.generatedImage.actionId}
-                                    regenerate={findImageRegeneration(file.generatedImage.userMessageId, item.authorBotId)}
-                                    image={file.generatedImage} source={{
-                                      groupId: group.id, messageId: item.id, fileIndex,
-                                      actionId: file.generatedImage.actionId
-                                    }} />
-                                ) : (
+                                {item.files.map((file, fileIndex) =>
+                                  file.generatedImage &&
+                                  item.authorBotId &&
+                                  client.hostId === "local" ? (
+                                    <GeneratedImagePreview
+                                      key={file.generatedImage.actionId}
+                                      regenerate={findImageRegeneration(
+                                        file.generatedImage.userMessageId,
+                                        item.authorBotId
+                                      )}
+                                      image={file.generatedImage}
+                                      source={{
+                                        groupId: group.id,
+                                        messageId: item.id,
+                                        fileIndex,
+                                        actionId: file.generatedImage.actionId
+                                      }}
+                                    />
+                                  ) : (
                                   <BotDeliveredFile
                                     key={file.filePath}
                                     client={client}
@@ -1222,16 +1251,27 @@ function GroupComposer({
             {attaching ? <Loader2 size={18} className="animate-spin" /> : <Plus size={20} />}
           </button>
           {imageAvailability && (
-            <button type="button" className="bot-icon-button" aria-label="生成图片"
-              title={imageAvailability.available ? "生成图片" : imageAvailability.reason ?? "尚未配置生图服务"}
+            <button
+              type="button"
+              className="bot-icon-button"
+              aria-label="生成图片"
+              title={
+                imageAvailability.available
+                  ? "生成图片"
+                  : (imageAvailability.reason ?? "尚未配置生图服务")
+              }
               disabled={!imageAvailability.available || draft.sending || attaching}
               onClick={() => {
-                const text = input.startsWith(imageGenerationCommand.insertText) ? input :
-                  imageGenerationCommand.insertText + input
+                const text = input.startsWith(imageGenerationCommand.insertText)
+                  ? input
+                  : imageGenerationCommand.insertText + input
                 editDraft({ text })
                 inputRef.current?.focus()
-                requestAnimationFrame(() => inputRef.current?.setSelectionRange(text.length, text.length))
-              }}>
+                requestAnimationFrame(() =>
+                  inputRef.current?.setSelectionRange(text.length, text.length)
+                )
+              }}
+            >
               <ImagePlus size={18} />
             </button>
           )}

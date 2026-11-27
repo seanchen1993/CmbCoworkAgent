@@ -471,7 +471,8 @@ export function BotConversation({
     await client.readAttachmentImages?.(bot.id, inputId) ?? [], [bot.id, client])
   const managedTurn = useMemo<ManagedChatTurn>(
     () => ({
-      supportsImageGeneration: client.hostId === "local" && !work?.source && !work?.resultReviewState,
+      supportsImageGeneration:
+        client.hostId === "local" && !work?.source && !work?.resultReviewState,
       allowedSkillNames: bot.allowedSkillNames,
       ...(work?.source && work.source.transport !== "im"
         ? { textOnlyReason: "模拟渠道仅支持文字和同受众工作，不支持附件、技能或本机资源。" }

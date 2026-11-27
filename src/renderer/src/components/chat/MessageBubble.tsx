@@ -1334,9 +1334,16 @@ function MessageBubbleImpl({
 
               if (resolvedToolCall.name === "generate_image" && allowGeneratedImages) {
                 if (result?.repeatedGeneratedImage) return null
-                return <GeneratedImageToolResult key={JSON.stringify([threadId, message.id, toolId])}
-                  threadId={threadId} messageId={message.id} callId={resolvedToolCall.id} result={result}
-                  running={inferredStatus === "running" || inferredStatus === "queued"} />
+                return (
+                  <GeneratedImageToolResult
+                    key={JSON.stringify([threadId, message.id, toolId])}
+                    threadId={threadId}
+                    messageId={message.id}
+                    callId={resolvedToolCall.id}
+                    result={result}
+                    running={inferredStatus === "running" || inferredStatus === "queued"}
+                  />
+                )
               }
               const presented =
                 presentation === "bot" &&

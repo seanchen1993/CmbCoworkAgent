@@ -29,21 +29,36 @@ describe("Bot execution presentation", () => {
     const key = getWorkerToolUiKey(message.id, "call-poster", 0)
     const user: Message = { id: "start", role: "user", content: "画张海报", created_at }
     const running = new Map([[key, { status: "running" as const }]])
-    expect(projectBotExecution([user, message], true, new Set(), null, running)
-      .hiddenMessages.has(message.id)).toBe(false)
-    for (const messages of [[message], [message, result("poster")], [message, result("poster", true)]]) {
+    expect(
+      projectBotExecution([user, message], true, new Set(), null, running).hiddenMessages.has(
+        message.id
+      )
+    ).toBe(false)
+    for (const messages of [
+      [message],
+      [message, result("poster")],
+      [message, result("poster", true)]
+    ]) {
       expect(projectBotExecution(messages, false).hiddenMessages.has(message.id)).toBe(false)
     }
   })
   it("shows one picture for repeated successful calls to the same action", () => {
     const image = JSON.stringify({
-      kind: "generated-image", actionId: a, width: 40, height: 40, mimeType: "image/png"
+      kind: "generated-image",
+      actionId: a,
+      width: 40,
+      height: 40,
+      mimeType: "image/png"
     })
     const messages = [
-      call("unrelated", "read_file"), result("unrelated", false, image),
-      call("failed", "generate_image"), result("failed", true, image),
-      call("poster", "generate_image"), result("poster", false, image),
-      call("replay", "generate_image"), result("replay", false, image)
+      call("unrelated", "read_file"),
+      result("unrelated", false, image),
+      call("failed", "generate_image"),
+      result("failed", true, image),
+      call("poster", "generate_image"),
+      result("poster", false, image),
+      call("replay", "generate_image"),
+      result("replay", false, image)
     ]
     const projection = projectBotExecution(messages, false)
     expect(projection.hiddenMessages.has("poster")).toBe(false)

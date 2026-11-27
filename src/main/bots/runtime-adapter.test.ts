@@ -2994,14 +2994,24 @@ describe("Bot Runtime integration", () => {
   it("settles an original group image checkpoint from its published receipt without running the model", async () => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
     const groupTask: BotTask = {
-      ...task, threadId: "group-g-a", origin: { kind: "group", groupId: "g", messageId: "request" }
+      ...task,
+      threadId: "group-g-a",
+      origin: { kind: "group", groupId: "g", messageId: "request" }
     }
     fixture.groupCheckpoint.mockReturnValue("checkpoint-after-image-publication")
     fixture.groupImageGenerationRequest.mockReturnValue({
-      text: "画一张海报", instanceKey: "host-bound-human-post", published: true
+      text: "画一张海报",
+      instanceKey: "host-bound-human-post",
+      published: true
     })
-    const result = await port().acquire(bot, groupTask)!.execute(new AbortController().signal, vi.fn())
-    expect(result).toMatchObject({ state: "completed", explicitGroupMessages: true, publicContribution: true })
+    const result = await port()
+      .acquire(bot, groupTask)!
+      .execute(new AbortController().signal, vi.fn())
+    expect(result).toMatchObject({
+      state: "completed",
+      explicitGroupMessages: true,
+      publicContribution: true
+    })
     expect(fixture.groupImageGenerationRequest).toHaveBeenCalledWith("g", "request", bot.id)
     expect(fixture.start).not.toHaveBeenCalled()
     expect(fixture.groupTaskDeliveries).not.toHaveBeenCalled()
@@ -4852,7 +4862,9 @@ describe("Bot Runtime integration", () => {
       const events: { task: BotTask; notifications: number }[] = []
       let ownerResults = 0
       const errors = vi.fn()
-      const host: LocalBotHost = new LocalBotHost(store, {
+      const host: LocalBotHost = new LocalBotHost(
+        store,
+        {
         onAvailable: () => () => {},
         acquire: (_bot, current) => ({
           execute: async () => {

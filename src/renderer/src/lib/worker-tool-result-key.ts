@@ -34,7 +34,8 @@ export function buildToolResultAssociations(
   return resolveToolResultOwnership(messages, (message, toolName, nativeMessageId) => {
     const botReceipt = getNativeBotReceipt(nativeMessageId, toolName)
     const failed = message.is_error ?? message.status === "error"
-    const image = !failed && toolName === "generate_image" && parseGeneratedImageReceipt(message.content)
+    const image =
+      !failed && toolName === "generate_image" && parseGeneratedImageReceipt(message.content)
     const repeated = image && displayedImages.has(image.actionId)
     if (image) displayedImages.add(image.actionId)
     return {

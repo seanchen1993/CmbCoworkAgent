@@ -206,8 +206,13 @@ export function createBotDeliveryTools(
   resolveHistoricalDelivery?: BotHistoricalDelivery
 ): DynamicStructuredTool[] {
   return createBotFileTools(workspacePath, signal, publish, peer, publicGroup ? "group" : "private",
-    storageRoot, receiptWorkId, resolveInput, receiptThreadKey, resolveHistoricalDelivery,
-    typeof publicGroup === "function" ? publicGroup : undefined)
+    storageRoot,
+    receiptWorkId,
+    resolveInput,
+    receiptThreadKey,
+    resolveHistoricalDelivery,
+    typeof publicGroup === "function" ? publicGroup : undefined
+  )
 }
 
 /** Private collaboration output is not a successful public delivery. */
@@ -478,7 +483,11 @@ function createBotFileTools(
           // absolute peer receipt that happens to use the same shared path.
           publicationStarted = true
           const generatedId = generatedFile && deliveredFiles[0]?.generatedImage?.actionId
-          const publication = publish?.(deliveredFiles, generatedId ? `generated-image:${generatedId}` : callId, content, selectedPaths,
+          const publication = publish?.(
+            deliveredFiles,
+            generatedId ? `generated-image:${generatedId}` : callId,
+            content,
+            selectedPaths,
             selectedPeers.length ? selectedPeers : undefined,
             ...(input.interim || input.selectionReason ? [{ interim: input.interim, selectionReason: input.selectionReason }] as const : []))
           const receipt = {

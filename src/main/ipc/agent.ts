@@ -9072,22 +9072,47 @@ export function registerAgentHandlers(ipcMain: IpcMain, getChatWindow: () => Bro
 
           // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
           const orderedChain = preparedRouting.orderedModelIds
-          const drawIntent = allowDesktopImages && hasOrdinaryBotConversationShape(metadata) &&
-            !isBtwThreadId(threadId) && !harnessAgentContext.managedExecution && !runGoal &&
-            !resumeCheckpointId && !continueBotTaskCheckpointId && userMessageId
-            ? imageGenerationIntent(message) : undefined
-          const extraTurnTools = drawIntent && userMessageId ? [
-            ...(runExecutionContext.additionalTools ?? []),
-            createImageGenerationTool({
-              threadId, userMessageId, signal: abortController.signal, forkable: true,
-              assertCurrent() {
-                throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-                runExecutionContext.validateChatDocument?.()
-                if (!hasOrdinaryBotConversationShape(parseThreadMetadata(getThreadCore(threadId)?.metadata)) ||
-                    isActiveManagedRunSession(threadId)) throw new Error("当前会话不能生成图片")
-              }
-            }, drawIntent)
-          ] : runExecutionContext.additionalTools
+            const drawIntent =
+              allowDesktopImages &&
+              hasOrdinaryBotConversationShape(metadata) &&
+              !isBtwThreadId(threadId) &&
+              !harnessAgentContext.managedExecution &&
+              !runGoal &&
+              !resumeCheckpointId &&
+              !continueBotTaskCheckpointId &&
+              userMessageId
+                ? imageGenerationIntent(message)
+                : undefined
+            const extraTurnTools =
+              drawIntent && userMessageId
+                ? [
+                    ...(runExecutionContext.additionalTools ?? []),
+                    createImageGenerationTool(
+                      {
+                        threadId,
+                        userMessageId,
+                        signal: abortController.signal,
+                        forkable: true,
+                        assertCurrent() {
+                          throwIfPhysicalStreamRunIsInactive(
+                            threadId,
+                            runToken,
+                            abortController.signal
+                          )
+                          runExecutionContext.validateChatDocument?.()
+                          if (
+                            !hasOrdinaryBotConversationShape(
+                              parseThreadMetadata(getThreadCore(threadId)?.metadata)
+                            ) ||
+                            isActiveManagedRunSession(threadId)
+                          )
+                            throw new Error("当前会话不能生成图片")
+                        }
+                      },
+                      drawIntent
+                    )
+                  ]
+                : runExecutionContext.additionalTools
           const failoverAttempts: FailoverAttempt[] = []
           // Expose this turn's attempts to the catch handler (same array ref).
           lastFailoverByChannel.set(channel, failoverAttempts)
@@ -9166,7 +9191,7 @@ export function registerAgentHandlers(ipcMain: IpcMain, getChatWindow: () => Bro
               botResultReport: botTurnContext?.event === "task_result",
               botResultReview: botTurnContext?.event === "task_result_review",
               botSkillDispatch: !!botSkillDispatch,
-              additionalTools: extraTurnTools,
+                additionalTools: extraTurnTools,
               foregroundWorkBudget: runExecutionContext.foregroundWorkBudget,
               toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
               userInputWithoutToolLock:

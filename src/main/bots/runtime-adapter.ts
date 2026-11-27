@@ -1,4 +1,8 @@
-import { createImageGenerationTool, imageGenerationIntent, type ImageGenerationTurn } from "../agent/image-generation-tool"
+import {
+  createImageGenerationTool,
+  imageGenerationIntent,
+  type ImageGenerationTurn
+} from "../agent/image-generation-tool"
 import { stageGeneratedGroupFile } from "./generated-image-delivery"
 import { admittedWorkDelivery, botPublicationLease } from "./work-result-settlement"
 import { matchesBotWorkAudience } from "../../shared/bots/work"
@@ -1065,14 +1069,24 @@ export function createLocalBotRunPort(
           else if (mock) getHost().initializeMockThread(task)
           const checkpointId = canDeferBotTask(task) ? getHost().taskCheckpoint(task.id) : undefined
           const groupOrigin = task.origin.kind === "group" ? task.origin : undefined
-          const groupDraw = groupOrigin && !mock && !simulated
-            ? getHost().groupImageGenerationRequest(groupOrigin.groupId, groupOrigin.messageId, bot.id) : undefined
+          const groupDraw =
+            groupOrigin && !mock && !simulated
+              ? getHost().groupImageGenerationRequest(
+                  groupOrigin.groupId,
+                  groupOrigin.messageId,
+                  bot.id
+                )
+              : undefined
           // The host can commit the public image before the private graph records its tool result.
           // A restored original turn already delivered to this group needs no private file or model.
           if (checkpointId && groupDraw?.published) {
             signal.throwIfAborted()
-            return { state: "completed", result: "图片已生成。", explicitGroupMessages: true,
-              publicContribution: true }
+            return {
+              state: "completed",
+              result: "图片已生成。",
+              explicitGroupMessages: true,
+              publicContribution: true
+            }
           }
           // Success may finish notification input handling before its retained commands settle.
           // Continue that task's checkpoint without claiming the same workflow result twice.
@@ -1594,29 +1608,60 @@ export function createLocalBotRunPort(
                 })
               : originalMessage
           const tracksPreparedInput = tracksBotInputPreparation(task)
-          const drawPrompt = groupDraw?.text ?? (task.origin.kind === "user" && !work?.source &&
-            !work?.resultReviewState ? memoryUserText(task) : "")
-          const drawIntent = !mock && !simulated && !previewThreadId && (!checkpointId || groupDraw)
-            ? imageGenerationIntent(drawPrompt) : undefined
+          const drawPrompt =
+            groupDraw?.text ??
+            (task.origin.kind === "user" && !work?.source && !work?.resultReviewState
+              ? memoryUserText(task)
+              : "")
+          const drawIntent =
+            !mock && !simulated && !previewThreadId && (!checkpointId || groupDraw)
+              ? imageGenerationIntent(drawPrompt)
+              : undefined
           const drawInputVersion = reviewInputVersion
-          const drawTurn: ImageGenerationTurn | undefined = drawIntent ? {
-            threadId: task.threadId, userMessageId: task.requestId, signal,
-            ...(checkpointId ? { resumeMessageId: continueBotTaskCheckpointId
-              ? botContinuationMessageId(task.id, continueBotTaskCheckpointId) : task.requestId } : {}),
-            ...(groupDraw && groupOrigin ? { group: {
-              instanceKey: groupDraw.instanceKey, messageId: groupOrigin.messageId
-            } } : {}),
-            assertCurrent() {
-              signal.throwIfAborted()
-              const current = getHost().featureTask(task.id)
-              if (current.state !== "running" || drawInputVersion !== reviewInputVersion || current.threadId !== task.threadId ||
-                  current.botId !== task.botId || current.workId !== task.workId)
-                throw new Error("生图任务已变更")
-              if (groupDraw && groupOrigin && getHost().groupImageGenerationRequest(
-                groupOrigin.groupId, groupOrigin.messageId, bot.id)?.instanceKey !== groupDraw.instanceKey)
-                throw new Error("群消息或生图任务归属已变更")
-            }
-          } : undefined
+          const drawTurn: ImageGenerationTurn | undefined = drawIntent
+            ? {
+                threadId: task.threadId,
+                userMessageId: task.requestId,
+                signal,
+                ...(checkpointId
+                  ? {
+                      resumeMessageId: continueBotTaskCheckpointId
+                        ? botContinuationMessageId(task.id, continueBotTaskCheckpointId)
+                        : task.requestId
+                    }
+                  : {}),
+                ...(groupDraw && groupOrigin
+                  ? {
+                      group: {
+                        instanceKey: groupDraw.instanceKey,
+                        messageId: groupOrigin.messageId
+                      }
+                    }
+                  : {}),
+                assertCurrent() {
+                  signal.throwIfAborted()
+                  const current = getHost().featureTask(task.id)
+                  if (
+                    current.state !== "running" ||
+                    drawInputVersion !== reviewInputVersion ||
+                    current.threadId !== task.threadId ||
+                    current.botId !== task.botId ||
+                    current.workId !== task.workId
+                  )
+                    throw new Error("生图任务已变更")
+                  if (
+                    groupDraw &&
+                    groupOrigin &&
+                    getHost().groupImageGenerationRequest(
+                      groupOrigin.groupId,
+                      groupOrigin.messageId,
+                      bot.id
+                    )?.instanceKey !== groupDraw.instanceKey
+                  )
+                    throw new Error("群消息或生图任务归属已变更")
+                }
+              }
+            : undefined
           if (tracksPreparedInput && !checkpointId && !continueBotTaskCheckpointId)
             getHost().beginInputPreparation(task.id, task.id)
           if (
@@ -1960,8 +2005,12 @@ export function createLocalBotRunPort(
                   : foregroundWorkBudget || introductionDeliveryCheck
                     ? (messages) => foregroundWorkBudget?.checkFinal() ?? introductionDeliveryCheck?.(messages)
                     : undefined,
-                additionalTools: [...resultTools, ...(drawTurn && drawIntent
-                  ? [createImageGenerationTool(drawTurn, drawIntent)] : []), ...(mock
+                  additionalTools: [
+                    ...resultTools,
+                    ...(drawTurn && drawIntent
+                      ? [createImageGenerationTool(drawTurn, drawIntent)]
+                      : []),
+                    ...(mock
                     ? [
                         ...createBotWorkTools(task, getHost, signal, waiting),
                         ...scopedMemoryTools(),
@@ -2044,7 +2093,9 @@ export function createLocalBotRunPort(
                               if (files.length) hasPublicContribution = true
                             },
                             peerDelivery,
-                            drawTurn?.group ? actionId => stageGeneratedGroupFile(drawTurn, actionId) : true
+                              drawTurn?.group
+                                ? (actionId) => stageGeneratedGroupFile(drawTurn, actionId)
+                                : true
                           ),
                           ...(peerResultOwner
                             ? createBotReturnFileTools(workspacePath, signal, captureReturnedFiles, peerDelivery)
