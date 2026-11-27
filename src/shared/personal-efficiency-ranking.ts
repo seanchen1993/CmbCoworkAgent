@@ -1,5 +1,5 @@
 import {
-  PERSONAL_EFFICIENCY_METRICS,
+  visiblePersonalEfficiencyMetrics,
   personalEfficiencyScore,
   type PersonalEfficiencyMetric,
   type PersonalEfficiencyPerson,
@@ -18,17 +18,15 @@ export function rankPersonalEfficiency(
   weights: PersonalEfficiencyWeights,
   sortBy: PersonalEfficiencyMetric | "score" = "score",
   sortOrder: "asc" | "desc" = "desc",
-  includeMonthly = true
+  includeMonthly = true,
+  groupScoped = false
 ): PersonalEfficiencyRankedPerson[] {
+  const metrics = visiblePersonalEfficiencyMetrics(includeMonthly, groupScoped)
+  const active = new Set(metrics.map(({ key }) => key))
   const appliedWeights = { ...weights }
-  if (!includeMonthly)
-    for (const metric of PERSONAL_EFFICIENCY_METRICS)
-      if (metric.monthly) appliedWeights[metric.key] = 0
-  const appliedSortBy =
-    !includeMonthly &&
-    PERSONAL_EFFICIENCY_METRICS.some((metric) => metric.key === sortBy && metric.monthly)
-      ? "score"
-      : sortBy
+  for (const key of Object.keys(appliedWeights) as PersonalEfficiencyMetric[])
+    if (!active.has(key)) appliedWeights[key] = 0
+  const appliedSortBy = sortBy === "score" || active.has(sortBy) ? sortBy : "score"
   const sorted = people.map((person) => ({
     person,
     score: personalEfficiencyScore(person.values, appliedWeights)

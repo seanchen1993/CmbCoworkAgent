@@ -106,6 +106,26 @@ describe("个人独立 Excel 导出", () => {
     )
     expect(ascending[0].rows.map((row) => row[2])).toEqual(["8003", "8002", "8001"])
   })
+  it("组导出保留 DevClaw 入库行数和权重，忽略只适用于月度填报的指标", () => {
+    const weights = {
+      ...defaultPersonalEfficiencyWeights(),
+      adoptionRate: 0,
+      devclawPushedLines: 2,
+      aiPushRate: 100
+    }
+    const groupFilters = { ...filters, selectedGroups: [{ roomName: "A室", groupName: "一组" }] }
+    const sheet = personalEfficiencyExportSheets(
+      { ...fixture(), month: null },
+      groupFilters,
+      { weights },
+      exportedAt
+    )[0]
+    expect(sheet.header).toContain("DevClaw 入库行数")
+    expect(sheet.header).not.toContain("累计 AI 入库代码占比（硅碳比）（%）")
+    expect(sheet.header).not.toContain("总 Push 行数")
+    expect(sheet.rows[0].slice(0, 4)).toEqual([1, "甲", "8001", 160])
+    expect(sheet.summaryRows).toContainEqual(["组筛选", "A室／一组"])
+  })
   it("缺失留空、真实零保留，不因个人月度缺失拒绝导出", () => {
     const sheet = personalEfficiencyExportSheets(fixture(), filters, {}, exportedAt)[0]
     const fp = sheet.header.indexOf("功能点")

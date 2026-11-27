@@ -48,6 +48,49 @@ describe("周期代码项目依据", () => {
     })
     expect(JSON.stringify(inputs)).not.toContain('"createDate"')
   })
+  it("按室导出时保留同一项目的不同上报组及直属室的代码", async () => {
+    const adopted = { pushed_adopted_lines: { value: 2 } }
+    const buckets = ["一组", null].map((group) => ({
+      key: { room: "A室", group, project: "h-P1" },
+      code_adopt_pushed: adopted
+    }))
+    const query = vi.fn<Parameters<typeof fetchProjectMetricPeriodCode>[0]>().mockResolvedValue({
+      aggregations: { project_code: { buckets } }
+    })
+    const result = await fetchProjectMetricPeriodCode(query, "events", [], {}, true)
+    expect(result.map(({ groupName, pushedAdoptedLines }) => [groupName, pushedAdoptedLines]))
+      .toEqual([["一组", 2], ["", 2]])
+    expect(query.mock.calls[0][1]).toMatchObject({
+      aggs: {
+        project_code: {
+          composite: {
+            sources: expect.arrayContaining([
+              { group: { terms: { field: "upperOrgLv0", missing_bucket: true } } }
+            ])
+          }
+        }
+      }
+    })
+  })
+  it("取到仅生成代码的组，同时单独标记是否有 Push", async () => {
+    const generation = [{ term: { eventName: "code_gen" } }]
+    const adoption = [{ term: { eventName: "code_adopt" } }]
+    const query = vi.fn<Parameters<typeof fetchProjectMetricPeriodCode>[0]>().mockResolvedValue({
+      aggregations: {
+        project_code: {
+          buckets: [{
+            key: { room: "A室", group: "一组", project: "h-P1" },
+            code_adopt_pushed: { doc_count: 0 }
+          }]
+        }
+      }
+    })
+    const result = await fetchProjectMetricPeriodCode(query, "events", adoption, {}, true, generation)
+    expect(result[0]).toMatchObject({ groupName: "一组", hasPushedCode: false })
+    expect(query.mock.calls[0][1]).toMatchObject({
+      query: { bool: { should: [{ bool: { filter: generation } }, { bool: { filter: adoption } }] } }
+    })
+  })
   it("失败、缺少桶、重复游标都明确失败", async () => {
     await expect(
       fetchProjectMetricPeriodCode(async () => ({ timed_out: true }), "e", [], {})

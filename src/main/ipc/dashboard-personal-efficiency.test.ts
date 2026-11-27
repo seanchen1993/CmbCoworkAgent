@@ -360,6 +360,31 @@ describe("个人查询权限和失败隔离", () => {
       terms: { timeRange: ["2026-10"] }
     })
   })
+  it("组选中后用统计周期的 DevClaw 行数，不查询整室的个人月度填报", async () => {
+    context()
+    const dependencies = deps()
+    const groupFilters = { ...filters, selectedGroups: [{ roomName: "A室", groupName: "一组" }] }
+    const result = await fetchPersonalEfficiency(
+      groupFilters,
+      dependencies,
+      vi.fn().mockResolvedValue([code("8001")])
+    )
+    expect(dependencies.query).not.toHaveBeenCalled()
+    expect(projectMetrics.fetchPersonalEfficiencyProjectContext).toHaveBeenCalledWith(
+      groupFilters,
+      dependencies,
+      undefined,
+      false
+    )
+    expect(result.month).toBeNull()
+    expect(result.people[0].values).toMatchObject({
+      adoptionRate: 60,
+      devclawPushedLines: 60,
+      devclawPushRate: null,
+      totalPushedLines: null,
+      aiPushRate: null
+    })
+  })
   it("非自然月不查询月度；代码读取失败仍保留 PM 项目并明确提示", async () => {
     context()
     const dependencies = deps()

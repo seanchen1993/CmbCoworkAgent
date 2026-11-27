@@ -774,11 +774,13 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
 export function ProjectMetricsSection({
   range,
   upperOrgLv1,
+  selectedGroups,
   refreshKey,
   dateBasis
 }: {
   range: { from: string; to: string }
   upperOrgLv1: string[]
+  selectedGroups: NonNullable<ProjectMetricFilters["selectedGroups"]>
   refreshKey: number
   dateBasis: NonNullable<ProjectMetricFilters["dateBasis"]>
 }): React.JSX.Element {
@@ -802,9 +804,10 @@ export function ProjectMetricsSection({
   const [departmentKeyword, setDepartmentKeyword] = useState("")
   const [debouncedDepartmentKeyword, setDebouncedDepartmentKeyword] = useState("")
   const [page, setPage] = useState(1)
-  const [previousDateBasis, setPreviousDateBasis] = useState(dateBasis)
-  if (previousDateBasis !== dateBasis) {
-    setPreviousDateBasis(dateBasis)
+  const scopeKey = JSON.stringify([dateBasis, upperOrgLv1, selectedGroups])
+  const [previousScopeKey, setPreviousScopeKey] = useState(scopeKey)
+  if (previousScopeKey !== scopeKey) {
+    setPreviousScopeKey(scopeKey)
     setPage(1)
   }
   const [pageSize, setPageSize] = useState<20 | 50 | 100>(20)
@@ -842,6 +845,7 @@ export function ProjectMetricsSection({
   const trendFilters = useMemo<ProjectMetricTrendFilters>(
     () => ({
       upperOrgLv1,
+      selectedGroups,
       dateBasis,
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
@@ -858,7 +862,8 @@ export function ProjectMetricsSection({
       debouncedTokenConsumptionMin,
       phaseStatuses,
       dateBasis,
-      upperOrgLv1
+      upperOrgLv1,
+      selectedGroups
     ]
   )
   const filters = useMemo<ProjectMetricFilters>(
@@ -975,11 +980,10 @@ export function ProjectMetricsSection({
     }
   }
   const exportIndicators = async (): Promise<void> => {
-    const exportFilters = { ...filters, upperOrgLv1: [] }
     setIndicatorExporting(true)
     setExportError(null)
     try {
-      const saved = await window.api.dashboard.projectMetricIndicatorExport(exportFilters)
+      const saved = await window.api.dashboard.projectMetricIndicatorExport(filters)
       if (!saved.success && !saved.canceled) throw new Error(saved.error || "导出指标失败")
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error))

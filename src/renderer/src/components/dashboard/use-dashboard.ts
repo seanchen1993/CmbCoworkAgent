@@ -1,3 +1,4 @@
+import type { ProjectMetricGroup } from "../../../../shared/project-metrics"
 import type {
   EfficiencyDevComputeResult,
   EfficiencyPluginFilter
@@ -2520,13 +2521,14 @@ export function useDashboard(initialOrgLv1List: string[]) {
 
   // Project-mode + Lean scope stays fixed; only compute accepts stage/plugin filters.
   const fetchEfficiency = useCallback(
-    async (r: TimeRange, orgList: string[]) => {
+    async (r: TimeRange, orgList: string[], selectedGroups: ProjectMetricGroup[]) => {
       const id = ++efficiencyFetchIdRef.current
       setEfficiencyLoading(true)
       setEfficiencyError(null)
       try {
         const result = await window.api.dashboard.efficiency(r, {
           upperOrgLv1: orgList,
+          selectedGroups,
           ...efficiencyPluginFilter
         })
         if (id !== efficiencyFetchIdRef.current) return

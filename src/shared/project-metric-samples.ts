@@ -1,5 +1,6 @@
 import {
   PROJECT_METRIC_TEAM,
+  matchesProjectMetricGroups,
   type ProjectMetricFilters,
   type ProjectMetricProjectItem,
   type ProjectMetricSamples
@@ -47,6 +48,8 @@ export function projectCandidateReason(
   if (item.teamName !== PROJECT_METRIC_TEAM) return "项目不属于统计团队"
   if (filters.upperOrgLv1?.length && !filters.upperOrgLv1.includes(item.roomName))
     return "项目不属于所选室"
+  if (!matchesProjectMetricGroups(item, filters.selectedGroups))
+    return "项目不属于所选组"
   const created = projectDateMillis(item.createDate)
   if (created === null || created < projectDateMillis("2026-06-01 00:00:00")!)
     return "项目不在已保存的立项范围内"

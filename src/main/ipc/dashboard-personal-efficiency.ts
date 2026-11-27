@@ -204,7 +204,8 @@ export function assemblePersonalEfficiency(
   projects: ProjectMetricProjectItem[],
   code: PersonalEfficiencyCodeRow[] | null,
   monthly: Row[],
-  month: string | null
+  month: string | null,
+  groupScoped = false
 ): { people: PersonalEfficiencyPerson[]; missingPmCount: number } {
   const people = new Map<string, PersonalEfficiencyPerson>()
   const ensure = (sapId: string, userName: string): PersonalEfficiencyPerson => {
@@ -286,6 +287,7 @@ export function assemblePersonalEfficiency(
       person.pushedEffectiveGeneratedLines !== null && person.pushedEffectiveGeneratedLines > 0
         ? (person.pushedAdoptedLines! * 100) / person.pushedEffectiveGeneratedLines
         : null
+    if (groupScoped) v.devclawPushedLines = person.pushedAdoptedLines
     if (month) {
       const row = monthByPerson.get(person.sapId)
       v.idePushedLines = count(row?.devagentIdePushedLines)
@@ -326,16 +328,17 @@ export async function fetchPersonalEfficiency(
     includeAllProjectNames
   )
   const rooms = selectedRooms(filters, deps)
+  const groupScoped = Boolean(filters.selectedGroups?.length)
   const [codes, monthly] = await Promise.allSettled([
     codeQuery([...new Set(context.bindings.map((p) => p.harnessProjectId))], rooms),
-    detailSapId ? Promise.resolve([]) : monthlyRecords(filters, deps)
+    detailSapId || groupScoped ? Promise.resolve([]) : monthlyRecords(filters, deps)
   ])
   const warnings = [...context.warnings]
   if (codes.status === "rejected") warnings.push(`个人代码数据不可用：${errorText(codes.reason)}`)
   if (monthly.status === "rejected")
     warnings.push(`个人月度数据不可用：${errorText(monthly.reason)}`)
   const bindings = new Map(context.bindings.map((p) => [p.harnessProjectId, p.prjCode]))
-  const month = projectMonthlyPeriodLabel(projectCompleteMonths(filters.range)) || null
+  const month = groupScoped ? null : projectMonthlyPeriodLabel(projectCompleteMonths(filters.range)) || null
   const result = assemblePersonalEfficiency(
     context.projects,
     codes.status === "fulfilled"
@@ -345,7 +348,8 @@ export async function fetchPersonalEfficiency(
         }))
       : null,
     monthly.status === "fulfilled" ? monthly.value : [],
-    month
+    month,
+    groupScoped
   )
   if (result.missingPmCount)
     warnings.push(`${result.missingPmCount} 个项目的 PM 姓名或 sapId 缺失，未计入个人项目指标`)
@@ -371,7 +375,8 @@ export function makeMockPersonalEfficiency(
     pushedAdoptedLines: 120 + index * 30,
     pushedEffectiveGeneratedLines: 200 + index * 50
   }))
-  const months = projectCompleteMonths(filters.range)
+  const groupScoped = Boolean(filters.selectedGroups?.length)
+  const months = groupScoped ? [] : projectCompleteMonths(filters.range)
   const month = projectMonthlyPeriodLabel(months) || null
   const monthly = aggregatePersonalMonthlyRecords(
     months,
@@ -386,7 +391,7 @@ export function makeMockPersonalEfficiency(
     )
   )
   return {
-    people: assemblePersonalEfficiency(projects, code, monthly, month).people,
+    people: assemblePersonalEfficiency(projects, code, monthly, month, groupScoped).people,
     month,
     warnings: []
   }

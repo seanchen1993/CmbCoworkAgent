@@ -2,7 +2,7 @@ import type { ProjectMetricFilters, ProjectMetricProjectItem } from "./project-m
 
 export type PersonalEfficiencyFilters = Pick<
   ProjectMetricFilters,
-  "range" | "upperOrgLv1" | "dateBasis"
+  "range" | "upperOrgLv1" | "dateBasis" | "selectedGroups"
 >
 
 export interface PersonalEfficiencyValues {
@@ -71,6 +71,12 @@ export const PERSONAL_EFFICIENCY_METRICS: Array<{
   { key: "aiPushedLines", label: "累计 AI 入库行数", unit: "行", monthly: true },
   { key: "totalPushedLines", label: "总 Push 行数", unit: "行", monthly: true }
 ]
+
+export function visiblePersonalEfficiencyMetrics(includeMonthly: boolean, groupScoped = false) {
+  return PERSONAL_EFFICIENCY_METRICS.filter(
+    (metric) => !metric.monthly || (groupScoped ? metric.key === "devclawPushedLines" : includeMonthly)
+  )
+}
 
 export function defaultPersonalEfficiencyWeights(): PersonalEfficiencyWeights {
   return Object.fromEntries(

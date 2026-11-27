@@ -822,6 +822,9 @@ export function EfficiencyPanel({
   onPluginFilterChange,
   range,
   upperOrgLv1,
+  selectedGroups,
+  dateBasis,
+  onDateBasisChange,
   projectMetricRefreshKey
 }: {
   data: DashboardEfficiencyData | null
@@ -831,12 +834,13 @@ export function EfficiencyPanel({
   onPluginFilterChange: (filter: EfficiencyPluginFilter) => void
   range: { from: string; to: string }
   upperOrgLv1: string[]
+  selectedGroups: NonNullable<ProjectMetricFilters["selectedGroups"]>
+  dateBasis: NonNullable<ProjectMetricFilters["dateBasis"]>
+  onDateBasisChange: (value: NonNullable<ProjectMetricFilters["dateBasis"]>) => void
   projectMetricRefreshKey: number
 }): React.JSX.Element {
   const [view, setView] = useState<"organization" | "personal">("organization")
   const [personalVisited, setPersonalVisited] = useState(false)
-  const [dateBasis, setDateBasis] =
-    useState<NonNullable<ProjectMetricFilters["dateBasis"]>>("developmentCompleted")
   return (
     <div className="px-6 py-4">
       <Tabs
@@ -852,7 +856,7 @@ export function EfficiencyPanel({
             <TabsTrigger value="organization">组织效能</TabsTrigger>
             <TabsTrigger value="personal">个人效能</TabsTrigger>
           </TabsList>
-          <ProjectMetricDateBasisSelect value={dateBasis} onChange={setDateBasis} />
+          <ProjectMetricDateBasisSelect value={dateBasis} onChange={onDateBasisChange} />
         </div>
         <TabsContent
           value="organization"
@@ -863,6 +867,7 @@ export function EfficiencyPanel({
           <ProjectMetricsSection
             range={range}
             upperOrgLv1={upperOrgLv1}
+            selectedGroups={selectedGroups}
             refreshKey={projectMetricRefreshKey}
             dateBasis={dateBasis}
           />
@@ -913,6 +918,7 @@ export function EfficiencyPanel({
               <PersonalEfficiencySection
                 range={range}
                 upperOrgLv1={upperOrgLv1}
+                selectedGroups={selectedGroups}
                 dateBasis={dateBasis}
                 refreshKey={projectMetricRefreshKey}
               />

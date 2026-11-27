@@ -152,7 +152,12 @@ import {
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
-import { emptyOrgValueClauses, isMissingOrgValue, readOrgText } from "./dashboard-org-fields"
+import {
+  DASHBOARD_UNCLASSIFIED_ORG,
+  emptyOrgValueClauses,
+  isMissingOrgValue,
+  readOrgText
+} from "./dashboard-org-fields"
 import {
   addBotActiveUserActivityCounts,
   buildBotActiveUserActivityQuery,
@@ -322,7 +327,9 @@ import { PROJECT_METRIC_TEAM } from "../../shared/project-metrics"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
-  ProjectMetricTrendFilters
+  ProjectMetricTrendFilters,
+  ProjectMetricGroup,
+  ProjectMetricGroupOptions
 } from "../../shared/project-metrics"
 import { fetchProjectMetricPeriodCode } from "./project-metric-period-code"
 import {
@@ -339,6 +346,10 @@ import {
   personalEfficiencyExportSheets,
   validatePersonalEfficiencyExportOptions
 } from "./personal-efficiency-export"
+import {
+  projectMetricGroupFilter,
+  validateProjectMetricGroups
+} from "./project-metric-group-scope"
 import { projectMetricIndicatorSheets } from "./project-metric-indicator-export"
 import { buildDashboardExcelBuffer, type DashboardExcelSheet } from "./dashboard-excel-workbook"
 import { formatProjectDate } from "../../shared/project-metric-calendar"
@@ -1653,7 +1664,25 @@ function projectMetricHarnessFilter(field: string, ids: string[]): Record<string
     : { match_none: {} }
 }
 
+type DashboardEfficiencyFilters = OrgFilterOptions & EfficiencyPluginFilter & {
+  selectedGroups?: ProjectMetricGroup[]
+}
+
+function projectMetricTelemetryFilters(
+  rooms: string[] | null,
+  groups?: ProjectMetricGroup[]
+): Record<string, unknown>[] {
+  const filters: Record<string, unknown>[] = [{ term: { upperOrgLv2: PROJECT_METRIC_TEAM } }]
+  if (rooms !== null) {
+    if (rooms.length) appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(rooms))
+    else filters.push({ match_none: {} })
+  }
+  appendOptionalFilter(filters, projectMetricGroupFilter(groups, "upperOrgLv1", "upperOrgLv0"))
+  return filters
+}
+
 function projectMetricDependencies(access: DashboardAccessContext): ProjectMetricDependencies {
+  let groupField: Promise<string> | undefined
   let fieldsChecked: Promise<void> | undefined
   return {
     query: esQuery,
@@ -1664,6 +1693,23 @@ function projectMetricDependencies(access: DashboardAccessContext): ProjectMetri
     monthlyIndex:
       (import.meta.env.VITE_ES_INDEX_GITEE_PUSH_INFO as string) || "devclaw_gitee_push_info",
     allowedRoomNames: projectMetricAllowedRoomNames(access),
+    factGroupField: () => {
+      groupField ??= (async () => {
+        const raw = asRecord(await esQuery(
+          getEsIndex("projectFact"),
+          { fields: ["groupName", "groupName.keyword"] },
+          { operation: "field_caps" }
+        ))
+        const fields = asRecord(raw.fields)
+        const field = ["groupName", "groupName.keyword"].find((name) => {
+          const keyword = asRecord(asRecord(fields[name]).keyword)
+          return keyword.searchable === true && keyword.aggregatable === true
+        })
+        if (!field) throw new Error("项目索引缺少可精确查询和聚合的组名字段")
+        return field
+      })()
+      return groupField
+    },
     validateFactFields: () => {
       fieldsChecked ??= (async () => {
         const raw = asRecord(
@@ -1699,27 +1745,24 @@ function projectMetricDependencies(access: DashboardAccessContext): ProjectMetri
       })()
       return fieldsChecked
     },
-    codeEvidence: async (range, ids) => {
-      if (!ids.length) return []
-      const { codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(null, range, [
-        { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
+    codeEvidence: async (range, ids, rooms, groups) => {
+      if (!ids.length || rooms?.length === 0) return []
+      const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(null, range, [
+        ...projectMetricTelemetryFilters(rooms, groups),
         projectMetricHarnessFilter("properties.harnessProjectId", ids)
       ])
       return fetchProjectMetricPeriodCode(
         esQuery,
         getEsIndex("event"),
         codeAdoptFilters,
-        perBucketAggs.code_adopt_pushed
+        perBucketAggs.code_adopt_pushed,
+        rooms !== null,
+        rooms !== null && !groups?.length ? codeGenFilters : undefined
       )
     },
-    codeStats: async (range, rooms, ids) => {
-      const extra: Record<string, unknown>[] = [{ term: { upperOrgLv2: PROJECT_METRIC_TEAM } }]
-      if (rooms !== null) {
-        if (rooms.length) appendOptionalFilter(extra, buildUpperOrgLv1ListFilter(rooms))
-        else extra.push({ match_none: {} })
-      }
+    codeStats: async (range, rooms, ids, groups) => {
       const raw = await fetchProjectModeCodeAggs(null, range, (aggs) => aggs, [
-        ...extra,
+        ...projectMetricTelemetryFilters(rooms, groups),
         projectMetricHarnessFilter("properties.harnessProjectId", ids)
       ])
       assertProjectModeResultComplete(raw)
@@ -1750,13 +1793,11 @@ async function fetchDashboardPersonalEfficiency(
     deps,
     async (ids, rooms) => {
       if (!ids.length || rooms?.length === 0) return []
-      const orgFilter = rooms === null ? null : buildUpperOrgLv1ListFilter(rooms)
       const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
         null,
         filters.range,
         [
-          { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
-          ...(orgFilter ? [orgFilter] : []),
+          ...projectMetricTelemetryFilters(rooms, filters.selectedGroups),
           ...(sapId ? [{ term: { sapId } }] : []),
           projectMetricHarnessFilter("properties.harnessProjectId", ids)
         ]
@@ -3663,7 +3704,6 @@ function buildCommitUserMatchFilter(userKeyword: string): Record<string, unknown
 }
 
 // 「未归类」哨兵：代表 upperOrgLv1 为空或缺失的记录（前后端约定一致）。
-const DASHBOARD_UNCLASSIFIED_ORG = "__unclassified__"
 // 「未归类」回填到「部门查询」文本框时使用的展示标签，需与渲染层 orgOptionLabel 一致。
 const DASHBOARD_UNCLASSIFIED_LABEL = "（未归类）"
 // fetchOrgOptions 内部用来给「字段缺失」的文档归桶的临时 key（不外泄）。
@@ -14633,10 +14673,13 @@ async function fetchProjectModeProjectCommits(
  */
 async function fetchDashboardEfficiency(
   range: TimeRange,
-  opts?: OrgFilterOptions & EfficiencyPluginFilter
+  opts?: DashboardEfficiencyFilters
 ): Promise<DashboardEfficiencyData> {
   const access = requireDashboardProjectModeAccess()
-  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  validateProjectMetricGroups(opts?.selectedGroups)
+  const rooms = buildProjectModeOrgFilter(opts, access)
+  const groups = projectMetricGroupFilter(opts?.selectedGroups, "upperOrgLv1", "upperOrgLv0")
+  const orgFilterClause = rooms && groups ? { bool: { filter: [rooms, groups] } } : rooms ?? groups
 
   // Lean project ids come from the self-healing snapshot (the sole source of
   // truth for projectFromLean). An empty set is meaningful, not an error: it
@@ -16397,7 +16440,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:efficiency",
-    async (_, range: TimeRange, opts?: OrgFilterOptions & EfficiencyPluginFilter) => {
+    async (_, range: TimeRange, opts?: DashboardEfficiencyFilters) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency(opts) }
       try {
         requireDashboardProjectModeAccess()
@@ -16412,9 +16455,9 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectMetricGroupOptions",
-    async (_, filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">) => {
+    async (_, filters: ProjectMetricGroupOptions) => {
       if (import.meta.env.DEV) {
-        return { success: true, data: makeMockProjectMetricGroupOptions() }
+        return { success: true, data: makeMockProjectMetricGroupOptions(filters) }
       }
       try {
         const access = requireDashboardProjectModeAccess()

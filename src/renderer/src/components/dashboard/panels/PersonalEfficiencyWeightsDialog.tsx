@@ -10,7 +10,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import {
-  PERSONAL_EFFICIENCY_METRICS,
+  visiblePersonalEfficiencyMetrics,
   defaultPersonalEfficiencyWeights,
   type PersonalEfficiencyWeights
 } from "../../../../../shared/personal-efficiency"
@@ -18,11 +18,13 @@ import {
 export function PersonalEfficiencyWeightsDialog({
   weights,
   includeMonthly,
+  groupScoped,
   onApply,
   onClose
 }: {
   weights: PersonalEfficiencyWeights
   includeMonthly: boolean
+  groupScoped: boolean
   onApply: (weights: PersonalEfficiencyWeights) => void
   onClose: () => void
 }): React.JSX.Element {
@@ -30,7 +32,7 @@ export function PersonalEfficiencyWeightsDialog({
     Object.fromEntries(Object.entries(weights).map(([key, value]) => [key, String(value)]))
   )
   const [submitted, setSubmitted] = useState(false)
-  const metrics = PERSONAL_EFFICIENCY_METRICS.filter((metric) => !metric.monthly || includeMonthly)
+  const metrics = visiblePersonalEfficiencyMetrics(includeMonthly, groupScoped)
   const invalid = (key: string): boolean =>
     !draft[key]?.trim() ||
     !Number.isFinite(Number(draft[key])) ||
@@ -69,7 +71,7 @@ export function PersonalEfficiencyWeightsDialog({
                   <h3 className="mb-1 text-xs font-medium text-muted-foreground">{group.title}</h3>
                   <div className="divide-y divide-border/60">
                     {metrics
-                      .filter((metric) => Boolean(metric.monthly) === group.monthly)
+                      .filter((metric) => Boolean(metric.monthly && !(groupScoped && metric.key === "devclawPushedLines")) === group.monthly)
                       .map(({ key, label }) => (
                         <label
                           key={key}

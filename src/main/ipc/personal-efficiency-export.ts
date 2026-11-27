@@ -1,6 +1,7 @@
 import {
   PERSONAL_EFFICIENCY_METRICS,
   defaultPersonalEfficiencyWeights,
+  visiblePersonalEfficiencyMetrics,
   type PersonalEfficiencyData,
   type PersonalEfficiencyFilters
 } from "../../shared/personal-efficiency"
@@ -49,13 +50,15 @@ export function personalEfficiencyExportSheets(
   const weights = options.weights ?? defaultPersonalEfficiencyWeights()
   const sortBy = options.sortBy ?? "score"
   const sortOrder = options.sortOrder ?? "desc"
-  const metrics = PERSONAL_EFFICIENCY_METRICS.filter((metric) => !metric.monthly || data.month)
+  const groupScoped = Boolean(filters.selectedGroups?.length)
+  const metrics = visiblePersonalEfficiencyMetrics(Boolean(data.month), groupScoped)
   const sorted = rankPersonalEfficiency(
     data.people,
     weights,
     sortBy,
     sortOrder,
-    Boolean(data.month)
+    Boolean(data.month),
+    groupScoped
   )
   const keyword = options.keyword?.trim().toLowerCase() ?? ""
   const selected = sorted.filter(({ person }) =>
@@ -69,6 +72,9 @@ export function personalEfficiencyExportSheets(
     ["统计开始", range.gte],
     ["统计结束（不含）", range.lt],
     ["室筛选", filters.upperOrgLv1?.join("、") || "全部（权限范围内）"],
+    ...(groupScoped
+      ? [["组筛选", filters.selectedGroups!.map((group) => `${group.roomName}／${group.groupName}`).join("、")]]
+      : []),
     ["项目日期口径", filters.dateBasis === "created" ? "立项日期" : "开发完成日期"],
     ["导出时间", exportedAt],
     ...data.warnings.map((warning) => ["数据提示", warning])

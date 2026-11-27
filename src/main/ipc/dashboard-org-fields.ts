@@ -15,6 +15,7 @@
  * 边界：只管组织维度。同一批文档的 userName / sapId 也可能是这个占位串，那个得单独
  * 处理，用户维度没有「未归类」这个去处，把名字抹空只会换成一个无名用户，不会更好。
  */
+export const DASHBOARD_UNCLASSIFIED_ORG = "__unclassified__"
 export const TRACE_BUDGET_PLACEHOLDER = "[trace budget exhausted]"
 
 /** 组织字段是否「没有值」：非字符串、空白，或采集 bug 留下的占位串。 */
