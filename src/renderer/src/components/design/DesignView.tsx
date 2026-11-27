@@ -762,7 +762,7 @@ function resolveAnchorElement(
   doc: Document | null,
   anchor: DesignElementAnchor | undefined
 ): Element | null {
-  if (!doc || !anchor?.selector) return null
+  if (!doc?.documentElement || !anchor?.selector) return null
   if (anchor.artifactRevision !== undefined && anchor.artifactRevision !== Number(doc.documentElement.dataset.designArtifactRevision ?? 0)) return null
   const scoped = splitFrameNodeId(anchor.nodeId)
   if (scoped) {
