@@ -70,6 +70,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  vi.unstubAllEnvs()
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   )
@@ -124,6 +125,34 @@ describe("LocalSandbox system-constraint telemetry", () => {
 
     expect(result.output).toContain("first constraint")
     expect(recordSystemConstraintRead).not.toHaveBeenCalled()
+  })
+
+  it("reports managed knowledge files through both read_file and shell telemetry", async () => {
+    const { root, sandbox } = await createSandboxFixture({
+      pluginRoot: undefined,
+      windowsSandbox: "none",
+      shellFileTelemetry: true
+    })
+    const appDataRoot = join(root, ".cmbcoworkagent")
+    vi.stubEnv("CMB_COWORK_AGENT_HOME", appDataRoot)
+    const knowledgeRoot = join(appDataRoot, "knowledge", "shared-rules")
+    const constraintPath = join(knowledgeRoot, "standards.md")
+    await mkdir(knowledgeRoot, { recursive: true })
+    await writeFile(constraintPath, "shared system constraint\n")
+
+    await expect(sandbox.read(constraintPath)).resolves.toContain("shared system constraint")
+    expect(recordSystemConstraintRead).toHaveBeenCalledTimes(1)
+    const result = await sandbox.execute(`cat "${constraintPath}"`)
+    expect(result.output).toContain("shared system constraint")
+    await vi.waitFor(() => expect(recordSystemConstraintRead).toHaveBeenCalledTimes(2))
+    for (const [record] of vi.mocked(recordSystemConstraintRead).mock.calls) {
+      expect(record).toMatchObject({
+        traceId: "trace-1",
+        harnessProjectId: "project-1",
+        harnessFeatureSlug: "feature-1",
+        constraintFile: "knowledge/shared-rules/standards.md"
+      })
+    }
   })
 
   it("records a constraint file read through the shell once the command succeeds", async () => {

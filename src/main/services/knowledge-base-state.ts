@@ -31,8 +31,12 @@ export function knowledgeStatePath(): string {
   return join(getCmbCoworkAgentDataRoot(), KNOWLEDGE_STATE_FILE)
 }
 
+export function knowledgeRootDirectory(): string {
+  return resolve(getCmbCoworkAgentDataRoot(), "knowledge")
+}
+
 export function knowledgeDirectory(idKey: string, role: KnowledgeWorkspaceRole): string {
-  const root = resolve(getCmbCoworkAgentDataRoot(), "knowledge")
+  const root = knowledgeRootDirectory()
   const target = resolve(root, idKey)
   if (
     !idKey ||
