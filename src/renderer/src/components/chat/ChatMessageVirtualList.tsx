@@ -735,7 +735,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         initialTopMostItemIndex={resolvedInitialTopMostItemIndex}
         alignToBottom
         atBottomThreshold={32}
-        followOutput={() => false}
+        followOutput={false}
         atBottomStateChange={onAtBottomStateChange}
         defaultItemHeight={112}
         increaseViewportBy={{ top: 600, bottom: 900 }}

@@ -603,6 +603,27 @@ async function testDurableTailFeedsRuntimeContext(): Promise<void> {
   assertEqual((await getDurableRuntimeTail(threadId)).messages[0].content,
     "checkpoint 后的问题", "ordinary callers without opt-in retain their original behavior")
 
+  // Display rows may have no media markers after reconciliation. Resolve by row identity.
+  const imageDatabase = db.getDb()
+  const { captureThreadIncarnation: imageThreadIncarnation } = await import("../src/main/services/thread-incarnation.ts")
+  const { threadIncarnationKey } = await import("../src/shared/thread-incarnation.ts")
+  const { normalizeGitWorkspacePathKey } = await import("../src/shared/workspace-path.ts")
+  const imageThread = db.getThreadCore(threadId)!
+  const imageScope = { incarnation: threadIncarnationKey(imageThreadIncarnation(imageThread)),
+    workspace: normalizeGitWorkspacePathKey(JSON.parse(imageThread.metadata || "{}").workspacePath ?? "") }
+  for (const approvedText of ["sanitized-only", ""]) {
+    imageDatabase.run("INSERT OR REPLACE INTO chat_image_messages VALUES (?, ?, ?, ?)",
+      [threadId, "user-2", "digest", JSON.stringify({ images: [], phase: "accepted", scope: imageScope, preparedText: approvedText })])
+    const approved = await getDurableRuntimeTail(threadId)
+    assertEqual(approved.messages[0].content, approvedText, "empty image manifests preserve Hook-approved text")
+  }
+  for (const phase of ["reserved", "rejected"]) {
+    imageDatabase.run("UPDATE chat_image_messages SET images_json=? WHERE thread_id=? AND message_id=?",
+      [JSON.stringify({ images: [], phase }), threadId, "user-2"])
+    assertEqual((await getDurableRuntimeTail(threadId)).messages.length, 1, "unapproved input stays out of runtime")
+  }
+  imageDatabase.run("DELETE FROM chat_image_messages WHERE thread_id=? AND message_id=?", [threadId, "user-2"])
+
   const { BotStore } = await import("../src/main/bots/store.ts")
   const { NativeSqliteAdapter } = await import("../src/main/db/native-sqlite-adapter.ts")
   const { DatabaseSync } = await import("node:sqlite")

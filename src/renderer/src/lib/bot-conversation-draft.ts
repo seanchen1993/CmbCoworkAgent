@@ -4,15 +4,20 @@ import type { BotWorkConversationResolution } from "../../../shared/bots/convers
 import type { BotOrdinaryThreadRef } from "../../../shared/bots/thread-history"
 import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
 import { isBotMessageReply } from "../../../shared/bots/message-reply"
-import { MAX_ATTACHMENT_PICKER_FILES } from "../../../shared/file-attachment"
+import { attachmentImages, MAX_ATTACHMENT_PICKER_FILES, MAX_CHAT_IMAGES } from "../../../shared/file-attachment"
 import type { useThreadContext } from "./thread-context"
 import { isThreadRetired } from "./store"
 import type { Thread } from "../types"
+import { normalizeGitWorkspacePathKey } from "../../../shared/workspace-path"
+import { threadIncarnationKey } from "../../../shared/thread-incarnation"
+import { ownsParkedImageComposer } from "./image-outbox"
 import {
   BOT_CONVERSATION_DRAFT_PREFIX,
+  ORDINARY_IMAGE_DRAFT_PREFIX,
   botConversationDraftKey,
   botThreadDraftKey,
   botDraftContentSchema,
+  draftImageRef,
   loadBotDraftRecord,
   saveBotDraftRecord,
   pruneBotDraftRecords
@@ -22,7 +27,7 @@ type DraftContext = Pick<
   ReturnType<typeof useThreadContext>,
   "initializeThread" | "getThreadState" | "getThreadActions" | "subscribeToThreadState"
 >
-const schema = botDraftContentSchema.extend({
+const draftFields = botDraftContentSchema.extend({
   version: z.union([z.literal(1), z.literal(2)]),
   mentions: z.array(z.custom<BotMessageMention>()).optional(),
   skill: z.object({
@@ -44,7 +49,8 @@ const schema = botDraftContentSchema.extend({
     .custom<import("../../../shared/bots/contracts").BotMessageReply>(isBotMessageReply)
     .nullable()
     .optional()
-}).superRefine((draft, ctx) => {
+})
+const schema = draftFields.superRefine((draft, ctx) => {
   if (draft.version !== 2) return
   try { parseBotMessageMentions(draft.text, draft.mentions) }
   catch { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "提及草稿无效" }) }
@@ -53,6 +59,63 @@ const threadSchema = z.object({
   incarnation: z.object({ token: z.string().min(1).nullable(), legacyCreatedAt: z.number().int() }),
   draft: schema
 })
+
+const ordinaryImageFile = z.object({
+  image: draftImageRef,
+  filename: z.string().min(1).max(512), filePath: z.literal(""), content: z.literal(""),
+  mimeType: z.literal("image/webp"), size: z.number().int().nonnegative(), truncated: z.literal(false)
+})
+const ordinaryImageDraft = draftFields.extend({
+  attachments: z.array(z.union([ordinaryImageFile, botDraftContentSchema.shape.attachments.element
+    .safeExtend({ embeddedImages: z.array(draftImageRef).max(MAX_CHAT_IMAGES).optional() })]))
+    .max(MAX_ATTACHMENT_PICKER_FILES)
+})
+
+/** Restore only user-selected image descriptors for this incarnation and workspace. */
+export function bindOrdinaryImageDraft(context: DraftContext,
+  row: Pick<Thread, "thread_id" | "created_at" | "metadata">, workspace: string | null,
+  onError: (error: string | null) => void): () => void {
+  const id = row.thread_id
+  const root = normalizeGitWorkspacePathKey(workspace ?? "")
+  const incarnation = threadIncarnationKey(threadDraftIncarnation(row))
+  const key = ORDINARY_IMAGE_DRAFT_PREFIX + JSON.stringify([id, incarnation, root])
+  let saved = false
+  const state = context.getThreadState(id)
+  if (state.draftAttachments.some(file => attachmentImages(file).some(image => image.draftWorkspace !== root))) {
+    context.getThreadActions(id).setDraftAttachments(state.draftAttachments.filter(
+      file => attachmentImages(file).every(image => image.draftWorkspace === root)))
+  }
+  return bindDraft(context, id, () => {
+    let fromStorage = false
+    const error = restoreDraft(context, id, () => {
+      const record = loadBotDraftRecord(key, ordinaryImageDraft)
+      saved = Boolean(record.draft)
+      fromStorage = saved
+      return record
+    })
+    const restored = context.getThreadState(id)
+    if (!error && fromStorage && ownsParkedImageComposer(restored, restored.queuedMessages ?? [], workspace, incarnation)) {
+      const actions = context.getThreadActions(id)
+      actions.setDraftInput("")
+      actions.setDraftAttachments([])
+      actions.setDraftMentionedWorkspaceFiles([])
+      actions.setDraftSkill(null)
+      actions.setDraftBuiltinBrowser(false)
+      actions.setDraftBotReplyTo(null)
+    }
+    return error
+  }, () => {
+    if (isThreadRetired(id) || normalizeGitWorkspacePathKey(context.getThreadState(id).workspacePath ?? "") !== root)
+      return null
+    const { draft } = composerDraft(context, id)
+    const hasImage = draft.attachments.some(file => attachmentImages(file).some(image => image.draftWorkspace === root))
+    if (!hasImage && !saved) return null
+    const error = saveBotDraftRecord<unknown>(key, hasImage ? draft : { version: 2, text: "", attachments: [] },
+      ordinaryImageDraft, !hasImage)
+    if (!error) saved = hasImage
+    return error
+  }, onError)
+}
 
 function sameIncarnation(a: BotOrdinaryThreadRef["incarnation"], b: BotOrdinaryThreadRef["incarnation"]): boolean {
   return a.token !== null || b.token !== null
@@ -146,6 +209,8 @@ function writeThreadComposerDraft(ref: BotOrdinaryThreadRef, draft: z.infer<type
 export function preserveLinkComposerDraft(context: DraftContext, ref: BotOrdinaryThreadRef): (() => void) | undefined {
   const { draft, empty } = composerDraft(context, ref.threadId)
   if (empty) return
+  if (context.getThreadState(ref.threadId).draftAttachments.some(file => attachmentImages(file).length))
+    throw new Error("普通聊天草稿包含图片，请先发送或移除，再关联 Bot。")
   const key = botThreadDraftKey(ref.threadId)
   const previous = loadBotDraftRecord(key, threadSchema)
   if (previous.error) throw new Error(previous.error)
@@ -154,8 +219,12 @@ export function preserveLinkComposerDraft(context: DraftContext, ref: BotOrdinar
   const storage = globalThis.localStorage
   const original = storage.getItem(key)
   const attachments = draft.attachments.some(file => !file.botInputId && !file.originalUnavailable)
-    ? draft.attachments.map(file => file.botInputId || file.originalUnavailable
-        ? file : { ...file, originalUnavailable: true as const })
+    ? draft.attachments.map(file => {
+        if (file.botInputId || file.originalUnavailable) return file
+        if (!file.embeddedImageCount) return { ...file, originalUnavailable: true as const }
+        return { ...file, embeddedImageCount: undefined, originalUnavailable: true as const,
+          visualNotice: "草稿只转入了文档文字，请在 Bot 会话中重新上传原件以读取图片。" }
+      })
     : draft.attachments
   writeThreadComposerDraft(ref, { ...draft, attachments })
   const written = storage.getItem(key)

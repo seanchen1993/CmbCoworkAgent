@@ -1,5 +1,5 @@
 import { BtwPane, BTW_LAUNCHER_TAB } from "./components/panels/BtwPane"
-import { useBtwChat, useDesktopBtwViewport } from "./lib/btw-chat"
+import { setFullSideView, useBtwChat, useDesktopBtwViewport } from "./lib/btw-chat"
 import { ProjectAgentWorkspaceHost } from "@/components/dashboard/ProjectAgentWorkspaceHost"
 import { ThreadSearchButton, ThreadSearchDialog } from "@/components/search/ThreadSearchDialog"
 import {
@@ -711,13 +711,17 @@ function App(): React.JSX.Element {
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
 
   const showBtwTabs = Boolean(showBtw && renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && !showCustomizeView)
-  const [fullSideParent, setFullSideParent] = useState<string | null>(null)
-  const fullSideParentHasTab = useBtwChat(state => Boolean(fullSideParent && state.selected[fullSideParent]))
+  const fullSideView = useBtwChat(s => s.fullSideView)
+  const fullSideHasTab = useBtwChat(s => Boolean(s.fullSideView && s.selected[s.fullSideView.parentId]))
   useEffect(() => {
-    if (fullSideParent && !fullSideParentHasTab) setFullSideParent(null)
-  }, [fullSideParent, fullSideParentHasTab])
-  const sideFull = showBtwTabs && fullSideParent === renderedThreadId
-  const sidePanelStyle = sideFull ? { flex: 1 } : fullscreenRightPanelStyle
+    if (!fullSideView || fullSideHasTab) return
+    useBtwChat.setState(s => s.fullSideView === fullSideView && !s.selected[fullSideView.parentId]
+      ? { fullSideView: null }
+      : s)
+  }, [fullSideView, fullSideHasTab])
+  const sideFull = showBtwTabs && fullSideView?.parentId === renderedThreadId
+  const mainTabVisible = sideFull && fullSideView.showMain
+  const sidePanelStyle = sideFull ? undefined : fullscreenRightPanelStyle
   const selectGitModule = useCallback(() => {
     if (activeRightPanelThreadId) {
       setGitChangeNoticePending(activeRightPanelThreadId, false)
@@ -1021,7 +1025,7 @@ function App(): React.JSX.Element {
       <BotConversationTransitions />
       <ThreadSearchDialog activateChat={() => {
         if (previewFullscreen || browserFullscreen) setRightModule("work")
-        if (sideFull) setFullSideParent(null)
+        if (sideFull) setFullSideView(null)
       }} />
       {/*
         isolate：把 app 内部的 z-index 关进自己的层叠上下文。
@@ -1167,7 +1171,7 @@ function App(): React.JSX.Element {
                     : "text-foreground bg-muted/35 hover:bg-muted/50"
                 }`}
                 onClick={() => {
-                  if (sideFull) setFullSideParent(null)
+                  if (sideFull) setFullSideView(null)
                   toggleRightPanel()
                 }}
                 title={rightPanelToggleText}
@@ -1260,7 +1264,7 @@ function App(): React.JSX.Element {
                     </Suspense>
                   </main>
                 ) : (
-                  <>
+                  <div className={sideFull ? "flex min-w-0 flex-1 flex-col overflow-hidden" : "contents"}>
                     {/* Center - Content Panel */}
                     {isAgentFocusActive ? (
                       <main
@@ -1295,7 +1299,7 @@ function App(): React.JSX.Element {
                         <main
                           ref={rightPanelMainRef}
                           className={fullscreenMainClassName}
-                          style={sideFull ? { display: "none" } : fullscreenMainStyle}
+                          style={sideFull && !mainTabVisible ? { display: "none" } : fullscreenMainStyle}
                         >
                           {renderedThreadId ? (
                             <TabbedPanel threadId={renderedThreadId} showTabBar={false} floatingChat />
@@ -1307,43 +1311,45 @@ function App(): React.JSX.Element {
                         </main>
                       )
                     )}
-                  </>
-                )}
 
-                {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
-                  <>
-                    {showRightResizeHandle && !sideFull && (
-                      <ResizeHandle
-                        onDragStart={handleRightResizeStart}
-                        onDrag={handleRightResize}
-                        onDragEnd={handleRightResizeEnd}
-                      />
+                    {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
+                      <>
+                        {showRightResizeHandle && !sideFull && (
+                          <ResizeHandle
+                            onDragStart={handleRightResizeStart}
+                            onDrag={handleRightResize}
+                            onDragEnd={handleRightResizeEnd}
+                          />
+                        )}
+                        {/* Right Panel - floating style */}
+                        <div
+                          ref={sideFull ? undefined : rightPanelContainerRef}
+                          style={sidePanelStyle}
+                          className={`${fullscreenRightPanelClassName} ${showBtw ? "border-l border-border" : ""} ${sideFull ? (mainTabVisible ? "order-first h-9" : "min-h-0 flex-1") : ""}`}
+                        >
+                          {/* Keep the main thread's file tracking and work-panel state alive during side chat. */}
+                          <RightPanel
+                            threadId={renderedThreadId}
+                            moduleMode={panelModule}
+                            onRequestPreviewMode={selectPreviewModule}
+                            onRequestWorkMode={selectWorkModule}
+                            onPreviewFullscreenChange={setPreviewFullscreen}
+                            onBrowserFullscreenChange={setBrowserFullscreen}
+                          />
+                          {showBtw && renderedThreadId && (
+                            <BtwPane
+                              key={renderedThreadId}
+                              parentId={renderedThreadId}
+                              full={sideFull}
+                              mainTabVisible={mainTabVisible}
+                              showMainTab={showMain => setFullSideView({ parentId: renderedThreadId, showMain })}
+                              toggleFull={() => setFullSideView(sideFull ? null : { parentId: renderedThreadId, showMain: false })}
+                            />
+                          )}
+                        </div>
+                      </>
                     )}
-                    {/* Right Panel - floating style */}
-                    <div
-                      ref={rightPanelContainerRef}
-                      style={sidePanelStyle}
-                      className={`${fullscreenRightPanelClassName} ${showBtw ? "border-l border-border" : ""}`}
-                    >
-                      {/* Keep the main thread's file tracking and work-panel state alive during side chat. */}
-                      <RightPanel
-                        threadId={renderedThreadId}
-                        moduleMode={panelModule}
-                        onRequestPreviewMode={selectPreviewModule}
-                        onRequestWorkMode={selectWorkModule}
-                        onPreviewFullscreenChange={setPreviewFullscreen}
-                        onBrowserFullscreenChange={setBrowserFullscreen}
-                      />
-                      {showBtw && renderedThreadId && (
-                        <BtwPane
-                          key={renderedThreadId}
-                          parentId={renderedThreadId}
-                          full={sideFull}
-                          toggleFull={() => setFullSideParent(sideFull ? null : renderedThreadId)}
-                        />
-                      )}
-                    </div>
-                  </>
+                  </div>
                 )}
               </div>
             ) : null}
@@ -1529,7 +1535,8 @@ function App(): React.JSX.Element {
                 isAgentFocusActive={isAgentFocusActive}
                 renderedMainView={renderedMainView}
                 renderedPanelThreadId={renderedRightPanelThreadId}
-                btwPaneVisible={showBtwTabs}
+                btwTabsVisible={showBtwTabs}
+                btwPaneVisible={showBtwTabs && !mainTabVisible}
               />
             )}
           </div>

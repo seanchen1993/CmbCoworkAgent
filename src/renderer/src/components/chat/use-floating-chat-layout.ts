@@ -60,7 +60,7 @@ export function useBtwComposerToolbarHeight(paneRef: RefObject<HTMLElement | nul
 }
 
 /** Layout only. No chat state, stream subscription or per-token measurement. */
-export function useFloatingChatLayout(rootRef: RefObject<HTMLDivElement | null>, threadId: string) {
+export function useFloatingChatLayout(rootRef: RefObject<HTMLDivElement | null>, threadId: string, resizeInput: () => void) {
   useLayoutEffect(() => {
     const chat = rootRef.current
     const owner = chat?.closest('[data-thread-floating-chat="true"], [data-bot-floating-chat="true"]')
@@ -74,12 +74,13 @@ export function useFloatingChatLayout(rootRef: RefObject<HTMLDivElement | null>,
       if (chat.style.getPropertyValue(name) !== next) chat.style.setProperty(name, next)
     }
     let followUp = 0
+    let lastWidth: number | undefined
     const measure = () => {
       cancelAnimationFrame(followUp)
       // ResizeObserver runs after layout. Read all geometry before changing insets.
       const headerRect = header?.getBoundingClientRect()
       const headerInset = headerRect ? Math.max(0, headerRect.bottom - viewport.getBoundingClientRect().top) : 0
-      const height = dock.getBoundingClientRect().height
+      const { height, width } = dock.getBoundingClientRect()
       const expanded = height > chat.clientHeight * 0.65
       let flowChanged = false
       if (headerRect && owner instanceof HTMLElement) {
@@ -96,6 +97,8 @@ export function useFloatingChatLayout(rootRef: RefObject<HTMLDivElement | null>,
       }
       setInset("--chat-composer-inset", expanded ? 0 : height)
       setInset("--chat-header-inset", headerInset)
+      if (lastWidth !== undefined && width > 0 && width !== lastWidth) resizeInput()
+      lastWidth = width
       // A header or dock can move the viewport without resizing it.
       if (flowChanged) followUp = requestAnimationFrame(measure)
     }
@@ -113,5 +116,5 @@ export function useFloatingChatLayout(rootRef: RefObject<HTMLDivElement | null>,
       chat.style.removeProperty("--chat-header-inset")
       if (owner instanceof HTMLElement) owner.style.removeProperty("--chat-floating-header-height")
     }
-  }, [rootRef, threadId])
+  }, [rootRef, threadId, resizeInput])
 }

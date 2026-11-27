@@ -517,6 +517,23 @@ fs.appendFileSync(${JSON.stringify(out)}, 'hit\\n')
   })
 }
 
+async function testLateOnceHookCannotConsumeNewSession(): Promise<void> {
+  const context = { toolName: "execute", sessionId: "reopened-while-hook-pending" }
+  const hook = makeHook({
+    id: "late-once", event: "PreToolUse", matcher: "execute", once: true,
+    command: nodeCommand("process.exit(0)")
+  })
+  const pending = runHooks([hook], "PreToolUse", context)
+  clearOnceStateForSession(context.sessionId)
+  await pending
+  let executions = 0
+  const observe = () => { executions++ }
+  await runHooks([hook], "PreToolUse", context, observe)
+  await runHooks([hook], "PreToolUse", context, observe)
+  assert(executions === 1, "a new session must have its own once state after a late completion")
+  clearOnceStateForSession(context.sessionId)
+}
+
 async function testOnceHookFailureDoesNotConsume(): Promise<void> {
   resetHookOnceStateForTests()
   await withTempDir("hook-once-fail", async (dir) => {
@@ -538,6 +555,7 @@ process.exit(2)
 
     const hits = (await readFile(out, "utf8")).trim().split(/\r?\n/).filter(Boolean)
     assert(hits.length === 2, `failing once hook should not be consumed, got ${hits.length}`)
+    assert(resetHookOnceStateForTests() === 0, "failed once hooks must release empty session records")
   })
 }
 
@@ -1120,6 +1138,7 @@ async function run(): Promise<void> {
   console.log("PASS B7i2 SubagentStop continue:false returns halt to caller")
   await testOnceHookRunsOnlyOncePerSession()
   console.log("PASS B7j once hook runs only once per session")
+  await testLateOnceHookCannotConsumeNewSession()
   await testOnceHookFailureDoesNotConsume()
   console.log("PASS B7k failing once hook is not consumed")
   await testClearOnceStateForSessionResetsThatSessionOnly()

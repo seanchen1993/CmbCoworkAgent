@@ -98,6 +98,7 @@ function createTestMiddleware(
     : undefined
   return createCmbSummarizationMiddleware({
     model: model as never,
+    chatImageMessageScope: "desktop",
     ...(fallbackModel ? { fallbackModel: fallbackModel as never } : {}),
     backend: (options.backend ?? createBackend()) as never,
     trigger: options.trigger ?? { type: "tokens", value: 1 },
@@ -236,6 +237,23 @@ describe("OpenAI-compatible context overflow classification", () => {
 })
 
 describe("CmbCowork context compaction middleware", () => {
+  it("compacts older image turns before the fourth image reaches the task model", async () => {
+    const summary = vi.fn(async () => new AIMessage(validSummary("older images")))
+    const handler = vi.fn<(request: SummaryRequest) => Promise<AIMessage>>().mockResolvedValue(new AIMessage("handled"))
+    const middleware = createTestMiddleware(summary, { trigger: { type: "messages", value: 100 } })
+    const imageTurn = (id: string, count: number) => new HumanMessage({
+      id, content: id, additional_kwargs: { cmb_chat_images: Array(count).fill({ filename: "image.png" }) }
+    })
+    const current = imageTurn("current", 2)
+    await middleware.wrapModelCall({
+      messages: [imageTurn("older", 2), new AIMessage("older answer"), current],
+      state: {}, tools: []
+    }, handler)
+    expect(summary).toHaveBeenCalled()
+    expect(handler.mock.calls[0][0].messages).toContain(current)
+    expect(handler.mock.calls[0][0].messages.some(message => message.id === "older")).toBe(false)
+  })
+
   it("restores a summarized HumanMessage through MemorySaver on the next invocation", async () => {
     const summaryModel = new FakeListChatModel({
       responses: Array(4).fill(validSummary("MemorySaver restore"))

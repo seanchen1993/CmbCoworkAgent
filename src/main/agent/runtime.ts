@@ -1,3 +1,6 @@
+import { createChatImageMiddleware, isDesktopChatImageScope, type ChatImageMessageScope } from "./chat-image-middleware"
+import { captureDesktopImageAccess } from "../chat-images"
+import { inspectImageRequest } from "../models/image-request"
 import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
 import { createBotDispatchFeedbackMiddleware } from "./bot-dispatch-feedback"
 import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
@@ -68,6 +71,7 @@ import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../mod
 import type { IdleModelEnvironment, ModelTransport } from "../../shared/model-catalog"
 import {
   createCmbSummarizationMiddleware,
+  isCmbContextOverflow,
   isGatewayContextOverflow
 } from "./context-summarization-middleware"
 import {
@@ -108,6 +112,8 @@ import {
   type SkillHookContextProvider
 } from "./local-sandbox"
 import { foregroundCommandCall, foregroundCommandEvidence } from "./foreground-command-evidence"
+import { taskCommitCall, withTaskCommitCall } from "./task-commit-call"
+import { recordTaskCommitEdit } from "../services/task-commit-edits"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import {
   createShellTaskMonitorTools,
@@ -197,7 +203,7 @@ import path from "path"
 import { join, resolve, delimiter } from "path"
 import fs from "fs/promises"
 import { app, BrowserWindow } from "electron"
-import { sendCurrentAgentRunStreamEvent } from "./agent-run-service"
+import { canDisplayTaskCommitReview, sendCurrentAgentRunStreamEvent } from "./agent-run-service"
 import {
   appendTaskCompletionAndRepetitionPrompt,
   getOutputStylePrompt,
@@ -409,10 +415,10 @@ import {
   getGlobalMcpCapabilityService
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
+import { waitForAbort } from "../utils/wait-for-abort"
 import {
   autoSelectPlaywrightInAppBrowserTab,
-  invokeMcpToolWithPlaywrightInAppBrowserSupport,
-  shouldPreparePlaywrightInAppBrowser
+  invokeMcpToolWithPlaywrightInAppBrowserSupport
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   DeepSeekChatOpenAICompletions,
@@ -940,6 +946,9 @@ function createTrustedToolFilePreviewContextMiddleware(threadId: string) {
       const toolCall = request.toolCall as { id?: string; name?: string } | undefined
       const toolCallId = toolCall?.id?.trim()
       const toolName = toolCall?.name?.trim()
+      if (toolName === "execute" && toolCallId) {
+        return withTaskCommitCall(threadId, toolCallId, () => handler(request))
+      }
       if (
         !toolCallId ||
         !toolName ||
@@ -947,9 +956,10 @@ function createTrustedToolFilePreviewContextMiddleware(threadId: string) {
       ) {
         return handler(request)
       }
-      return runWithTrustedToolFilePreviewContext({ threadId, toolCallId, toolName }, () =>
+      const invoke = () => runWithTrustedToolFilePreviewContext({ threadId, toolCallId, toolName }, () =>
         handler(request)
       )
+      return toolName === "read_file" ? invoke() : withTaskCommitCall(threadId, toolCallId, invoke)
     }
   })
 }
@@ -1400,7 +1410,7 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
-    inAppBrowserSignal?: AbortSignal
+    abortSignal?: AbortSignal
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1434,19 +1444,20 @@ export function createScopedMcpCapabilityService(
     return [...hookScope.activePluginIds].sort().join("\u001f")
   }
 
-  const getBaseToolSnapshot = async (): Promise<{
+  const getBaseToolSnapshot = async (signal = baseContext.abortSignal): Promise<{
     fingerprint: string
     tools: McpCapabilityTool[]
   }> => {
+    signal?.throwIfAborted()
     if (baseSnapshotCache) {
       return { fingerprint: baseSnapshotCache.fingerprint, tools: [...baseSnapshotCache.tools] }
     }
 
     let snapshot: { fingerprint: string; tools: McpCapabilityTool[] }
     if (service.getSnapshot) {
-      snapshot = await service.getSnapshot()
+      snapshot = await waitForAbort(service.getSnapshot(), signal)
     } else {
-      const tools = await service.listTools()
+      const tools = await waitForAbort(service.listTools(), signal)
       snapshot = {
         fingerprint: tools
           .map((tool) => tool.capabilityId)
@@ -1459,11 +1470,12 @@ export function createScopedMcpCapabilityService(
     return { fingerprint: snapshot.fingerprint, tools: [...snapshot.tools] }
   }
 
-  const getScopedToolSnapshot = async (): Promise<{
+  const getScopedToolSnapshot = async (signal = baseContext.abortSignal): Promise<{
     tools: McpCapabilityTool[]
     maps: ReturnType<typeof buildAliasMaps>
   }> => {
-    const baseSnapshot = await getBaseToolSnapshot()
+    const baseSnapshot = await getBaseToolSnapshot(signal)
+    signal?.throwIfAborted()
     const cacheKey = `${baseSnapshot.fingerprint}\u001e${getActivePluginKey()}`
     if (scopedSnapshotCache?.key === cacheKey) {
       return { tools: [...scopedSnapshotCache.tools], maps: scopedSnapshotCache.maps }
@@ -1485,11 +1497,12 @@ export function createScopedMcpCapabilityService(
 
   const resolveScopedTool = async (idOrAlias: string): Promise<McpCapabilityTool | null> => {
     const { maps } = await getScopedToolSnapshot()
+    baseContext.abortSignal?.throwIfAborted()
     return (
       maps.capabilityById.get(idOrAlias) ??
       maps.toolIds.get(idOrAlias) ??
       maps.canonicalToolIds.get(idOrAlias) ??
-      service.getTool(idOrAlias)
+      waitForAbort(service.getTool(idOrAlias), baseContext.abortSignal)
     )
   }
 
@@ -1625,15 +1638,27 @@ export function createScopedMcpCapabilityService(
       }
     },
     getTool: resolveScopedTool,
-    invoke: async (idOrAlias, args) => {
-      const snapshot = await getScopedToolSnapshot()
+    invoke: async (idOrAlias, args, callerSignal) => {
+      const scopeSignal = baseContext.abortSignal
+      const signal =
+        scopeSignal && callerSignal && scopeSignal !== callerSignal
+          ? AbortSignal.any([scopeSignal, callerSignal])
+          : scopeSignal ?? callerSignal
+      const invokeTool = (targetId: string, input: Record<string, unknown>) => {
+        if (!signal) return service.invoke(targetId, input)
+        signal.throwIfAborted()
+        return waitForAbort(service.invoke(targetId, input, signal), signal)
+      }
+      const snapshot = await getScopedToolSnapshot(signal)
+      signal?.throwIfAborted()
       const tool =
         snapshot.maps.capabilityById.get(idOrAlias) ??
         snapshot.maps.toolIds.get(idOrAlias) ??
         snapshot.maps.canonicalToolIds.get(idOrAlias) ??
-        (await service.getTool(idOrAlias))
+        (await waitForAbort(service.getTool(idOrAlias), signal))
+      signal?.throwIfAborted()
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
-      if (!tool) return service.invoke(idOrAlias, args)
+      if (!tool) return invokeTool(idOrAlias, args)
 
       const hookContext: HookContext = {
         toolName: tool.toolId,
@@ -1656,11 +1681,14 @@ export function createScopedMcpCapabilityService(
         projectDir: baseContext.projectDir,
         workspaceHookCwd: baseContext.workspaceHookCwd,
         forceSyncWorkspaceHooks: baseContext.forceSyncWorkspaceHooks,
+        ...(signal && { abortSignal: signal, stopPendingHooksOnAbort: true }),
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
       const preHooks = resolveHooksForContext("PreToolUse", hookContext)
+      signal?.throwIfAborted()
       const preResult = await runHooksEnriched(preHooks, "PreToolUse", hookContext, onHookResult)
+      signal?.throwIfAborted()
       if (preResult) {
         hookScope.activatePersistentHooks(preHooks)
       }
@@ -1695,46 +1723,42 @@ export function createScopedMcpCapabilityService(
         capabilityService: service,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
-        signal: baseContext.inAppBrowserSignal
+        signal
       })
 
+      signal?.throwIfAborted()
       if (pluginId) hookScope.activatePlugin(pluginId)
       const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
         tool,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
-        signal: baseContext.inAppBrowserSignal,
+        signal,
         args: effectiveArgs,
         prepareBeforeInvoke: false,
-        invoke: async (signal) => {
-          const invokeTool = async (target: McpCapabilityTool) => {
-            const dispatchSignal = signal ?? (shouldPreparePlaywrightInAppBrowser(target)
-              ? baseContext.inAppBrowserSignal
-              : undefined)
-            if (!dispatchSignal) return service.invoke(target.capabilityId, effectiveArgs)
-            dispatchSignal.throwIfAborted()
-            const invocation = await service.invoke(target.capabilityId, effectiveArgs, dispatchSignal)
-            dispatchSignal.throwIfAborted()
-            return invocation
-          }
+        invoke: async () => {
           try {
-            return await invokeTool(tool)
+            return await invokeTool(tool.capabilityId, effectiveArgs)
           } catch (error) {
+            signal?.throwIfAborted()
             const fallbackTool = shouldFallbackMcpError(error)
               ? findFallbackTool(tool, snapshot.tools)
               : null
             if (!fallbackTool) throw error
-            return appendFallbackNotice(await invokeTool(fallbackTool), tool, fallbackTool)
+            const result = await invokeTool(fallbackTool.capabilityId, effectiveArgs)
+            return appendFallbackNotice(result, tool, fallbackTool)
           }
         }
       })
+      signal?.throwIfAborted()
       const postContext: HookContext = {
         ...hookContext,
         toolArgs: effectiveArgs,
         toolResult: result.text
       }
       const postHooks = resolveHooksForContext("PostToolUse", postContext)
+      signal?.throwIfAborted()
       const postResult = await runHooksEnriched(postHooks, "PostToolUse", postContext, onHookResult)
+      signal?.throwIfAborted()
       if (postResult) {
         hookScope.activatePersistentHooks(postHooks)
       }
@@ -1747,6 +1771,7 @@ export function createScopedMcpCapabilityService(
       if (shouldSendFailureFuseNotice(failureFuseDecision)) {
         onFailureFuseNotice?.(failureFuseDecision)
       }
+      signal?.throwIfAborted()
       // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
       // than a throw or a `success: false` shape, so `detectToolFailure` (which
       // looks at common ad-hoc shapes) doesn't see them. Translate isError →
@@ -1764,6 +1789,7 @@ export function createScopedMcpCapabilityService(
           })
         }
         const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+        signal?.throwIfAborted()
         runHooksEnriched(failureHooks, "PostToolUseFailure", failureContext, onHookResult).catch(
           (e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
         )
@@ -2369,6 +2395,41 @@ interface RuntimeToolFailure {
   signal: ToolFailureSignal
 }
 
+type RuntimeTool = {
+  name?: string
+  func?: unknown
+  invoke?: unknown
+}
+
+export function wrapRuntimeToolErrors(tools: RuntimeTool[], abortSignal?: AbortSignal): void {
+  for (const tool of tools) {
+    for (const method of ["func", "invoke"] as const) {
+      const original = tool[method]
+      if (typeof original !== "function") continue
+      tool[method] = async (...args: unknown[]) => {
+        abortSignal?.throwIfAborted()
+        try {
+          const result = await Reflect.apply(original, tool, args)
+          abortSignal?.throwIfAborted()
+          return result
+        } catch (error) {
+          abortSignal?.throwIfAborted()
+          if (
+            isWorkflowStructuredOutputFatalError(error) ||
+            (method === "invoke" && (isHookHaltError(error) || isFailureFuseHaltError(error)))
+          )
+            throw error
+          const message = error instanceof Error ? error.message : String(error)
+          const level =
+            error instanceof TypeError || error instanceof ReferenceError ? "error" : "warn"
+          console[level](`[Runtime] Tool "${tool.name}" error (non-fatal):`, message)
+          return message
+        }
+      }
+    }
+  }
+}
+
 /** Dispatch tool exceptions using the owning runtime's hook scope and failure fuse. */
 export function createRuntimeToolFailureHandler(
   baseContext: HookContext & { sessionId: string },
@@ -2379,6 +2440,8 @@ export function createRuntimeToolFailureHandler(
   onHookResult?: HookResultCallback
 ): (input: RuntimeToolFailure) => FailureFuseDecision | undefined {
   return ({ toolName, toolCallId, toolArgs, signal }) => {
+    const abortSignal = baseContext.stopPendingHooksOnAbort ? baseContext.abortSignal : undefined
+    if (abortSignal?.aborted) return undefined
     const { sessionId: threadId, turnId } = baseContext
     const decision = turnId
       ? recordToolFailure({
@@ -2408,9 +2471,12 @@ export function createRuntimeToolFailureHandler(
       })
     }
     const event = "PostToolUseFailure"
-    runHooks(resolveHooks(event, context), event, context, onHookResult).catch((error) =>
-      console.warn("[Hooks] PostToolUseFailure hook error:", error)
-    )
+    const hooks = resolveHooks(event, context)
+    if (!abortSignal?.aborted) {
+      runHooks(hooks, event, context, onHookResult).catch((error) =>
+        console.warn("[Hooks] PostToolUseFailure hook error:", error)
+      )
+    }
     return decision
   }
 }
@@ -2508,12 +2574,14 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
     // adapter keeps createDeepAgent oblivious to that wiring.
     onToolFailureSignal,
+    sideConversationSignal,
     onFinalSystemPrompt,
     onFailureFuseNotice,
     onTurnCompletionRecovery,
     checkFinalDelivery,
     openingReplyReminder = false,
     onBotDispatchFeedback,
+    chatImageMessageScope,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
     toolStrategy = "standard",
@@ -2522,9 +2590,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
     onToolFailureSignal?: (input: RuntimeToolFailure) => FailureFuseDecision | void
+    sideConversationSignal?: AbortSignal
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
     checkFinalDelivery?: TurnFinalDeliveryCheck
+    chatImageMessageScope?: ChatImageMessageScope
     onBotDispatchFeedback?: (feedback: BotDispatchFeedback | undefined) => void
     openingReplyReminder?: boolean
     botResultReport?: boolean
@@ -2639,6 +2709,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     })
   }
   const mainSummarizationOptions = {
+    chatImageMessageScope,
     ...summarizationBaseOptions,
     model: configureContextCompactionModel(summarizationModel, onContextCompaction),
     ...(summarizationOverflowModel && {
@@ -2955,6 +3026,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       try {
         return await handler(request)
       } catch (error) {
+        sideConversationSignal?.throwIfAborted()
         // Protection halts are control flow, not tool failures. Propagate
         // before PostToolUseFailure/failure-fuse accounting can misclassify
         // or replace the dedicated stationarity halt.
@@ -3371,6 +3443,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ),
       ...(onBotDispatchFeedback ? [createBotDispatchFeedbackMiddleware(onBotDispatchFeedback)] : []),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
+      ...(threadId ? [createChatImageMiddleware(threadId, chatImageMessageScope)] : []),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
       // invalid_tool_calls into normalized tool_calls (the guard middleware above
@@ -4325,12 +4398,15 @@ function normalizeLailasInputOverflow(response: Response, rawBody: string): Resp
 function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
-  capture?: { threadId?: string },
+  capture?: { threadId?: string; allowImages?: boolean; validateImageAccess?: () => void },
   beforeAttempt?: () => Response | undefined
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
   return async (input, init) => {
+    const imageRequest = inspectImageRequest(init?.body, capture?.allowImages === true)
+    if (imageRequest?.rejection) return imageRequest.rejection
+    const validateAccess = imageRequest ? capture?.validateImageAccess : undefined
     const parentSignal = (init?.signal ?? undefined) as AbortSignal | undefined
     let lastError: unknown = undefined
 
@@ -4339,25 +4415,47 @@ function createRetryingFetch(
     // gateway codes (480/485/…) or non-OpenAI bodies this clone is the only place
     // the real reason survives. Called both for non-retryable statuses and when
     // the retry budget is exhausted on a retryable status (432/433/429/5xx).
-    const prepareErrorResponse = async (res: Response): Promise<Response> => {
-      if (res.status !== 485 && !hooks?.onFetchError) return res
-      const requestId = res.headers.get("x-request-id") ?? undefined
+    const prepareErrorResponse = async (res: Response, upstreamImage = Boolean(imageRequest)): Promise<Response> => {
+      if (res.status !== 485 && !hooks?.onFetchError && !upstreamImage) return res
       let rawBody: string | undefined
       try {
         rawBody = await res.clone().text()
       } catch {
-        // The SDK still receives the original response when its body cannot be read.
+        // The SDK can still consume the original response on the ordinary text path.
       }
+      if (upstreamImage || (rawBody && /data:image\//i.test(rawBody))) {
+        // Some gateways echo the bare encoded pixels without a data URL prefix.
+        // Keep the recovery signal and numeric limit, never the upstream error text.
+        const failure = { status: res.status, responseBody: rawBody }
+        const overflow = isCmbContextOverflow(failure)
+        const limit = overflow ? contextWindowFromError(rawBody) : undefined
+        const message = overflow
+          ? "当前任务上下文超过最大限度" + (limit ? ` (maximum context length is ${limit} tokens)` : "")
+          : "图片请求失败（HTTP " + res.status + "）"
+        const code = overflow ? "context_length_exceeded" : "image_request_failed"
+        const safeBody = JSON.stringify({ error: { code, message } })
+        hooks?.onFetchError?.({ status: res.status, rawBody: safeBody })
+        return new Response(safeBody, {
+          status: res.status,
+          headers: { "content-type": "application/json" }
+        })
+      }
+      const requestId = res.headers.get("x-request-id") ?? undefined
       hooks?.onFetchError?.({ status: res.status, requestId, rawBody })
       return res.status === 485 && rawBody ? normalizeLailasInputOverflow(res, rawBody) : res
     }
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
       if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+      try {
+        validateAccess?.()
+      } catch {
+        return Response.json({ error: { message: "当前任务的图片读取权限已失效" } }, { status: 403 })
+      }
       // Backoff can cross the closing boundary even on an already created model.
       const rejection = beforeAttempt?.()
       if (rejection) {
-        const response = await prepareErrorResponse(rejection)
+        const response = await prepareErrorResponse(rejection, false)
         if (attempt > 1) hooks?.onRetrySuccess?.()
         return response
       }
@@ -4400,7 +4498,7 @@ function createRetryingFetch(
         // turn ("Received empty response from chat model call.") can be traced
         // back to the exact upstream response that produced it.
         console.log(
-          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
+          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${imageRequest ? "omitted" : res.headers.get("content-type") ?? "unknown"}, request-id=${imageRequest ? "omitted" : res.headers.get("x-request-id") ?? "unknown"}`
         )
 
         // 580 also represents context overflow. Let summarization reduce the
@@ -4685,6 +4783,7 @@ function configureLocalCompactionTokenEstimation(model: ChatOpenAI): ChatOpenAI 
 /** @internal Exported for protocol-level tests. */
 export function getModelInstance(
   customConfig: {
+    inputModalities?: ("text" | "image")[]
     id: string
     model: string
     baseUrl: string
@@ -4703,7 +4802,8 @@ export function getModelInstance(
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
   purpose: ModelInstancePurpose = "agent",
-  captureThreadId?: string
+  captureThreadId?: string,
+  validateImageAccess?: () => void
 ): ChatOpenAI {
   const apiKey = customConfig.apiKey
   if (!apiKey) {
@@ -4734,7 +4834,8 @@ export function getModelInstance(
   const modelFetch = createRetryingFetch(
     retryHooks,
     maxRetryAttempts,
-    { threadId: captureThreadId },
+    { threadId: captureThreadId, validateImageAccess, allowImages: purpose === "agent" &&
+      customConfig.inputModalities?.includes("image") === true },
     customConfig.transport === "idle-gateway"
       ? () => getIdleModelServiceHoursRejection(customConfig)
       : undefined
@@ -4847,6 +4948,7 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 }
 
 export interface CreateAgentRuntimeOptions {
+  validateChatDocument?: () => void
   /** Optional working-context budget; does not change the provider output limit. */
   contextBudgetTokens?: number
   /** Internal inheritance override; absent on top-level runs to capture the global setting. */
@@ -4869,6 +4971,7 @@ export interface CreateAgentRuntimeOptions {
   /** Trusted main-turn delivery only; not forwarded to leaf agents. */
   checkFinalDelivery?: TurnFinalDeliveryCheck
   /** Host opt-in for a user-facing main turn; never inherited by workers or subagents. */
+  chatImageMessageScope?: ChatImageMessageScope
   onBotDispatchFeedback?: (feedback: BotDispatchFeedback | undefined) => void
   openingReplyReminder?: boolean
   /** Ordinary-path todo completion gate. Defaults to enabled. */
@@ -5182,6 +5285,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     skillUseTracker,
     onFileMutation
   } = options
+  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
+  const sideConversationSignal = sideConversationLifetime && options.abortSignal
+    ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
+    : sideConversationLifetime
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const runtimeBlockedToolNames = runtimeToolDenylist(blockedToolNames)
   const isCoordinatorMode = agentMode === "coordinator"
@@ -5297,7 +5404,16 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // DeepSeek thinking mode rejects named tool_choice; workers keep their configured thinking.
   const modelPurpose = options.botCommunication && options.botSkillDispatch && !options.botResultReport
     ? "bot-skill-dispatch" : "agent"
-  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId)
+  const activeImageScope = options.chatImageMessageScope
+  const desktopImageScope = isDesktopChatImageScope(activeImageScope)
+  const validateMediaScope = desktopImageScope
+    ? threadId ? captureDesktopImageAccess(threadId) : undefined
+    : activeImageScope?.validateAccess
+  const validateDocument = options.validateChatDocument
+  const validateImageAccess = desktopImageScope && validateDocument
+    ? () => { validateDocument(); validateMediaScope?.() }
+    : validateMediaScope
+  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId, validateImageAccess)
   const contextCompactionModel = getModelInstance(
     customConfig,
     retryHooks,
@@ -5435,12 +5551,22 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const baseHooks = hookScope.disabled ? [] : getEnabledHooks(workspacePath)
   console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
 
+  const taskCommitEnabled = threadId === approvalThreadId && !options.worktreeIsolation
+  const callBinding = () => {
+    const call = taskCommitCall.getStore()
+    return taskCommitEnabled && call?.threadId === threadId ? call.binding : null
+  }
   const backend = new LocalSandbox({
     // File tools are rooted in the independent checkout. Shell starts there and
     // keeps the worktree Git guard; the user's configured OS sandbox, if any,
     // remains an additional execution policy rather than a worktree prerequisite.
     rootDir: fileRoot,
     agentId,
+    taskCommitRepositoryPaths: () => callBinding()?.repositoryPaths,
+    onTaskCommitEdit: (file, before, after) => {
+      const version = callBinding()?.version
+      if (version) recordTaskCommitEdit(threadId, version, file, before, after)
+    },
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
     // Native Git in an isolated worktree runs through the normal shell path.
@@ -5491,7 +5617,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         taskSubagentsEnabled: mainSubagentsEnabled
       }
     ),
-    abortSignal: options.abortSignal,
+    abortSignal: sideConversationSignal ?? options.abortSignal,
+    stopPendingHooksOnAbort: sideConversationSignal !== undefined,
     backgroundCommandLifecycle: options.backgroundCommandLifecycle,
     foregroundCommandLifecycle: options.foregroundCommandLifecycle,
     runId: threadId,
@@ -5701,7 +5828,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     getYoloMode,
     options.autoApproveFileEdits === true,
     !options.worktreeIsolation,
-    workspacePath
+    workspacePath,
+    threadId === approvalThreadId && !options.worktreeIsolation
+      ? {
+          threadId,
+          canReview: () => !options.botCommunication && !managedExecution && canDisplayTaskCommitReview() &&
+            BrowserWindow.getAllWindows().some(win => !win.isDestroyed())
+        }
+      : undefined
   )
   backend.setOrchestrator(orchestrator)
 
@@ -5925,10 +6059,6 @@ The workspace root is: ${fileRoot}`
     console.log("[Runtime] Memory disabled for this session")
   }
 
-  const sideConversationLifetime = getSideThreadLifetimeSignal(threadId)
-  const sideConversationSignal = sideConversationLifetime && options.abortSignal
-    ? AbortSignal.any([sideConversationLifetime, options.abortSignal])
-    : sideConversationLifetime
   const capabilityService = createScopedMcpCapabilityService(
     options.capabilityService ??
       (disableMcpTools
@@ -5949,7 +6079,7 @@ The workspace root is: ${fileRoot}`
     {
       workspacePath,
       threadId,
-      inAppBrowserSignal: sideConversationSignal,
+      abortSignal: sideConversationSignal,
       agentId,
       pluginOutputDir,
       systemId,
@@ -6052,11 +6182,6 @@ The workspace root is: ${fileRoot}`
     }
   }
 
-  type RuntimeTool = {
-    name?: string
-    func?: unknown
-    invoke?: unknown
-  }
   const extraTools: RuntimeTool[] = []
   if (options.enableRequestUserInput) {
     extraTools.push(
@@ -6106,44 +6231,6 @@ The workspace root is: ${fileRoot}`
     )
   }
 
-  // Wrap extra tools so that errors are returned as strings instead of throwing
-  function wrapToolErrors(tools: RuntimeTool[]): void {
-    for (const t of tools) {
-      if (typeof t.func === "function") {
-        const originalFunc = t.func
-        t.func = async (...args: unknown[]) => {
-          try {
-            return await Reflect.apply(originalFunc, t, args)
-          } catch (e: unknown) {
-            if (isWorkflowStructuredOutputFatalError(e)) throw e
-            const msg = e instanceof Error ? e.message : String(e)
-            const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
-            console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
-            return msg
-          }
-        }
-      }
-      if (typeof t.invoke === "function") {
-        const originalInvoke = t.invoke
-        t.invoke = async (...args: unknown[]) => {
-          try {
-            return await Reflect.apply(originalInvoke, t, args)
-          } catch (e: unknown) {
-            if (
-              isHookHaltError(e) ||
-              isFailureFuseHaltError(e) ||
-              isWorkflowStructuredOutputFatalError(e)
-            )
-              throw e
-            const msg = e instanceof Error ? e.message : String(e)
-            const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
-            console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
-            return msg
-          }
-        }
-      }
-    }
-  }
   if (options.additionalTools?.length) {
     extraTools.push(...(options.additionalTools as unknown as RuntimeTool[]))
   }
@@ -6314,11 +6401,11 @@ The workspace root is: ${fileRoot}`
     )
   }
 
-  wrapToolErrors(extraTools)
-  wrapToolErrors(memoryTools as RuntimeTool[])
+  wrapRuntimeToolErrors(extraTools, sideConversationSignal)
+  wrapRuntimeToolErrors(memoryTools as RuntimeTool[], sideConversationSignal)
 
   if (toolSearchTools.length > 0) {
-    wrapToolErrors(toolSearchTools as RuntimeTool[])
+    wrapRuntimeToolErrors(toolSearchTools as RuntimeTool[], sideConversationSignal)
   }
 
   if (codeExecRouteEnabled) {
@@ -6352,6 +6439,7 @@ The workspace root is: ${fileRoot}`
   const toolHookMiddleware = createToolHookMiddleware({
     workspacePath,
     threadId: options.threadId,
+    abortSignal: sideConversationSignal,
     agentId,
     hookScope,
     resolveHooksForContext,
@@ -7240,7 +7328,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       })
     : []
   if (coordinatorWorkerToolsForMain.length > 0) {
-    wrapToolErrors(coordinatorWorkerToolsForMain as RuntimeTool[])
+    wrapRuntimeToolErrors(coordinatorWorkerToolsForMain as RuntimeTool[], sideConversationSignal)
   }
 
   if (isCoordinatorMode) {
@@ -7489,6 +7577,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     checkFinalDelivery: options.checkFinalDelivery,
     openingReplyReminder: options.openingReplyReminder,
     onBotDispatchFeedback: options.onBotDispatchFeedback,
+    chatImageMessageScope: options.chatImageMessageScope,
     turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,
     actionStationarityTurnId,
@@ -7496,6 +7585,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     userInputWithoutToolLock: options.userInputWithoutToolLock,
     botBrowserToolsOwnFileLock: options.botBrowserToolsOwnFileLock,
     toolHookMiddleware,
+    sideConversationSignal,
     onFailureFuseNotice,
     onContextCompaction,
     onToolFailureSignal: createRuntimeToolFailureHandler(
@@ -7515,6 +7605,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         harnessNodeStatus,
         projectCode,
         projectDir,
+        ...(sideConversationSignal && {
+          abortSignal: sideConversationSignal,
+          stopPendingHooksOnAbort: true
+        }),
         ...isolatedWorkspaceHookContext
       },
       resolveHooksForContext,

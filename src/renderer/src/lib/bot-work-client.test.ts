@@ -26,6 +26,7 @@ function fixture() {
     "send",
     "open",
     "requestReceipts",
+    "cancelQueuedImageInput",
     "messageReply",
     "messageReactions",
     "setMessageReaction",
@@ -37,6 +38,7 @@ function fixture() {
     "importFiles",
     "attachFiles",
     "attachFileBytes",
+    "readAttachmentImages",
     "attachWorkspaceFile",
     "exportFile",
     "shareFile",
@@ -56,6 +58,22 @@ function fixture() {
   return { client, scoped: botWorkClient(client, work) }
 }
 describe("original beta client bound to a work", () => {
+  it("reads a picker image preview only within the bound work", async () => {
+    const { client, scoped } = fixture()
+    await scoped.readAttachmentImages!(work.botId, "input-fixture")
+    expect(client.readAttachmentImages).toHaveBeenCalledWith(work.botId, "input-fixture", undefined, work.id, undefined)
+    expect(() => scoped.readAttachmentImages!(work.botId, "input-fixture", undefined, "other-work"))
+      .toThrow("工作会话目标不一致")
+    expect(client.readAttachmentImages).toHaveBeenCalledOnce()
+  })
+  it("withdraws image requests only within the exact work composer", async () => {
+    const { client, scoped } = fixture()
+    const check = { requestId: "visual-request", messageHash: "a".repeat(64) }
+    await scoped.cancelQueuedImageInput!(work.botId, check)
+    expect(client.cancelQueuedImageInput).toHaveBeenCalledWith(work.botId, check, work.id)
+    expect(() => scoped.cancelQueuedImageInput!(work.botId, check, "another-work")).toThrow("工作会话目标不一致")
+    expect(client.cancelQueuedImageInput).toHaveBeenCalledOnce()
+  })
   it("preserves the complete frozen local client through the registry facade", async () => {
     const base = fixture().client
     let receive: ((event: BotChangeEvent) => void) | undefined

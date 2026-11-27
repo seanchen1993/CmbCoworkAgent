@@ -14,7 +14,8 @@ import {
   groupEditorDeleteMention,
   groupEditorLineBoundary,
   groupEditorMotionPlugin,
-  groupEditorClipboardPlugin
+  groupEditorClipboardPlugin,
+  pasteBotEditorFiles
 } from "./bot-group-editor"
 import { groupMessageRecipients, groupMentionQuery } from "./bot-group-mentions"
 
@@ -186,6 +187,18 @@ describe("group editor draft projection", () => {
 })
 
 describe("group editor clipboard", () => {
+  it("pastes mixed text and files once, preserving ordinary text-only pastes", () => {
+    const view = { pasteText: vi.fn(() => true) }, attach = vi.fn()
+    const image = { name: "diagram.png" } as File
+    const event = { preventDefault: vi.fn(), clipboardData: { files: [image], getData: () => "@甲\n截图" } }
+    expect(pasteBotEditorFiles(view, event as unknown as ClipboardEvent, attach)).toBe(true)
+    expect(view.pasteText).toHaveBeenCalledExactlyOnceWith("@甲\n截图")
+    expect(attach).toHaveBeenCalledExactlyOnceWith([image])
+    event.clipboardData.files = []
+    expect(pasteBotEditorFiles(view, event as unknown as ClipboardEvent, attach)).toBe(false)
+    expect(event.preventDefault).toHaveBeenCalledTimes(1)
+  })
+
   const clipboard = groupEditorClipboardPlugin()
   const paste = (state: EditorState, text: string) => {
     const slice = clipboard.props.clipboardTextParser!.call(

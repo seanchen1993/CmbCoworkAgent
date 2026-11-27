@@ -2,7 +2,7 @@ import { parentPort } from "node:worker_threads"
 import { parseFileBytes } from "../file-parser"
 import {
   FILE_ATTACHMENT_PARSE_CANCELLED,
-  FILE_ATTACHMENT_PARSE_MAX_RESPONSE_BYTES,
+  isBoundedParseResponse,
   type FileAttachmentParserWorkerRequest,
   type FileAttachmentParserWorkerResponse
 } from "./protocol"
@@ -41,10 +41,12 @@ parentPort.on("message", (request: FileAttachmentParserWorkerRequest) => {
       const attachment = await parseFileBytes(
         request.source.fileName,
         request.source.bytes,
-        request.maxLength
+        request.maxLength,
+        request.includeImageBytes,
+        request.source.allowHtmlSource
       )
       throwIfCancelled(cancellation)
-      if (Buffer.byteLength(JSON.stringify(attachment), "utf8") > FILE_ATTACHMENT_PARSE_MAX_RESPONSE_BYTES) {
+      if (!isBoundedParseResponse(attachment)) {
         throw new Error("Parsed attachment response exceeds the IPC budget")
       }
       parentPort?.postMessage({

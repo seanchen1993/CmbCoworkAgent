@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import React from "react"
+import { chatUploadLabel, MAX_ATTACHMENT_PICKER_FILES, MAX_ATTACHMENT_TOTAL_CHARS } from "../../../shared/file-attachment"
 import { renderToStaticMarkup } from "react-dom/server"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
+import { runFrozenImageOutbox, imageDeliveryAction, isActiveImageReceipt } from "./image-outbox"
+import { canClaimQueuedMessage } from "./queued-message-content"
 import { appendBtwReferences, readBtwReferences } from "../../../shared/btw-references"
 import { BUILTIN_BROWSER_COMMAND } from "../features/builtin-browser/builtin-browser"
 import { BTW_SLASH_COMMANDS, buildSlashPopoverMode } from "../features/slash-commands/useSlashCommands"
@@ -22,6 +25,59 @@ const source = ts.createSourceFile(
   true,
   ts.ScriptKind.TSX
 )
+
+it.each([
+  ["accepted", "old-A"],
+  ["missing", "new-B"]
+])("uses the correct frozen image model when its receipt is %s and the catalogue changes", async (initialStatus, modelId) => {
+  let submission: ts.Expression | undefined
+  function visit(node: ts.Node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "submitQueuedMessage" &&
+        node.initializer && ts.isCallExpression(node.initializer)) submission = node.initializer.arguments[0]
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  if (!submission) throw new Error("Cannot find queue submission callback")
+  const now = new Date()
+  const frozen = { modelId: "old-A", mode: "workflow", message: "original prepared message" }
+  const queued = { id: "queue-1", created_at: now, updated_at: now, text: "original", modelId: "old-A",
+    botReplyTo: { role: "user" }, chatImages: [{ id: "image", filename: "x.png", slot: 0 }],
+    imageDelivery: { workspacePath: "/work", incarnation: "inc", source: "", frozen } }
+  let status = initialStatus
+  let current = queued
+  const send = vi.fn(async () => { status = "succeeded" })
+  const deleted = vi.fn()
+  const bindings = { threadId: "thread", workspacePath: "/work", currentThread: {}, managedTurn: null,
+    isBtwSubmissionBlocked: () => false,
+    currentThreadIdRef: { current: "thread" }, chatViewMountedRef: { current: true }, readOnlyRef: { current: false },
+    managedTurnRef: { current: null }, getQueuedMessage: () => current, stream: { submit: send },
+    workspacePathRef: { current: "/work" },
+    useAppStore: { getState: () => ({ threads: [{ thread_id: "thread" }] }) },
+    window: { api: { file: { chatImageSubmissionStatus: async () => status, updateImageOwners: vi.fn() } } },
+    updateQueuedMessage: (_id: string, edits: Partial<typeof queued>, callback: (error: null) => void) => {
+      current = { ...current, ...edits }
+      callback(null)
+    }, canClaimQueuedMessage,
+    threadDraftIncarnation: () => ({}), threadIncarnationKey: () => "inc", isSameGitWorkspacePath: (a: string, b: string) => a === b,
+    imageDeliveryAction, runFrozenImageOutbox, deleteQueuedMessage: deleted, setActiveTurnStartTime: vi.fn(),
+    imageSendPhases: new Map(), editingImageIds: new Set(), setQueuePumpTick: vi.fn(),
+    isActiveImageReceipt, setObservedImageReceipt: vi.fn(), setImageQueueError: vi.fn(),
+    clearFinishedWorkflowRun: vi.fn(), setError: vi.fn(), currentModel: "new-B", models: [{ id: "new-B", available: true, inputModalities: ["text", "image"] }],
+    revalidateOrdinaryBotReply: vi.fn(() => { throw new Error("Unexpected first-submit quote validation") }),
+    loadResolvedAgentMode: vi.fn(() => { throw new Error("Unexpected mode hydration") }) }
+  const script = ts.transpileModule("const submit = " + submission.getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText
+  const submit = new Function(...Object.keys(bindings), script + "\nreturn submit")(...Object.values(bindings))
+  await submit(queued)
+  expect(send).toHaveBeenCalledOnce()
+  expect(send).toHaveBeenCalledWith({ messages: [{ type: "human", content: frozen.message }] },
+    expect.objectContaining({ config: { configurable: { thread_id: "thread", hook_turn_id: queued.id,
+      model_id: modelId, agent_mode: "workflow", chat_images: queued.chatImages } } }))
+  expect(bindings.revalidateOrdinaryBotReply).not.toHaveBeenCalled()
+  expect(bindings.loadResolvedAgentMode).not.toHaveBeenCalled()
+  expect(deleted).toHaveBeenCalledWith(queued.id)
+})
 
 function bindQueuedEdit(text: string, sideComposer = true) {
   const declarations: string[] = []
@@ -100,6 +156,9 @@ describe("queued auxiliary edits", () => {
 function renderComposer(overrides: Record<string, unknown> = {}): string {
   const bindings: Record<string, unknown> = {
     React,
+    chatUploadLabel,
+    MAX_ATTACHMENT_PICKER_FILES,
+    MAX_ATTACHMENT_TOTAL_CHARS,
     IconPopoverButton,
     Plus: () => null,
     useHarnessNotifications: () => [],
@@ -224,6 +283,9 @@ function bindSideSubmit(overrides: Record<string, unknown>, route: Record<string
     draftBotReplyTo: null,
     managedTurn: undefined,
     managedTurnRef: { current: undefined },
+    attachments: [],
+    ordinaryUploadPending: { current: null },
+    uploadDraft: {},
     restoredBotDraft: null,
     restoredBotDraftError: null,
     readOnly: false,
@@ -258,6 +320,7 @@ function bindSideSubmit(overrides: Record<string, unknown>, route: Record<string
     "btwAvailable",
     "isBtwInput",
     "slash",
+    "allowWorkspaceImages",
     "atFileMentions"
   ]
   const predicates: string[] = []
@@ -333,6 +396,8 @@ function bindSideReceipt() {
     threadContext: { getThreadState: () => draft },
     trimmedInput: input,
     managedTurn: undefined,
+    keepImageDraft: false,
+    composedDraft: {},
     claimedAttachments,
     claimedMentionedFiles,
     setAttachments: (files: typeof claimedAttachments) => { draft.draftAttachments = files },
@@ -400,7 +465,9 @@ function bindQueuedReceipt(sideComposer = true) {
     currentModel: next.modelId,
     queuedModelId: next.modelId,
     submitAgentMode: "normal",
-    visibleUserMessage: { id: next.id },
+    queued: next,
+    draftForSubmission: next,
+    imageSendPhases: new Map(),
     models: [{ id: next.modelId, available: true }],
     setActiveTurnStartTime: vi.fn(),
     clearFinishedWorkflowRun: vi.fn(),
@@ -435,6 +502,15 @@ describe("Chat composer rendered decision guards", () => {
     const notifications = [{ type: "biz_retry", status: "pending", sourceThreadId: "thread" }]
     expectAvailability(renderComposer({ useHarnessNotifications: () => notifications }), true)
     expectAvailability(renderComposer(), false)
+  })
+
+  it("keeps the main attachment picker available for images when the text budget is exhausted", () => {
+    const budget = { totalPendingFileChars: MAX_ATTACHMENT_TOTAL_CHARS }
+    expectAvailability(renderComposer(budget), false)
+
+    const sideMarkup = renderComposer({ ...budget, surface: "btw" })
+    expect(sideMarkup.match(/<button\b[^>]*aria-label="添加文件"[^>]*>/u)?.[0])
+      .toContain('aria-disabled="true"')
   })
 
   it("waits for the first auxiliary question to be accepted before enabling the composer", () => {

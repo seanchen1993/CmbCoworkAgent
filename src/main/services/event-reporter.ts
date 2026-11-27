@@ -459,13 +459,20 @@ export function buildEvent(
   eventCategory: EventCategory,
   properties?: Record<string, unknown>
 ): CoworkEvent {
-  const userInfo = getUserInfo()
-  const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
   return {
     eventId: randomUUID(),
     eventName,
     eventCategory,
     eventTime: nowIsoLocal(),
+    ...buildEventContext(),
+    properties
+  }
+}
+
+export function buildEventContext() {
+  const userInfo = getUserInfo()
+  const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
+  return {
     userName: userInfo?.userName || "unknown",
     userIp: getLocalIP(),
     sapId: userInfo?.sapId,
@@ -477,8 +484,7 @@ export function buildEvent(
     upperOrgLv0: upperOrgLevels.upperOrgLv0,
     upperOrgLv1: upperOrgLevels.upperOrgLv1,
     upperOrgLv2: upperOrgLevels.upperOrgLv2,
-    upperOrgLv3: upperOrgLevels.upperOrgLv3,
-    properties
+    upperOrgLv3: upperOrgLevels.upperOrgLv3
   }
 }
 

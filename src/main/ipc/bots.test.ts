@@ -57,6 +57,7 @@ const fixture = vi.hoisted(() => ({
   messageReactions: vi.fn(),
   setMessageReaction: vi.fn(),
   requestReceipts: vi.fn(),
+  cancelQueuedImageInput: vi.fn(),
   stopConversation: vi.fn(),
   stopWork: vi.fn(),
   stopGroup: vi.fn(),
@@ -79,7 +80,7 @@ const fixture = vi.hoisted(() => ({
   markWorksRead: vi.fn(),
   listenConversationTransitions: vi.fn(),
   finishConversationTransition: vi.fn(),
-  windowFor: vi.fn(() => ({}))
+  windowFor: vi.fn((): object | null => ({}))
 }))
 vi.mock("electron", () => ({
   BrowserWindow: { getAllWindows: () => [], fromWebContents: fixture.windowFor },
@@ -133,7 +134,8 @@ import { registerBotHandlers } from "./bots"
 function register(
   deleteThread?: Parameters<typeof registerBotHandlers>[1],
   event: unknown = {},
-  im?: Parameters<typeof registerBotHandlers>[2]
+  im?: Parameters<typeof registerBotHandlers>[2],
+  getMainWindow?: Parameters<typeof registerBotHandlers>[3]
 ) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
   registerBotHandlers(
@@ -141,13 +143,24 @@ function register(
       handle: (channel, listener) => handlers.set(channel, listener)
     } as unknown as IpcMain,
     deleteThread,
-    im
+    im,
+    getMainWindow
   )
   return (channel: string, ...args: unknown[]) => handlers.get(channel)!(event, ...args)
 }
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.getHost.mockImplementation(() => fixture)
+})
+it("withdraws visual requests only from the desktop frame with a canonical request receipt", () => {
+  const frame = {}
+  const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+  const check = { requestId: "visual-request", messageHash: "a".repeat(64) }
+  expect(() => register()("bots:cancel-queued-image-input", "local", "bot-1", check)).toThrow("本机桌面")
+  expect(() => call("bots:cancel-queued-image-input", "local", "bot-1", { ...check, messageHash: "bad" })).toThrow()
+  expect(fixture.cancelQueuedImageInput).not.toHaveBeenCalled()
+  call("bots:cancel-queued-image-input", "local", "bot-1", check, "work-1")
+  expect(fixture.cancelQueuedImageInput).toHaveBeenCalledExactlyOnceWith("bot-1", check, "work-1")
 })
 it("keeps surviving historical card summaries when an unlinked work's native conversation is deleted", async () => {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
@@ -343,6 +356,22 @@ it("revalidates only the original detached native user quote against its Bot inp
   }
 })
 describe("Bot IPC boundaries", () => {
+  it("requires the main application window for private, work and group image submissions", () => {
+    const frame = {}
+    const sender = { mainFrame: frame, isDestroyed: () => false }
+    const event = { senderFrame: frame, sender }
+    const getWindow = () => ({ webContents: {}, isDestroyed: () => false } as unknown as import("electron").BrowserWindow)
+    const call = register(undefined, event, undefined, getWindow)
+    const ids = ["input-11111111-1111-1111-1111-111111111111"]
+    const privateRequest = { botId: "bot", requestId: "request", message: "inspect", inputFileIds: ids }
+    const task = { botId: "bot", operationId: "start", title: "Inspect", goal: "inspect", inputFileIds: ids }
+    const group = { groupId: "group", requestId: "request", text: "inspect", targetBotIds: ["bot"], inputImageIds: ids }
+    expect(() => call("bots:send", "local", privateRequest)).toThrow("主窗口")
+    expect(() => call("bots:work:create", "local", task)).toThrow("主窗口")
+    expect(() => call("bots:group:send", "local", group)).toThrow("主窗口")
+    expect(fixture.sendDesktopMessage).not.toHaveBeenCalled()
+    expect(fixture.createWork).not.toHaveBeenCalled()
+  })
   it("allows reading and answering an exact work question only from the desktop main frame", () => {
     const frame = {}
     const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
@@ -959,7 +988,7 @@ describe("Bot IPC boundaries", () => {
     expect(() =>
       register(undefined, { ...event, senderFrame: {} })("bots:im:status", "local")
     ).toThrow("桌面")
-    fixture.windowFor.mockReturnValueOnce(null as any)
+    fixture.windowFor.mockReturnValueOnce(null)
     expect(() => call("bots:im:status", "local")).toThrow("桌面")
     expect(() => call("bots:im:status", "remote")).toThrow("本机")
     expect(() => call("bots:im:conversation-history", "local", "a", "b", "x".repeat(1025))).toThrow(

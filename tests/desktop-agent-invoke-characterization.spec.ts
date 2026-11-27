@@ -85,6 +85,10 @@ function testForegroundHandlerInventory(): void {
   assertIncludes(invoke, '"agent:invoke"', "invoke IPC remains registered")
   assertIncludes(resume, '"agent:resume"', "resume IPC remains registered")
   assertIncludes(interrupt, 'ipcMain.on("agent:interrupt"', "interrupt IPC remains registered")
+  for (const [name, handler] of [["invoke", invoke], ["resume", resume], ["interrupt", interrupt]]) {
+    assertIncludes(handler, "chatWindowForSender(event, getChatWindow)", name + " authenticates the renderer document")
+    assertIncludes(handler, "assertChatAttachmentWindow(event, getChatWindow)", name + " revalidates image access")
+  }
   assertIncludes(cancel, '"agent:cancel"', "cancel IPC remains registered")
   assertOccurrences(invoke, "invokeRuntimeFactory.create(", 3, "invoke Runtime creation paths")
   assertOccurrences(resume, "resumeRuntimeFactory.create(", 2, "resume Runtime creation paths")
@@ -199,7 +203,8 @@ function testPromptSkillHookAndHarnessPreparation(): void {
       "await resolveHarnessFeatureBindingContext(bindingMetadata)",
       "createStandardTurnTrace({",
       "harnessAgentContext = await getHarnessAgentContext(metadata",
-      "await fireSessionStartOnce(",
+      "const sessionStart = fireSessionStartOnce(",
+      "await waitForAbort(sessionStart, abortController.signal)",
       "const preparedPrompt = await prepareUserPromptForCurrentRun"
     ],
     "Feature Harness, trace and prompt preparation"
@@ -216,7 +221,7 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
     invoke,
     [
       "const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)",
-      "const preparedRouting = await resolveStandardTurnRouting({",
+      "const preparedRouting = imageRouting ?? await resolveStandardTurnRouting({",
       "const userHumanMessage = isCoordinatorNotificationTurn",
       "configurable: { thread_id: threadId }",
       "const orderedChain = preparedRouting.orderedModelIds",
@@ -365,9 +370,15 @@ function testIdentityFencedCleanupAndCancellation(): void {
       "const activeRunToken = turnStates.get(threadId)?.runToken",
       'LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })',
       "flushPendingStreamTranscriptMessages(threadId, activeRunToken)",
-      "controller.abort()"
+      "stopDesktopRun(controller)"
     ],
     "desktop cancellation"
+  )
+  const stop = sliceBetween(agentIpc, "function stopDesktopRun(", "\n}", "desktop run stop")
+  assertSourceOrder(
+    stop,
+    ["userStoppedDesktopSignals.add(controller.signal)", "controller.abort()"],
+    "desktop stop records the user cancellation before aborting"
   )
   assertNotIncludes(cancel, "activeRuns.delete(threadId)", "cancel leaves cleanup to run finally")
 }
@@ -379,9 +390,16 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
     "desktop approval waits"
   )
   assertIncludes(runtime, "pendingApprovals.set(req.id", "Runtime registers approval ownership")
-  assertIncludes(
+  assertSourceOrder(
     runtime,
-    'options.abortSignal?.addEventListener("abort", onAbort',
+    [
+      "const requestApproval = async (",
+      "signal = options.abortSignal",
+      'rejectPending("abort")',
+      "pendingApprovals.set(req.id",
+      'approvalDecisionBroker.register(',
+      'signal?.addEventListener("abort", onAbort, { once: true })\n      if (signal?.aborted)'
+    ],
     "stopping the run rejects its pending approval"
   )
   assertIncludes(
@@ -525,9 +543,21 @@ function testBotPromptReceiptAppliesOnlyAfterAcceptedSubmission(): void {
     "if (!preparedPrompt.accepted) {",
     "effectiveMessage = preparedPrompt.content",
     "botPreparedSystemPrompt = approved?.extraSystemPrompt",
-    "extraSystemPrompt: botPreparedSystemPrompt",
+    "extraSystemPrompt: !botTurnContext && botPreparedSystemPrompt",
+    "? [runExecutionContext.extraSystemPrompt, botPreparedSystemPrompt].filter(Boolean)",
     ": runExecutionContext.extraSystemPrompt"
   ], "the original system prompt passes through when no accepted Bot receipt adds context")
+  assertSourceOrder(invoke, [
+    "const submission = beginChatImageSubmission(request)",
+    "if (imageAdmission?.recovered) {",
+    "effectiveMessage = imageAdmission.recovered.preparedText!",
+    "} else if (!isInternalNotificationTurn) {",
+    "imageAdmission?.beginHook()",
+    "const preparedPrompt = await prepareUserPromptForCurrentRun",
+    "imageAdmission?.accept(effectiveMessage, approvedImages)",
+    "imageAdmission?.start()",
+    "stream = await agent.stream(input, streamConfig)"
+  ], "recovered image requests reuse their approved body and fence the first graph invocation")
 }
 
 const tests = [

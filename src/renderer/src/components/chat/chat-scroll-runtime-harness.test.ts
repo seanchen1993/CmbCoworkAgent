@@ -50,6 +50,7 @@ import {
 
 interface CapturedVirtuosoProps {
   data: readonly number[]
+  followOutput: false
   initialTopMostItemIndex?: {
     index: number | "LAST"
     align?: "start" | "center" | "end"
@@ -200,6 +201,7 @@ describe("chat scroll render/runtime harness", () => {
     const virtuoso = renderVirtualList(0, runtime, true)
 
     expect(virtuoso?.data).toEqual([])
+    expect(virtuoso?.followOutput).toBe(false)
     expect(virtuoso?.initialTopMostItemIndex).toBeUndefined()
     virtuoso?.itemsRendered()
     expect(runtime.state).toMatchObject({ mode: "initializing", dataReady: false })
@@ -216,6 +218,7 @@ describe("chat scroll render/runtime harness", () => {
     const virtuoso = renderVirtualList(500, runtime)
     expect(virtuoso).not.toBeNull()
     expect(virtuoso?.data).toHaveLength(500)
+    expect(virtuoso?.followOutput).toBe(false)
     expect(virtuoso?.initialTopMostItemIndex).toEqual({
       index: "LAST",
       align: "end",
@@ -256,6 +259,9 @@ describe("chat scroll render/runtime harness", () => {
     const runtime = new ChatScrollRuntimeHarness()
     const virtuoso = hydrateAndConfirmBottom(runtime)
     runtime.dispatch({ type: "USER_DETACH", source: "user-input" })
+    // Virtuoso's resize and viewport-shrink listeners only disable their own tail writes
+    // for the literal false. A callback returning false only disables following appended rows.
+    expect(virtuoso.followOutput).toBe(false)
     const commandCountAtDetach = runtime.scrollCommands.length
 
     for (let eventIndex = 0; eventIndex < 100; eventIndex += 1) {

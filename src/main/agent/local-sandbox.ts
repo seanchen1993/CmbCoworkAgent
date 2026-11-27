@@ -135,6 +135,7 @@ import {
   noteFileToolWrite,
   type ShellFileCapture
 } from "./shell-file-effects"
+import { prepareLiteralTaskShellWrite } from "./task-commit-shell-write"
 import { extractShellCommandReadPaths, profileShellCommand } from "./shell-command-profile"
 import {
   openStableWritableFileHandle,
@@ -432,6 +433,8 @@ export interface LocalSandboxOptions {
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
   abortSignal?: AbortSignal
+  /** Stop waiting for hooks owned by a conversation whose cancellation ends the invocation. */
+  stopPendingHooksOnAbort?: boolean
   /** Logical thread/run owner used for background-task cancellation and hook/session identity. */
   runId?: string
   /** Parent conversation that must wait for this child runtime's shell tasks during deletion. */
@@ -455,6 +458,8 @@ export interface LocalSandboxOptions {
   internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  onTaskCommitEdit?: (file: string, before: Buffer | string | null, after: Buffer | string | null) => void
+  taskCommitRepositoryPaths?: () => readonly string[] | undefined
   /** Bash First file telemetry only; never changes execution permissions. */
   shellFileTelemetry?: boolean
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
@@ -839,11 +844,15 @@ export class LocalSandbox
   private readOnlyShellEnforced = false
   /** AbortSignal: when signalled, in-flight child processes are killed immediately. */
   private abortSignal?: AbortSignal
+  private readonly stopPendingHooksOnAbort: boolean
   private backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   private foregroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Whether the conversation-level abort signal has been triggered. */
   get isAborted(): boolean {
     return this.abortSignal?.aborted ?? false
+  }
+  private get hookCancellationSignal(): AbortSignal | undefined {
+    return this.stopPendingHooksOnAbort ? this.abortSignal : undefined
   }
   /** Cached from parent's private fields to avoid (this as any) scattered everywhere */
   private readonly _resolvePath: (key: string) => string
@@ -853,6 +862,14 @@ export class LocalSandbox
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly onTaskCommitEdit?: LocalSandboxOptions["onTaskCommitEdit"]
+  private readonly readTaskCommitRepositories?: LocalSandboxOptions["taskCommitRepositoryPaths"]
+  private get taskCommitRepositoryPaths(): readonly string[] {
+    return this.readTaskCommitRepositories?.() ?? []
+  }
+  private isTaskCommitPath(file: string): boolean {
+    return this.taskCommitRepositoryPaths.some(root => LocalSandbox.isPathInsideDir(file, root))
+  }
   private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private _allowedSkillNames?: ReadonlySet<string>
@@ -2190,6 +2207,8 @@ export class LocalSandbox
     this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
+    this.onTaskCommitEdit = options.onTaskCommitEdit
+    this.readTaskCommitRepositories = options.taskCommitRepositoryPaths
     this._shellFileTelemetry = options.shellFileTelemetry === true
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
@@ -2207,6 +2226,7 @@ export class LocalSandbox
     })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
+    this.stopPendingHooksOnAbort = options.stopPendingHooksOnAbort === true
     this.backgroundCommandLifecycle = options.backgroundCommandLifecycle
     this.foregroundCommandLifecycle = options.foregroundCommandLifecycle
 
@@ -2795,7 +2815,7 @@ export class LocalSandbox
     return Boolean(realCwd && realBoundary && LocalSandbox.isPathInsideDir(realCwd, realBoundary))
   }
 
-  private validateExecutionCwd(cwd: string): string | null {
+  private validateExecutionCwd(cwd: string, taskCommit = false): string | null {
     const realpathCache = new Map<string, string | null>()
     if (this.isMemoryStorageWritePath(cwd, realpathCache)) {
       return `Invalid cwd: '${cwd}' is inside managed memory storage.`
@@ -2814,6 +2834,11 @@ export class LocalSandbox
         ? null
         : `Invalid cwd: '${cwd}' resolves outside enabled skill '${skillMatch.name}'.`
     }
+    // This only admits a commit into the task-card orchestrator, which checks the
+    // current task binding again. Raw shell execution never receives this exception.
+    if (taskCommit && this.orchestrator && !this.worktreeIsolation &&
+        this.taskCommitRepositoryPaths.some(root => LocalSandbox.isPathInsideDir(cwd, root) &&
+          this.isRealExecutionCwdInsideBoundary(cwd, root, realpathCache))) return null
     return `Invalid cwd: '${cwd}' is outside the workspace and is not a known enabled skill directory.`
   }
 
@@ -3002,9 +3027,15 @@ export class LocalSandbox
   }
 
   private prepareHookContext(context: HookContext): HookContext {
+    const ownerSignal = this.hookCancellationSignal
+    const callerSignal = context.abortSignal
     return {
       ...context,
-      abortSignal: context.abortSignal ?? this.abortSignal,
+      abortSignal:
+        ownerSignal && callerSignal && ownerSignal !== callerSignal
+          ? AbortSignal.any([ownerSignal, callerSignal])
+          : callerSignal ?? this.abortSignal,
+      ...(ownerSignal && { stopPendingHooksOnAbort: true }),
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
@@ -3068,6 +3099,8 @@ export class LocalSandbox
     }: { executePostPolicy?: ExecutePostHookPolicy; failureSignal?: ToolFailureSignal } = {}
   ): Promise<HookResult | null> {
     const hookContext = this.prepareHookContext(context)
+    const abortSignal = hookContext.stopPendingHooksOnAbort ? hookContext.abortSignal : undefined
+    abortSignal?.throwIfAborted()
     const hooks = executePostPolicy?.scopedHooks ?? this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(
       executePostPolicy?.matchedHooks ?? hooks,
@@ -3075,6 +3108,7 @@ export class LocalSandbox
       hookContext,
       this._onHookResult
     )
+    abortSignal?.throwIfAborted()
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -3098,6 +3132,7 @@ export class LocalSandbox
       if (shouldSendFailureFuseNotice(failureFuseDecision)) {
         this._onFailureFuseNotice?.(failureFuseDecision)
       }
+      abortSignal?.throwIfAborted()
       result = LocalSandbox.mergeFailureFuseWarning(result, failureFuseDecision)
       if (signal) this.maybeFirePostToolUseFailureFromResult(hookContext, signal)
       if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
@@ -4278,6 +4313,8 @@ export class LocalSandbox
     limit = READ_FILE_DEFAULT_LIMIT,
     options: LocalSandboxReadFileOptions = {}
   ): Promise<string> {
+    const abortSignal = this.hookCancellationSignal
+    abortSignal?.throwIfAborted()
     if (this.isHiddenSkillPath(filePath)) {
       return `Error reading file '${filePath}': skill is disabled`
     }
@@ -4379,6 +4416,7 @@ export class LocalSandbox
           this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
+        abortSignal?.throwIfAborted()
         if (isHookHaltError(hookError) || isFailureFuseHaltError(hookError)) throw hookError
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
@@ -4408,6 +4446,7 @@ export class LocalSandbox
         },
         this.abortSignal
       )
+      abortSignal?.throwIfAborted()
 
       if (!hasNonWhitespace) {
         recordTrustedToolFilePreviewSource(resolvedPath, "read")
@@ -4497,8 +4536,10 @@ export class LocalSandbox
       if (formattedLines.length > 0) {
         await this.recordPluginSystemConstraintRead(resolvedPath, options.traceContext)
       }
+      abortSignal?.throwIfAborted()
       return finalResult
     } catch (e: unknown) {
+      abortSignal?.throwIfAborted()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return await this.applyPostToolUseHookToText(
@@ -5027,6 +5068,7 @@ export class LocalSandbox
       if (!r.error) {
         await this.recordReadTime(resolvedPath)
         await noteFileToolWrite(resolvedPath, effectiveContent)
+        if (this.isTaskCommitPath(resolvedPath)) this.onTaskCommitEdit?.(resolvedPath, null, effectiveContent)
       }
       return r
     })
@@ -5350,6 +5392,9 @@ export class LocalSandbox
             await this.recordReadTime(resolvedPath)
           }
           await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
+          if (this.isTaskCommitPath(resolvedPath)) {
+            this.onTaskCommitEdit?.(resolvedPath, buffer, iconv.encode(expectedContent, encoding))
+          }
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -7234,11 +7279,11 @@ export class LocalSandbox
       typeof updatedArgs.cwd === "string" && updatedArgs.cwd.trim()
         ? this.resolveExecutionCwd(updatedArgs.cwd)
         : requestedCwd
-    const cwdError = this.validateExecutionCwd(effectiveCwd)
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const cwdError = this.validateExecutionCwd(effectiveCwd, isGitCommitCommand(effectiveCommand, shellSyntax))
     if (cwdError) {
       return `Error: ${cwdError}`
     }
-    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
     const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
@@ -8100,7 +8145,8 @@ export class LocalSandbox
       typeof updatedArgs.cwd === "string" && updatedArgs.cwd.trim()
         ? this.resolveExecutionCwd(updatedArgs.cwd)
         : requestedCwd
-    const cwdError = this.validateExecutionCwd(effectiveCwd)
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const cwdError = this.validateExecutionCwd(effectiveCwd, isGitCommitCommand(effectiveCommand, shellSyntax))
     if (cwdError) {
       return {
         output: `Error: ${cwdError}`,
@@ -8108,7 +8154,6 @@ export class LocalSandbox
         truncated: false
       }
     }
-    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
     const worktreeViolation = this.worktreeIsolation
       ? getWorktreeShellIsolationViolation(
           effectiveCommand,
@@ -8703,10 +8748,8 @@ export class LocalSandbox
     // Read the request flag here, in the caller's async context; the capture
     // window itself starts after any Windows sandbox queue wait, right before
     // the process starts.
-    const captureFileEffects =
-      this._shellFileTelemetry &&
-      !backgroundExecution &&
-      shellFileCaptureContext.getStore() === true
+    const foregroundAgentShell = !backgroundExecution && shellFileCaptureContext.getStore() === true
+    const captureFileEffects = this._shellFileTelemetry && foregroundAgentShell
     const executeAttempt = (attemptOptions?: ExecuteRawOptions): Promise<LocalExecuteResponse> => {
       const foreground = foregroundCommandContext.getStore()
       const adoptable = foreground?.sandbox === this && !backgroundExecution ? foreground : undefined
@@ -8726,8 +8769,15 @@ export class LocalSandbox
           } : attemptOptions
         ).finally(leave)
     }
-    const runCommand = (): Promise<LocalExecuteResponse> =>
-      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () => {
+    const runCommand = async (): Promise<LocalExecuteResponse> => {
+      const roots = foregroundAgentShell ? this.taskCommitRepositoryPaths : []
+      const write = roots.length && this.onTaskCommitEdit
+        ? await prepareLiteralTaskShellWrite(command, effectiveCwd, roots, async () =>
+            process.platform === "win32" && effectiveSandboxMode !== "none"
+              ? (await LocalSandbox.resolveWindowsSandboxShell()).shell
+              : LocalSandbox.resolveShell())
+        : null
+      const result = await this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () => {
         if (!options?.handoff) return executeAttempt(options)
         let termination: Promise<void> | undefined
         return executeAttempt({
@@ -8740,6 +8790,11 @@ export class LocalSandbox
           await termination?.catch(() => undefined)
         })
       })
+      if (write && result.exitCode === 0) {
+        this.onTaskCommitEdit?.(write.file, write.before, write.after)
+      }
+      return result
+    }
     const commandConcurrency = classifyCommandConcurrency(command)
     const signal = overrideAbortSignal ?? this.abortSignal
     // Classify the effective post-hook command here, including unsandboxed

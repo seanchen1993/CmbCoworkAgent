@@ -1,3 +1,18 @@
+import type { HarnessDeployUnitMapping } from "../../shared/harness-board-types"
+
+type MappingListener = (projectId: string, slug: string, mappings: HarnessDeployUnitMapping[]) => void
+const mappingListeners = new Set<MappingListener>()
+
+export function onFeatureRepositoryMappingChange(listener: MappingListener): void {
+  mappingListeners.add(listener)
+}
+
+export function publishFeatureRepositoryMappings(
+  projectId: string, slug: string, mappings: HarnessDeployUnitMapping[]
+): void {
+  for (const listener of mappingListeners) listener(projectId, slug, mappings)
+}
+
 type CatalogListener = (projectId: string, featureSlugs: ReadonlySet<string>) => void
 type CatalogReadObserver = () => (
   projectId: string, featureSlugs: ReadonlySet<string>, isCurrent: () => boolean

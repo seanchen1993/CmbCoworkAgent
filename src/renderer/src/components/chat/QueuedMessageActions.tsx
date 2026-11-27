@@ -9,14 +9,14 @@ export function QueuedMessageActions({
   onChooseSkillTarget,
   onDelete
 }: {
-  botState?: "queued" | "sending" | "unconfirmed"
+  botState?: "queued" | "sending" | "unconfirmed" | "host-queued"
   onChooseSkillTarget?(): void
   onEdit(): void
   onDelete(): void
 }) {
   const [open, setOpen] = useState(false)
   const busy = botState === "sending"
-  const immutable = busy || botState === "unconfirmed"
+  const immutable = busy || botState === "unconfirmed" || botState === "host-queued"
   const deleteLabel = botState ? "删除待发消息" : "删除"
   return (
     <>
@@ -48,7 +48,9 @@ export function QueuedMessageActions({
             <p className="px-2 py-1.5 text-xs leading-relaxed text-muted-foreground">
               {busy
                 ? "正在发送，请稍候。"
-                : "发送结果待确认，可重试或删除待发记录。删除不会停止已接收的任务。"}
+                : botState === "host-queued"
+                  ? "这条消息正在等待，可在开始处理前取消。"
+                  : "发送结果待确认，可重试或删除待发记录。删除不会停止已接收的任务。"}
             </p>
           )}
           <button

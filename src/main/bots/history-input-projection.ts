@@ -19,9 +19,13 @@ export type BotHistoryOwner = Pick<BotWorkItem, "id" | "botId" | "threadId" | "s
 }
 
 type Projection = (ids: readonly string[], purpose?: "reply") => ReadonlyMap<string, string | null>
+export type HistoricalBotMessageOrigin = import("../../shared/bots/contracts").BotMessageOrigin & {
+  imageSelection?: { botId: string; workId: string; ids: string[] }
+}
 type HistorySource = {
+  imageInput?(botId: string, workId: string, messageId: string, inputId: string): import("../../shared/bots/input-files").BotInputFile
   forkInputs?(threadId: string, ids: readonly string[]): ReadonlyMap<string, string | null>
-  origins?(threadId: string, incarnation: ReturnType<typeof captureThreadIncarnation>, ids: readonly string[], row?: ThreadIncarnationRow): import("../../shared/bots/contracts").BotMessageOrigin[]
+  origins?(threadId: string, incarnation: ReturnType<typeof captureThreadIncarnation>, ids: readonly string[], row?: ThreadIncarnationRow): HistoricalBotMessageOrigin[]
   legacyRequests?(threadId: string, owners: readonly BotHistoryOwner[], ids: readonly string[]): readonly string[]
   works(threadId: string): readonly BotHistoryOwner[]
   inputs(botId: string, threadId: string, ids: readonly string[], workIds?: readonly string[], purpose?: "reply"): ReadonlyMap<string, string | null>
@@ -54,6 +58,7 @@ export function botHistoricalMessageReader(threadId: string, readRow: () => Thre
       for (const entry of history.origins!(threadId, incarnation, ids.slice(offset, offset + 100), row)) {
         const origin = entry.origin
         if (origin.kind === "user") origins.set(entry.requestId, {
+          ...(entry.imageSelection ? { hasInputImages: true as const } : {}),
           ...(origin.replyTo ? { replyTo: {
             id: origin.replyTo.id, ordinal: origin.replyTo.ordinal, role: origin.replyTo.role
           } } : {}),
@@ -63,6 +68,18 @@ export function botHistoricalMessageReader(threadId: string, readRow: () => Thre
     }
     return origins
   }
+}
+
+/** Resolve the original desktop work receipt again when the UI actually requests its pixels. */
+export function historicalMessageImageInputs(threadId: string, row: ThreadIncarnationRow, messageId: string) {
+  const history = source
+  if (!history?.origins || !history.imageInput) return []
+  const readInput = history.imageInput
+  const entries = history.origins(threadId, captureThreadIncarnation(row), [messageId], row)
+  const matches = entries.filter(entry => entry.requestId === messageId && entry.imageSelection)
+  const selected = matches[0]?.imageSelection
+  if (matches.length !== 1 || !selected) return []
+  return selected.ids.map(id => readInput(selected.botId, selected.workId, messageId, id))
 }
 
 export const BOT_FORK_DELIVERY_BOUNDARY = "cmb_bot_fork_delivery_boundary"
@@ -260,7 +277,8 @@ export function clearBotWorkInputHistory(
           origin.kind === "user" ? origin.explicitSkill : undefined)).digest("hex"), row.updated_at, row.work_id,
           row.mock_source_json])
       db.run(`UPDATE bot_tasks SET message='',prepared_input=NULL,input_preparation_required=0,error=NULL,
-        origin_json=json_remove(origin_json,'$.replyTo','$.explicitSkill','$.mentions','$.inputFileIds','$.allowedInputFileIds')
+        origin_json=json_remove(origin_json,'$.replyTo','$.explicitSkill','$.mentions','$.inputFileIds',
+          '$.visualInputFileIds','$.allowedInputFileIds')
         WHERE id=?`, [row.id])
     }
   } finally { warm.free() }
@@ -273,7 +291,7 @@ export function clearBotWorkInputHistory(
     db.run(`UPDATE bot_work_commands SET receipt=json_remove(
       json_set(receipt,'${path}.message','','${path}.error',NULL),
       '${path}.origin.replyTo','${path}.origin.explicitSkill','${path}.origin.mentions',
-      '${path}.origin.inputFileIds','${path}.origin.allowedInputFileIds')
+      '${path}.origin.inputFileIds','${path}.origin.visualInputFileIds','${path}.origin.allowedInputFileIds')
       WHERE json_extract(receipt,'${path}.botId')=? AND json_extract(receipt,'${path}.workId')=?
         AND json_extract(receipt,'${path}.threadId')=?
         AND json_extract(receipt,'${path}.origin.kind') IN ('user','work')`, identity)

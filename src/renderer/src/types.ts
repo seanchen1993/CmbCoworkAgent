@@ -53,6 +53,7 @@ export interface Provider {
 }
 
 export interface ModelConfig {
+  inputModalities?: ("text" | "image")[]
   id: string
   name: string
   provider: ProviderId
@@ -280,6 +281,7 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  hasChatImages?: true
   /** Verified display/edit metadata from native history, not execution authority. */
   botHistoryInputOrigin?: import("../../shared/bots/message-reply").BotHistoryInputOrigin
   botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope
@@ -380,6 +382,14 @@ export interface Message {
  *                               current run (awaiting injection); cleared on run end
  */
 export interface QueuedMessage {
+  imageDelivery?: {
+    workspacePath: string
+    incarnation: string
+    source: string
+    immediate?: true
+    frozen?: { message: string; mode: "normal" | "coordinator" | "workflow"; modelId: string }
+  }
+  chatImages?: import("../../shared/file-attachment").SubmittedChatImage[]
   id: string
   text: string
   /** Bot-only durable reference; ordinary thread composition does not use it. */
@@ -511,6 +521,7 @@ export interface HITLRequest {
   suggestedCommitFilePaths?: string[]
   suggestedCommitFileBasePath?: string
   suggestedGitWorktreePath?: string
+  commitBindingVersion?: string
   suggestedGitRepositories?: Array<{
     path: string
     displayPath: string

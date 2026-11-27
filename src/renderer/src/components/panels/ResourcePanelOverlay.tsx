@@ -16,13 +16,15 @@ interface ResourcePanelOverlayProps {
   renderedMainView: string
   renderedPanelThreadId: string | null
   btwPaneVisible?: boolean
+  btwTabsVisible?: boolean
 }
 
 export function ResourcePanelOverlay({
   isAgentFocusActive,
   renderedMainView,
   renderedPanelThreadId,
-  btwPaneVisible = false
+  btwPaneVisible = false,
+  btwTabsVisible = btwPaneVisible
 }: ResourcePanelOverlayProps): React.JSX.Element | null {
   const rightPanelCollapsed = useAppStore((state) => state.rightPanelCollapsed)
   const setRightModule = useAppStore((state) => state.setRightModule)
@@ -37,7 +39,7 @@ export function ResourcePanelOverlay({
     !rightPanelCollapsed &&
     (renderedMainView === "thread" || renderedMainView === "harness") &&
     Boolean(renderedPanelThreadId)
-  const usePreviewDrawer = !standardRightPanelMounted || btwPaneVisible
+  const usePreviewDrawer = !standardRightPanelMounted || btwTabsVisible
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
   const [drawerOwner, setDrawerOwner] = useState<string | null>(null)
@@ -55,8 +57,10 @@ export function ResourcePanelOverlay({
     handlePreviewRequest
   )
   const sidePreview = useResourcePreviewRequest(btwThreadId, btwPaneVisible, handlePreviewRequest)
-  const drawerFromSide = btwPaneVisible && drawerOwner !== null && drawerOwner === btwThreadId
-  const drawerInScope = drawerOwner === null || drawerOwner === activeThreadId || drawerFromSide
+  const drawerFromSide = drawerOwner !== null && drawerOwner === btwThreadId
+  const browserRequestThreadId = btwPaneVisible ? btwThreadId : activeThreadId
+  const drawerInScope = drawerOwner === null || drawerFromSide ||
+    (drawerOwner === activeThreadId && (mode !== "browser" || drawerOwner === browserRequestThreadId))
   const drawerVisible = open && drawerInScope
   const overlayThreadId = drawerFromSide ? btwThreadId : activeThreadId
   const preview = drawerFromSide ? sidePreview : parentPreview
@@ -74,7 +78,7 @@ export function ResourcePanelOverlay({
 
   const selectMode = useCallback(
     (nextMode: ResourcePanelOverlayMode) => {
-      if (standardRightPanelMounted && !(btwPaneVisible && nextMode === "preview")) {
+      if (standardRightPanelMounted && !(btwTabsVisible && nextMode === "preview")) {
         close()
         setRightModule(nextMode)
         return
@@ -83,7 +87,7 @@ export function ResourcePanelOverlay({
       setMode(nextMode)
       setOpen(true)
     },
-    [btwPaneVisible, close, setRightModule, standardRightPanelMounted]
+    [btwTabsVisible, close, setRightModule, standardRightPanelMounted]
   )
 
   useEffect(() => {
@@ -91,21 +95,20 @@ export function ResourcePanelOverlay({
   }, [selectMode])
 
   const handleBrowserPanelRequest = useCallback((threadId: string | null) => {
-    if (!btwPaneVisible) {
+    if (!btwTabsVisible) {
       selectMode("browser")
       return
     }
-    // Automatic parent requests must leave the foreground side pane in place.
-    if (!threadId || threadId !== btwThreadId) return
+    if (!threadId || threadId !== browserRequestThreadId) return
     setDrawerOwner(threadId)
     setMode("browser")
     setOpen(true)
-  }, [btwPaneVisible, btwThreadId, selectMode])
+  }, [btwTabsVisible, browserRequestThreadId, selectMode])
 
   useBrowserViewLifecycle({
     currentThreadId: renderedMainView === "thread" ? activeThreadId : null,
     harnessSessionThreadId: renderedMainView === "harness" ? activeThreadId : null,
-    visibleBtwThreadId: btwPaneVisible ? btwThreadId : null,
+    visibleBtwThreadId: btwThreadId,
     mainView: renderedMainView,
     rightPanelCollapsed,
     isAgentFocusActive,
@@ -130,7 +133,7 @@ export function ResourcePanelOverlay({
           resourcePreviewRequest={mode === "preview" || mode === "browser" ? preview.request : null}
           onResourcePreviewRequestHandled={preview.clear}
           listenForResourcePreview={false}
-          observeCompletedResources={!(btwPaneVisible && standardRightPanelMounted && overlayThreadId === activeThreadId)}
+          observeCompletedResources={!(btwTabsVisible && standardRightPanelMounted && overlayThreadId === activeThreadId)}
           onRequestPreviewMode={() => setMode("preview")}
           onRequestWorkMode={close}
         />

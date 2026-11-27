@@ -12,7 +12,7 @@ export const COORDINATOR_NOTIFICATION_PROMPT_PREFIX = "[[CMB_COORDINATOR_WORKER_
 export const COORDINATOR_NOTIFICATION_PROMPT = `${COORDINATOR_NOTIFICATION_PROMPT_PREFIX}
 Continue processing completed coordinator worker notifications. This is an internal system turn, not a new user request.`
 
-const QUIET_COORDINATOR_TOOL_NAMES = new Set(["read_worker_state"])
+export const QUIET_COORDINATOR_TOOL_NAMES: ReadonlySet<string> = new Set(["read_worker_state"])
 const INTERNAL_COORDINATOR_CONTEXT_START = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_START]]"
 const INTERNAL_COORDINATOR_CONTEXT_END = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_END]]"
 const INTERNAL_COORDINATOR_NOTIFICATION_START =
@@ -90,8 +90,8 @@ function hasMarkedInternalCoordinatorBlock(content: string): boolean {
   )
 }
 
-function isQuietCoordinatorToolCall(toolCall: CoordinatorToolCallLike): boolean {
-  return typeof toolCall.name === "string" && QUIET_COORDINATOR_TOOL_NAMES.has(toolCall.name)
+export function isQuietCoordinatorToolName(name: unknown): boolean {
+  return typeof name === "string" && QUIET_COORDINATOR_TOOL_NAMES.has(name)
 }
 
 /**
@@ -149,7 +149,7 @@ export function projectCoordinatorTranscriptNoise<TToolCall extends CoordinatorT
     }
   }
 
-  const visibleToolCalls = toolCalls.filter((toolCall) => !isQuietCoordinatorToolCall(toolCall))
+  const visibleToolCalls = toolCalls.filter((toolCall) => !isQuietCoordinatorToolName(toolCall.name))
   const toolCallsChanged = visibleToolCalls.length !== toolCalls.length
   return {
     hidden: toolCallsChanged && visibleToolCalls.length === 0 && !contentText.trim(),

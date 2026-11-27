@@ -3,6 +3,7 @@
  * 同时收口这类文件专用的去重、扩展名过滤、数量/字符上限控制和路径转换。
  */
 import type { FileAttachment, FileInfo } from "@/types"
+import { attachmentImages, isChatImagePath, isVisualDocumentPath } from "../../../../shared/file-attachment"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import { normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
@@ -13,7 +14,7 @@ import {
 } from "./useAtFileMentions"
 
 // Only exact paths to supported files in the active workspace become attachments.
-export function matchedWorkspaceMentions(text: string, files: readonly FileInfo[]): FileInfo[] {
+export function matchedWorkspaceMentions(text: string, files: readonly FileInfo[], allowImages = false): FileInfo[] {
   const paths = extractAtFileMentions(text).map(normalizeAtFileMentionPath).filter(Boolean)
   if (!paths.length) return []
   const wanted = new Set(paths)
@@ -21,7 +22,7 @@ export function matchedWorkspaceMentions(text: string, files: readonly FileInfo[
   for (const file of files) {
     if (file.is_dir) continue
     const key = normalizeAtFileMentionPath(file.path)
-    if (wanted.has(key) && !matched.has(key) && isSupportedWorkspaceMentionFilePath(file.path)) {
+    if (wanted.has(key) && !matched.has(key) && isSupportedWorkspaceMentionFilePath(file.path, allowImages)) {
       matched.set(key, file)
       if (matched.size === wanted.size) break
     }
@@ -63,6 +64,7 @@ interface ResolveAtFileAttachmentsParams {
     maxChars: number
   ) => Promise<WorkspaceReadFileResult>
   readWorkspaceAttachment?: (filePath: string, maxChars: number) => Promise<FileAttachment>
+  readWorkspaceImage?: (filePath: string, maxLength: number) => Promise<FileAttachment>
   cancelWorkspaceFileReads?: () => void
 }
 
@@ -141,6 +143,7 @@ export function retainMentionedWorkspaceFilesForWorkspace(
 // 2. 沿用统一的文件数量上限；
 // 3. 成功时返回可直接写入 state 的 MentionedWorkspaceFile。
 export function resolveAtFileSelection(params: {
+  allowImages?: boolean
   file: AtFileSuggestion
   workspacePath: string
   attachments: readonly Pick<FileAttachment, "filePath">[]
@@ -148,7 +151,7 @@ export function resolveAtFileSelection(params: {
   maxAttachments: number
 }): ResolveAtFileSelectionResult {
   const { file, workspacePath, attachments, mentionedFiles, maxAttachments } = params
-  if (!isSupportedWorkspaceMentionFilePath(file.workspaceFilePath)) {
+  if (!isSupportedWorkspaceMentionFilePath(file.workspaceFilePath, params.allowImages)) {
     return { kind: "unsupported", filename: file.filename }
   }
 
@@ -276,9 +279,12 @@ export async function resolveAtFileAttachments(
     maxTotalChars,
     readWorkspaceFile,
     readWorkspaceAttachment,
+    readWorkspaceImage,
     cancelWorkspaceFileReads
   } = params
   const fallbackAttachments = attachments.length > 0 ? [...attachments] : []
+  const allowImages = Boolean(readWorkspaceImage && !readWorkspaceAttachment)
+  let hasImageMention = false
 
   try {
     // 以当前附件列表为基线继续累加 @文件带入的内容，这样显式上传的附件
@@ -286,7 +292,7 @@ export async function resolveAtFileAttachments(
     let fileText = rawMessage
     for (const range of [...protectedRanges].sort((a, b) => b.start - a.start))
       fileText = fileText.slice(0, range.start) + " ".repeat(range.end - range.start) + fileText.slice(range.end)
-    const matchedMentions = workspacePath ? matchedWorkspaceMentions(fileText, workspaceFiles) : []
+    const matchedMentions = workspacePath ? matchedWorkspaceMentions(fileText, workspaceFiles, allowImages) : []
     const currentAttachments = attachments.length > 0 ? [...attachments] : []
     const existingAttachmentPaths = new Set(currentAttachments.map((item) => normalizeGitWorkspacePathKey(item.filePath)))
     let currentAttachmentChars = currentAttachments.reduce(
@@ -326,8 +332,12 @@ export async function resolveAtFileAttachments(
 
     // 先纳入输入框里已经通过 popover 选中过的 @文件，保证它们优先参与去重和带入。
     for (const mentionFile of mentionedFiles) {
+      if (isChatImagePath(mentionFile.workspaceFilePath) || (allowImages && isVisualDocumentPath(mentionFile.workspaceFilePath))) {
+        if (!allowImages) throw new Error("@图片不适用于当前会话，请重新选择附件。")
+        hasImageMention = true
+      }
       if (!isMentionedWorkspaceFileForWorkspace(mentionFile, workspacePath)) {
-        if (readWorkspaceAttachment) throw new Error("@文件所属工作区已变更，请重新选择。")
+        if (readWorkspaceAttachment || hasImageMention) throw new Error("@文件所属工作区已变更，请重新选择。")
         warningMessage = "@文件所属工作区已变更，旧工作区引用未被发送。"
         continue
       }
@@ -337,6 +347,8 @@ export async function resolveAtFileAttachments(
     // 再解析用户仍保留在 rawMessage 里的 @路径，把“手选”和“手打”两种来源合并。
     if (workspacePath) {
       for (const workspaceFile of matchedMentions) {
+        if (allowImages && (isChatImagePath(workspaceFile.path) || isVisualDocumentPath(workspaceFile.path)))
+          hasImageMention = true
         addMentionCandidate(
           toMentionedWorkspaceFile(
             {
@@ -373,13 +385,33 @@ export async function resolveAtFileAttachments(
 
         // 数量上限命中后直接停止，和普通附件的 UX 保持一致。
         if (!readWorkspaceAttachment && currentAttachments.length >= maxAttachments) {
+          if (hasImageMention) throw new Error(`最多只能发送 ${maxAttachments} 个附件，请调整附件后重试。`)
           mentionCountLimitHit = true
           break
+        }
+
+        const visualDocument = isVisualDocumentPath(mentionFile.workspaceFilePath)
+        if (allowImages && readWorkspaceImage && (isChatImagePath(mentionFile.workspaceFilePath) || visualDocument)) {
+          const remaining = maxTotalChars - currentAttachmentChars
+          const parsed = await readWorkspaceImage(mentionFile.workspaceFilePath, Math.max(1, remaining))
+          if (remaining <= 0 && visualDocument && !attachmentImages(parsed).length)
+            throw new Error("附件内容已达上限，请调整附件后重试。")
+          const attachment = remaining <= 0 && parsed.content.length
+            ? { ...parsed, content: "", truncated: true }
+            : parsed
+          if (!visualDocument && !attachment.image) throw new Error("@图片读取失败，请重新选择。")
+          currentAttachmentChars += attachment.content.length
+          if (attachment.visualNotice) warningMessage = attachment.visualNotice
+          currentAttachments.push(attachment)
+          sourcePaths.forEach(path => handledMentionPaths.add(path))
+          existingAttachmentPaths.add(pathKey)
+          continue
         }
 
         const remaining = maxTotalChars - currentAttachmentChars
         if (remaining <= 0) {
           mentionAttachmentLimitHit = true
+          if (hasImageMention) continue
           break
         }
 
@@ -421,9 +453,7 @@ export async function resolveAtFileAttachments(
 
         // 超过剩余额度时只截断内容，不丢掉这个附件，尽量保留用户意图。
         const truncated = Boolean(readResult.truncated) || readResult.content.length > remaining
-        const content = truncated
-          ? `${readResult.content.slice(0, remaining)}\n\n... [内容已截取：显示前 ${remaining.toLocaleString()} 个字符]`
-          : readResult.content
+        const content = readResult.content.slice(0, remaining)
 
         currentAttachments.push({
           filename: mentionFile.filename,
@@ -448,7 +478,7 @@ export async function resolveAtFileAttachments(
       warningMessage
     }
   } catch (error) {
-    if (readWorkspaceAttachment) throw error
+    if (readWorkspaceAttachment || hasImageMention) throw error
     return {
       cleanedMessage: rawMessage,
       textEdits: [],

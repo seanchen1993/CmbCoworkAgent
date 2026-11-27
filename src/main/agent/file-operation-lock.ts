@@ -143,6 +143,10 @@ async function resourceKey(target: string, linkDepth = 0): Promise<string> {
   }
 }
 
+export function getWorkspaceExecutionKey(workspace: string): Promise<string> {
+  return resourceKey(workspace)
+}
+
 async function fileResourceKey(target: string): Promise<string> {
   const canonical = await resourceKey(target)
   try {
@@ -182,12 +186,12 @@ async function withLock<T>(
 async function withWorkspaceAccess<T>(
   workspace: string,
   access: WorkspaceAccess,
-  operation: () => Promise<T>,
+  operation: (workspaceKey: string) => Promise<T>,
   signal?: AbortSignal,
   deadline?: number
 ): Promise<T> {
   signal?.throwIfAborted()
-  const key = await resourceKey(workspace)
+  const key = await getWorkspaceExecutionKey(workspace)
   let entry = workspaceLocks.get(key)
   if (!entry) {
     entry = { lock: new WorkspaceLock(), users: 0 }
@@ -195,7 +199,7 @@ async function withWorkspaceAccess<T>(
   }
   entry.users++
   try {
-    return await entry.lock.run(access, operation, signal, deadline)
+    return await entry.lock.run(access, () => operation(key), signal, deadline)
   } finally {
     if (--entry.users === 0) workspaceLocks.delete(key)
   }
@@ -208,12 +212,16 @@ export async function withWorkspaceExecution<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
   /** Monotonic deadline for queued admission. A free lock can still be acquired. */
-  deadline?: number
+  deadline?: number,
+  onAcquired?: (workspaceKey: string) => void
 ): Promise<T> {
   return withWorkspaceAccess(
     workspace,
     access === "read" ? "scan" : "exclusive",
-    operation,
+    (workspaceKey) => {
+      onAcquired?.(workspaceKey)
+      return operation()
+    },
     signal,
     deadline
   )

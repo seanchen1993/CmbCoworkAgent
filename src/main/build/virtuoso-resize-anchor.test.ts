@@ -87,6 +87,29 @@ describe("Virtuoso upward resize anchoring", () => {
     return writes
   }
 
+  it("keeps the reading position when a row grows during an upward scroll from the tail", () => {
+    const { bo, oo, M, Y } = internals
+    const list = bo(oo)
+    const rows = Array.from({ length: 8 }, (_, index) => index)
+    const writes: number[] = []
+    Y<{ top: number }>(list.scrollTo, ({ top }) => writes.push(top))
+    M(list.followOutput, false)
+    M(list.defaultItemHeight, 100)
+    M(list.data, rows)
+    M(list.viewportHeight, 400)
+    M(list.didMount, true)
+    M(list.propsReady, true)
+    M(list.scrollContainerState, { scrollTop: 400, scrollHeight: 800, viewportHeight: 400 })
+
+    // A same-length renderer update precedes the next measurement of the image row.
+    M(list.data, [...rows])
+    M(list.propsReady, false)
+    M(list.propsReady, true)
+    writes.length = 0
+    M(list.scrollContainerState, { scrollTop: 0, scrollHeight: 900, viewportHeight: 400 })
+    expect(writes).toEqual([])
+  })
+
   it("ignores rows growing below the reading position", () => {
     expect(measure([size(15, 275)])).toEqual([])
   })

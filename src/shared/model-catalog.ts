@@ -1,18 +1,24 @@
 import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE, IDLE_MODEL_SERVICE_HOURS } from "./idle-model-service-window"
 
+export type ModelInputModality = "text" | "image"
+
+export function modelInputModalities(value: unknown): ModelInputModality[] {
+  return Array.isArray(value) && value.includes("image") ? ["text", "image"] : ["text"]
+}
+
 export type ModelTier = "premium" | "economy"
 export type ModelThinkingEffort = "low" | "high" | "max"
 export type ModelTransport = "idle-gateway"
 export type IdleModelEnvironment = "production" | "uat"
-export type BuiltinModelLockedField = "baseUrl" | "model" | "apiKey" | "maxTokens"
+export type BuiltinModelLockedField = "name" | "baseUrl" | "model" | "apiKey" | "maxTokens"
 
 // Pro already uses this persisted ID in defaults, overrides and thread metadata.
 export const MAODOU_PRO_MODEL_ID = "idle-ultra"
 export const MAODOU_PRO_MODEL_NAME = "码豆模型PRO"
 export const IDLE_ULTRA_MODEL_ID = "maodou-ultra"
 export const IDLE_ULTRA_MODEL_NAME = "闲时模型 Ultra"
-export const IDLE_MODEL_MAX_TOKENS = 128_000
-export const IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS = 200_000
+export const MAODOU_PRO_MODEL_DEFAULT_MAX_TOKENS = 200_000
+export const IDLE_ULTRA_MODEL_MAX_TOKENS = 128_000
 export const IDLE_MODEL_SAP_REQUIRED_MESSAGE = "请先完善当前用户的八位 SAP 员工编号"
 export const IDLE_MODEL_NOTICE = `生产环境服务时间为${IDLE_MODEL_SERVICE_HOURS}。可以提前选择模型。`
 export const IDLE_MODEL_UAT_NOTICE = "当前使用 UAT 测试环境。"
@@ -45,6 +51,7 @@ export function isModelSelectable(
  * client-side preset for that model.
  */
 export interface RemoteModelCatalogItem {
+  inputModalities?: ModelInputModality[]
   id?: string
   enabled?: boolean
   name?: string

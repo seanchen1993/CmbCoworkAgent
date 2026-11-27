@@ -158,6 +158,8 @@ npm run build
 npm run dist
 ```
 
+Windows 打包会下载并校验固定版本的 MinGit，供系统 Git 较旧时执行任务提交。安装包包含完整的 MinGit 及其许可证。使用旧版 Git 进行本地开发或 E2E 测试前，运行 `npm run prepare:task-commit-git` 准备同一份运行时。[Git for Windows 官方发行包](https://github.com/git-for-windows/git/releases/tag/v2.56.1.windows.1)
+
 ## 常用脚本
 
 | 命令 | 说明 |

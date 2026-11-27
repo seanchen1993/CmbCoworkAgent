@@ -1,3 +1,4 @@
+import { captureImageScopeCleanup } from "../chat-images"
 import { createBotThreadReplyResolver } from "../bots/thread-message-replies"
 import { copyForkInputProjections, readForkReplyOrigins } from "../bots/fork-input-projection"
 import { BOT_PREPARED_USER_REQUEST_KEY } from "../agent/agent-run-service"
@@ -725,6 +726,11 @@ async function copyForkedThreadMessages(input: {
       })
       const legacy = botLegacyHistoryRequests(input.sourceThreadId, input.sourceRow,
         inputs.filter(message => message.text === null).map(message => message.id))
+      const { copyBoundChatImages, getChatImageHistoryProjections } = await import("../chat-images")
+      const userIds = messages.filter(item => item.role === "user").map(item => item.id)
+      for (const id of getChatImageHistoryProjections(input.sourceThreadId, userIds).keys()) {
+        await copyBoundChatImages(input.sourceThreadId, input.targetThreadId, id)
+      }
       copyForkInputProjections({
         sourceThreadId: input.sourceThreadId,
         targetThreadId: input.targetThreadId,
@@ -1687,7 +1693,9 @@ async function cleanupFailedFork(
   if (options.rowCreated) {
     try {
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(targetThreadId)
+      const cleanImages = captureImageScopeCleanup(targetThreadId)
       dbDeleteThread(targetThreadId)
+      await cleanImages().catch(error => console.warn("[Threads] 图片清理失败", error))
       clearTrustedToolFilePreviewSourcesForThread(targetThreadId, previewScopeKeys)
     } catch (error) {
       console.warn("[Threads] Failed to cleanup fork thread row:", error)
@@ -3214,6 +3222,20 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
 
   const desktopHistoryPage = async <T extends { messages: Message[] }>(event: IpcMainInvokeEvent, threadId: string, page: T): Promise<T> => {
     if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) return page
+    try {
+      const { getChatImageHistoryProjections } = await import("../chat-images")
+      const receipts = getChatImageHistoryProjections(threadId,
+        page.messages.filter(message => message.role === "user").map(message => message.id))
+      if (receipts.size) {
+        page = { ...page, messages: page.messages.map(message => {
+          const receipt = message.role === "user" ? receipts.get(message.id) : undefined
+          return receipt?.images.length && receipt.source !== "bot"
+            ? { ...message, hasChatImages: true as const } : message
+        }) }
+      }
+    } catch (error) {
+      console.warn("[ChatImages] Failed to read history preview metadata:", error)
+    }
     try { return await decorateBotHistoryPage(threadId, page, () => getThreadCore(threadId), readForkReplyOrigins) }
     catch (error) {
       console.warn("[Bots] Failed to read optional history display metadata:", error)
@@ -4141,6 +4163,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       await imRemoteAccessService.disableThread(threadId)
       assertCanCommitDeletion()
       // Delete from our metadata store — the point of no return.
+      const cleanImages = captureImageScopeCleanup(threadId)
       const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
       if (getThreadMessageCount(threadId) >= 1_000) {
         getDb().withoutAutomaticCheckpoint(() => dbDeleteThread(threadId))
@@ -4149,6 +4172,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         // Avoid a worker startup per item in batches of empty/small tasks.
         dbDeleteThread(threadId)
       }
+      void cleanImages().catch(error => console.warn("[Threads] 图片清理失败", error))
       unregisterSideThread(threadId)
       pendingNotificationScheduler.clearClosedSideThreadState(threadId)
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)

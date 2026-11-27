@@ -6,6 +6,7 @@ import { getCurrentBrowserCdpPort } from "../../browser/cdp/browser-cdp"
 import { preparePlaywrightInAppBrowser } from "../../browser/cdp/playwright-mcp-bridge"
 import { getGlobalBrowserService } from "../../browser/core/browser-service-registry"
 import type { McpCapabilityTool } from "../../mcp/capability-types"
+import { waitForAbort } from "../../utils/wait-for-abort"
 import {
   listBrowserScriptLibraryEntries,
   readBrowserScriptLibraryScript
@@ -165,16 +166,21 @@ export async function createInAppBrowserTools(
         await preparePlaywrightInAppBrowser({
           workspacePath: context.workspacePath,
           threadId: context.threadId,
+          signal: context.abortSignal,
           service
         })
         context.abortSignal?.throwIfAborted()
         return JSON.stringify(
-          await service.extractIframeInformation({
-            maxTextCharsPerFrame,
-            textOffset,
-            linkOffset,
-            frameIndex
-          })
+          await waitForAbort(
+            service.extractIframeInformation({
+              maxTextCharsPerFrame,
+              textOffset,
+              linkOffset,
+              frameIndex,
+              ...(context.abortSignal && { signal: context.abortSignal })
+            }),
+            context.abortSignal
+          )
         )
       },
       {
@@ -214,10 +220,13 @@ export async function createInAppBrowserTools(
         await preparePlaywrightInAppBrowser({
           workspacePath: context.workspacePath,
           threadId: context.threadId,
+          signal: context.abortSignal,
           service
         })
         context.abortSignal?.throwIfAborted()
-        return JSON.stringify(await service.readWpsDocumentText())
+        return JSON.stringify(
+          await waitForAbort(service.readWpsDocumentText(context.abortSignal), context.abortSignal)
+        )
       },
       {
         name: "inAppBrowser_read_wps_document",

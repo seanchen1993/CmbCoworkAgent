@@ -1,9 +1,12 @@
+import { visualDocx, visualXlsx } from "../../tests/support/document-attachment-fixtures.mjs"
 import { describe, expect, it } from "vitest"
+import { encode } from "iconv-lite"
 import AdmZip from "adm-zip"
 import {
   MAX_ATTACHMENT_ARCHIVE_TOTAL_BYTES,
   MAX_ATTACHMENT_FILE_BYTES,
   MAX_ATTACHMENT_TEXT_LENGTH,
+  getSupportedExtensions,
   parseFileBytes
 } from "./file-parser"
 
@@ -60,5 +63,112 @@ describe("bounded attachment byte parser", () => {
         Uint8Array.from(payload).buffer
       )
     ).rejects.toThrow(/解压|条目/)
+  })
+})
+
+describe("chat document uploads", () => {
+  it("extracts declared GBK HTML tables without script or template contents", async () => {
+    const html = '<meta charset="gbk"><title>报告</title><script>hidden</script>' +
+      '<table><tr><th>部门</th><th>金额</th></tr><tr><td>研发</td><td>42</td></tr></table>' +
+      '<template>hidden</template><img src="https://example.invalid/">'
+    const result = await parseFileBytes("report.HTM", Uint8Array.from(encode(html, "gbk")).buffer)
+    expect(result.content).toContain("研发\t42")
+    expect(result.content).toContain("报告")
+    expect(result.content).not.toContain("hidden")
+    expect(result.mimeType).toBe("text/html")
+  })
+
+  it("reads real encoding declarations after comments and raw script text", async () => {
+    const html = "<!-- <meta charset=utf-8> -->" +
+      "<script>const example = '<meta charset=utf-8>'</script>" +
+      '<meta http-equiv="Content-Type" content="text/html; charset=gbk"><p>年度报告</p>'
+    const file = Uint8Array.from(encode(html, "gbk")).buffer
+    expect((await parseFileBytes("report.html", file)).content).toBe("年度报告")
+    expect((await parseFileBytes("bom.html", bytes("\uFEFF<meta charset=gbk><p>年度报告</p>")))
+      .content).toBe("年度报告")
+  })
+
+  it("preserves table columns across merged cells and resets spans between row groups", async () => {
+    const html = `<table><thead><tr><th rowspan="0">组</th><th colspan="2">本期</th>
+      <th>上期</th></tr><tr><td>A</td><td>B</td><td>C</td></tr></thead>
+      <tbody><tr><td>新组</td><td rowspan="2">跨行</td><td>X</td></tr>
+      <tr><td>末行</td><td>Y</td></tr></tbody></table>`
+    const lines = (await parseFileBytes("table.html", bytes(html))).content.split(/\n+/)
+    expect(lines).toEqual(["组\t本期\t\t上期", "\tA\tB\tC", "新组\t跨行\tX", "末行\t\tY"])
+    await expect(parseFileBytes("wide.htm", bytes('<table><td colspan="9999999">x</td></table>')))
+      .rejects.toThrow("表格列数")
+  })
+
+  it.each(["json", "jsonl", "yaml", "yml", "xml", "log", "tsv"])(
+    "accepts %s and enforces the remaining character budget", async ext => {
+      expect(getSupportedExtensions()).toContain("." + ext)
+      const result = await parseFileBytes("input." + ext, bytes("abcdef"), 3)
+      expect(result.content).toBe("abc")
+      expect(result.truncated).toBe(true)
+    }
+  )
+
+  it("explains an empty dynamic document", async () => {
+    await expect(parseFileBytes("empty.html", bytes("<title>App</title><main> </main><script>go()</script>")))
+      .rejects.toThrow("静态正文")
+  })
+})
+
+
+describe("document visuals", () => {
+  it("keeps static-empty HTML source available only to the workspace attachment path", async () => {
+    const source = "<html><script>document.body.append('report')</script></html>"
+    await expect(parseFileBytes("script.html", bytes(source))).rejects.toThrow("静态正文")
+    const workspace = await parseFileBytes("script.html", bytes(source), 32, true, true)
+    expect(workspace.content).toBe(source.slice(0, 32))
+    expect(workspace.truncated).toBe(true)
+  })
+
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJXcAAAAASUVORK5CYII=", "base64")
+  const buffer = (value: Buffer) => Uint8Array.from(value).buffer
+
+  it("preserves Word paragraph and table image positions and emits no raw bytes to text-only callers", async () => {
+    const input = buffer(visualDocx([image, image]))
+    const parsed = await parseFileBytes("report.docx", input, undefined, true)
+    expect(parsed.content).toMatch(/Row 1【图 1】[\s\S]*Row 2【图 2】/)
+    expect(parsed.documentImages?.map(item => Buffer.from(item.bytes))).toEqual([image, image])
+    expect(await parseFileBytes("report.docx", input)).toMatchObject({ embeddedImageCount: 2 })
+    expect((await parseFileBytes("report.docx", input)).documentImages).toBeUndefined()
+  })
+
+  it("accepts image-only documents, labels omissions, and reports corrupted relationships", async () => {
+    const parsed = await parseFileBytes("pictures.docx",
+      buffer(visualDocx([image, image, image, image], { imageOnly: true })), undefined, true)
+    expect(parsed.content).toContain("【图 1】")
+    expect(parsed.documentImages).toHaveLength(3)
+    expect(parsed.visualNotice).toContain("超过图片数量上限")
+    await expect(parseFileBytes("broken.docx",
+      buffer(visualDocx([image], { missingRelationship: true })))).rejects.toThrow("无法解析 Word 文档")
+    const missing = await parseFileBytes("broken.docx", buffer(visualDocx([null])))
+    expect(missing.visualNotice).toContain("图片原件无法读取")
+  })
+
+  it("maps spreadsheet pictures to sheet and cell, and identifies charts it cannot render", async () => {
+    const parsed = await parseFileBytes("report.xlsx", buffer(visualXlsx(image)), undefined, true)
+    expect(parsed.content).toContain("## Sheet: Report")
+    expect(parsed.content).toContain("Code,147")
+    expect(parsed.content).toContain("C5 附近 【图 1】")
+    expect(parsed.visualNotice).toContain("原生图表")
+    expect(Buffer.from(parsed.documentImages![0].bytes)).toEqual(image)
+  })
+
+  it("includes inline HTML raster images without resolving outside references or hidden content", async () => {
+    const data = "data:image/png;base64," + image.toString("base64")
+    const html = '<p>Context</p><table><tr><td><img src="' + data + '"></td></tr></table>' +
+      '<img src="https://example.invalid/image.png"><img src="../private.png">' +
+      '<template><img src="' + data + '"></template>'
+    const parsed = await parseFileBytes("report.html", bytes(html), undefined, true)
+    expect(parsed.content).toContain("Context")
+    expect(parsed.content).toContain("【图 1】")
+    expect(parsed.documentImages).toHaveLength(1)
+    expect(parsed.visualNotice).toContain("外部文件或网址")
+    const truncated = await parseFileBytes("report.html", bytes(html), 3, true)
+    expect(truncated.visualNotice).toContain("截断")
+    expect(truncated.documentImages).toHaveLength(1)
   })
 })

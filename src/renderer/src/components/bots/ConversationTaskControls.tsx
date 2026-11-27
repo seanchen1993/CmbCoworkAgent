@@ -342,7 +342,11 @@ export function ConversationTaskControls({
             )}
           </div>
         ) : (
-          <button type="button" className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-muted" onClick={() => void begin()}>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded-full bg-background/65 px-2 py-1.5 text-foreground/80 shadow-xs ring-1 ring-inset ring-foreground/10 backdrop-blur-md hover:bg-background/85 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+            onClick={() => void begin()}
+          >
             <Link2 size={14} aria-hidden="true" />
             关联为 Bot 任务
           </button>

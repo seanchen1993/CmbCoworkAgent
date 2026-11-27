@@ -21,6 +21,33 @@ function workerTarget(workerThreadId: string): SubagentExportTarget {
 }
 
 describe("Worker session export capture", () => {
+  it("sends image pixels and removes them from both raw export caches", async () => {
+    const body = JSON.stringify({ messages: [{ cmb_chat_images: [{ id: "private-image-ref" }], content: [
+      { type: "text", text: "inspect" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,secretPixels" } }
+    ] }] })
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("ok"))
+    const send = withRawApiCallCapture(fetchImpl, "vision-parent")
+    await send("https://example.invalid", { body })
+    const target = workerTarget("vision-worker")
+    await withSubagentSessionCapture(target, "implementation", async () => {
+      await recordMessages([new HumanMessage({ id: "vision", content: [
+        { type: "image_url", image_url: { url: "data:image/png;base64,secretPixels" } }
+      ] })])
+      await send("https://example.invalid", { body })
+    })
+    expect(JSON.stringify(getCapturedSubagentSession(target)?.messages)).not.toContain("secretPixels")
+    for (const capture of [
+      getCapturedRawApiCall("vision-parent"), getCapturedSubagentSession(target)?.rawApiCall
+    ]) {
+      expect(capture).toContain("inspect")
+      expect(capture).toContain("[image]")
+      expect(capture).not.toContain("secretPixels")
+      expect(capture).not.toContain("private-image-ref")
+    }
+    expect(fetchImpl.mock.calls.every(call => call[1]?.body === body)).toBe(true)
+  })
+
   it("retains prior turns, tool details, reasoning, and the latest submitted request", async () => {
     const target = workerTarget("worker-continuation")
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("ok"))

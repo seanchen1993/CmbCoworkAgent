@@ -181,6 +181,8 @@ export async function parkOrdinaryConversationQueue(
   context.initializeThread(threadId, { requireQueuedMessages: true })
   const actions = context.getThreadActions(threadId)
   let drafts = context.getThreadState(threadId).queuedMessages
+  if (drafts.some(draft => draft.imageDelivery || draft.chatImages?.length))
+    throw new Error("普通聊天仍有待发送的图文消息，请先发送或移除，再关联 Bot。")
   if (drafts.some((draft) => draft.botHandoffTarget))
     throw new Error(
       "草稿仍保留此前 Bot 的发送身份，请先核对原任务结果；不要把未确认发送转到新的任务。确认后可删除旧草稿并明确发送新消息。"
@@ -289,9 +291,10 @@ export async function parkLinkedConversationQueue(
       // across an unlink; native idle/version checks still decide the transition.
       if (draft.handoffRequestedAt && receipt?.state === "absent" && draft.botHandoffTarget)
         continue
-      if (draft.handoffRequestedAt && receipt?.state !== "accepted")
+      const settled = receipt?.state === "accepted" || receipt?.state === "withdrawn"
+      if (draft.handoffRequestedAt && !settled)
         throw new Error("原发送回执尚未核对，已保留草稿；请稍后再解除关联。")
-      if (receipt?.state === "accepted")
+      if (settled)
         persist((done) => actions.deleteQueuedMessage(draft.id, done))
       else
         persist((done) =>

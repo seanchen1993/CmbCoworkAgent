@@ -157,7 +157,8 @@ function relativePathWithin(basePath: string, targetPath: string): string | null
  */
 export function resolveCommitWorktreePath(
   workspacePath?: string | null,
-  repositoryRootPath?: string
+  repositoryRootPath?: string,
+  hasTaskCommitBinding = false
 ): string | undefined {
   const workspace = workspacePath?.trim() ? collapseFsPath(workspacePath) : ""
   const repositoryRoot = repositoryRootPath?.trim() ? collapseFsPath(repositoryRootPath) : ""
@@ -169,7 +170,9 @@ export function resolveCommitWorktreePath(
       ? workspace
       : resolveFsPath(workspace, repositoryWithinWorkspace)
   }
-  return workspace
+  return hasTaskCommitBinding && relativePathWithin(repositoryRoot, workspace) === null
+    ? repositoryRoot
+    : workspace
 }
 
 function normalizeSuggestedCommitPath(

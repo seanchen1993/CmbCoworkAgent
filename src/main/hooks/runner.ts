@@ -17,8 +17,14 @@ import { persistHookResultRecord } from "./log-record"
 import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { withWorkspaceExecution } from "../agent/file-operation-lock"
+import { getWorkspaceExecutionKey, withWorkspaceExecution } from "../agent/file-operation-lock"
 import { resolveHarnessExecutionStage } from "../services/harness-stage-attribution"
+import {
+  getSideThreadCommandHooks,
+  getSideThreadLifetimeSignal,
+  trackSideThreadHook
+} from "../side-thread-registry"
+import { waitForAbort } from "../utils/wait-for-abort"
 import { canonicalShellTaskMonitorToolName } from "../agent/shell-task-monitor"
 
 /**
@@ -54,7 +60,26 @@ function isTokenUserContextField(field: string): boolean {
 // entries when a thread ends (or when a hook is mutated). Aligns conceptually
 // with CC's session-scoped session-hooks Map, except we track fired state
 // rather than registering ephemeral hooks.
-const firedOnceHookKeys = new Map<string, Set<string>>()
+class SessionOnceKeys extends Set<string> {
+  private pending = 0
+
+  constructor(private readonly sessionId: string) {
+    super()
+  }
+
+  // A detached dispatch can still mark this session after its caller returns.
+  track<T>(work: Promise<T>): Promise<T> {
+    this.pending++
+    return work.finally(() => {
+      this.pending--
+      if (!this.pending && !this.size && firedOnceHookKeys.get(this.sessionId) === this) {
+        firedOnceHookKeys.delete(this.sessionId)
+      }
+    })
+  }
+}
+
+const firedOnceHookKeys = new Map<string, SessionOnceKeys>()
 
 // Compiled regex cache keyed by matcher string. null = invalid pattern (fallback to exact match).
 const _regexCache = new Map<string, RegExp | null>()
@@ -66,6 +91,8 @@ export interface HookContext {
   workspacePath?: string
   /** Internal cancellation for queued synchronous command hooks; never sent to the hook process. */
   abortSignal?: AbortSignal
+  /** Also stop dispatching this invocation's pending hooks on cancellation. */
+  stopPendingHooksOnAbort?: boolean
   /** Monotonic deadline for synchronous command hooks queued behind workspace activity. */
   workspaceLockDeadline?: number
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
@@ -1160,6 +1187,7 @@ async function executeHook(
   event: HookEvent,
   onLateHookResult?: HookResultCallback
 ): Promise<HookResult> {
+  if (context.stopPendingHooksOnAbort) context.abortSignal?.throwIfAborted()
   // PR-15 — async config-layer fork: return a `pending` placeholder
   // synchronously so the calling event chain doesn't wait, then run the
   // real executor in the background and forward the final result through the
@@ -1179,6 +1207,12 @@ async function executeHook(
         recordHookResult(event, hook, finalLate, context, onLateHookResult)
       })
       .catch((err) => {
+        if (
+          context.stopPendingHooksOnAbort &&
+          context.abortSignal?.aborted &&
+          err === context.abortSignal.reason
+        )
+          return
         const errStr = err instanceof Error ? err.message : String(err)
         const finalLate: HookResult = {
           exitCode: null,
@@ -1228,6 +1262,7 @@ async function executeSyncHook(
     event === "Setup" ||
     (context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
   const signal = synchronous ? context.abortSignal : undefined
+  const dispatchSignal = context.stopPendingHooksOnAbort ? context.abortSignal : undefined
   let result: HookResult
   let stdinPayload: string | undefined
   const refreshStage = async (): Promise<void> => {
@@ -1235,7 +1270,10 @@ async function executeSyncHook(
     // and project sessions without a feature never enter the stage lookup path.
     if (!context.harnessProjectId || !context.featureId) return
     signal?.throwIfAborted()
-    const stage = await resolveHarnessExecutionStage(context.harnessProjectId, context.featureId)
+    const stage = await waitForAbort(
+      resolveHarnessExecutionStage(context.harnessProjectId, context.featureId),
+      dispatchSignal
+    )
     signal?.throwIfAborted()
     if (stage) {
       // enrichContextFromHook creates a private object for every invocation.
@@ -1244,41 +1282,64 @@ async function executeSyncHook(
       context.harnessNodeStatus = stage.nodeStatus ?? undefined
     }
   }
-  if (hookType === "prompt") {
+  if (hookType === "prompt" || hookType === "http") {
     await refreshStage()
-    if (diagnostic) {
-      const policy = hook.prompt?.trim()
-      if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
+    dispatchSignal?.throwIfAborted()
+    const releaseSideHook = synchronous && context.sessionId && event !== "SessionEnd"
+      ? trackSideThreadHook(context.sessionId)
+      : undefined
+    try {
+      if (hookType === "prompt") {
+        if (diagnostic) {
+          const policy = hook.prompt?.trim()
+          if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
+        }
+        result = await executePromptHook(hook, context, event)
+      } else {
+        const builtPayload = buildHookStdinPayload(event, context, hook)
+        if (diagnostic) stdinPayload = builtPayload
+        result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
+      }
+    } finally {
+      releaseSideHook?.()
     }
-    result = await executePromptHook(hook, context, event)
-  } else if (hookType === "http") {
-    await refreshStage()
-    const builtPayload = buildHookStdinPayload(event, context, hook)
-    if (diagnostic) stdinPayload = builtPayload
-    result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
   } else {
+    let commandWorkspaceKey: string | undefined
+    let releaseSideCommand: (() => void) | undefined
     const runCommand = async (): Promise<HookResult> => {
       // Resolve after workspace admission: a command ahead of this hook may
       // advance the workflow while the hook is queued.
       await refreshStage()
+      dispatchSignal?.throwIfAborted()
       const builtPayload = buildHookStdinPayload(event, context, hook)
       if (diagnostic) stdinPayload = builtPayload
       const cwd = getCommandCwd(context)
-      return executeCommandHook(hook, buildHookEnv(event, context, hook), builtPayload, cwd)
+      const env = buildHookEnv(event, context, hook)
+      if (commandWorkspaceKey && context.sessionId && event !== "SessionEnd") {
+        releaseSideCommand = trackSideThreadHook(context.sessionId, commandWorkspaceKey)
+      }
+      return executeCommandHook(hook, env, builtPayload, cwd)
     }
     // Synchronous formatters and other command hooks may read/modify any file.
     // Coordinate their actual process lifetime with tool IO, without acquiring
     // the runtime gate again. Detached hooks retain their existing async policy.
-    result =
-      context.workspacePath && synchronous
-        ? await withWorkspaceExecution(
-            context.workspacePath,
-            "write",
-            runCommand,
-            context.abortSignal,
-            context.workspaceLockDeadline
-          )
-        : await runCommand()
+    try {
+      result =
+        context.workspacePath && synchronous
+          ? await withWorkspaceExecution(
+              context.workspacePath,
+              "write",
+              runCommand,
+              context.abortSignal,
+              context.workspaceLockDeadline,
+              (workspaceKey) => {
+                commandWorkspaceKey = workspaceKey
+              }
+            )
+          : await runCommand()
+    } finally {
+      releaseSideCommand?.()
+    }
   }
   const finalized = applyConfiguredOnBlock(
     normalizeHumanGateDecisionForEvent(parseHookJsonOutput(result), hook, event),
@@ -1339,24 +1400,13 @@ function shouldSkipOnceHook(hook: HookConfig, event: HookEvent, context: HookCon
   return sessionSet.has(getOnceHookKey(hook, event, context))
 }
 
-function shouldConsumeOnceHook(result: HookResult): boolean {
-  return result.exitCode === 0
-}
-
-function markOnceHookIfNeeded(
-  hook: HookConfig,
-  event: HookEvent,
-  context: HookContext,
-  result: HookResult
-): void {
-  if (hook.once !== true || !shouldConsumeOnceHook(result)) return
-  const sessionId = getOnceSessionId(context)
-  let sessionSet = firedOnceHookKeys.get(sessionId)
-  if (!sessionSet) {
-    sessionSet = new Set<string>()
-    firedOnceHookKeys.set(sessionId, sessionSet)
+function getSessionOnceKeys(sessionId: string): SessionOnceKeys {
+  let keys = firedOnceHookKeys.get(sessionId)
+  if (!keys) {
+    keys = new SessionOnceKeys(sessionId)
+    firedOnceHookKeys.set(sessionId, keys)
   }
-  sessionSet.add(getOnceHookKey(hook, event, context))
+  return keys
 }
 
 /** Drop all once-fired entries belonging to a session — call from fireSessionEnd. */
@@ -1378,8 +1428,10 @@ export function clearOnceStateForHook(hookId: string): void {
   }
 }
 
-export function resetHookOnceStateForTests(): void {
+export function resetHookOnceStateForTests(): number {
+  const sessionCount = firedOnceHookKeys.size
   firedOnceHookKeys.clear()
+  return sessionCount
 }
 
 function enrichContextFromHook(hook: HookConfig, context: HookContext): HookContext {
@@ -1524,7 +1576,53 @@ function recordHookResult(
   onHookResult?.(event, hook, result)
 }
 
-export async function runHooks(
+export function getHookCancellationSignal(event: HookEvent, context: HookContext): AbortSignal | undefined {
+  const { sessionId, abortSignal, stopPendingHooksOnAbort } = context
+  // Close still owns SessionEnd and lets those cleanup hooks run to completion.
+  const lifetime = event !== "SessionEnd" && sessionId
+    ? getSideThreadLifetimeSignal(sessionId)
+    : undefined
+  if (!lifetime) return stopPendingHooksOnAbort ? abortSignal : undefined
+  return abortSignal && abortSignal !== lifetime
+    ? AbortSignal.any([lifetime, abortSignal])
+    : lifetime
+}
+
+export function runHooks(
+  hooks: HookConfig[],
+  event: HookEvent,
+  context: HookContext,
+  onHookResult?: HookResultCallback
+): Promise<HookResult | null> {
+  const signal = getHookCancellationSignal(event, context)
+  return waitForAbort(dispatchHooks(hooks, event, context, onHookResult, signal), signal)
+}
+
+/** Observe the Setup batch's settlement independently of the session's wait. */
+export function runSetupHooks(
+  hooks: HookConfig[],
+  context: HookContext,
+  onHookResult?: HookResultCallback
+): Promise<HookResult | null> {
+  const signal = getHookCancellationSignal("Setup", context)
+  return dispatchHooks(hooks, "Setup", context, onHookResult, signal)
+}
+
+function dispatchHooks(
+  hooks: HookConfig[],
+  event: HookEvent,
+  context: HookContext,
+  onHookResult: HookResultCallback | undefined,
+  signal: AbortSignal | undefined
+): Promise<HookResult | null> {
+  if (signal?.aborted) return Promise.reject(signal.reason)
+  const hookContext = signal
+    ? { ...context, abortSignal: signal, stopPendingHooksOnAbort: true }
+    : context
+  return runMatchingHooks(hooks, event, hookContext, onHookResult)
+}
+
+async function runMatchingHooks(
   hooks: HookConfig[],
   event: HookEvent,
   context: HookContext,
@@ -1537,6 +1635,26 @@ export async function runHooks(
   }
 
   if (matched.length === 0) return null
+
+  // Capture the current session's set before any hook can suspend. SessionEnd
+  // removes it from the map, so a late completion cannot mark a reopened session.
+  const onceKeys = matched.some(({ hook }) => hook.once === true)
+    ? getSessionOnceKeys(getOnceSessionId(context))
+    : undefined
+  const dispatch = dispatchMatchedHooks(matched, event, context, onHookResult, onceKeys)
+  return onceKeys ? onceKeys.track(dispatch) : dispatch
+}
+
+async function dispatchMatchedHooks(
+  matched: { hook: HookConfig; matchedContext: HookContext }[],
+  event: HookEvent,
+  context: HookContext,
+  onHookResult: HookResultCallback | undefined,
+  onceKeys: SessionOnceKeys | undefined
+): Promise<HookResult | null> {
+  function markOnceHookIfNeeded(hook: HookConfig, hookContext: HookContext, result: HookResult): void {
+    if (hook.once === true && result.exitCode === 0) onceKeys?.add(getOnceHookKey(hook, event, hookContext))
+  }
 
   if (event === "PreToolUse" || event === "PreSkillUse" || event === "UserPromptSubmit") {
     let mergedUpdatedInput: Record<string, unknown> | undefined
@@ -1556,7 +1674,7 @@ export async function runHooks(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
       recordHookResult(event, hook, result, hookContext, onHookResult)
-      markOnceHookIfNeeded(hook, event, hookContext, result)
+      markOnceHookIfNeeded(hook, hookContext, result)
       // continue=false halts the entire agent turn, overrides everything else
       if (result.continue === false) {
         const reason =
@@ -1669,7 +1787,7 @@ export async function runHooks(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}`
       )
       recordHookResult(event, hook, result, hookContext, onHookResult)
-      markOnceHookIfNeeded(hook, event, hookContext, result)
+      markOnceHookIfNeeded(hook, hookContext, result)
       if (result.continue === false) {
         shouldHalt = true
         haltReason = result.stopReason ?? haltReason
@@ -1711,7 +1829,7 @@ export async function runHooks(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
       recordHookResult(event, hook, result, hookContext, onHookResult)
-      markOnceHookIfNeeded(hook, event, hookContext, result)
+      markOnceHookIfNeeded(hook, hookContext, result)
 
       // continue:false → halt the turn (no revision); takes priority over decision:block.
       // Non-blocking PostSkillUse output is intentionally dropped here — it remains observable
@@ -1777,7 +1895,7 @@ export async function runHooks(
         `[Hooks] Stop hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
       recordHookResult(event, hook, result, hookContext, onHookResult)
-      markOnceHookIfNeeded(hook, event, hookContext, result)
+      markOnceHookIfNeeded(hook, hookContext, result)
       if (result.continue === false) {
         stopReasons.push(
           result.stopReason ||
@@ -1844,7 +1962,7 @@ export async function runHooks(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
       )
       recordHookResult(event, hook, result, hookContext, onHookResult)
-      markOnceHookIfNeeded(hook, event, hookContext, result)
+      markOnceHookIfNeeded(hook, hookContext, result)
       if (result.continue === false) {
         stopReasons.push(
           result.stopReason ||
@@ -1891,7 +2009,7 @@ export async function runHooks(
   // slow hook block the UI/app indefinitely.
   //
   // PR-11 follow-up — Setup MUST go through this awaited branch because
-  // session-lifecycle uses the resolution of runHooks to decide whether to
+  // session-lifecycle uses the settlement of this batch to decide whether to
   // write the workspace's setup-state marker. The original fire-and-forget
   // path returned null synchronously, which caused the marker to be written
   // before the hook actually completed (so a failed Setup script would
@@ -1907,7 +2025,7 @@ export async function runHooks(
           `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
         )
         recordHookResult(event, hook, result, hookContext, onHookResult)
-        markOnceHookIfNeeded(hook, event, hookContext, result)
+        markOnceHookIfNeeded(hook, hookContext, result)
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
         }
@@ -1928,16 +2046,36 @@ export async function runHooks(
         }
       }
     })
+    // The caller can stop waiting before a cancelled side's command has
+    // released its lock. Reserve the SessionEnd budget for cleanup itself.
+    if (event === "SessionEnd" && context.sessionId && context.workspacePath) {
+      const commands = getSideThreadCommandHooks(context.sessionId)
+      if (
+        commands &&
+        matched.some(({ hook, matchedContext }) =>
+          (hook.type ?? "command") === "command" &&
+          !hookRunsAsynchronously(hook, event, matchedContext)
+        )
+      ) {
+        const workspaceKey = await getWorkspaceExecutionKey(context.workspacePath).catch(() => null)
+        if (workspaceKey) await commands.get(workspaceKey)
+      }
+    }
     let timedOut = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const allTasks = Promise.allSettled(tasks)
     const settled = await Promise.race<Array<PromiseSettledResult<HookResult | undefined>> | "timeout">(
       [
-        Promise.allSettled(tasks),
-        new Promise<"timeout">((resolve) => setTimeout(() => {
-          timedOut = true
-          resolve("timeout")
-        }, TOTAL_TIMEOUT_MS))
+        onceKeys ? onceKeys.track(allTasks) : allTasks,
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => {
+            timedOut = true
+            resolve("timeout")
+          }, TOTAL_TIMEOUT_MS)
+        })
       ]
     )
+    clearTimeout(timer)
     // For Setup we surface a synthetic blocking result on timeout so the
     // caller (session-lifecycle) does NOT mark the workspace initialised.
     if (event === "Setup") {
@@ -1981,14 +2119,14 @@ export async function runHooks(
   // Notification / SessionStart: fire-and-forget
   for (const { hook, matchedContext } of matched) {
     const hookContext = enrichContextFromHook(hook, matchedContext)
-    executeHook(hook, hookContext, event, onHookResult)
+    const task = executeHook(hook, hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(
           `[Hooks] ${event} hook (${hook.type ?? "command"}) → exit=${result.exitCode}, decision=${result.decision ?? "-"}, continue=${result.continue}`
         )
         recordHookResult(event, hook, result, hookContext, onHookResult)
-        markOnceHookIfNeeded(hook, event, hookContext, result)
+        markOnceHookIfNeeded(hook, hookContext, result)
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
         }
@@ -1996,6 +2134,7 @@ export async function runHooks(
       .catch((err) => {
         console.warn(`[Hooks] ${event} hook error:`, err)
       })
+    if (hook.once) void onceKeys?.track(task)
   }
 
   return null

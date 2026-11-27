@@ -7,8 +7,9 @@ import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../src/shared/idle-model-se
 import {
   IDLE_MODEL_NOTICE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
-  IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
   IDLE_MODEL_UAT_NOTICE,
+  IDLE_ULTRA_MODEL_MAX_TOKENS,
+  MAODOU_PRO_MODEL_DEFAULT_MAX_TOKENS,
   isModelAvailable,
   isModelSelectable
 } from "../../src/shared/model-catalog"
@@ -28,7 +29,7 @@ const pro = {
   model: "pro",
   baseUrl: "http://idle.example.test/pattern/llm/v1",
   hasApiKey: true,
-  maxTokens: 128_000,
+  maxTokens: MAODOU_PRO_MODEL_DEFAULT_MAX_TOKENS,
   maxOutputTokens: 8192,
   temperature: 0.1,
   topP: 0.95,
@@ -39,7 +40,8 @@ const ultra = {
   id: "maodou-ultra",
   ref: "builtin:maodou-ultra" as const,
   name: "闲时模型 Ultra",
-  model: "ultra"
+  model: "ultra",
+  maxTokens: IDLE_ULTRA_MODEL_MAX_TOKENS
 }
 const gatewayModels = [pro, ultra]
 
@@ -117,15 +119,14 @@ Object.assign(window, {
       getBuiltinConfigs: async () =>
         gatewayModels.map((item) => ({
           ...item,
-          maxTokens: useUat ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS : item.maxTokens,
-          lockedFields: ["baseUrl", "model", "apiKey", ...(useUat ? [] : ["maxTokens"])],
+          lockedFields: ["baseUrl", "model", "apiKey", "name", ...(item.model === "ultra" ? ["maxTokens"] : [])],
           notice: gatewayNotice(item.model),
           unavailableReason: gatewayUnavailableReason(item.model)
         })),
       getCustomConfigs: async () => [],
       getDefault: async () => pro.ref,
-      updateBuiltinConfig: async (_id: string, config: { name: string; maxTokens: number }) => {
-        settingsWrites.names.push(config.name)
+      updateBuiltinConfig: async (_id: string, config: { name?: string; maxTokens: number }) => {
+        if (config.name !== undefined) settingsWrites.names.push(config.name)
         settingsWrites.maxTokens.push(config.maxTokens)
       },
       setDefault: async (id: string) => {

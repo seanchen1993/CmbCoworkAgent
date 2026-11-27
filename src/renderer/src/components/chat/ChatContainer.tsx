@@ -1,5 +1,6 @@
 import { addBtwReference, clearBtwReferences, useBtwReferences, type BtwReference } from "@/lib/btw-references"
 import { isBtwThreadId } from "../../../../shared/btw-chat"
+import { prepareBtwComposerFocus } from "@/lib/btw-composer-focus"
 import { appendBtwReferences, readBtwReferences } from "../../../../shared/btw-references"
 import "./chat-floating.css"
 import { BtwSelection } from "./BtwSelection"
@@ -38,8 +39,10 @@ import {
   ChatExecutionDetailsContext,
   ChatFoldedToolCallsContext,
   ChatDesktopWorkIdContext,
-  ChatToolPresentationContext
+  ChatToolPresentationContext,
+  ChatUserImagePresentationContext
 } from "./chat-presentation-context"
+import { MessageImageGallery } from "./MessageImageGallery"
 import { QueuedMessageActions } from "./QueuedMessageActions"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botMessageHasEntranceBody } from "@/lib/bot-message-entrance"
@@ -146,6 +149,7 @@ import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
 import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
 import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
+import { TaskCommitBindingControl } from "../git/TaskCommitBindingControl"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
 import {
@@ -182,7 +186,7 @@ import {
   type DurableChatSearchMatch,
   type DurableChatSearchPage
 } from "./ChatSearchOverlay"
-import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
+import { getChatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -229,15 +233,29 @@ import {
   resolveAtFileSelection
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
+import { AttachmentImagePreview } from "./AttachmentImagePreview"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../../shared/goal-events"
 import { findThreadMessageGapTailStart } from "@/lib/thread-message-pages"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { preparePromptHistory } from "@/lib/prompt-history"
+import { readForCurrentAttachmentDraft } from "@/lib/attachment-draft-read"
 import { usePromptHistory } from "./usePromptHistory"
 import { isSameGitWorkspacePath, normalizeGitWorkspacePathKey, normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
+  attachmentFallbackText,
+  attachmentImages,
+  submittedAttachmentImages,
+  MAX_CHAT_IMAGES,
+  chatImageExtensions,
+  isChatImagePath,
+  isVisualDocumentPath,
+  chatUploadExtensions,
+  chatUploadLabel,
   MAX_ATTACHMENT_FILE_BYTES,
+  MAX_ATTACHMENT_TOTAL_CHARS,
+  MAX_ATTACHMENT_PICKER_FILES,
+  type DraftAttachmentImage,
   type SelectedAttachmentFileGrant
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
@@ -260,7 +278,18 @@ import {
   type ChatSkillCatalogProjection
 } from "@/lib/app-catalog-cache"
 import { readHarnessBoardCatalogCache } from "@/components/harness-board/harness-board-cache"
-import { threadDraftIncarnation } from "@/lib/bot-conversation-draft"
+import { bindOrdinaryImageDraft, threadDraftIncarnation } from "@/lib/bot-conversation-draft"
+import {
+  claimImageComposer,
+  imageComposerSource,
+  imageDeliveryAction,
+  imageQueuePresentation,
+  isActiveImageReceipt,
+  parkImageOutbox,
+  runFrozenImageOutbox,
+  type ImageSendPhase
+} from "@/lib/image-outbox"
+import { threadIncarnationKey } from "../../../../shared/thread-incarnation"
 import {
   getQueuedModelContent,
   getQueuedDisplayContent,
@@ -976,6 +1005,7 @@ export interface ManagedChatTurn {
   /** Host-owned file selection; returns references to files retained in its workspace. */
   attachFiles?(maxFiles: number, maxChars: number): Promise<FileAttachment[]>
   attachWorkspaceFile?(fileId: string, maxChars: number): Promise<FileAttachment>
+  readAttachmentImages?(inputId: string): Promise<DraftAttachmentImage[]>
   attachFileBytes?(
     files: Array<{ fileName: string; bytes: ArrayBuffer }>,
     maxChars: number
@@ -990,6 +1020,7 @@ export interface ManagedChatTurn {
   reconcileDrafts?(drafts: QueuedMessage[]): Promise<void>
   draftReceiptRevision?: string
   sendingDraftIds?: ReadonlySet<string>
+  queuedVisualDraftIds?: ReadonlySet<string>
   maxPendingDrafts?: number
   submit: NonNullable<ReturnType<typeof useThreadStream>["stream"]>["submit"]
   cancel(): Promise<void>
@@ -1011,6 +1042,7 @@ interface ChatContainerProps {
   restoredBotDraftError?: string | null
   threadId: string
   surface?: ChatSurface
+  visible?: boolean
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
   historyOnly?: boolean
@@ -1099,16 +1131,16 @@ const THINKING_MESSAGES = [
   "就快好了..."
 ]
 
-const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
+const SUPPORTED_EXTS = new Set(chatUploadExtensions)
 const ATTACH_FILE_POPOVER_CONTENT = (
   <div className="space-y-1">
-    <div>1. 添加文件 (txt, md, csv, docx, xlsx)</div>
+    <div>1. 添加文件 ({chatUploadLabel})</div>
     <div>2. doc文件：不要直接改后缀，在文件系统“另存为”docx之后，再选择上传。</div>
   </div>
 )
 const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
-const MAX_ATTACHMENTS = 3
-const MAX_TOTAL_CHARS = 24_000
+const MAX_ATTACHMENTS = MAX_ATTACHMENT_PICKER_FILES
+const MAX_TOTAL_CHARS = MAX_ATTACHMENT_TOTAL_CHARS
 const AT_FILE_PREVIEW_LANE = "chat-at-file-submit"
 /** 输入框正文硬上限(字符数)。超过则拒绝发送并提示,防止病态超长输入。
  * 取值与附件总字符上限(MAX_TOTAL_CHARS)一致,均为 24000。 */
@@ -1116,7 +1148,7 @@ const MAX_INPUT_CHARS = 24_000
 
 type PendingAttachmentInput =
   | ({ kind: "selected" } & SelectedAttachmentFileGrant)
-  | { kind: "bytes"; fileName: string; bytes: ArrayBuffer }
+  | { kind: "file"; file: File }
 
 // Distinguishes a live Enter/send that is still preparing its payload from other
 // users of the shared submit lock (notably the queue pump). A second Enter during
@@ -1124,6 +1156,12 @@ type PendingAttachmentInput =
 // new message racing a pump before isLoading updates should still be queued.
 // Keep the marker across composer unmounts and tab switches.
 const liveSubmitPreparingThreads = new Set<string>()
+const imageSendPhases = new Map<string, ImageSendPhase>()
+const imageQueueErrors = new Map<string, { id: string; message: string }>()
+const IMAGE_QUEUE_MODEL_REQUIRED_ERROR = "图文草稿的原模型不可用，请选择支持图片的模型后重试。"
+const IMAGE_QUEUE_WORKSPACE_MISMATCH = "图片消息属于原工作区或原会话。可返回原工作区，或移除草稿。"
+const editingImageIds = new Set<string>()
+const parkingImageIds = new Set<string>()
 
 // A side conversation can still be opening when its parent composer remounts.
 const openingSideRequests = new Map<string, Promise<string | undefined>>()
@@ -1796,40 +1834,11 @@ function getVisibleBtwPane(): HTMLElement | null {
   return pane?.offsetParent ? pane : null
 }
 
-export function focusBtwPaneComposer(pane: HTMLElement): void {
-  const chat = pane.querySelector<HTMLElement>('[data-chat-surface="btw"]')
-  const target = chat?.querySelector<HTMLTextAreaElement>("textarea.composer-textarea:enabled") ??
-    chat ?? pane.querySelector<HTMLButtonElement>("[data-btw-active-tab]") ?? pane
-  if (document.activeElement !== target) target.focus({ preventScroll: true })
-}
-
-export function prepareBtwComposerFocus(parentId: string): (id: string | undefined) => void {
-  const intent = new AbortController()
-  const cancel = () => intent.abort()
-  for (const type of ["pointerdown", "keydown", "focusin"]) {
-    window.addEventListener(type, cancel, { capture: true, signal: intent.signal })
-  }
-  return id => {
-    if (!id || intent.signal.aborted) {
-      cancel()
-      return
-    }
-    requestAnimationFrame(() => {
-      if (intent.signal.aborted) return
-      cancel()
-      const app = useAppStore.getState()
-      if (app.currentThreadId !== parentId || app.mainView !== "thread" || app.rightModule !== "btw" ||
-        app.rightPanelCollapsed || app.showCustomizeView || useBtwChat.getState().selected[parentId] !== id) return
-      const pane = document.querySelector<HTMLElement>("[data-btw-pane]")
-      if (pane?.dataset.btwPane === id) focusBtwPaneComposer(pane)
-    })
-  }
-}
-
 export function ChatContainer({
   composerNotice,
   threadId,
   surface = "default",
+  visible = true,
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
   historyOnly = false,
@@ -1856,6 +1865,7 @@ export function ChatContainer({
         : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
+  const chatScrollSessionStore = getChatScrollSessionStore(threadId)
   const [initialChatScrollView] = useState(() => chatScrollSessionStore.open(threadId))
   const initialChatScrollSession = initialChatScrollView.session
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
@@ -1881,7 +1891,15 @@ export function ChatContainer({
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const mainComposerActionsRef = useMainComposerActionsRef(threadId, surface === "default")
-  useFloatingChatLayout(chatRootRef, threadId)
+  const adjustTextareaHeight = useCallback((): void => {
+    const textarea = inputRef.current
+    if (textarea) {
+      textarea.style.height = "auto"
+      const height = textarea.scrollHeight
+      if (height > 0) textarea.style.height = `${Math.min(height, 200)}px`
+    }
+  }, [])
+  useFloatingChatLayout(chatRootRef, threadId, adjustTextareaHeight)
   const [dismissedRemoteTipThreadIds, setDismissedRemoteTipThreadIds] = useState(
     loadRemoteThreadTipDismissals
   )
@@ -2072,6 +2090,12 @@ export function ChatContainer({
   const queuedEditRequestRef = useRef(0)
   const guidingQueuedMessageIdsRef = useRef(new Set<string>())
   const [queuePumpTick, setQueuePumpTick] = useState(0)
+  const [checkedImageReceiptKey, setCheckedImageReceiptKey] = useState("")
+  const [observedImageReceipt, setObservedImageReceipt] = useState<{
+    threadId: string
+    id: string
+    status: "pending" | "running" | "awaiting"
+  } | null>(null)
   const subscribeToSubmitRelease = useCallback(
     (listener: () => void) => subscribeSubmitInFlightRelease(submitInFlightRef, threadId, listener),
     [submitInFlightRef, threadId]
@@ -2827,7 +2851,24 @@ export function ChatContainer({
   )
 
   // ── File attachments state ──
-  const [attachmentLoading, setAttachmentLoading] = useState(false)
+  const [managedAttachmentLoading, setAttachmentLoading] = useState(false)
+  const managedUpload = Boolean(managedTurn)
+  const readBotAttachmentImages = managedTurn?.readAttachmentImages
+  const readAttachmentImages = useCallback(async (file: FileAttachment) => {
+    if (file.botInputId) return await readBotAttachmentImages?.(file.botInputId) ?? []
+    if (managedUpload) return []
+    return Promise.all(attachmentImages(file).map(async ({ id, filename }) => ({
+      filename,
+      url: await window.api.file.readDraftChatImage({ threadId, workspacePath: workspacePath ?? null, imageId: id })
+    })))
+  }, [managedUpload, readBotAttachmentImages, threadId, workspacePath])
+  const uploadDraft = useMemo(() => ({ threadId, workspacePath, managedUpload }),
+    [threadId, workspacePath, managedUpload])
+  const uploadDraftRef = useRef(uploadDraft)
+  uploadDraftRef.current = uploadDraft
+  const ordinaryUploadPending = useRef<typeof uploadDraft | null>(null)
+  const [ordinaryReadOwner, setOrdinaryReadOwner] = useState<typeof uploadDraft | null>(null)
+  const attachmentLoading = managedAttachmentLoading || ordinaryReadOwner === uploadDraft
   const [dragOver, setDragOver] = useState(false)
   const attachmentsRef = useRef(attachments)
   const managedAttachmentPendingRef = useRef(false)
@@ -2880,23 +2921,39 @@ export function ChatContainer({
   const hasPendingFilePayload = totalPendingFileCount > 0
 
   const handleAttachmentInputs = useCallback(
-    async (inputs: PendingAttachmentInput[]) => {
-      if (inputs.length === 0 || attachmentLoading) return
-      setAttachmentLoading(true)
+    async (inputsOrPicker: PendingAttachmentInput[] | (() => Promise<PendingAttachmentInput[]>)) => {
+      if (ordinaryUploadPending.current === uploadDraft || managedAttachmentLoading || managedUpload) return
+      const initialDraft = threadContext.getThreadState(threadId)
+      const isCurrent = () => chatViewMountedRef.current && uploadDraftRef.current === uploadDraft &&
+        threadContext.getThreadState(threadId).draftAttachments === initialDraft.draftAttachments &&
+        threadContext.getThreadState(threadId).draftMentionedWorkspaceFiles === initialDraft.draftMentionedWorkspaceFiles
+      ordinaryUploadPending.current = uploadDraft
+      setOrdinaryReadOwner(uploadDraft)
+      const stagedImages: string[] = []
       clearError()
       try {
+        const inputs = typeof inputsOrPicker === "function"
+          ? await readForCurrentAttachmentDraft(isCurrent, inputsOrPicker) : inputsOrPicker
+        if (!inputs || !isCurrent()) return
         const snapshot = attachmentsRef.current
+        const added: FileAttachment[] = []
         let currentCount = snapshot.length + mentionedFilesRef.current.length
-        let currentChars = snapshot.reduce((sum, a) => sum + a.content.length, 0)
+        let currentChars = snapshot.reduce((sum, a) => sum + a.content.length, 0) +
+          mentionedFilesRef.current.reduce((sum, file) => sum + (file.contentChars ?? 0), 0)
         const existingPaths = new Set([
           ...snapshot.map((a) => a.filePath),
           ...mentionedFilesRef.current.map((item) => item.absolutePath)
         ])
 
         for (const input of inputs) {
-          const displayIdentity = input.kind === "selected" ? input.filePath : input.fileName
+          if (!isCurrent()) return
+          const displayIdentity = input.kind === "selected" ? input.filePath : input.file.name
+          if (surface === "btw" && isChatImagePath(displayIdentity)) {
+            setError("请在主对话发送图片或含图片的文档。")
+            continue
+          }
           // #7: skip duplicates
-          if (existingPaths.has(displayIdentity)) {
+          if (!isChatImagePath(displayIdentity) && existingPaths.has(displayIdentity)) {
             const dupName = displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             setError(`文件"${dupName}"已添加，跳过重复`)
             continue
@@ -2910,7 +2967,7 @@ export function ChatContainer({
             if (ext === ".doc") {
               setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
             } else {
-              setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+              setError(`不支持的文件类型"${fileName}"，仅支持 ${chatUploadLabel}`)
             }
             continue
           }
@@ -2921,25 +2978,47 @@ export function ChatContainer({
           }
 
           const remaining = MAX_TOTAL_CHARS - currentChars
-          if (remaining <= 0) {
+          if (remaining <= 0 && !chatImageExtensions.includes(ext) && !isVisualDocumentPath(displayIdentity)) {
             setError(`附件总内容已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
-            break
+            continue
           }
-          const result =
-            input.kind === "selected"
-              ? await window.api.file.parseSelected({
+          const file = input.kind === "file" ? input.file : undefined
+          if (file && file.size > MAX_ATTACHMENT_FILE_BYTES) {
+            setError("单文件不超过 5MB")
+            continue
+          }
+          const parseInput = async () => {
+            if (input.kind === "selected") {
+              return window.api.file.parseSelected({
+                  threadId,
+                  workspacePath: uploadDraft.workspacePath ?? null,
                   grant: input.grant,
                   filePath: input.filePath,
-                  maxLength: remaining
-                })
-              : await window.api.file.parseBytes({
-                  fileName: input.fileName,
-                  bytes: input.bytes,
-                  maxLength: remaining
-                })
+                  maxLength: Math.max(1, remaining)
+              })
+            }
+            const file = input.file
+            const bytes = await readForCurrentAttachmentDraft(isCurrent, async () => await file.arrayBuffer())
+            if (!bytes) return undefined
+            return window.api.file.parseBytes({
+                  threadId,
+                  workspacePath: uploadDraft.workspacePath ?? null,
+                  fileName: file.name,
+                  bytes,
+                  maxLength: Math.max(1, remaining)
+            })
+          }
+          const result = await parseInput()
+          const selectedImages = result?.attachment ? attachmentImages(result.attachment) : []
+          stagedImages.push(...selectedImages.map(image => image.id))
+          if (!result || !isCurrent()) return
+          if (surface === "btw" && selectedImages.length) {
+            setError("请在主对话发送图片或含图片的文档。")
+            continue
+          }
           if (result.success && result.attachment) {
             // #12: skip empty files
-            if (!result.attachment.content.trim()) {
+            if (!selectedImages.length && !result.attachment.content.trim()) {
               if (result.attachment.filename.toLowerCase().endsWith(".docx")) {
                 setError(
                   `文件 "${result.attachment.filename}" 内容为空；若原始文件为 doc，请${DOC_SAVE_AS_DOCX_HINT}`
@@ -2949,21 +3028,48 @@ export function ChatContainer({
               }
               continue
             }
-            setAttachments((prev) => [...prev, result.attachment!])
+            if (remaining <= 0 && !selectedImages.length) {
+              setError("附件文字已达上限，请缩减文字附件后重试。")
+              continue
+            }
+            const attachment = remaining <= 0 && result.attachment.content.length
+              ? { ...result.attachment, content: "", truncated: true }
+              : result.attachment
+            if ([...snapshot, ...added, attachment].flatMap(attachmentImages).length > MAX_CHAT_IMAGES) {
+              setError("每条消息最多发送 3 张图片，含文档内嵌图片")
+              continue
+            }
+            added.push(attachment.image ? { ...attachment, image: { ...attachment.image,
+              draftWorkspace: normalizeGitWorkspacePathKey(uploadDraft.workspacePath ?? "") } } : attachment)
             existingPaths.add(result.attachment.filePath)
             currentCount++
-            currentChars += result.attachment.content.length
+            currentChars += attachment.content.length
           } else {
             setError(result.error || "文件解析失败")
           }
         }
+        if (added.length && isCurrent()) {
+          setAttachments([...snapshot, ...added])
+          const adopted = new Set(added.flatMap(attachmentImages).map(image => image.id))
+          for (let i = stagedImages.length - 1; i >= 0; i--) {
+            if (adopted.has(stagedImages[i])) stagedImages.splice(i, 1)
+          }
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "文件处理异常")
+        if (isCurrent()) setError(err instanceof Error ? err.message : "文件处理异常")
       } finally {
-        setAttachmentLoading(false)
+        for (let offset = 0; offset < stagedImages.length; offset += MAX_CHAT_IMAGES) {
+          void window.api.file.updateImageOwners({ action: "discard", threadId,
+            workspacePath: uploadDraft.workspacePath ?? null,
+            ids: stagedImages.slice(offset, offset + MAX_CHAT_IMAGES) }).catch(() => undefined)
+        }
+        if (ordinaryUploadPending.current === uploadDraft) {
+          ordinaryUploadPending.current = null
+          if (chatViewMountedRef.current) setOrdinaryReadOwner(null)
+        }
       }
     },
-    [setError, clearError, attachmentLoading, setAttachments]
+    [uploadDraft, managedUpload, managedAttachmentLoading, surface, threadId, threadContext, setError, clearError, setAttachments]
   )
 
   const addManagedAttachments = useCallback(
@@ -2984,8 +3090,8 @@ export function ChatContainer({
         MAX_TOTAL_CHARS -
         existingAttachments.reduce((sum, item) => sum + item.content.length, 0) -
         existingMentions.reduce((sum, item) => sum + (item.contentChars ?? 0), 0)
-      if (maxFiles <= 0 || maxChars <= 0) {
-        setError(maxFiles <= 0 ? `最多只能添加 ${MAX_ATTACHMENTS} 个文件` : "附件内容已达上限")
+      if (maxFiles <= 0) {
+        setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
         return
       }
       managedAttachmentPendingRef.current = true
@@ -2993,7 +3099,7 @@ export function ChatContainer({
       clearError()
       const originalWorkspace = normalizeWorkspacePathKey(workspacePathRef.current)
       try {
-        const files = await collect(replacement ? 1 : maxFiles, maxChars)
+        const files = await collect(replacement ? 1 : maxFiles, Math.max(0, maxChars))
         if (!chatViewMountedRef.current) return
         if (replacement && (currentThreadIdRef.current !== threadId ||
           !managedTurnRef.current?.attachFiles || managedTurnRef.current.composerReadOnlyReason)) return
@@ -3040,20 +3146,23 @@ export function ChatContainer({
       setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
       return
     }
-    const result = await window.api.file.select()
-    if (result.error) setError(result.error)
-    if (!result.canceled && result.files.length > 0) {
-      await handleAttachmentInputs(
-        result.files.map((file) => ({ kind: "selected" as const, ...file }))
-      )
-    }
-  }, [handleAttachmentInputs, setError, managedTurn, addManagedAttachments])
+    await handleAttachmentInputs(async () => {
+      const result = await window.api.file.select()
+      if (result.error && uploadDraftRef.current === uploadDraft) setError(result.error)
+      return result.canceled ? [] : result.files.map(file => ({ kind: "selected", ...file }))
+    })
+  }, [handleAttachmentInputs, setError, managedTurn, addManagedAttachments, uploadDraft])
 
   const removeAttachment = useCallback(
     (index: number) => {
+      const removed = attachments[index]
+      const ids = removed ? attachmentImages(removed).map(image => image.id) : []
       setAttachments((prev) => prev.filter((_, i) => i !== index))
+      if (ids.length && !managedUpload)
+        void window.api.file.updateImageOwners({ action: "discard", threadId, workspacePath: workspacePath ?? null,
+          ids }).catch(() => undefined)
     },
-    [setAttachments]
+    [attachments, managedUpload, setAttachments, threadId, workspacePath]
   )
   const removeMentionedFile = useCallback((index: number) => {
     setMentionedFiles((prev) => prev.filter((_, i) => i !== index))
@@ -3092,23 +3201,7 @@ export function ChatContainer({
           })
           return
         }
-        const inputs: PendingAttachmentInput[] = []
-        for (const file of dropped) {
-          const lastDot = file.name.lastIndexOf(".")
-          const ext = lastDot >= 0 ? file.name.substring(lastDot).toLowerCase() : ""
-          if (!SUPPORTED_EXTS.has(ext)) {
-            setError(`不支持的文件类型"${file.name}"，仅支持 txt、md、csv、docx、xlsx、xls`)
-            continue
-          }
-          if (file.size > MAX_ATTACHMENT_FILE_BYTES) {
-            setError(`文件"${file.name}"过大，单文件不超过 5MB`)
-            continue
-          }
-          inputs.push({ kind: "bytes", fileName: file.name, bytes: await file.arrayBuffer() })
-        }
-        if (inputs.length > 0) {
-          await handleAttachmentInputs(inputs)
-        }
+        await handleAttachmentInputs(dropped.map(file => ({ kind: "file", file })))
       }
     },
     [handleAttachmentInputs, attachmentLoading, setError, managedTurn, addManagedAttachments]
@@ -3560,6 +3653,7 @@ export function ChatContainer({
           suggestedCommitFilePaths?: string[]
           suggestedCommitFileBasePath?: string
           suggestedGitWorktreePath?: string
+          commitBindingVersion?: string
           suggestedGitRepositories?: Array<{
             path: string
             displayPath: string
@@ -4448,7 +4542,7 @@ export function ChatContainer({
       if (lease.threadId !== threadId) return
       chatScrollSessionStore.setPendingRevealMessageId(lease, messageId)
     },
-    [threadId]
+    [chatScrollSessionStore, threadId]
   )
   const invalidateDurableMessageReveal = useCallback((): void => {
     durableMessageWindowGenerationRef.current += 1
@@ -4463,6 +4557,8 @@ export function ChatContainer({
   }, [invalidateDurableMessageReveal])
 
   const trackTranscriptScroll = surface !== "btw" || displayMessages.length > 0
+  const browsingWelcome = surface === "default" && displayMessages.length === 0 &&
+    !isLoading && !historyLoading && !navigation
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
     return scrollRef.current?.querySelector(
@@ -4530,7 +4626,7 @@ export function ChatContainer({
     upwardUserScrollIntentUntilRef.current = 0
     downwardUserScrollIntentUntilRef.current = 0
     scrollbarUserIntentActiveRef.current = false
-  }, [threadId])
+  }, [chatScrollSessionStore, threadId])
 
   useEffect(() => {
     if (!trackTranscriptScroll || scrollParent || !scrollRef.current) return
@@ -4804,7 +4900,7 @@ export function ChatContainer({
         bottomScrollFrameRef.current = null
       }
     }
-  }, [cancelMessageWindowLoad, getViewport, threadId])
+  }, [cancelMessageWindowLoad, chatScrollSessionStore, getViewport, threadId])
   const searchDurableMessages = useCallback(
     (query: string, options: DurableChatSearchOptions): Promise<DurableChatSearchPage> => {
       return window.api.threads.searchMessages(threadId, query, {
@@ -4904,7 +5000,8 @@ export function ChatContainer({
   )
 
   useEffect(() => {
-    if (!scrollParent || !trackTranscriptScroll) return
+    // Browsing welcome skills must not opt the first conversation turn out of following.
+    if (!scrollParent || !trackTranscriptScroll || browsingWelcome) return
     lastObservedScrollTopRef.current = scrollParent.scrollTop
 
     const confirmOrDetachFromScroll = (): void => {
@@ -5075,7 +5172,7 @@ export function ChatContainer({
       window.removeEventListener("pointercancel", cancelScrollbarPointerIntent, true)
       window.removeEventListener("blur", cancelScrollbarPointerIntent)
     }
-  }, [cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent, trackTranscriptScroll])
+  }, [browsingWelcome, cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent, trackTranscriptScroll])
 
   const scrollToMessageById = useCallback(
     (messageId: string, virtualBehavior: "smooth" | "auto" = "smooth"): void => {
@@ -5878,7 +5975,39 @@ export function ChatContainer({
     [sideComposer, threadId, workspacePath]
   )
   const botCaret = botInputRef.current?.selectionStart ?? input.length
+  const allowWorkspaceImages = surface === "default" && !managedTurn && !readOnly
+  const imageDraftIdentity = currentThread && threadDraftIncarnation(currentThread)
+  const imageDraftBinding = imageDraftIdentity?.token ?? imageDraftIdentity?.legacyCreatedAt
+  const imageIncarnation = imageDraftIdentity && threadIncarnationKey(imageDraftIdentity)
+  const parentImagePresentation = useContext(ChatUserImagePresentationContext)
+  const linkedImageHistory = surface === "bot" && Boolean(desktopWorkId) &&
+    currentThread?.metadata?.botLocalConversation === true
+  const presentUserImages = useCallback((message: Message) => {
+    // A re-linked thread may contain inputs owned by an earlier work of the same Bot.
+    if (!(linkedImageHistory && message.botHistoryInputOrigin?.hasInputImages) &&
+        (surface !== "default" || managedUpload)) {
+      const managedImages = parentImagePresentation?.(message)
+      if (managedImages != null || surface !== "bot" || !desktopWorkId) return managedImages
+    }
+    if (!imageIncarnation || !(message.hasChatImages || message.botHistoryInputOrigin?.hasInputImages)) return null
+    const request = { threadId, messageId: message.id, incarnation: imageIncarnation, workspacePath: workspacePath ?? null }
+    return <MessageImageGallery sourceKey={JSON.stringify([request, desktopWorkId])}
+      read={() => window.api.file.readMessageChatImages(request)} />
+  }, [threadId, imageIncarnation, workspacePath, surface, managedUpload, desktopWorkId, linkedImageHistory, parentImagePresentation])
+  useEffect(() => {
+    if (!allowWorkspaceImages || historyOnly || restoredBotDraft || historyLoading || !currentThread ||
+        currentThread.metadata?.botId || currentThread.metadata?.botWorkId ||
+        currentThread.metadata?.botLocalConversation) return
+    const savedWorkspace = currentThread.metadata?.workspacePath
+    if (normalizeGitWorkspacePathKey(typeof savedWorkspace === "string" ? savedWorkspace : "") !==
+        normalizeGitWorkspacePathKey(workspacePath ?? "")) return
+    return bindOrdinaryImageDraft(threadContext, currentThread, workspacePath, error => {
+      if (error) toast.error(error)
+    })
+  }, [allowWorkspaceImages, historyOnly, restoredBotDraft, historyLoading, currentThread,
+    imageDraftBinding, threadContext, workspacePath])
   const atFileMentions = useAtFileMentions({
+    allowImages: allowWorkspaceImages,
     input,
     cursorOffset: managedTurn?.mentionOptions ? botCaret : inputCaret,
     workspaceFiles,
@@ -5944,7 +6073,7 @@ export function ChatContainer({
       : effectiveComposerControlsDisabled) ||
     attachmentLoading ||
     totalPendingFileCount >= MAX_ATTACHMENTS ||
-    totalPendingFileChars >= MAX_TOTAL_CHARS
+    (sideComposer && totalPendingFileChars >= MAX_TOTAL_CHARS)
   const appliedControlFocusRequest = useRef<number | undefined>(undefined)
   useEffect(() => {
     const request = managedTurn?.controlFocusRequest
@@ -6050,9 +6179,13 @@ export function ChatContainer({
     }
     if (!question && clearComposer) {
       const app = useAppStore.getState()
-      const selected = useBtwChat.getState().selected[threadId]
+      const { selected: selectedTabs, fullSideView } = useBtwChat.getState()
+      const selected = selectedTabs[threadId]
       if (selected && !isBtwSubmissionBlocked(selected) && (app.rightModule !== "btw" || app.rightPanelCollapsed)) {
         const completeFocus = prepareBtwComposerFocus(threadId)
+        if (fullSideView?.parentId === threadId && fullSideView.showMain) {
+          useBtwChat.setState({ fullSideView: { parentId: threadId, showMain: false } })
+        }
         useAppStore.setState({ rightModule: "btw", rightPanelCollapsed: false })
         setInput("")
         completeFocus(selected)
@@ -6154,6 +6287,7 @@ export function ChatContainer({
 
     try {
       const selection = resolveAtFileSelection({
+        allowImages: allowWorkspaceImages,
         file,
         workspacePath,
         attachments: attachmentsRef.current,
@@ -6203,11 +6337,12 @@ export function ChatContainer({
   }
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (content: string, options: { id?: string } = {}): Promise<Message> => {
+    async (content: string, options: { id?: string; hasChatImages?: boolean } = {}): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: options.id ?? crypto.randomUUID(),
         role: "user",
+        ...(options.hasChatImages ? { hasChatImages: true as const } : {}),
         content,
         created_at: userStartAt,
         start_at: userStartAt,
@@ -6399,13 +6534,48 @@ export function ChatContainer({
     ]
   )
 
+  const imageReceiptCandidates = useMemo(() => {
+    if (managedTurn || historyOnly || !currentThread) return []
+    const incarnation = threadIncarnationKey(threadDraftIncarnation(currentThread))
+    return queuedMessages.filter(({ imageDelivery, parkedForConversationLink }) =>
+      !parkedForConversationLink && imageDelivery?.frozen && imageDelivery.incarnation === incarnation &&
+      isSameGitWorkspacePath(imageDelivery.workspacePath, workspacePath))
+  }, [currentThread, historyOnly, managedTurn, queuedMessages, workspacePath])
+  const imageReceiptKey = imageReceiptCandidates.length
+    ? JSON.stringify([threadId, imageReceiptCandidates.map(message => [message.id, message.updated_at.getTime()])
+      .sort(([left], [right]) => String(left).localeCompare(String(right)))])
+    : ""
+  const imageReceiptCheckPending = imageReceiptKey !== "" && checkedImageReceiptKey !== imageReceiptKey
+  const activeImageReceipt = observedImageReceipt?.threadId === threadId &&
+    imageReceiptCandidates.some(message => message.id === observedImageReceipt.id)
+      ? observedImageReceipt : null
+  const setImageQueueError = useCallback((id: string, message: string) => {
+    imageQueueErrors.set(threadId, { id, message })
+    setError(message)
+  }, [setError, threadId])
+  const clearImageQueueError = useCallback((id: string) => {
+    const saved = imageQueueErrors.get(threadId)
+    if (saved?.id !== id) return
+    imageQueueErrors.delete(threadId)
+    if (threadContext.getThreadState(threadId).error === saved.message) clearError()
+  }, [clearError, threadContext, threadId])
+
   const handleSubmit = async (e: Pick<Event, "preventDefault">, defaultText = ""): Promise<void> => {
     e.preventDefault()
+    if (ordinaryUploadPending.current === uploadDraft) {
+      toast.info("附件正在读取，请稍后发送。")
+      return
+    }
     if (surface === "btw" && (isBtwSubmissionBlocked(threadId) ||
       sideRestoring || getSideQuestion(threadId) !== undefined || liveSubmitPreparingThreads.has(threadId))) return
     if (managedTurnRef.current?.composerReadOnlyReason) return
     if (restoredBotDraftError) {
       setError(restoredBotDraftError)
+      return
+    }
+    if (!managedTurn && attachments.some(file => file.botInputId &&
+      (file.embeddedImageCount || ["image/png", "image/jpeg", "image/webp"].includes(file.mimeType)))) {
+      setError("草稿里有 Bot 会话的图片。请移除这些附件，在当前聊天中重新添加后再发送。")
       return
     }
     const trimmedInput = defaultText || input.trim()
@@ -6468,7 +6638,7 @@ export function ChatContainer({
     const willEnqueueWhileBusy =
       !managedTurn &&
       !isGoalSlashInput &&
-      (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
+      (isLoading || imageReceiptCheckPending || Boolean(activeImageReceipt) || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !sideReferences.length && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
@@ -6576,6 +6746,8 @@ export function ChatContainer({
     }
     const queuedSubmitFocus = willEnqueueWhileBusy || queueRestoredDraft ? document.activeElement : null
     const history = preparePromptHistory(submittedHistoryWorkspace, trimmedInput)
+    const stagedMentionImages: string[] = []
+    let releaseImageSource: (() => void) | undefined
 
     try {
       const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
@@ -6709,6 +6881,18 @@ export function ChatContainer({
       // fresh composer and is not cleared when this draft is enqueued.
       const browser = selectedBuiltinBrowser
       const claimedAttachments = attachments
+      const keepImageDraft = attachments.some(file => attachmentImages(file).length) ||
+        (allowWorkspaceImages && (mentionedFiles.some(file => isChatImagePath(file.workspaceFilePath) || isVisualDocumentPath(file.workspaceFilePath)) ||
+          extractAtFileMentions(trimmedInput).some(path => isChatImagePath(path) || isVisualDocumentPath(path))))
+      let imageSource: string | undefined
+      if (keepImageDraft && !managedTurn) {
+        const state = threadContext.getThreadState(threadId)
+        if (state.draftAttachments !== attachments || state.draftMentionedWorkspaceFiles !== mentionedFiles ||
+            (!defaultText && state.draftInput.trim() !== trimmedInput)) return
+        imageSource = imageComposerSource(state)
+        releaseImageSource = claimImageComposer(threadId, workspacePath, imageSource)
+        if (!releaseImageSource) return
+      }
       const claimedMentionedFiles = mentionedFiles
       let rawMessage = trimmedInput
       const isFirstMessage = threadMessages.length === 0
@@ -6719,7 +6903,7 @@ export function ChatContainer({
         claimedMentionedFiles.length === 0 && !rawMessage.includes("@")
       // Bot drafts stay in the composer during preparation. Only the durable
       // outbox handoff below consumes them; IO or storage failure preserves the draft.
-      if (!sideComposer && !managedTurn?.submitDraft && !queueRestoredDraft) {
+      if (!sideComposer && !managedTurn?.submitDraft && !queueRestoredDraft && !keepImageDraft) {
         setInput("")
         if (claimedAttachments.length) setAttachments([])
         if (claimedMentionedFiles.length) setMentionedFiles([])
@@ -6728,9 +6912,8 @@ export function ChatContainer({
       // The original composer payload is now atomically claimed. Any later
       // Enter belongs to newly typed input and should queue behind this submit
       // while @file IO is still running, rather than being silently ignored.
-      // Quotes and references stay visible until this draft commits. Keep the
-      // preparation guard so a second send cannot claim them during file reads.
-      if (shouldLockSubmit && !sideComposer && !managedTurn?.submitDraft && !claimedReply && !queueRestoredDraft)
+      // Keep quotes, side references and visual attachments claimed until their handoff commits.
+      if (shouldLockSubmit && !sideComposer && !managedTurn?.submitDraft && !claimedReply && !queueRestoredDraft && !keepImageDraft)
         liveSubmitPreparingThreads.delete(threadId)
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
@@ -6777,6 +6960,20 @@ export function ChatContainer({
           workspaceFiles: filesForSubmission,
           maxAttachments: MAX_ATTACHMENTS,
           maxTotalChars: MAX_TOTAL_CHARS,
+          ...(allowWorkspaceImages && workspacePath ? {
+            readWorkspaceImage: async (filePath: string, maxLength: number) => {
+              const assertCurrent = () => {
+                if (!chatViewMountedRef.current || currentThreadIdRef.current !== threadId ||
+                    normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey)
+                  throw new Error("@图片所属会话或工作区已变更，请重新选择。")
+              }
+              assertCurrent()
+              const attachment = await window.api.file.attachWorkspaceImage({ threadId, workspacePath, filePath, maxLength })
+              stagedMentionImages.push(...attachmentImages(attachment).map(image => image.id))
+              assertCurrent()
+              return attachment
+            }
+          } : {}),
           ...(attachWorkspaceFile ? {
             readWorkspaceAttachment: async (filePath: string, maxChars: number) => {
               const checkWorkspace = () => {
@@ -6872,7 +7069,7 @@ export function ChatContainer({
       if (!rawMessage && resolvedAttachments.length === 0 && !skill && !browser) return
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
-      const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
+      const fallbackUserText = attachmentPayload && !skill ? attachmentFallbackText(attachmentPayload) : ""
       const visibleUserText = resolveBuiltinBrowserVisibleUserText({
         browserSelected: browser,
         fallbackUserText,
@@ -6885,8 +7082,9 @@ export function ChatContainer({
       // When a skill is active we also skip the default prompt: the skill's own
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
-      const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
-      if (browser && !sideComposer && !managedTurn?.submitDraft && !queueRestoredDraft) setSelectedBuiltinBrowser(false)
+      const userText = rawMessage || (attachmentPayload && !keepImageDraft && !skill ? "请分析以下文件内容。" : "")
+      if (browser && !sideComposer && !managedTurn?.submitDraft && !queueRestoredDraft && !keepImageDraft)
+        setSelectedBuiltinBrowser(false)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
       }
@@ -6924,6 +7122,13 @@ export function ChatContainer({
           })
         : ""
 
+      if ((attachmentPayload ?? []).reduce((count, file) =>
+        count + (file.botInputId ? file.embeddedImageCount ??
+          (["image/png", "image/jpeg", "image/webp"].includes(file.mimeType) ? 1 : 0) :
+          attachmentImages(file).length), 0) > MAX_CHAT_IMAGES) {
+        setError("每条消息最多发送 3 张图片，含文档内嵌图片")
+        return
+      }
       const inputFileIds = surface === "bot" ? botInputFileIds(attachmentPayload ?? []) : []
       const composedDraft: QueuedMessage = {
         id: crypto.randomUUID(),
@@ -6931,6 +7136,7 @@ export function ChatContainer({
         ...(selectedBotMentions.length ? { botMentions: parseBotMessageMentions(userText, selectedBotMentions) } : {}),
         ...(replyForSubmission ? { botReplyTo: replyForSubmission } : {}),
         attachmentModelBlocks,
+        chatImages: submittedAttachmentImages(attachmentPayload ?? []),
         attachmentDisplayPrefix,
         ...(inputFileIds.length ? { botInputFileIds: inputFileIds } : {}),
         skillBlock,
@@ -6965,6 +7171,10 @@ export function ChatContainer({
         }
         if (selectedSkill && currentDraft.draftSkill === selectedSkill) setSelectedSkill(null)
         if (browser && currentDraft.draftBuiltinBrowser) setSelectedBuiltinBrowser(false)
+        if (!managedTurn && composedDraft.chatImages?.length) {
+          void window.api.file.updateImageOwners({ action: "discard", threadId, workspacePath: workspacePath ?? null,
+            ids: composedDraft.chatImages.map(image => image.id) }).catch(() => undefined)
+        }
       }
 
       if (managedTurn?.submitDraft) {
@@ -6997,16 +7207,48 @@ export function ChatContainer({
 
       // Busy → park the draft and stop. The auto-drain effect sends it once the
       // thread is idle again, or the user can steer it into the running turn.
-      if (willEnqueueWhileBusy || queueRestoredDraft) {
-        if (queueRestoredDraft) {
-          let storageError: string | null = "消息未能保存，未发送。"
-          addQueuedMessage(composedDraft, error => { storageError = error })
-          if (storageError) {
-            deleteQueuedMessage(composedDraft.id)
-            setError(storageError)
-            return
+      if (willEnqueueWhileBusy || queueRestoredDraft || composedDraft.chatImages?.length) {
+        if (queueRestoredDraft || keepImageDraft) {
+          const images = composedDraft.chatImages ?? []
+          if (images.length) {
+            if (!currentThread || !workspacePath || !imageSource || !chatViewMountedRef.current ||
+                uploadDraftRef.current !== uploadDraft || imageComposerSource(threadContext.getThreadState(threadId)) !== imageSource) return
+            composedDraft.imageDelivery = {
+              workspacePath, incarnation: threadIncarnationKey(threadDraftIncarnation(currentThread)),
+              source: imageSource,
+              ...(!willEnqueueWhileBusy && !queuedMessages.length && !hasActiveGoalRunning
+                ? { immediate: true as const } : {})
+            }
           }
-          clearClaimedDraft()
+          const persist = () => {
+            let error: string | null = "消息未能保存，未发送。"
+            addQueuedMessage(composedDraft, result => { error = result })
+            return error
+          }
+          if (composedDraft.imageDelivery) {
+            const { workspacePath, incarnation } = composedDraft.imageDelivery
+            const scope = { threadId, workspacePath, incarnation, messageId: composedDraft.id }
+            parkingImageIds.add(composedDraft.id)
+            try {
+              const parked = await parkImageOutbox({ persist,
+                pin: () => window.api.file.updateImageOwners({ action: "pin", ...scope, ids: images.map(image => image.id) }),
+                unpin: () => window.api.file.updateImageOwners({ action: "unpin", ...scope }),
+                rollback: () => deleteQueuedMessage(composedDraft.id), consume: clearClaimedDraft,
+                isCurrent: () => getQueuedMessage(composedDraft.id) === composedDraft &&
+                  imageComposerSource(threadContext.getThreadState(threadId)) === imageSource })
+              if (!parked) return
+            } catch (error) {
+              setError(error instanceof Error ? error.message : "图片排队失败，原草稿已保留。")
+              return
+            } finally {
+              parkingImageIds.delete(composedDraft.id)
+              setQueuePumpTick(tick => tick + 1)
+            }
+          } else {
+            const error = persist()
+            if (error) { deleteQueuedMessage(composedDraft.id); setError(error); return }
+            clearClaimedDraft()
+          }
         } else {
           addQueuedMessage(composedDraft)
           if (sideComposer) clearClaimedDraft()
@@ -7147,20 +7389,23 @@ export function ChatContainer({
             messages: [{ type: "human", content: fullMessage }]
           },
           {
-            onPromptAccepted: (sideComposer || history) ? (acceptedWorkspace => {
+            onPromptAccepted: (sideComposer || keepImageDraft || history) ? acceptedWorkspace => {
               if (sideUserMessageId && !isBtwSubmissionBlocked(threadId)) {
                 sidePromptAccepted = true
                 void appendVisibleUserMessageWithTime(displayContent, { id: sideUserMessageId })
                 clearClaimedDraft()
                 liveSubmitPreparingThreads.delete(threadId)
+              } else if (keepImageDraft) {
+                clearClaimedDraft()
               }
               if (isSameGitWorkspacePath(submittedHistoryWorkspace, acceptedWorkspace)) history?.accept()
               else history?.discard()
-            }) : undefined,
+            } : undefined,
             config: {
               configurable: {
                 thread_id: threadId,
                 model_id: currentModel,
+                chat_images: composedDraft.chatImages,
                 agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
                 ...(hookTurnId ? { hook_turn_id: hookTurnId } : {})
               }
@@ -7184,6 +7429,11 @@ export function ChatContainer({
         }
       }
     } finally {
+      releaseImageSource?.()
+      for (let offset = 0; offset < stagedMentionImages.length; offset += MAX_CHAT_IMAGES) {
+        void window.api.file.updateImageOwners({ action: "discard", threadId, workspacePath: workspacePath ?? null,
+          ids: stagedMentionImages.slice(offset, offset + MAX_CHAT_IMAGES) }).catch(() => undefined)
+      }
       history?.discard()
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       releaseSubmitInFlightLock(queuedDraftPreparationLock, shouldLockQueuedDraftPreparation, threadId)
@@ -7287,6 +7537,40 @@ export function ChatContainer({
     setEditingQueueId(null)
     setEditingQueueText("")
 
+    if (message.imageDelivery) {
+      if (parkingImageIds.has(message.id) || imageSendPhases.has(message.id) || editingImageIds.has(message.id)) {
+        toast.message("图片消息正在发送，请稍后编辑。")
+        return
+      }
+      const { workspacePath, incarnation } = message.imageDelivery
+      const scope = { threadId, workspacePath, incarnation, messageId: message.id }
+      editingImageIds.add(message.id)
+      try {
+        const status = await window.api.file.chatImageSubmissionStatus(scope)
+        if (status !== "missing" && status !== "rejected") {
+          toast.message("消息已进入处理或执行结果待核对，不能改写原提交。")
+          return
+        }
+        const id = status === "rejected" ? crypto.randomUUID() : message.id
+        if (id !== message.id) {
+          await window.api.file.updateImageOwners({ action: "pin", ...scope, messageId: id,
+            previousMessageId: message.id, ids: (message.chatImages ?? []).map(image => image.id) })
+        }
+        const error = threadContext.getThreadActions(threadId).replaceQueuedImage(message, {
+          ...updatedMessage, id, imageDelivery: { ...message.imageDelivery, frozen: undefined }, updated_at: new Date()
+        })
+        if (id !== message.id)
+          await window.api.file.updateImageOwners({ action: "unpin", ...scope, messageId: error ? id : message.id })
+        if (error) setError(error)
+        else { clearImageQueueError(message.id); setQueueAutoDrainSuppressed(false) }
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "图片消息编辑失败。")
+      } finally {
+        editingImageIds.delete(message.id)
+        setQueuePumpTick(tick => tick + 1)
+      }
+      return
+    }
     if (!message.handoffRequestedAt) {
       updateQueuedMessage(message.id, { text: nextText })
       return
@@ -7362,10 +7646,15 @@ export function ChatContainer({
       }
     }
   }, [
+    clearImageQueueError,
     appendMessage,
     deleteQueuedMessage,
     editingQueueId,
     editingQueueText,
+    clearError,
+    setError,
+    setQueueAutoDrainSuppressed,
+    threadContext,
     getQueuedMessage,
     managedTurn,
     sideComposer,
@@ -7393,9 +7682,63 @@ export function ChatContainer({
   )
 
   const handleDeleteQueuedMessage = useCallback(
-    (message: QueuedMessage): void => {
+    async (message: QueuedMessage): Promise<void> => {
       if (managedTurn?.submitDraft) {
         managedTurn.discardDraft?.(message)
+        return
+      }
+      if (message.imageDelivery) {
+        if (editingImageIds.has(message.id)) return
+        const phase = imageSendPhases.get(message.id)
+        if (phase === "submitted" || phase === "accepted") {
+          toast.message("图片消息已开始发送，可停止生成。")
+          return
+        }
+        // The pin operation will see the missing record and release its ownership.
+        if (parkingImageIds.has(message.id)) {
+          if (getQueuedMessage(message.id) === message) {
+            deleteQueuedMessage(message.id, error => {
+              if (error) setError(error)
+              else clearImageQueueError(message.id)
+            })
+          }
+          return
+        }
+        const { workspacePath: savedWorkspace, incarnation } = message.imageDelivery
+        const scope = { threadId, workspacePath: savedWorkspace, incarnation, messageId: message.id }
+        editingImageIds.add(message.id)
+        try {
+          const staleWorkspace = !isSameGitWorkspacePath(scope.workspacePath, workspacePath)
+          if (staleWorkspace) {
+            await window.api.file.updateImageOwners({ action: "abandon", ...scope })
+          } else {
+            const status = await window.api.file.chatImageSubmissionStatus(scope)
+            if (isActiveImageReceipt(status) || status === "accepted") {
+              toast.message("图片消息已开始处理，请在会话中停止或继续。")
+              return
+            }
+          }
+          if (getQueuedMessage(message.id) !== message) return
+          let removed = false
+          deleteQueuedMessage(message.id, error => {
+            if (error) setError(error)
+            else {
+              removed = true
+              clearImageQueueError(message.id)
+            }
+          })
+          if (removed && !staleWorkspace) {
+            await window.api.file.updateImageOwners({ action: "unpin", ...scope })
+            const resident = new Set(threadContext.getThreadState(threadId).draftAttachments.flatMap(attachmentImages).map(image => image.id))
+            const ids = (message.chatImages ?? []).map(ref => ref.id).filter(id => !resident.has(id))
+            if (ids.length) await window.api.file.updateImageOwners({ action: "discard", ...scope, ids })
+          }
+        } catch (error) {
+          setError(error instanceof Error ? error.message : "图片消息移除失败。")
+        } finally {
+          editingImageIds.delete(message.id)
+          setQueuePumpTick(tick => tick + 1)
+        }
         return
       }
       // Main only needs a withdrawal tombstone for a handoff that is queued or
@@ -7404,9 +7747,13 @@ export function ChatContainer({
       if (message.handoffRequestedAt || guidingQueuedMessageIdsRef.current.has(message.id)) {
         void window.api.agent.deleteCurrentRunQueuedMessage(threadId, message.id)
       }
-      deleteQueuedMessage(message.id)
+      deleteQueuedMessage(message.id, error => {
+        if (!error && message.chatImages?.length)
+          void window.api.file.updateImageOwners({ action: "unpin", threadId, workspacePath: workspacePath ?? null,
+            messageId: message.id }).catch(() => undefined)
+      })
     },
-    [deleteQueuedMessage, threadId, managedTurn?.submitDraft, managedTurn?.discardDraft]
+    [clearImageQueueError, deleteQueuedMessage, getQueuedMessage, setError, threadContext, threadId, workspacePath, managedTurn?.submitDraft, managedTurn?.discardDraft]
   )
 
   const handleGuideQueuedMessage = useCallback(
@@ -7528,6 +7875,148 @@ export function ChatContainer({
         return
       }
       if (!stream) return
+      let delivery = queued.imageDelivery
+      const queueImageIds = queued.chatImages?.map(ref => ref.id)
+      if (queueImageIds?.length && !delivery) {
+        if (!currentThread || !workspacePath) return
+        delivery = { workspacePath, incarnation: threadIncarnationKey(threadDraftIncarnation(currentThread)), source: "" }
+        updateQueuedMessage(queued.id, { imageDelivery: delivery }, error => { if (error) setError(error) })
+        return
+      }
+      const scope = delivery && { threadId, workspacePath: delivery.workspacePath, incarnation: delivery.incarnation, messageId: queued.id }
+      let safeToChooseModel = false
+      const checkDelivery = async () => {
+        if (!scope) return true
+        const status = await window.api.file.chatImageSubmissionStatus(scope)
+        if (getQueuedMessage(queued.id) !== queued) return false
+        switch (imageDeliveryAction(status)) {
+          case "finish":
+            deleteQueuedMessage(queued.id)
+            if (status === "failed") setError("图片消息已接纳，但本次运行失败，请查看会话记录。")
+            return false
+          case "review":
+            setImageQueueError(queued.id, status === "rejected" ? "图片消息已拒收。可编辑后重新发送，或移除这条消息。" :
+              "图片消息的执行结果待核对。请先查看会话记录，再决定是否移除并重新发送。")
+            return false
+          case "wait":
+            if (isActiveImageReceipt(status)) setObservedImageReceipt({ threadId, id: queued.id, status })
+            return false
+          case "send":
+            safeToChooseModel = status === "missing"
+            if (status === "accepted" && !delivery?.frozen) {
+              setImageQueueError(queued.id, "图片消息已接纳，但缺少原始提交内容，请先核对会话记录。")
+              return false
+            }
+            if (status === "missing" && queueImageIds?.length) {
+              await window.api.file.updateImageOwners({ action: "pin", ...scope, ids: queueImageIds })
+              if (getQueuedMessage(queued.id) !== queued) {
+                if (!getQueuedMessage(queued.id))
+                  await window.api.file.updateImageOwners({ action: "unpin", ...scope })
+                return false
+              }
+              if (editingImageIds.has(queued.id)) return false
+              await window.api.file.updateImageOwners({ action: "discard", ...scope, ids: queueImageIds })
+            }
+            return true
+        }
+      }
+      if (scope && (!isSameGitWorkspacePath(scope.workspacePath, workspacePath) || !currentThread ||
+          scope.incarnation !== threadIncarnationKey(threadDraftIncarnation(currentThread)))) {
+        setImageQueueError(queued.id, IMAGE_QUEUE_WORKSPACE_MISMATCH)
+        return
+      }
+      const sendFrozenImage = async (entry: QueuedMessage, imageScope: NonNullable<typeof scope>) => {
+        const canSend = () => {
+          const current = getQueuedMessage(entry.id)
+          const liveThread = useAppStore.getState().threads.find(thread => thread.thread_id === threadId)
+          return current === entry && canClaimQueuedMessage(entry, current) && !editingImageIds.has(entry.id) &&
+            chatViewMountedRef.current && currentThreadIdRef.current === threadId &&
+            !readOnlyRef.current && !managedTurnRef.current &&
+            isSameGitWorkspacePath(imageScope.workspacePath, workspacePathRef.current) &&
+            Boolean(liveThread && imageScope.incarnation === threadIncarnationKey(threadDraftIncarnation(liveThread)))
+        }
+        if (!canSend()) return
+        const setPhase = (phase: ImageSendPhase) => {
+          imageSendPhases.set(entry.id, phase)
+          setQueuePumpTick(tick => tick + 1)
+        }
+        let acknowledged = false
+        try {
+          const status = await runFrozenImageOutbox(entry, {
+            status: () => window.api.file.chatImageSubmissionStatus(imageScope),
+            canSend,
+            send: async (request, id) => {
+              setPhase("submitted")
+              setActiveTurnStartTime(Date.now())
+              clearFinishedWorkflowRun()
+              let transportError: Error | undefined
+              await stream.submit({ messages: [{ type: "human", content: request.message }] }, {
+                onSubmitError: error => {
+                  transportError = error instanceof Error ? error : new Error(String(error))
+                },
+                onPromptAccepted: () => {
+                  if (acknowledged) return
+                  acknowledged = true
+                  setPhase("accepted")
+                  const display = guardCoordinatorPlainText(getQueuedDisplayContent(entry, true))
+                  void appendVisibleUserMessageWithTime(display, { id, hasChatImages: Boolean(entry.chatImages?.length) })
+                  if (!threadMessages.length && currentThread?.title?.startsWith("Thread ")) {
+                    const title = entry.text.trim() || entry.skillName
+                    if (title) generateTitleForFirstMessage(threadId, title, entry.skillName, entry.skillDescription)
+                  }
+                },
+                config: { configurable: { thread_id: threadId, hook_turn_id: id, chat_images: entry.chatImages,
+                  model_id: request.modelId, agent_mode: request.mode } }
+              })
+              if (transportError) throw transportError
+            },
+            finish: failed => {
+              if (getQueuedMessage(entry.id) !== entry) return
+              deleteQueuedMessage(entry.id)
+              if (failed) setError("图片消息已接纳，但本次运行失败，请查看会话记录。")
+            }
+          })
+          if (isActiveImageReceipt(status)) {
+            setObservedImageReceipt({ threadId, id: entry.id, status })
+          } else if (status === "unknown" || status === "rejected" || status === "missing") {
+            setImageQueueError(entry.id, status === "unknown" ? "图片消息的执行结果待核对，请先查看会话记录。" :
+              "图片消息未获接纳，原输入已保留在队列中。")
+          }
+        } finally {
+          setActiveTurnStartTime(null)
+        }
+      }
+      if (!await checkDelivery()) return
+      const currentSelectedModel = models.find(model => model.id === currentModel && model.available)
+      const replacementVisionModel = currentSelectedModel?.inputModalities?.includes("image")
+        ? currentSelectedModel : undefined
+      const canUseOriginalImageModel = async (model: typeof currentSelectedModel) =>
+        Boolean(model?.available && (model.inputModalities?.includes("image") ||
+          (!replacementVisionModel && models.some(candidate => candidate.available && candidate.inputModalities?.includes("image")) &&
+            await window.api.routing.getMode() === "auto")))
+      if (scope && delivery?.frozen) {
+        const originalModel = models.find(model => model.id === delivery.frozen?.modelId && model.available)
+        const canUseOriginal = !safeToChooseModel || await canUseOriginalImageModel(originalModel)
+        if (!canUseOriginal && !replacementVisionModel) {
+          setImageQueueError(queued.id, IMAGE_QUEUE_MODEL_REQUIRED_ERROR)
+          return
+        }
+        if (!canUseOriginal && replacementVisionModel) {
+          if (getQueuedMessage(queued.id) !== queued || editingImageIds.has(queued.id)) return
+          const frozen = { ...delivery.frozen, modelId: replacementVisionModel.id }
+          let persistError: string | null = "图片消息未能保存"
+          updateQueuedMessage(queued.id, { modelId: frozen.modelId, imageDelivery: { ...delivery, frozen } },
+            error => { persistError = error })
+          if (persistError) setImageQueueError(queued.id, persistError)
+          else {
+            const saved = getQueuedMessage(queued.id)
+            if (saved?.imageDelivery?.frozen === frozen) await sendFrozenImage(saved, scope)
+          }
+        } else {
+          await sendFrozenImage(queued, scope)
+        }
+        return
+      }
       let draftForSubmission = queued
       if (queued.botReplyTo?.role === "user") {
         const isCurrent = () => {
@@ -7558,15 +8047,14 @@ export function ChatContainer({
       const queuedModel = queued.modelId
         ? models.find((model) => model.id === queued.modelId)
         : undefined
-      const currentSelectedModel = currentModel
-        ? models.find((model) => model.id === currentModel)
-        : undefined
-      const selectedModel = queuedModel?.available
-        ? queuedModel
-        : currentSelectedModel?.available
-          ? currentSelectedModel
-          : undefined
+      const selectedModel = delivery
+        ? await canUseOriginalImageModel(queuedModel) ? queuedModel : replacementVisionModel
+        : queuedModel?.available ? queuedModel : currentSelectedModel
       if (!selectedModel) {
+        if (delivery) {
+          setImageQueueError(queued.id, IMAGE_QUEUE_MODEL_REQUIRED_ERROR)
+          return
+        }
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
         } else if (queuedModel || currentSelectedModel) {
@@ -7657,15 +8145,26 @@ export function ChatContainer({
       if (draftForSubmission !== queued && (currentQueued !== queued || !chatViewMountedRef.current ||
           currentThreadIdRef.current !== threadId || readOnlyRef.current || managedTurnRef.current)) return
       const isFirstMessage = threadMessages.length === 0
+      if (scope && delivery) {
+        if (currentQueued !== queued || editingImageIds.has(queued.id)) return
+        const frozen = { message: fullMessage, modelId: queuedModelId, mode: submitAgentMode === "multi" ? "normal" as const : submitAgentMode }
+        let persistError: string | null = "图片消息未能保存"
+        updateQueuedMessage(queued.id, { imageDelivery: { ...delivery, frozen } }, error => { persistError = error })
+        if (persistError) {
+          setImageQueueError(queued.id, persistError)
+          return
+        }
+        const saved = getQueuedMessage(queued.id)
+        if (saved?.imageDelivery?.frozen === frozen) await sendFrozenImage(saved, scope)
+        return
+      }
       deleteQueuedMessage(queued.id)
       // Reuse the draft's own id for the optimistic bubble. If stream.submit below
       // throws, the catch re-parks this same draft and the pump retries it — without
       // a stable id, each retry would call appendMessage with a FRESH uuid and leave
       // a new orphaned "ghost" user bubble behind every attempt (appendMessage upserts
       // by id, so re-using queued.id makes a retry replace the same bubble instead).
-      const visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
-        id: queued.id
-      })
+      await appendVisibleUserMessageWithTime(displayContent, { id: queued.id })
       if (isBtwSubmissionBlocked(threadId)) {
         removeLocalMessage(queued.id)
         prependQueuedMessage(queued)
@@ -7688,22 +8187,18 @@ export function ChatContainer({
       clearFinishedWorkflowRun()
       let promptAccepted = false
       try {
-        await stream.submit(
-          {
-            messages: [{ type: "human", content: fullMessage }]
-          },
-          {
-            onPromptAccepted: sideComposer ? () => { promptAccepted = true } : undefined,
-            config: {
-              configurable: {
-                thread_id: threadId,
-                model_id: queuedModelId,
-                agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
-                ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
-              }
+        await stream.submit({ messages: [{ type: "human", content: fullMessage }] }, {
+          onPromptAccepted: sideComposer ? () => { promptAccepted = true } : undefined,
+          config: {
+            configurable: {
+              thread_id: threadId,
+              model_id: queuedModelId,
+              chat_images: draftForSubmission.chatImages,
+              agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
+              hook_turn_id: queued.id
             }
           }
-        )
+        })
       } finally {
         setActiveTurnStartTime(null)
       }
@@ -7729,6 +8224,7 @@ export function ChatContainer({
       removeLocalMessage,
       setActiveTurnStartTime,
       setError,
+      setImageQueueError,
       sideComposer,
       stream,
       threadId,
@@ -7742,12 +8238,89 @@ export function ChatContainer({
   // selected model and workspace are usable, clear only those known errors so
   // the parked draft can resume; unrelated run failures still block auto-drain.
   useEffect(() => {
-    if (historyOnly || !threadError || !RECOVERABLE_QUEUE_ERRORS.has(threadError)) return
-    const selectedModel = currentModel
-      ? models.find((model) => model.id === currentModel)
-      : undefined
-    if (selectedModel?.available && workspacePath) clearError()
-  }, [clearError, currentModel, historyOnly, models, threadError, workspacePath])
+    if (historyOnly || !threadError) return
+    const head = nextOrdinaryQueuedMessage(queuedMessages)
+    if (threadError === IMAGE_QUEUE_WORKSPACE_MISMATCH) {
+      if (head?.imageDelivery && currentThread && isSameGitWorkspacePath(head.imageDelivery.workspacePath, workspacePath) &&
+          head.imageDelivery.incarnation === threadIncarnationKey(threadDraftIncarnation(currentThread)))
+        clearImageQueueError(head.id)
+      return
+    }
+    if (!workspacePath) return
+    const selectedModel = models.find(model => model.id === currentModel && model.available)
+    if (threadError === IMAGE_QUEUE_MODEL_REQUIRED_ERROR) {
+      const originalModelId = head?.imageDelivery?.frozen?.modelId ?? head?.modelId
+      if (head?.imageDelivery && models.some(model => model.available &&
+          (model.id === currentModel || model.id === originalModelId) && model.inputModalities?.includes("image")))
+        clearImageQueueError(head.id)
+    } else if (selectedModel && RECOVERABLE_QUEUE_ERRORS.has(threadError)) {
+      clearError()
+    }
+  }, [clearError, clearImageQueueError, currentModel, currentThread, historyOnly, models,
+    queuedMessages, threadError, workspacePath])
+
+  // A receipt can outlive the renderer and queue order. Keep the thread fenced
+  // until its frozen requests have been checked, even if a plain draft moves ahead.
+  useEffect(() => {
+    if (!imageReceiptKey) {
+      setCheckedImageReceiptKey("")
+      return
+    }
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const reconcile = async () => {
+      let retry = false
+      let deferred = false
+      let live: typeof observedImageReceipt = null
+      const isLocal = (id: string) => imageSendPhases.has(id) || editingImageIds.has(id)
+      for (const entry of imageReceiptCandidates) {
+        if (disposed) return
+        if (getQueuedMessage(entry.id) !== entry) continue
+        if (isLocal(entry.id)) { deferred = true; continue }
+        const delivery = entry.imageDelivery!
+        const scope = { threadId, workspacePath: delivery.workspacePath, incarnation: delivery.incarnation, messageId: entry.id }
+        try {
+          const status = await window.api.file.chatImageSubmissionStatus(scope)
+          if (disposed) return
+          if (getQueuedMessage(entry.id) !== entry) continue
+          if (isLocal(entry.id)) { deferred = true; continue }
+          if (isActiveImageReceipt(status)) {
+            live ??= { threadId, id: entry.id, status }
+            retry = true
+          } else if (imageDeliveryAction(status) === "finish") {
+            deleteQueuedMessage(entry.id, error => {
+              if (error) setImageQueueError(entry.id, error)
+              else {
+                clearImageQueueError(entry.id)
+                if (status === "failed") setError("图片消息已接纳，但本次运行失败，请查看会话记录。")
+              }
+            })
+          } else if (status === "unknown" && !threadContext.getThreadState(threadId).error &&
+            nextOrdinaryQueuedMessage(threadContext.getThreadState(threadId).queuedMessages)?.id === entry.id) {
+            setImageQueueError(entry.id, "图片消息的执行结果待核对，请先查看会话记录。")
+          }
+        } catch {
+          // A temporary read failure does not make the in-flight request retryable.
+          deferred = true
+        }
+      }
+      if (disposed) return
+      if (!deferred) {
+        setCheckedImageReceiptKey(imageReceiptKey)
+        setObservedImageReceipt(current => current?.threadId === live?.threadId &&
+          current?.id === live?.id && current?.status === live?.status ? current : live)
+      } else if (live) {
+        setObservedImageReceipt(live)
+      }
+      if (retry || deferred) timer = setTimeout(() => void reconcile(), 1000)
+    }
+    void reconcile()
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [clearImageQueueError, deleteQueuedMessage, getQueuedMessage, imageReceiptCandidates, imageReceiptKey,
+    setError, setImageQueueError, submitReleaseVersion, threadContext, threadId])
 
   // Reconcile handed-off drafts against main-process state instead of guessing
   // from an idle transition. Durable messages leave the draft queue, messages
@@ -7869,11 +8442,20 @@ export function ChatContainer({
     // only the queue head. Draining any ordinary item first could append it
     // before a previously injected guided turn whose acknowledgement is late.
     const next = nextOrdinaryQueuedMessage(queuedMessages)
-    if (!next) return
+    if (!next || activeImageReceipt || imageReceiptCheckPending ||
+        parkingImageIds.has(next.id) || editingImageIds.has(next.id)) return
 
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
+    if (next.chatImages?.length) {
+      imageSendPhases.set(next.id, "preparing")
+      setQueuePumpTick(tick => tick + 1)
+    }
     const recoverQueuedSubmission = async (message?: string) => {
       if (isBtwSubmissionBlocked(threadId)) return
+      if (next.chatImages?.length) {
+        if (message !== undefined) setImageQueueError(next.id, message)
+        return
+      }
       if (message !== undefined) setError(message)
       let durable: boolean | undefined
       try {
@@ -7930,9 +8512,12 @@ export function ChatContainer({
         error => recoverQueuedSubmission(error instanceof Error ? error.message : String(error))
       )
       .finally(() => {
+        imageSendPhases.delete(next.id)
         releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
       })
   }, [
+    activeImageReceipt,
+    imageReceiptCheckPending,
     bizRetryPending,
     contextReminderPending,
     currentModel,
@@ -7949,6 +8534,7 @@ export function ChatContainer({
     readOnly,
     removeLocalMessage,
     setError,
+    setImageQueueError,
     sideRestoring,
     stream,
     submitReleaseVersion,
@@ -8085,15 +8671,8 @@ export function ChatContainer({
   }
 
   // Auto-resize textarea based on content
-  const adjustTextareaHeight = useCallback((): void => {
-    const textarea = inputRef.current
-    if (textarea) {
-      textarea.style.height = "auto"
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
-    }
-  }, [])
-
   useEffect(() => {
+    if (!visible) return
     if (textareaResizeFrameRef.current !== null) {
       cancelAnimationFrame(textareaResizeFrameRef.current)
     }
@@ -8107,7 +8686,7 @@ export function ChatContainer({
         textareaResizeFrameRef.current = null
       }
     }
-  }, [adjustTextareaHeight, input, composerReadOnly])
+  }, [adjustTextareaHeight, input, composerReadOnly, visible])
 
   useEffect(() => {
     if (surface !== "btw" || !stream || effectiveInputDisabled || !workspacePath) return
@@ -9208,6 +9787,21 @@ export function ChatContainer({
     </div>
   )
 
+  const canPresentImmediateImage = !sideComposer && !managedTurn && !queueAutoDrainSuppressed && !threadError &&
+    !pendingApproval && !readOnly && !historyLoading && !hasActiveGoalRunning && !bizRetryPending &&
+    !contextReminderPending && Boolean(stream)
+  const immediateQueueHead = canPresentImmediateImage && !isLoading
+    ? nextOrdinaryQueuedMessage(queuedMessages)
+    : undefined
+  const presentedQueue = queuedMessages.map(message => ({
+    message,
+    presentation: activeImageReceipt?.id === message.id ? "hidden" : imageQueuePresentation(message, managedTurn ? undefined : imageSendPhases.get(message.id),
+      message === immediateQueueHead)
+  }))
+  const pendingImage = presentedQueue.find(item =>
+    item.presentation === "preparing" || item.presentation === "sending")
+  const visibleQueuedMessages = presentedQueue.filter(item => item.presentation === "queued").map(item => item.message)
+
   function insertContextMenuToken(symbol: "@" | "/"): void {
     insertingContextToken.current = true
     setContextMenuOpen(false)
@@ -9333,7 +9927,7 @@ export function ChatContainer({
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
-        visible={!historyOnly && !showCustomizeView}
+        visible={visible && !historyOnly && !showCustomizeView}
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
@@ -9540,6 +10134,7 @@ export function ChatContainer({
                     value={showExecutionDetails || searchExpandsExecutionDetails}
                   >
                     <ChatFoldedToolCallsContext.Provider value={foldedTools}>
+                    <ChatUserImagePresentationContext.Provider value={presentUserImages}>
                     <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
                       <ChatMessageVirtualList
                         historyWindowRevision={historyWindowRevision}
@@ -9610,6 +10205,7 @@ export function ChatContainer({
                         footer={chatMessageListFooter}
                       />
                     </ChatToolPresentationContext.Provider>
+                    </ChatUserImagePresentationContext.Provider>
                     </ChatFoldedToolCallsContext.Provider>
                   </ChatExecutionDetailsContext.Provider>
                 </div>
@@ -10045,21 +10641,47 @@ export function ChatContainer({
                       </button>
                     </div>
                   )}
-                  {queuedMessages.length > 0 && (
+                  {activeImageReceipt && !isLoading && (
+                    <div className="flex items-center justify-between gap-2 px-1 py-1 text-xs text-muted-foreground">
+                      <span role="status">{activeImageReceipt.status === "awaiting" ? "图片消息等待继续" : "图片消息正在处理…"}</span>
+                      {activeImageReceipt.status !== "awaiting" && (
+                        <button type="button" className="shrink-0 rounded-md px-2 py-1 hover:bg-muted hover:text-foreground"
+                          onClick={handleCancel}>停止生成</button>
+                      )}
+                    </div>
+                  )}
+                  {pendingImage && (
+                    <div className="flex items-center justify-between gap-2 px-1 py-1 text-xs text-muted-foreground">
+                      <span role="status">正在发送图片消息…</span>
+                      {pendingImage.presentation === "preparing" && (
+                        <button
+                          type="button"
+                          className="shrink-0 rounded-md px-2 py-1 hover:bg-muted hover:text-foreground"
+                          onClick={() => void handleDeleteQueuedMessage(pendingImage.message)}
+                        >
+                          取消发送
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {visibleQueuedMessages.length > 0 && (
                     <div className="px-1 py-1">
                       <div className="flex items-center gap-2 pb-1 text-[11px] text-muted-foreground">
                         <ListEnd className="size-3.5" />
                         <span>
-                          {managedTurn?.submitDraft ? "待确认" : "排队中"} {queuedMessages.length}{" "}
+                          {managedTurn?.submitDraft && !visibleQueuedMessages.every(message =>
+                            managedTurn.queuedVisualDraftIds?.has(message.id)) ? "待确认" : "排队中"} {visibleQueuedMessages.length}{" "}
                           条
                         </span>
                       </div>
                       <div data-chat-queued-list className="space-y-1.5">
-                        {queuedMessages.map((queued) => {
+                        {visibleQueuedMessages.map((queued) => {
                           const isEditing = editingQueueId === queued.id
                           const isGuided = Boolean(queued.handoffRequestedAt)
                           const retainedReply = !managedTurn ? queued.botReplyTo : undefined
                           const canResumeParked = !managedTurn && !readOnly && canResumeParkedQueuedMessage(queued)
+                          const botVisualQueued = managedTurn?.queuedVisualDraftIds?.has(queued.id)
+                          const ordinaryImageInBot = Boolean(managedTurn && (queued.imageDelivery || queued.chatImages?.length))
                           return (
                             <div
                               key={queued.id}
@@ -10154,7 +10776,9 @@ export function ChatContainer({
                                       继续发送
                                     </button>
                                   )}
-                                  {managedTurn?.submitDraft && (
+                                  {botVisualQueued && <span className="shrink-0 text-xs text-muted-foreground">排队中</span>}
+                                  {ordinaryImageInBot && <span className="shrink-0 text-xs text-muted-foreground">请回到普通聊天处理</span>}
+                                  {managedTurn?.submitDraft && !botVisualQueued && !ordinaryImageInBot && (
                                     <button
                                       type="button"
                                       onClick={() => void submitQueuedMessage(queued)}
@@ -10168,7 +10792,7 @@ export function ChatContainer({
                                           : "重试发送"}
                                     </button>
                                   )}
-                                  {!managedTurn?.submitDraft && !queued.botExplicitSkill && CURRENT_RUN_GUIDE_UI_ENABLED && (
+                                  {!managedTurn?.submitDraft && !queued.botExplicitSkill && !queued.chatImages?.length && CURRENT_RUN_GUIDE_UI_ENABLED && (
                                     <button
                                       type="button"
                                       onClick={() => void handleGuideQueuedMessage(queued)}
@@ -10190,21 +10814,23 @@ export function ChatContainer({
                                       {isGuided ? "已引导" : "引导"}
                                     </button>
                                   )}
-                                  <QueuedMessageActions
+                                  {!ordinaryImageInBot && <QueuedMessageActions
                                     botState={
                                       managedTurn?.submitDraft
-                                        ? managedTurn.sendingDraftIds?.has(queued.id)
-                                          ? "sending"
-                                          : isGuided
-                                            ? "unconfirmed"
-                                            : "queued"
+                                        ? botVisualQueued
+                                          ? "host-queued"
+                                          : managedTurn.sendingDraftIds?.has(queued.id)
+                                            ? "sending"
+                                            : isGuided
+                                              ? "unconfirmed"
+                                              : "queued"
                                         : undefined
                                     }
                                     onChooseSkillTarget={queued.botExplicitSkill && !queued.botSkillTarget && !queued.handoffRequestedAt && !queued.botHandoffTarget && managedTurn?.chooseSkillTarget
                                       ? () => managedTurn.chooseSkillTarget!(queued) : undefined}
                                     onEdit={() => startEditingQueuedMessage(queued)}
                                     onDelete={() => handleDeleteQueuedMessage(queued)}
-                                  />
+                                  />}
                                 </div>
                               )}
                             </div>
@@ -10235,6 +10861,10 @@ export function ChatContainer({
                         }
                         onGitStatusChange={setGitWorkspaceStatus}
                       />
+                      {surface === "default" && !readOnly && workspacePath && !threadId.includes("__wf_") && (
+                        <TaskCommitBindingControl key={JSON.stringify([threadId, workspacePath])}
+                          threadId={threadId} />
+                      )}
                       <GitBranchSwitcher
                         key={workspacePath}
                         workspacePath={workspacePath}
@@ -10623,9 +11253,15 @@ export function ChatContainer({
                                 className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1 text-xs group cursor-default"
                               >
                                 <Paperclip className="size-3 shrink-0 text-muted-foreground" />
+                                <AttachmentImagePreview attachment={att} read={readAttachmentImages} />
                                 <span className="max-w-[160px] truncate" title={att.filePath}>
                                   {att.filename}
                                 </span>
+                                {att.visualNotice && (
+                                  <span className="text-xs text-amber-600" title={att.visualNotice}>
+                                    {att.visualNotice}
+                                  </span>
+                                )}
                                 {att.truncated && (
                                   <span className="text-amber-500" title="内容已截取">
                                     ⚠
@@ -10734,7 +11370,22 @@ export function ChatContainer({
                                   setError(managedTurn.textOnlyReason!)
                                 }
                               }
-                            : undefined
+                            : (event) => {
+                                if (managedTurn || !event.clipboardData.files.length) return
+                                const files = Array.from(event.clipboardData.files)
+                                event.preventDefault()
+                                const pasted = event.clipboardData.getData("text/plain")
+                                if (pasted) {
+                                  const { selectionStart, selectionEnd } = event.currentTarget
+                                  setInput(input.slice(0, selectionStart) + pasted + input.slice(selectionEnd))
+                                }
+                                if (files.some(file => file.size > MAX_ATTACHMENT_FILE_BYTES)) {
+                                  setError("单文件不超过 5MB")
+                                  return
+                                }
+                                void handleAttachmentInputs(files.slice(0, MAX_ATTACHMENTS)
+                                  .map(file => ({ kind: "file" as const, file })))
+                              }
                         }
                         onCompositionStart={() => {
                           promptHistory.cancelPending()
@@ -10894,14 +11545,20 @@ export function ChatContainer({
                     {surface !== "bot" && <>
                       {agentCommitApproval && <AgentGitCommitDialog
                         key={agentCommitApproval.id}
-                        // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
-                        open={!showCustomizeView}
+                        // 提交审批通过 Portal 显示，跟随会话可见性，切回后继续处理。
+                        open={visible && !showCustomizeView}
                         threadId={threadId}
                         workspacePath={workspacePath}
                         suggestedMessage={agentCommitApproval.suggestedCommitMessage}
                         suggestedFilePaths={agentCommitApproval.suggestedCommitFilePaths}
                         suggestedFileBasePath={agentCommitApproval.suggestedCommitFileBasePath}
                         suggestedGitWorktreePath={agentCommitApproval.suggestedGitWorktreePath}
+                        commitBindingVersion={agentCommitApproval.commitBindingVersion}
+                        reviewReason={
+                          typeof agentCommitApproval.reason === "string"
+                            ? agentCommitApproval.reason
+                            : undefined
+                        }
                         suggestedGitRepositories={agentCommitApproval.suggestedGitRepositories}
                         suggestedFileSelectionSource={
                           agentCommitApproval.suggestedCommitFileSelectionSource

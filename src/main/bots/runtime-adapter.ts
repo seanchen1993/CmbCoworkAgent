@@ -19,6 +19,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { lstatSync, realpathSync } from "node:fs"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { createThread, getThreadCore, updateThread } from "../db"
+import { boundChatImageReceipt } from "../chat-images"
+import { hasBotInputImages, prepareBotInputImages, botBoundImageIds } from "./input-images"
 import { startAgentRun, steerAgentRun, type AgentRunTerminal } from "../agent/agent-run-service"
 import {
   createManagedTransportAgentRunDelivery,
@@ -87,7 +89,7 @@ import { applyBotSkillSelection } from "./skill-policy"
 import { BOT_TEAM_UNSUPPORTED } from "../../shared/bots/team-policy"
 import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { createBotWorkTools, createBotWorkResultTools } from "./work-tools"
-import { projectSkillWorkInput, verifyInputFiles } from "./input-files"
+import { projectSkillWorkInput, retainedInputFileIds, verifyInputFiles } from "./input-files"
 import type { BotMockExecution } from "../../shared/bots/mock-channel"
 import {
   botMockMetadataSafe,
@@ -140,8 +142,11 @@ function botReplyPreview(event: SchedulerRendererEvent): SchedulerRendererEvent 
   if (event.type === "custom" && event.data.type === "coordinator_ai_snapshot_message") {
     const message = event.data.assistantMessage
     if (message && typeof message === "object" && "content" in message) {
-      const { content: _draft, ...rest } = message
-      return "reasoning" in rest ? { ...event, data: { ...event.data, assistantMessage: rest } } : undefined
+      const assistantMessage = { ...message }
+      Reflect.deleteProperty(assistantMessage, "content")
+      return "reasoning" in assistantMessage
+        ? { ...event, data: { ...event.data, assistantMessage } }
+        : undefined
     }
   }
   return event
@@ -689,6 +694,7 @@ export function createLocalBotRunPort(
           return
         if (interruptModel?.()) yielded = true
       }
+      const imageStages = new Set<() => Promise<void>>()
       let releaseImInteraction: (() => void) | undefined
       return {
         approvalRequestIds,
@@ -752,6 +758,9 @@ export function createLocalBotRunPort(
             JSON.parse(getThreadCore(task.threadId)?.metadata || "{}")).enabled) return false
           // The same audience can steer at a graph boundary. An unrelated peer or routine cannot.
           if (!canSteerBotTask(task, message)) return false
+          // A message with pixels needs its own model-routing/capability decision.
+          if (!message.mockSource && message.message.includes('input_id="input-') &&
+            getHost().inputFilesForTask(message.id).some(hasBotInputImages)) return false
           // Forwarding context is not an answer or a request to abandon the current turn.
           // Keep it in the existing inbox until the original interaction is resolved.
           if (message.origin.kind === "work" &&
@@ -841,6 +850,9 @@ export function createLocalBotRunPort(
           return result.queued
         },
         release() {
+          for (const release of imageStages)
+            void release().catch(error => console.warn("[Bots] Image release failed", error?.code))
+          imageStages.clear()
           approvalRequestIds.clear()
           releaseImInteraction?.()
           stopQuestionCapture()
@@ -1488,7 +1500,23 @@ export function createLocalBotRunPort(
             task.origin.kind === "notification" &&
             ["workflow", "coordinator"].includes(task.origin.notificationKind)
           const hasInputFiles = (task.origin.kind === "user" || task.origin.kind === "work") && Boolean(task.origin.inputFileIds?.length)
-          const files = hasInputFiles ? getHost().inputFilesForTask(task.id) : []
+          const hasGroupImages = task.origin.kind === "group"
+          const files = hasInputFiles || hasGroupImages ? getHost().inputFilesForTask(task.id) : []
+          let admittedImageFileIds: string[] = []
+          const validateBotChatImageAccess = () => {
+            const current = getHost().imagesForRunningTask(task.id)
+            if (checkpointId) {
+              const receipt = boundChatImageReceipt(task.threadId, task.requestId)
+              const allowed = botBoundImageIds(task, current)
+              if (receipt?.source !== "bot" || receipt.images.some(ref => !allowed.has(ref.id)))
+                throw new BotError("CONFLICT", "图片授权已发生变化")
+            }
+            const allowed = new Set(current.map(file => file.id))
+            if (admittedImageFileIds.some(id => !allowed.has(id)))
+              throw new BotError("CONFLICT", "图片授权已发生变化")
+          }
+          const localImages = !task.mockSource && !work?.source &&
+            files.some(hasBotInputImages)
           if (hasInputFiles)
             await verifyInputFiles(task.origin.kind === "work" ? files : files.filter(file => file.blockHash), signal)
           const projectedInput = projectSkillWorkInput(task, files)
@@ -1729,6 +1757,24 @@ export function createLocalBotRunPort(
               }),
               {
                 source: "bot",
+                ...(localImages ? {
+                  validateBotChatImageAccess,
+                  ...(checkpointId ? { resumeBotChatImageMessageId: task.requestId } : {}),
+                  ...(!checkpointId && task.origin.kind === "user" ? {
+                    onBotChatImageAdmission: () => getHost().acceptDesktopImageInput(task.id)
+                  } : {}),
+                  prepareBotChatImages: async (body: string, activeSignal: AbortSignal) => {
+                    const current = getHost().imagesForRunningTask(task.id)
+                    admittedImageFileIds = retainedInputFileIds(current.filter(hasBotInputImages), body, task)
+                    const result = await prepareBotInputImages(task, previewThreadId ?? task.threadId,
+                      body, current, activeSignal, undefined, imageStages)
+                    if (!result.length && task.origin.kind === "user" &&
+                        !body.replace(/<attachment\b[^>]*\btype="image\/(?:png|jpeg|webp)"[^>]*>[\s\S]*?<\/attachment>/gi, "").trim())
+                      throw new BotError("CONFLICT", "图片已被输入处理移除，草稿已保留。")
+                    validateBotChatImageAccess()
+                    return result
+                  }
+                } : {}),
                 persistedUserInputProjections: inputProjection || (ids => getHost().inputProjections(bot.id, task.threadId, ids)),
                 ...(tracksPreparedInput ? {
                   onUserPromptPrepared: (body: string, receipt?: { internalGoalInput: true }) => {

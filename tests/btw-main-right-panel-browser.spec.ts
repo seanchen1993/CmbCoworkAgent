@@ -133,6 +133,7 @@ function completeWrite(name) {
 function App() {
   const [sideOpen, setSideOpen] = useState(false)
   const [full, setFull] = useState(false)
+  const [mainTabVisible, setMainTabVisible] = useState(false)
   const [modal, setModal] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
   const [btwVisible, setBtwVisible] = useState(true)
@@ -151,16 +152,17 @@ function App() {
     <button onClick={() => openResourcePanelOverlay("browser")}>Open parent browser</button>
     <RightPanel threadId="main" moduleMode={browserOpen ? "browser" : sideOpen ? "btw" : "work"} />
     {sideOpen && <textarea aria-label="Side composer" />}
-    <button onClick={() => { setFull(false); void openBtw() }}>Open focus fixture</button>
+    <button onClick={() => { setFull(false); setMainTabVisible(false); void openBtw() }}>Open focus fixture</button>
     <button onClick={() => { void openBtw() }}>Append focus fixture</button>
     <button>Other control</button>
-    {mainComposerVisible && <div data-chat-surface="default" data-chat-thread-id="main" style={focusTab && full ? { display: "none" } : undefined}>
+    {mainComposerVisible && <div data-chat-surface="default" data-chat-thread-id="main" style={focusTab && full && !mainTabVisible ? { display: "none" } : undefined}>
       <textarea aria-label="Main composer" className="composer-textarea" />
       <div ref={mainComposerActionsRef} data-composer-actions style={{ height: 40 }} />
     </div>}
-    {visibleBtw && <BtwPane parentId="main" full={full} toggleFull={() => setFull(!full)} />}
+    {visibleBtw && <BtwPane parentId="main" full={full} mainTabVisible={full && mainTabVisible}
+      showMainTab={setMainTabVisible} toggleFull={() => setFull(!full)} />}
     <ResourcePanelOverlay renderedMainView="thread" renderedPanelThreadId="main" isAgentFocusActive={false}
-      btwPaneVisible={visibleBtw} />
+      btwTabsVisible={visibleBtw} btwPaneVisible={visibleBtw && !(full && mainTabVisible)} />
     {modal && <div role="dialog" data-cmb-modal-dialog="true" data-state="open">Fixture modal</div>}
   </>
 }
@@ -172,7 +174,7 @@ createRoot(document.getElementById("root")).render(<App />)
       name: "stub-right-panel-data",
       setup(builder) {
         builder.onResolve({
-          filter: /^(?:\.\.\/chat\/ChatContainer|@\/(?:lib\/(?:btw-chat|store|thread-context)|components\/(?:tabs\/FileViewer|panels\/(?:GitPanelView|SubagentPanel|SystemConstraintsPanel)|browser\/BrowserPanel|customize\/(?:LspPanel|ProjectPluginDevelopmentGuide))))$/
+          filter: /^(?:\.\.\/chat\/ChatContainer|@\/(?:lib\/(?:btw-chat|btw-composer-focus|store|thread-context)|components\/(?:tabs\/FileViewer|panels\/(?:GitPanelView|SubagentPanel|SystemConstraintsPanel)|browser\/BrowserPanel|customize\/(?:LspPanel|ProjectPluginDevelopmentGuide))))$/
         }, ({ path }) => ({ path, namespace: "right-panel-data" }))
         builder.onLoad({ filter: /.*/, namespace: "right-panel-data" }, ({ path }) => ({
           contents: path.endsWith("/btw-chat") ? `
@@ -216,6 +218,7 @@ useAppStore.getState = () => state
 useAppStore.setState = patch => Object.assign(state, patch)
 export const selectSkillGenerationAgent = () => ({ phase: null })
 export const selectSkillRetryContext = () => null
+export const selectThreadSummary = (_state, id) => id === "main" ? { title: "Main conversation" } : undefined
 ` : path.endsWith("/thread-context") ? `
 import { useSyncExternalStore } from "react"
 import { mergeWorkspaceStreamFiles } from "./src/renderer/src/lib/workspace-file-load"
@@ -301,7 +304,10 @@ export function ProjectPluginDevelopmentGuide() {
     const page = await browser.newPage()
     const errors: Error[] = []
     page.on("pageerror", error => errors.push(error))
-    await page.setContent('<style>[data-testid="workspace-info-panel"] { height: 720px }</style><div id="root"></div>')
+    await page.setContent(`<style>
+      [data-testid="workspace-info-panel"] { height: 720px }
+      header[aria-label="辅助对话标签页"], header[aria-label="辅助对话标签页"] > div, [data-sortable-btw-tab] { display: flex }
+    </style><div id="root"></div>`)
     await page.addScriptTag({ content: outputFiles[0].text })
     await page.getByRole("button", { name: "任务" }).click()
     await page.getByText("暂无任务").waitFor()
@@ -440,6 +446,77 @@ export function ProjectPluginDevelopmentGuide() {
     assert.equal(await mainComposer.evaluate(element => document.activeElement === element), true)
 
     close = await openFocusFixture()
+    const tabHeader = page.locator('header[aria-label="辅助对话标签页"]')
+    await page.getByRole("button", { name: "进入完整视图" }).click()
+    await page.getByRole("button", { name: "Main conversation" }).click()
+    await mainComposer.waitFor()
+    await close.press("Enter")
+    await page.evaluate(() => window.panelFixture.finishClose(true))
+    await tabHeader.waitFor({ state: "detached" })
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Main composer")
+
+    await openFocusFixture()
+    const appendFocusFixture = page.getByRole("button", { name: "Append focus fixture" })
+    await appendFocusFixture.click()
+    await appendFocusFixture.click()
+    const firstTab = page.getByRole("button", { name: "辅助对话 1", exact: true })
+    const secondTab = page.getByRole("button", { name: "辅助对话 2", exact: true })
+    const thirdTab = page.getByRole("button", { name: "辅助对话 3", exact: true })
+    await firstTab.scrollIntoViewIfNeeded()
+    const source = await firstTab.boundingBox()
+    const target = await secondTab.boundingBox()
+    assert.ok(source && target)
+    const sourceY = source.y + source.height / 2
+    await page.mouse.move(source.x + source.width / 4, sourceY)
+    await page.mouse.down()
+    await page.mouse.move(source.x + source.width / 2, sourceY, { steps: 5 })
+    await page.mouse.up()
+    assert.equal(await thirdTab.getAttribute("aria-pressed"), "true", "a drag ending on its source preserves the active tab")
+    await firstTab.press("Enter")
+    assert.equal(await firstTab.getAttribute("aria-pressed"), "true", "keyboard selection still selects a tab")
+    await thirdTab.press("Enter")
+    const awayY = source.y > 25 ? source.y - 25 : source.y + source.height + 25
+    await page.mouse.move(source.x + source.width / 2, sourceY)
+    await page.mouse.down()
+    await page.mouse.move(source.x + source.width / 2, awayY)
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 5 })
+    await page.mouse.up()
+    assert.deepEqual(await page.locator("[data-sortable-btw-tab]").evaluateAll(tabs =>
+      tabs.map(tab => tab.getAttribute("data-sortable-btw-tab"))), ["side-2", "side-1", "side-3"])
+    assert.equal(await thirdTab.getAttribute("aria-pressed"), "true", "reordering preserves the active tab")
+    await firstTab.click()
+    assert.equal(await firstTab.getAttribute("aria-pressed"), "true", "clicking still selects a tab")
+    // Narrow split view: hold a stationary pointer at each edge to reach offscreen tabs.
+    for (let i = 0; i < 3; i++) await appendFocusFixture.click()
+    const strip = tabHeader.locator("div:has(> [data-sortable-btw-tab])")
+    const narrowLayout = await page.addStyleTag({ content: `
+      header > div:has(> [data-sortable-btw-tab]) { width: 340px; overflow-x: auto; scrollbar-width: none }
+      [data-sortable-btw-tab] { flex: 0 0 156px }
+    ` })
+    await secondTab.click()
+    await firstTab.scrollIntoViewIfNeeded()
+    for (const edge of ["right", "left"] as const) {
+      const rect = await strip.boundingBox()
+      const start = await firstTab.boundingBox()
+      assert.ok(rect && start)
+      await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2)
+      await page.mouse.down()
+      await page.mouse.move(edge === "right" ? rect.x + rect.width - 3 : rect.x + 3, rect.y + rect.height / 2)
+      await page.waitForFunction(direction => {
+        const el = document.querySelector("[data-sortable-btw-tab]")!.parentElement!
+        return direction === "right" ? el.scrollLeft >= el.scrollWidth - el.clientWidth - 1 : el.scrollLeft <= 1
+      }, edge, { timeout: 3000 })
+      await page.mouse.up()
+      const ordered = await page.locator("[data-sortable-btw-tab]").evaluateAll(nodes => nodes.map(node => node.getAttribute("data-sortable-btw-tab")))
+      assert.equal(edge === "right" ? ordered.at(-1) : ordered[0], "side-1")
+      assert.equal(await secondTab.getAttribute("aria-pressed"), "true", "dragging a background tab does not select it")
+    }
+    await narrowLayout.evaluate(node => node.remove())
+    await firstTab.click({ button: "right" })
+    await page.getByRole("menuitem", { name: "关闭所有标签页", exact: true }).click()
+    await settleClose()
+
+    close = await openFocusFixture()
     await page.getByRole("button", { name: "Append focus fixture" }).click()
     await close.click()
     await page.getByRole("button", { name: "辅助对话 2", exact: true }).click({ button: "right" })
@@ -525,6 +602,19 @@ export function ProjectPluginDevelopmentGuide() {
     const browserOwner = () => browserReady.evaluate(element => [element.dataset.threadId, element.dataset.workspacePath])
     const sidePane = page.locator('[data-btw-pane="side-2"]')
     await sidePane.waitFor()
+    await page.getByRole("button", { name: "进入完整视图" }).click()
+    await page.getByRole("button", { name: "Main conversation" }).click()
+    await requestBrowser("side-2")
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    assert.equal(await browserReady.count(), 0, "background side chat must not open over the full-size main chat")
+    await requestBrowser("main")
+    const browserDrawer = page.getByRole("dialog", { name: "内置浏览器" })
+    await browserDrawer.getByTestId("browser-panel-ready").waitFor({ state: "attached" })
+    assert.deepEqual(await browserOwner(), ["main", "/parent-workspace"])
+    await browserDrawer.getByRole("button", { name: "关闭面板" }).click()
+    await browserDrawer.waitFor({ state: "detached" })
+    await page.getByRole("button", { name: "辅助对话 2", exact: true }).click()
+    await page.getByRole("button", { name: "退出完整视图" }).click()
     const sideTab = sidePane.getByRole("button", { name: "辅助对话 2", exact: true })
     await sideTab.focus()
     await requestBrowser("side-1")

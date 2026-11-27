@@ -144,7 +144,9 @@ function markdownImageIndex(
 ): number | undefined {
   const matches = new Set<number>()
   files.forEach((file, index) => {
-    if (isAbsolute(file.filePath) && relative(file.filePath, filePath) === "") matches.add(index)
+    // An exact receipt survives deletion. Other spellings need a recorded
+    // alias or a live filesystem lookup, even on case-insensitive volumes.
+    if (isAbsolute(file.filePath) && resolve(file.filePath) === resolve(filePath)) matches.add(index)
   })
   if (workspace && receipt.fileAliases !== undefined) {
     if (!Array.isArray(receipt.fileAliases) || receipt.fileAliases.length > 8) throw unavailable()

@@ -3,6 +3,7 @@ import {
   COORDINATOR_NOTIFICATION_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
   isCoordinatorNotificationPrompt,
+  isQuietCoordinatorToolName,
   isWorkflowNotificationPrompt,
   projectCoordinatorTranscriptNoise
 } from "../../../shared/internal-notification-turn"
@@ -14,14 +15,6 @@ export {
   isWorkflowNotificationPrompt
 }
 
-function isQuietCoordinatorToolResult(message: Message): boolean {
-  return (
-    message.role === "tool" &&
-    typeof message.name === "string" &&
-    message.name === "read_worker_state"
-  )
-}
-
 /**
  * Keep coordinator waiting/probing tools out of the main chat timeline.
  * Worker progress is already represented in the right-side agent panel, so
@@ -29,7 +22,7 @@ function isQuietCoordinatorToolResult(message: Message): boolean {
  */
 export function filterCoordinatorNoiseMessages(messages: Message[]): Message[] {
   return messages.flatMap((message) => {
-    if (isQuietCoordinatorToolResult(message)) {
+    if (message.role === "tool" && isQuietCoordinatorToolName(message.name)) {
       return []
     }
     const projection = projectCoordinatorTranscriptNoise(

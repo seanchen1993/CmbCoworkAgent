@@ -33,7 +33,7 @@ import {
   mergeThreadDirectoryFirstPage
 } from "./thread-directory-pagination"
 import { queueStorageKey } from "./queued-message-content"
-import { botConversationDraftKey, botThreadDraftKey } from "./bot-draft-storage"
+import { botConversationDraftKey, botThreadDraftKey, clearOrdinaryImageDrafts } from "./bot-draft-storage"
 import { LOCAL_BOT_HOST_ID } from "../../../shared/bots/contracts"
 import type { BotConversationDeletionOutcome } from "../../../shared/bots/conversation"
 import {
@@ -47,7 +47,7 @@ import {
 } from "../../../shared/message-role-collision"
 import { revalidateModelCatalog } from "./model-catalog-cache"
 import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/types"
-import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
+import { getChatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
 import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache"
 import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
 import { DEFAULT_STARTUP_VIEW, type StartupView } from "../../../shared/startup-view"
@@ -92,7 +92,10 @@ export function retireRendererThread(threadId: string, deferDirectoryUpdate = fa
     },
     {
       label: "Failed to remove deleted thread draft",
-      run: () => window.localStorage.removeItem(botThreadDraftKey(threadId))
+      run: () => {
+        window.localStorage.removeItem(botThreadDraftKey(threadId))
+        clearOrdinaryImageDrafts(threadId)
+      }
     },
     {
       label: "Failed to clear deleted thread projection",
@@ -100,7 +103,7 @@ export function retireRendererThread(threadId: string, deferDirectoryUpdate = fa
     },
     {
       label: "Failed to clear deleted thread scroll state",
-      run: () => chatScrollSessionStore.delete(threadId)
+      run: () => getChatScrollSessionStore(threadId).delete(threadId)
     },
     {
       label: "Failed to clear deleted thread skill generation",

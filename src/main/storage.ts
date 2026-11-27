@@ -1,3 +1,4 @@
+import { modelInputModalities, type ModelInputModality } from "../shared/model-catalog"
 import {
   readContentFileSync,
   encodeMarketContent,
@@ -1613,6 +1614,7 @@ export async function syncSkillsToClaudeDir(workDir: string): Promise<void> {
 
 // Custom model configurations stored as JSON in ~/.cmbcoworkagent/custom-models.json
 export interface CustomModelConfig {
+  inputModalities?: ModelInputModality[]
   id: string
   name: string
   baseUrl: string
@@ -1650,6 +1652,11 @@ export interface BuiltinModelOverride {
   tier?: "premium" | "economy"
 }
 
+export interface StoredBuiltinModelOverride extends BuiltinModelOverride {
+  /** Pro's existing maxTokens field stores the UAT context override. */
+  productionMaxTokens?: number
+}
+
 export interface UserInfoConfig {
   sapId?: string //8
   ystId?: string //6
@@ -1684,6 +1691,7 @@ export type ThinkingEffort = "low" | "high" | "max"
 export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 
 export interface CustomModelPublicConfig {
+  inputModalities?: ModelInputModality[]
   id: string
   name: string
   baseUrl: string
@@ -1702,6 +1710,7 @@ export interface CustomModelPublicConfig {
 }
 
 interface StoredCustomModelRecord {
+  inputModalities?: ModelInputModality[]
   id: string
   name: string
   baseUrl: string
@@ -2017,13 +2026,13 @@ export function getStoredIdleModelUseUat(): boolean {
 
 const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"
 
-export function getBuiltinModelOverrides(): Record<string, BuiltinModelOverride> {
+export function getBuiltinModelOverrides(): Record<string, StoredBuiltinModelOverride> {
   const raw = getSettingsStore().get(BUILTIN_MODEL_OVERRIDES_KEY, {}) as unknown
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
-  return raw as Record<string, BuiltinModelOverride>
+  return raw as Record<string, StoredBuiltinModelOverride>
 }
 
-export function setBuiltinModelOverride(id: string, override: BuiltinModelOverride): void {
+export function setBuiltinModelOverride(id: string, override: StoredBuiltinModelOverride): void {
   const normalizedId = id.trim()
   if (!normalizedId) throw new Error("内置模型 ID 不能为空")
   const current = getBuiltinModelOverrides()
@@ -2336,6 +2345,7 @@ function toPublicConfig(
     name: config.name || config.model,
     baseUrl: config.baseUrl,
     model: config.model,
+    inputModalities: modelInputModalities(config.inputModalities),
     hasApiKey: !!getCustomModelApiKey(config.id, env),
     maxTokens: tokenBudget.maxTokens,
     maxOutputTokens: tokenBudget.maxOutputTokens,
@@ -2368,6 +2378,7 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
       name: item.name || item.model,
       baseUrl: item.baseUrl,
       model: item.model,
+      inputModalities: modelInputModalities(item.inputModalities),
       apiKey: getCustomModelApiKey(item.id, env),
       maxTokens: tokenBudget.maxTokens,
       maxOutputTokens: tokenBudget.maxOutputTokens,
@@ -2401,6 +2412,7 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     name: record.name || record.model,
     baseUrl: record.baseUrl,
     model: record.model,
+    inputModalities: modelInputModalities(record.inputModalities),
     apiKey: getCustomModelApiKey(record.id),
     maxTokens: tokenBudget.maxTokens,
     maxOutputTokens: tokenBudget.maxOutputTokens,
@@ -2476,6 +2488,7 @@ export function upsertCustomModelConfig(
     name: normalizedName,
     baseUrl: validatedBaseUrl,
     model: normalizedModel,
+    inputModalities: modelInputModalities(config.inputModalities),
     maxTokens: validatedMaxTokens,
     maxOutputTokens: validatedMaxOutputTokens,
     temperature: validatedTemperature,

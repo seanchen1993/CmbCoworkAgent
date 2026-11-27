@@ -751,7 +751,8 @@ const sessionLifecycleSrc = _read(
 )
 assert(
   /export async function fireSessionStartOnce/.test(sessionLifecycleSrc) &&
-    /const result = await runHooks/.test(sessionLifecycleSrc),
+    /const attempt = runSetupHooks\(/.test(sessionLifecycleSrc) &&
+    /await waitForAbort\(attempt, lifetime\)/.test(sessionLifecycleSrc),
   "P3d fireSessionStartOnce awaits Setup before SessionStart"
 )
 
@@ -760,8 +761,8 @@ const agentIpcSrc = _read(
   "utf-8"
 )
 assert(
-  /await fireSessionStartOnce\(/.test(agentIpcSrc),
-  "P3e agent invoke waits for fireSessionStartOnce"
+  /const sessionStart = fireSessionStartOnce\([^;]*?\)\s*await waitForAbort\(sessionStart, abortController\.signal\)/.test(agentIpcSrc),
+  "P3e agent invoke waits for SessionStart until the turn is cancelled"
 )
 assert(
   !/setLateHookResultListener/.test(runnerSrc),

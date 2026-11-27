@@ -1,4 +1,5 @@
 import type { ChatScrollState } from "../../../../shared/chat-scroll-controller"
+import { isBtwThreadId } from "../../../../shared/btw-chat"
 import type { ChatScrollTailSnapshot } from "@/lib/chat-scroll-tail-change"
 
 export interface ChatScrollSessionAnchor {
@@ -158,9 +159,8 @@ export function createChatScrollSessionStore(
     delete(threadId): void {
       sessions.delete(threadId)
       pendingRevealMessageIds.delete(threadId)
-      // Advance even when no view is mounted. Every continuation from the deleted
-      // row now has a permanently stale lease; a same-id replacement opens a fresh one.
-      advanceLease(threadId)
+      // A same-id replacement gets a new generation when it opens.
+      currentLeaseGenerationByThreadId.delete(threadId)
     },
     size(): number {
       return sessions.size
@@ -168,4 +168,9 @@ export function createChatScrollSessionStore(
   }
 }
 
-export const chatScrollSessionStore = createChatScrollSessionStore()
+const mainChatScrollSessionStore = createChatScrollSessionStore()
+const sideChatScrollSessionStore = createChatScrollSessionStore()
+
+export function getChatScrollSessionStore(threadId: string): ChatScrollSessionStore {
+  return isBtwThreadId(threadId) ? sideChatScrollSessionStore : mainChatScrollSessionStore
+}

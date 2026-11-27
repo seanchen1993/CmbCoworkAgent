@@ -1,7 +1,7 @@
-import { useDeferredValue, useEffect, useRef, useState } from "react"
+import { useDeferredValue, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
 import { ChevronsDown, File, FileDiff, FolderOpen, Globe, Maximize2, MessageSquareText, Minimize2, Plus, X } from "lucide-react"
 import { closeBtw, loadBtwThread, openBtw, retryBtwSkillGeneration, useBtwChat } from "@/lib/btw-chat"
-import { selectSkillGenerationAgent, selectSkillRetryContext, useAppStore } from "@/lib/store"
+import { selectSkillGenerationAgent, selectSkillRetryContext, selectThreadSummary, useAppStore } from "@/lib/store"
 import { useThreadContext } from "@/lib/thread-context"
 import { hasOpenModalDialog } from "@/lib/modal-dialog"
 import { useShallow } from "zustand/react/shallow"
@@ -9,7 +9,8 @@ import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover"
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "../ui/context-menu"
-import { ChatContainer, focusBtwPaneComposer, prepareBtwComposerFocus } from "../chat/ChatContainer"
+import { focusBtwPaneComposer, prepareBtwComposerFocus } from "@/lib/btw-composer-focus"
+import { ChatContainer } from "../chat/ChatContainer"
 import { useBtwComposerToolbarHeight } from "../chat/use-floating-chat-layout"
 import { SkillGenerationCard } from "./RightPanel"
 
@@ -100,16 +101,27 @@ function closeWithComposerFocus(
   }, () => intent.abort())
 }
 
-function BtwTabs({ parentId, full, toggleFull }: { parentId: string; full: boolean; toggleFull: () => void }) {
+interface BtwViewProps {
+  parentId: string
+  full: boolean
+  toggleFull: () => void
+  mainTabVisible?: boolean
+  showMainTab?: (show: boolean) => void
+}
+
+function BtwTabs({ parentId, full, toggleFull, mainTabVisible, showMainTab }: BtwViewProps) {
+  const mainTitle = useAppStore(s => full ? selectThreadSummary(s, parentId)?.title || "主会话" : "")
   const tabs = useBtwChat(useShallow(s => s.tabs.filter(tab => tab.parentId === parentId)))
   const activeId = useBtwChat(s => s.selected[parentId])
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [resultIndex, setResultIndex] = useState(0)
   const focusSelectedComposer = useRef<string | null>(null)
-  const dragging = useRef<string | null>(null)
+  const tabDrag = useRef<AbortController | null>(null)
+  const draggedTab = useRef<string | null>(null)
   const selectedTab = useRef<HTMLButtonElement>(null)
   const tabStrip = useRef<HTMLDivElement>(null)
+  useEffect(() => () => tabDrag.current?.abort(), [])
   useEffect(() => {
     const tab = selectedTab.current?.parentElement
     if (!tab || (tabs.length <= 1 && activeId !== launcher)) return
@@ -119,7 +131,7 @@ function BtwTabs({ parentId, full, toggleFull }: { parentId: string; full: boole
     }, { root: tabStrip.current, threshold: 1 })
     observer.observe(tab)
     return () => observer.disconnect()
-  }, [activeId, tabs.length])
+  }, [activeId, tabs.length, mainTabVisible])
   const items = tabs.map(tab => ({
     id: tab.id, title: `辅助对话 ${tab.number}`, closeState: tab.closeState,
     pending: !tab.closeState && Boolean(tab.pending || tab.skillRequests?.length)
@@ -127,13 +139,95 @@ function BtwTabs({ parentId, full, toggleFull }: { parentId: string; full: boole
   if (activeId === launcher) items.push({ id: launcher, title: "新标签页", closeState: undefined, pending: false })
   const matches = items.filter(item => item.title.includes(search.trim()))
   const highlightedIndex = Math.min(resultIndex, matches.length - 1)
+  function selectSideTab(id: string) {
+    if (mainTabVisible) showMainTab?.(false)
+    select(parentId, id)
+  }
   function chooseSearchResult(id: string) {
     focusSelectedComposer.current = id === launcher ? null : id
-    select(parentId, id)
+    selectSideTab(id)
     setSearchOpen(false)
   }
+  function startTabDrag(id: string, event: ReactPointerEvent<HTMLDivElement>) {
+    draggedTab.current = null
+    const strip = tabStrip.current
+    if (!strip || id === launcher || event.button !== 0 || event.pointerType !== "mouse") return
+    tabDrag.current?.abort()
+    const drag = new AbortController()
+    tabDrag.current = drag
+    const { pointerId, clientX, clientY } = event
+    let canceledByEscape = false
+    const options = { capture: true, signal: drag.signal }
+    let scrollTimer: number | undefined
+    let scrollDirection = 0
+    function stopScrolling() {
+      window.clearInterval(scrollTimer)
+      scrollTimer = undefined
+      scrollDirection = 0
+    }
+    drag.signal.addEventListener("abort", stopScrolling, { once: true })
+    function cancel() {
+      drag.abort()
+      tabDrag.current = null
+    }
+    const trackMovement = (pointer: PointerEvent) => {
+      if (pointer.pointerId !== pointerId || canceledByEscape) return
+      if (draggedTab.current !== id && Math.hypot(pointer.clientX - clientX, pointer.clientY - clientY) < 5) return
+      draggedTab.current = id
+      const max = strip.scrollWidth - strip.clientWidth
+      if (max <= 0) return
+      const { left, right, top, bottom, width } = strip.getBoundingClientRect()
+      const edge = Math.min(24, width / 2)
+      let direction = 0
+      if (pointer.clientY >= top && pointer.clientY <= bottom && pointer.clientX >= left && pointer.clientX <= right) {
+        if (pointer.clientX < left + edge && strip.scrollLeft > 0) direction = -1
+        if (pointer.clientX > right - edge && strip.scrollLeft < max - 0.5) direction = 1
+      }
+      if (direction === scrollDirection) return
+      stopScrolling()
+      if (!direction) return
+      scrollDirection = direction
+      scrollTimer = window.setInterval(() => {
+        const before = strip.scrollLeft
+        strip.scrollLeft += direction * 16
+        if (strip.scrollLeft === before) stopScrolling()
+      }, 16)
+    }
+    // The pointer can leave the strip before returning to a drop target.
+    window.addEventListener("pointermove", trackMovement, options)
+    window.addEventListener("pointerup", up => {
+      if (up.pointerId !== pointerId) return
+      trackMovement(up)
+      cancel()
+      if (canceledByEscape || up.button !== 0 || draggedTab.current !== id || !(up.target instanceof Element)) return
+      const targetTab = up.target.closest<HTMLElement>("[data-sortable-btw-tab]")
+      const to = targetTab?.dataset.sortableBtwTab
+      if (!to || to === id || !tabStrip.current?.contains(targetTab)) return
+      useBtwChat.setState(s => {
+        const ordered = [...s.tabs]
+        const index = ordered.findIndex(t => t.parentId === parentId && t.id === id)
+        const target = ordered.findIndex(t => t.parentId === parentId && t.id === to)
+        if (index < 0 || target < 0) return s
+        const [moved] = ordered.splice(index, 1)
+        ordered.splice(target, 0, moved)
+        return { tabs: ordered }
+      })
+    }, options)
+    window.addEventListener("pointercancel", canceled => { if (canceled.pointerId === pointerId) cancel() }, options)
+    window.addEventListener("keydown", key => {
+      if (key.key !== "Escape") return
+      if (draggedTab.current === id) {
+        key.preventDefault()
+        canceledByEscape = true
+        stopScrolling()
+      } else {
+        cancel()
+      }
+    }, options)
+    window.addEventListener("blur", cancel, { signal: drag.signal })
+  }
   function closeTabs(ids: readonly string[]) {
-    const pane = selectedTab.current?.closest<HTMLElement>("[data-btw-pane]") ?? null
+    const pane = tabStrip.current?.closest("aside") ?? null
     closeWithComposerFocus(parentId, ids, pane, async () => {
       await Promise.all(ids.map(id => {
         if (id !== launcher) return closeBtw(id)
@@ -178,35 +272,27 @@ function BtwTabs({ parentId, full, toggleFull }: { parentId: string; full: boole
             {!matches.length && <p className="p-2 text-xs text-muted-foreground">没有匹配的标签页</p>}</div>
         </PopoverContent>
       </Popover>
-      <div ref={tabStrip} className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
+      {full && <button type="button" title={mainTitle} aria-pressed={Boolean(mainTabVisible)}
+        onClick={() => showMainTab?.(true)}
+        className={cn("flex h-7 min-w-0 max-w-[35%] shrink-0 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium text-muted-foreground hover:bg-muted/50", mainTabVisible && "bg-foreground/[0.085] text-foreground")}>
+        <MessageSquareText className="size-3.5 shrink-0" /><span className="truncate">{mainTitle}</span>
+      </button>}
+      <div ref={tabStrip} className="flex min-w-0 select-none items-center gap-0.5 overflow-x-auto [scrollbar-width:none]">
         {items.map(({ id, title, closeState, pending }) => {
-          const active = id === activeId
+          const active = !mainTabVisible && id === activeId
           const Icon = id === launcher ? File : MessageSquareText
-          return <ContextMenu key={id}><ContextMenuTrigger asChild><div draggable={id !== launcher}
-            onDragStart={event => {
-              dragging.current = id
-              event.dataTransfer.setData("text/plain", title)
-              event.dataTransfer.effectAllowed = "move"
+          return <ContextMenu key={id}><ContextMenuTrigger asChild><div data-sortable-btw-tab={id === launcher ? undefined : id}
+            onPointerDown={event => startTabDrag(id, event)}
+            onClickCapture={event => {
+              if (event.detail > 0 && draggedTab.current === id) {
+                draggedTab.current = null
+                event.stopPropagation()
+              }
             }}
-            onDragEnd={() => { dragging.current = null }}
-            onDragOver={event => { if (dragging.current && id !== launcher) event.preventDefault() }}
-            onDrop={event => {
-              const from = dragging.current
-              if (!from || from === id || id === launcher) return
-              event.preventDefault()
-              dragging.current = null
-              useBtwChat.setState(s => {
-                const ordered = [...s.tabs]
-                const index = ordered.findIndex(t => t.parentId === parentId && t.id === from)
-                const to = ordered.findIndex(t => t.parentId === parentId && t.id === id)
-                if (index < 0 || to < 0) return s
-                const [moved] = ordered.splice(index, 1)
-                ordered.splice(to, 0, moved)
-                return { tabs: ordered }
-              })
-            }} onAuxClick={e => { if (e.button === 1) { e.preventDefault(); closeTabs([id]) } }}
+            onAuxClick={e => { if (e.button === 1) { e.preventDefault(); closeTabs([id]) } }}
             className={cn("group flex w-[156px] max-w-full shrink-0 items-center rounded-md text-muted-foreground hover:bg-muted/50", active && "bg-foreground/[0.085] text-foreground")}>
-            <button type="button" ref={active ? selectedTab : undefined} data-btw-active-tab={active || undefined} aria-pressed={active} onClick={() => select(parentId, id)}
+            <button type="button" ref={active ? selectedTab : undefined} data-btw-active-tab={active || undefined} aria-pressed={active}
+              onClick={() => selectSideTab(id)}
               className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md pl-2 pr-1 text-[13px] font-medium">
               <Icon className="size-3.5" />{title}
               {pending && <span role="img" aria-label="等待处理" title="等待处理" className="size-1.5 shrink-0 rounded-full bg-status-warning" />}
@@ -227,7 +313,7 @@ function BtwTabs({ parentId, full, toggleFull }: { parentId: string; full: boole
           </ContextMenu>
         })}
       </div>
-      <button type="button" title="新增标签" aria-label="新增标签" className={iconButton} onClick={() => openBtwLauncher(parentId)}><Plus className="size-4" /></button>
+      <button type="button" title="新增标签" aria-label="新增标签" className={iconButton} onClick={() => { if (mainTabVisible) showMainTab?.(false); openBtwLauncher(parentId) }}><Plus className="size-4" /></button>
       <button type="button" aria-label={full ? "退出完整视图" : "进入完整视图"} title={full ? "退出完整视图" : "进入完整视图"} aria-pressed={full} className={cn(iconButton, "ml-auto")} onClick={toggleFull}>
         {full ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
       </button>
@@ -254,7 +340,8 @@ function BtwSkillGeneration({ threadId }: { threadId: string }) {
   )
 }
 
-export function BtwPane({ parentId, full, toggleFull }: { parentId: string; full: boolean; toggleFull: () => void }) {
+export function BtwPane(props: BtwViewProps) {
+  const { parentId, full, mainTabVisible } = props
   const id = useBtwChat(s => s.selected[parentId])
   const { getThreadState } = useThreadContext()
   const composerId = useDeferredValue<string | null | undefined>(id, null)
@@ -268,19 +355,13 @@ export function BtwPane({ parentId, full, toggleFull }: { parentId: string; full
     void loadBtwThread(id, parentId).catch(console.error)
   }, [id, hasSummary, parentId])
   const options = [
-    { label: "文件", detail: "从目录中选择一个文件", icon: FolderOpen, open: () => {
-      closeLauncher(parentId)
-      useAppStore.getState().requestOpenRightPanelSection(parentId, "files")
-    } },
-    { label: "浏览器", detail: "浏览网页和预览应用。", icon: Globe, open: () => {
-      closeLauncher(parentId)
-      useAppStore.getState().requestOpenBrowserPanel()
-    } },
-    { label: "审查", detail: "查看代码变更与差异。", icon: FileDiff, open: () => {
-      closeLauncher(parentId)
-      useAppStore.getState().setRightModule("git")
-    } },
-    { label: "辅助对话", detail: "在侧边面板中继续对话。", icon: MessageSquareText, open: () => {
+    { kind: "files", label: "文件", detail: "从目录中选择一个文件", icon: FolderOpen },
+    { kind: "browser", label: "浏览器", detail: "浏览网页和预览应用。", icon: Globe },
+    { kind: "git", label: "审查", detail: "查看代码变更与差异。", icon: FileDiff },
+    { kind: "btw", label: "辅助对话", detail: "在侧边面板中继续对话。", icon: MessageSquareText }
+  ] as const
+  function openLauncherOption(kind: (typeof options)[number]["kind"]): void {
+    if (kind === "btw") {
       if (opening.current) return
       opening.current = true
       const completeFocus = prepareBtwComposerFocus(parentId)
@@ -288,15 +369,21 @@ export function BtwPane({ parentId, full, toggleFull }: { parentId: string; full
         completeFocus(undefined)
         toast.error(error instanceof Error ? error.message : "无法创建辅助对话。")
       }).finally(() => { opening.current = false })
-    } }
-  ]
+      return
+    }
+    closeLauncher(parentId)
+    const app = useAppStore.getState()
+    if (kind === "files") app.requestOpenRightPanelSection(parentId, "files")
+    else if (kind === "browser") app.requestOpenBrowserPanel()
+    else app.setRightModule("git")
+  }
   if (!id) return null
   return (
-    <aside ref={paneRef} aria-label="辅助对话" data-btw-pane={id} tabIndex={-1} data-thread-floating-chat="true" className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background">
-      <BtwTabs parentId={parentId} full={full} toggleFull={toggleFull} />
+    <aside ref={paneRef} aria-label="辅助对话" data-btw-pane={mainTabVisible ? undefined : id} tabIndex={-1} data-thread-floating-chat="true" className={cn("relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background", mainTabVisible && "[&>:not(header)]:hidden")}>
+      <BtwTabs {...props} />
       {id === launcher ? <div className="mx-auto w-full max-w-2xl overflow-auto px-6 py-8">
         <h2 className="mb-4 font-semibold">新标签页</h2>
-        {options.map(({label, detail, icon: Icon, open}) => <button type="button" key={label} onClick={open}
+        {options.map(({kind, label, detail, icon: Icon}) => <button type="button" key={kind} onClick={() => openLauncherOption(kind)}
           className="flex w-full items-center gap-3 rounded-lg p-3 text-left hover:bg-muted">
           <Icon className="size-4" /><span className="flex flex-col text-sm">{label}<small className="text-xs text-muted-foreground">{detail}</small></span>
         </button>)}
@@ -313,7 +400,7 @@ export function BtwPane({ parentId, full, toggleFull }: { parentId: string; full
       ) : hasSummary && composerId === id ? (
         <>
           <BtwSkillGeneration key={id} threadId={id} />
-          <ChatContainer key={id} threadId={id} surface="btw" />
+          <ChatContainer key={id} threadId={id} surface="btw" visible={!mainTabVisible} />
         </>
       ) : null}
     </aside>

@@ -1,9 +1,10 @@
-import { appendFile, mkdtemp, rename, rm, stat, utimes, writeFile } from "node:fs/promises"
+import { appendFile, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   openStableFileHandle,
+  openStableWritableFileHandle,
   readStableFileHandleBounded
 } from "./stable-file-handle"
 
@@ -25,6 +26,21 @@ afterEach(async () => {
 })
 
 describe("stable file handle", () => {
+  it("preserves a concurrent append after checking an existing ignore file", async () => {
+    const root = await tempDirectory("stable-append-")
+    const file = path.join(root, ".gitignore")
+    await writeFile(file, "first\n")
+    const opened = await openStableWritableFileHandle(root, file, "append")
+    try {
+      await opened.handle.readFile("utf8")
+      await appendFile(file, "another editor\n")
+      await opened.assertPathIdentity()
+      await opened.handle.writeFile("selected\n", "utf8")
+      expect(await readFile(file, "utf8")).toBe("first\nanother editor\nselected\n")
+    } finally {
+      await opened.handle.close()
+    }
+  })
   it("keeps reading the authorized inode after its path is replaced", async () => {
     const root = await tempDirectory("cmb-stable-file-")
     const filePath = path.join(root, "preview.txt")

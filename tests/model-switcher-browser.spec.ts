@@ -325,9 +325,14 @@ async function main(): Promise<void> {
     })
     await page.locator('input[value="pro"]').waitFor()
     assert.equal(await page.locator('input[value="pro"]').isDisabled(), true)
-    assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
+    assert.equal(await page.locator('input[value="码豆模型PRO"]').isDisabled(), true)
+    const productionContext = page.locator('input[value="200000"]')
+    assert.equal(await productionContext.isEnabled(), true)
     assert.equal(await page.getByText(/非服务时段/).count(), 0)
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isEnabled(), true)
+    await productionContext.fill("240000")
+    await page.getByRole("button", { name: "保存", exact: true }).click()
+    await settle()
 
     await page.evaluate(() => {
       const fixture = (window as unknown as FixtureWindow).modelSwitcherFixture
@@ -336,16 +341,19 @@ async function main(): Promise<void> {
     })
     await page.locator('input[value="ultra"]').waitFor()
     assert.equal(await page.locator('input[value="ultra"]').isDisabled(), true)
+    await page.getByText(/128k 上下文窗口由系统管理/).waitFor()
+    assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
     await page.getByText(/生产环境服务时间为北京时间 22:00 至次日 07:00/).waitFor()
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isEnabled(), true)
-    const nameInput = page.locator('input[value="闲时模型 Ultra"]')
-    await nameInput.fill("未保存的模型名称")
+    assert.equal(await page.locator('input[value="闲时模型 Ultra"]').isDisabled(), true)
+    const outputTokens = page.getByPlaceholder("8192", { exact: true })
+    await outputTokens.fill("6144")
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog("closed")
     )
     await page.getByText(/当前为非服务时段/).waitFor()
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isDisabled(), true)
-    assert.equal(await page.locator('input[value="未保存的模型名称"]').count(), 1)
+    assert.equal(await outputTokens.inputValue(), "6144")
     assert.equal((await settle()).currentModel, "builtin:maodou-ultra")
     await page.getByRole("button", { name: "保存", exact: true }).click()
     await settle()
@@ -353,7 +361,7 @@ async function main(): Promise<void> {
       await page.evaluate(() =>
         (window as unknown as FixtureWindow).modelSwitcherFixture.readSettingsWrites()
       ),
-      { names: ["未保存的模型名称"], defaults: [], maxTokens: [128_000] }
+      { names: [], defaults: [], maxTokens: [240_000, 128_000] }
     )
     console.log("PASS Maodou models: daytime Pro, restricted Ultra, preselection, identity checks, and settings save")
 
@@ -372,9 +380,14 @@ async function main(): Promise<void> {
       await page.evaluate(() =>
         (window as unknown as FixtureWindow).modelSwitcherFixture.readSettingsWrites().maxTokens
       ),
-      [128_000, 256_000]
+      [240_000, 128_000, 256_000]
     )
-    console.log("PASS Pro model: editable UAT context")
+    await page.evaluate(() =>
+      (window as unknown as FixtureWindow).modelSwitcherFixture.showGatewaySettings("ultra", true)
+    )
+    await page.getByText(/128k 上下文窗口由系统管理/).waitFor()
+    assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
+    console.log("PASS Maodou models: editable Pro context, locked Ultra context, fixed names")
   } finally {
     await app.close()
   }

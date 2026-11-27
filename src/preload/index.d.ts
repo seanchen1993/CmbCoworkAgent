@@ -1,5 +1,7 @@
 import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
+import type { GitPanelOperationOptions, GitPanelRepository, GitPanelSnapshot } from "../shared/git-panel-repository"
 import type { GitGraphPage } from "../shared/git-graph"
+import type { TaskCommitBindingApi } from "../shared/task-commit-binding"
 import type {
   GitBranchKind,
   GitBranchListResult,
@@ -257,7 +259,9 @@ import type {
 import type {
   AttachmentBytesParseRequest,
   AttachmentFileSelectionResult,
-  AttachmentGrantParseRequest
+  AttachmentGrantParseRequest,
+  WorkspaceChatImageRequest, ChatImageOwnerRequest, ChatImageStatusRequest, ChatImageSubmissionStatus,
+  DraftAttachmentImage, DraftChatImageRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
@@ -1128,7 +1132,8 @@ interface CustomAPI {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      chatImages?: import("../shared/file-attachment").SubmittedChatImage[]
     ) => () => void
     interrupt: (
       threadId: string,
@@ -1512,6 +1517,7 @@ interface CustomAPI {
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
     upsertCustomConfig: (config: {
+      inputModalities?: ("text" | "image")[]
       id?: string
       name: string
       baseUrl: string
@@ -1654,15 +1660,15 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
+    listGitPanelRepositories: (threadId: string) => Promise<GitPanelRepository[]>
     getGitPanelMeta: (
       threadId: string,
-      options?: {
-        worktreePath?: string
+      options?: GitPanelOperationOptions & {
         includeSummary?: boolean
         refreshHead?: boolean
         includePushability?: boolean
       }
-    ) => Promise<{
+    ) => Promise<GitPanelSnapshot & {
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1670,6 +1676,7 @@ interface CustomAPI {
       changedFilesTotal?: number
       hasPendingDiff: boolean
       hasPushableCommit: boolean
+      panelCardNumber?: string
       pendingCommits?: Array<{ hash: string; message: string; date: string }>
       trackedFiles?: string[]
       repositoryRoots?: string[]
@@ -1678,14 +1685,18 @@ interface CustomAPI {
     }>
     getGitPanelDiffs: (
       threadId: string,
-      options?: {
+      options?: GitPanelOperationOptions & {
         includeDiffs?: boolean
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
-        worktreePath?: string
+        commitBindingVersion?: string
+        includeCommitTarget?: boolean
       }
-    ) => Promise<{
+    ) => Promise<GitPanelSnapshot & {
+      commitPreviewRevision?: string
+      unavailableFileCount?: number
+      commitPreviewTarget?: { root: string; scope: string; branch: string }
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1711,7 +1722,10 @@ interface CustomAPI {
     getGitPanelFileDiff: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions & {
+        commitBindingVersion?: string
+        commitPreviewRevision?: string
+      }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1732,7 +1746,7 @@ interface CustomAPI {
       threadId: string,
       targetPath: string,
       kind: "file" | "directory",
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ) => Promise<{
       success: boolean
       entry?: string
@@ -1800,14 +1814,15 @@ interface CustomAPI {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string; agentInitiated?: boolean }
+      options?: GitPanelOperationOptions & { agentInitiated?: boolean; commitBindingVersion?: string; commitPreviewRevision?: string }
     ) => Promise<{
       success: boolean
       error?: string
+      warning?: string
     }>
     pushWorktree: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ) => Promise<{
       success: boolean
       autoCommitted?: boolean
@@ -1820,7 +1835,7 @@ interface CustomAPI {
     }>
     pullWorktree: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ) => Promise<{
       success: boolean
       detail?: string
@@ -1829,7 +1844,7 @@ interface CustomAPI {
     rejectWorktreeChanges: (
       threadId: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ) => Promise<{
       success: boolean
       revertedFileCount?: number
@@ -1838,7 +1853,7 @@ interface CustomAPI {
     rejectWorktreeFile: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string }
+      options?: GitPanelOperationOptions
     ) => Promise<{
       success: boolean
       error?: string
@@ -1863,6 +1878,11 @@ interface CustomAPI {
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
+    readDraftChatImage: (request: DraftChatImageRequest) => Promise<string>
+    readMessageChatImages: (request: ChatImageStatusRequest) => Promise<DraftAttachmentImage[]>
+    attachWorkspaceImage: (request: WorkspaceChatImageRequest) => Promise<ParsedAttachment>
+    updateImageOwners: (request: ChatImageOwnerRequest) => Promise<void>
+    chatImageSubmissionStatus: (request: ChatImageStatusRequest) => Promise<ChatImageSubmissionStatus>
     parseSelected: (request: AttachmentGrantParseRequest) => Promise<{
       success: boolean
       attachment?: ParsedAttachment
@@ -2108,6 +2128,7 @@ interface CustomAPI {
     getCompileModelInfo: (threadId: string) => Promise<TaskMmdCompileModelInfo>
     onChanged: (callback: (payload: { threadId?: string }) => void) => () => void
   }
+  taskCommitBinding: TaskCommitBindingApi
   autoCommit: {
     getSettings: () => Promise<AgentAutoCommitSettings>
     saveSettings: (updates: Partial<AgentAutoCommitSettings>) => Promise<AgentAutoCommitSettings>
@@ -3402,7 +3423,7 @@ interface CustomAPI {
     createBranch: (branch: string, cwd?: string) => Promise<GitBranchMutationResult>
   }
   gitPanel: {
-    getCommitHistory: (threadId: string) => Promise<{
+    getCommitHistory: (threadId: string, options?: GitPanelOperationOptions) => Promise<{
       success: boolean
       projectPath: string | null
       records: GitCommitHistoryRecord[]

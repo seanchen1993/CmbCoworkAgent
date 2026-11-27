@@ -90,6 +90,19 @@ function readThreadRoutingState(threadId: string | undefined): ThreadRoutingStat
   }
 }
 
+/** Reuse only an eligible model. Previous-model continuity precedes unexpired failover preference. */
+export function resolveImageRoutingContinuity(threadId: string, continuation: RoutingContext["continuation"],
+  eligibleRefs: ReadonlySet<string>) {
+  const state = readThreadRoutingState(threadId)
+  if (!state) return
+  const previous = continuation && state.lastResolvedModelId
+  if (previous && eligibleRefs.has(previous)) return { modelId: previous, reason: `${continuation}→reuse-last-model` }
+  const sticky = state.failoverStickyModelId
+  if (sticky && (state.failoverStickyUntil ?? 0) > Date.now() && eligibleRefs.has(sticky))
+    return { modelId: sticky, reason: "failover-sticky" }
+  return undefined
+}
+
 function writeThreadRoutingState(threadId: string, patch: Partial<ThreadRoutingState>): void {
   const row = getThreadCore(threadId)
   if (!row) return

@@ -31,6 +31,7 @@ export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 
 // Agent IPC
 export interface AgentInvokeParams {
+  chatImages?: import("../shared/file-attachment").SubmittedChatImage[]
   threadId: string
   streamRequestId?: string
   message: string
@@ -145,6 +146,7 @@ export interface Provider {
 
 // Model configuration
 export interface ModelConfig {
+  inputModalities?: ("text" | "image")[]
   id: string
   name: string
   provider: ProviderId
@@ -223,6 +225,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** A sent-image receipt exists; only the scoped preview IPC may read its pixels. */
+  hasChatImages?: true
   /** Added only to desktop history responses; storage and model inputs ignore it. */
   botHistoryInputOrigin?: import("../shared/bots/message-reply").BotHistoryInputOrigin
   botHistoryDeliveryScope?: import("../shared/bots/file-delivery").BotHistoryDeliveryScope
@@ -1154,6 +1158,7 @@ export interface ApprovalRequest extends HITLRequest {
   suggestedCommitFileBasePath?: string
   /** For git_commit/git_push: preferred Git operation target (normally the repository root). */
   suggestedGitWorktreePath?: string
+  commitBindingVersion?: string
   /** For git_commit: concrete repository targets when the command cwd contains multiple repos. */
   suggestedGitRepositories?: Array<{
     path: string

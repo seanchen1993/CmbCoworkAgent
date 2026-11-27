@@ -12,6 +12,7 @@ import { captureModelRetryBaseline, hasModelRetryProgress } from "./model-retry-
 type StreamValues = Record<string, unknown>
 type SubmitOptions = NonNullable<Parameters<UseStreamCustom<StreamValues>["submit"]>[1]> & {
   onPromptAccepted?: (workspacePath?: string) => void
+  onSubmitError?: (error: unknown) => void
 }
 type AssistantSnapshot = Extract<Message, { type: "ai" }> & { id: string }
 
@@ -317,7 +318,10 @@ export function createElectronStream(options: ElectronStreamOptions) {
         },
         callbacks: { onCustomEvent: (data) => callbacks.onCustomEvent?.(data) },
         onSuccess: () => undefined,
-        onError: (error) => callbacks.onError?.(error)
+        onError: (error) => {
+          if (submitOptions?.onSubmitError) submitOptions.onSubmitError(error)
+          else callbacks.onError?.(error)
+        }
       }
     )
   }

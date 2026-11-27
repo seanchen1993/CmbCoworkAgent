@@ -1,3 +1,9 @@
+import { waitForAbort } from "../utils/wait-for-abort"
+import { checkpointDesktopImageMessageIds, checkpointHasChatImages } from "../../shared/checkpoint-transcript"
+import { chatImageMarker } from "../../shared/attachment-message-parts"
+import type { SubmittedChatImage } from "../../shared/file-attachment"
+import type { ChatImageAdmission } from "../chat-images"
+import { assertChatAttachmentWindow, chatWindowForSender } from "./chat-attachment-window"
 import { botSkillDispatchInput } from "../agent/bot-skill-dispatch"
 import {
   COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
@@ -521,6 +527,7 @@ import {
   botWorkflowNotificationClaim
 } from "../agent/bot-checkpoint-resume"
 import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
+import { chatAttachmentBudgetError } from "../../shared/attachment-message-parts"
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -589,6 +596,28 @@ function canPreviewSystemPrompt(): boolean {
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+const desktopImageInvokes = new Map<string, Set<AbortController>>()
+const userStoppedDesktopSignals = new WeakSet<AbortSignal>()
+
+function trackDesktopImageInvoke(threadId: string) {
+  const controller = new AbortController()
+  const pending = desktopImageInvokes.get(threadId) ?? new Set<AbortController>()
+  desktopImageInvokes.set(threadId, pending)
+  pending.add(controller)
+  return {
+    signal: controller.signal,
+    release: () => {
+      pending.delete(controller)
+      if (!pending.size && desktopImageInvokes.get(threadId) === pending) desktopImageInvokes.delete(threadId)
+    }
+  }
+}
+
+function stopDesktopRun(controller: AbortController) {
+  userStoppedDesktopSignals.add(controller.signal)
+  controller.abort()
+}
+
 const workflowNotificationClaimFence = new OwnedClaimFence<string, string>()
 
 function claimWorkflowNotification(runId: string, runToken: string): void {
@@ -2778,8 +2807,12 @@ function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
  * AgentRunDelivery.send. Reaching for another BrowserWindow member instead
  * compiles fine and then throws on the IM path.
  */
+let currentChatWindow: (() => BrowserWindow | null) | undefined
+
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
   if (window.isDestroyed() || window.webContents.isDestroyed()) return
+  if (channel.startsWith("agent:stream:") && !isManagedTransportWindow(window) &&
+      currentChatWindow && window !== currentChatWindow()) return
   try {
     window.webContents.send(channel, payload)
   } catch (error) {
@@ -4831,6 +4864,56 @@ export function persistAndForwardPhysicalRunStreamChunk(
   return messageId
 }
 
+async function graphStillHasImageWork(
+  threadId: string, snapshot: () => Promise<{ next: readonly unknown[]; tasks: readonly { interrupts?: readonly unknown[] }[] }>
+): Promise<boolean | undefined> {
+  if (hasPendingApprovalForThread(threadId)) return true
+  try {
+    const state = await snapshot()
+    return state.next.length > 0 || state.tasks.some(task => Boolean(task.interrupts?.length))
+  } catch {
+    // A failed read cannot establish completion or a resumable interrupt.
+    return undefined
+  }
+}
+
+function continuedImageOutcome(terminal: AutoModeTerminal | undefined, pending: boolean | undefined,
+  signal: AbortSignal) {
+  if (userStoppedDesktopSignals.has(signal)) return "cancelled"
+  if (signal.aborted || pending === undefined) return
+  if (pending) return "awaiting"
+  return terminal?.endReason.code === "unknown" ? undefined : terminal?.outcome
+}
+
+async function finishContinuedImageRun(threadId: string, messageId: string | undefined,
+  terminal: AutoModeTerminal | undefined, pending: boolean | undefined, runToken: string,
+  controller: AbortController, release: (() => void) | undefined) {
+  if (!release) return
+  try {
+    if (!messageId || !ownsPhysicalStreamRunLease(threadId, runToken, controller)) return
+    const { settleContinuedChatImageSubmission } = await import("../chat-images")
+    const outcome = continuedImageOutcome(terminal, pending, controller.signal)
+    if (outcome && ownsPhysicalStreamRunLease(threadId, runToken, controller))
+      settleContinuedChatImageSubmission(threadId, messageId, outcome)
+  } catch (error) {
+    console.warn("[Agent] Failed to settle the continued image receipt:", error)
+  } finally {
+    release()
+  }
+}
+
+async function durableTailRequiresImages(threadId: string, tail: DurableRuntimeTail): Promise<boolean> {
+  const messageIds = checkpointDesktopImageMessageIds(tail.checkpointTuple?.checkpoint)
+  for (const message of tail.messages) {
+    const images = message.additional_kwargs?.cmb_chat_images
+    if (message.id && HumanMessage.isInstance(message) && message.additional_kwargs?.cmb_chat_images_source !== "bot" &&
+        Array.isArray(images) && images.length > 0) messageIds.push(message.id)
+  }
+  if (messageIds.length === 0) return false
+  const { hasReadableDesktopChatImages } = await import("../chat-images")
+  return hasReadableDesktopChatImages(threadId, [...new Set(messageIds.reverse())])
+}
+
 function persistVisibleUserTranscriptMessage(
   threadId: string,
   content: string,
@@ -5854,7 +5937,8 @@ async function autoProposeSKill(
   await runSkillProposalFlow(threadId, context, mode, worthinessReason, canResetSession)
 }
 
-export function registerAgentHandlers(ipcMain: IpcMain): void {
+export function registerAgentHandlers(ipcMain: IpcMain, getChatWindow: () => BrowserWindow | null): void {
+  currentChatWindow = getChatWindow
   console.log("[Agent] Registering agent handlers...")
   LocalSandbox.onBackgroundShellChange((change) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -5902,6 +5986,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const botCanDispatch = request.owner === "bot" && !peerFeedback ? message.botCanDispatch : undefined
     const messageId = message.id
     const messageContent = message.content
+    const attachmentError = request.owner === "desktop" && chatAttachmentBudgetError(messageContent)
+    if (attachmentError) return { queued: false, reason: "invalid_payload", message: attachmentError }
     const messageDisplayContent = message.trustedExplicitSkill
       ? [message.displayContent || message.content, formatComposerSkillUseBlock(message.trustedExplicitSkill)].join("\n\n")
       : message.displayContent
@@ -6437,11 +6523,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     // holds: a managed caller has no stream to fall back on, so an unreported
     // run reaches it as an unexplained "no reply".
     let terminalReported = false
+    let imageAdmission: ChatImageAdmission | undefined
+    let imageRunSignal: AbortSignal | undefined
+    let imageAwaitingContinuation: boolean | undefined = false
+    const imageWasStopped = () => (imageRunSignal && userStoppedDesktopSignals.has(imageRunSignal)) ||
+      (incomingRunExecutionContext.signal && userStoppedDesktopSignals.has(incomingRunExecutionContext.signal))
     const runExecutionContext: AgentRunExecutionContext = {
       ...incomingRunExecutionContext,
       onRunTerminated: (terminal) => {
         if (terminalReported) return
         terminalReported = true
+        if (imageAdmission) {
+          const outcome = imageWasStopped() ? "cancelled" : imageAwaitingContinuation ? "awaiting" :
+            imageAwaitingContinuation === undefined || terminal.code === "unknown" ? "unknown" : terminal.outcome
+          imageAdmission.finish(outcome)
+        }
         incomingRunExecutionContext.onRunTerminated?.(terminal)
       }
     }
@@ -6589,6 +6685,49 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         )
       ) {
         return
+      }
+      const attachmentBudgetError = runExecutionContext.source === "desktop" &&
+        chatAttachmentBudgetError(message, request.chatImages ?? [])
+      if (attachmentBudgetError) {
+        safeSendToWindow(window, channel, { type: "error", error: attachmentBudgetError })
+        runExecutionContext.onRunTerminated?.({ outcome: "error", code: "attachment_budget", message: attachmentBudgetError })
+        return
+      }
+      if (request.chatImages?.length && (runExecutionContext.source !== "desktop" ||
+        initialInvokeMetadata.botHostId === "local" || isManagedTransportWindow(window))) {
+        safeSendToWindow(window, channel, { type: "error", error: "当前入口无法提交桌面图片" })
+        return
+      }
+      if (initialInvokeThread && runExecutionContext.source === "desktop" &&
+        (userMessageId || request.chatImages?.length)) {
+        try {
+          const { beginChatImageSubmission, getChatImageSubmissionStatus } = await import("../chat-images")
+          const submission = beginChatImageSubmission(request)
+          if (submission && "replay" in submission) {
+            await submission.replay
+            const status = getChatImageSubmissionStatus(threadId, userMessageId!)
+            if (status === "failed" || status === "succeeded") acknowledgePrompt(initialInvokeWorkspacePath)
+            if (status === "rejected") throw new Error("原图片消息未获接纳。请编辑后作为新消息发送。")
+            if (status === "failed") throw new Error("已接纳的原图片消息执行失败，请查看原会话。")
+            if (status !== "succeeded" && status !== "cancelled") throw new Error(status === "accepted"
+              ? "原图片消息已接纳但尚未启动，请恢复原请求。"
+              : "原图片消息的执行状态待确认，请查看原会话并从现有检查点恢复。")
+            safeSendToWindow(window, channel, { type: "done" })
+            runExecutionContext.onRunTerminated?.({ outcome: "success", code: "already_completed" })
+            return
+          }
+          imageAdmission = submission?.owner
+          if (imageAdmission && imageWasStopped()) {
+            imageAdmission.finish("cancelled")
+            safeSendToWindow(window, channel, { type: "done" })
+            return
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "图片消息校验失败"
+          safeSendToWindow(window, channel, { type: "error", error: reason })
+          runExecutionContext.onRunTerminated?.({ outcome: "error", code: "image_submission", message: reason })
+          return
+        }
       }
       let modelInputMessage = message
       let routingMessage = message
@@ -7042,6 +7181,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRunSettledPromise,
           resolveActiveRunSettled
         } = replacement
+        if (imageAdmission) imageRunSignal = abortController.signal
         const externalSignal = runExecutionContext.signal
         const abortFromExternalSignal = (): void => {
           if (!abortController.signal.aborted) abortController.abort(externalSignal?.reason)
@@ -7400,6 +7540,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const throwIfInvokeAborted = (): void => {
           if (
             abortController.signal.aborted ||
+            getSideThreadLifetimeSignal(threadId)?.aborted ||
             !isCurrentRunMessageQueueOwner(threadId, runToken)
           ) {
             throw createAbortError()
@@ -7979,7 +8120,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
           // thread is deleted (threads:delete) or the app is quitting.
-          await fireSessionStartOnce(
+          const sessionStart = fireSessionStartOnce(
             threadId,
             sessionWorkspacePath,
             onHookResult,
@@ -7988,8 +8129,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnState.turnId,
             harnessAgentContext.pluginOutputDir,
             harnessAgentContext.systemId,
-            getHarnessHookContext(harnessAgentContext)
+            getHarnessHookContext(harnessAgentContext),
+            abortController.signal
           )
+          await waitForAbort(sessionStart, abortController.signal)
           throwIfInvokeAborted()
           sendActiveHookNotice(window, channel, workspacePath)
 
@@ -8030,10 +8173,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // marker message, not user input — they must NOT run explicit-skill
           // activation or the UserPromptSubmit hook, or a plugin could block /
           // rewrite / halt the result-report turn.
-          if (!isInternalNotificationTurn) {
+          let submittedImagePrompt: string | undefined
+          if (imageAdmission?.recovered) {
+            effectiveMessage = imageAdmission.recovered.preparedText!
+            routingMessage = effectiveMessage
+          } else if (!isInternalNotificationTurn) {
+            imageAdmission?.beginHook()
             const preparedPrompt = await prepareUserPromptForCurrentRun(message, modelInputMessage)
             throwIfInvokeAborted()
             if (!preparedPrompt.accepted) {
+              imageAdmission?.reject()
               if (preparedPrompt.blockedBy === "explicit_skill") {
                 // Distinct from a completion (Stop) hook halt: this input never
                 // reached the model, and IM tells the user so.
@@ -8079,6 +8228,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return
             }
             effectiveMessage = preparedPrompt.content
+            if (imageAdmission || (runExecutionContext.source === "bot" && runExecutionContext.prepareBotChatImages &&
+              !runGoalId && !botSkillDispatch)) submittedImagePrompt = preparedPrompt.submissionContent
             if (onBotUserPromptPrepared) {
               const approvedRequest = runGoalId ? "" : preparedPrompt.submissionContent
               const approved = onBotUserPromptPrepared(
@@ -8471,8 +8622,63 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
 
+          const { approveChatImages, bindBotChatImages } = await import("../chat-images")
+          let approvedImages: SubmittedChatImage[] = []
+          if (imageAdmission?.recovered) {
+            effectiveMessage = imageAdmission.recovered.preparedText!
+            approvedImages = imageAdmission.recovered.images
+          } else if (imageAdmission) {
+            approvedImages = await approveChatImages(threadId, message, submittedImagePrompt ?? "", request.chatImages, userMessageId)
+            if (approvedImages.some(ref => effectiveMessage.split(chatImageMarker(ref)).length !== 2))
+              throw new Error("获准的图片标记丢失或重复，请重新添加")
+          } else if (submittedImagePrompt !== undefined && runExecutionContext.prepareBotChatImages) {
+            approvedImages = await runExecutionContext.prepareBotChatImages(submittedImagePrompt, abortController.signal)
+            for (const ref of approvedImages) {
+              const marker = chatImageMarker(ref)
+              if (effectiveMessage.includes(marker)) throw new Error("图片标记不唯一，请重新添加")
+              effectiveMessage += "\n\n" + marker
+            }
+          }
+          const allowDesktopImages = runExecutionContext.source === "desktop" && metadata.botHostId !== "local" &&
+            !isManagedTransportWindow(window) && !isInternalNotificationTurn
+          const botResumeMessageId = runExecutionContext.source === "bot" && (resumeCheckpointId || continueBotTaskCheckpointId)
+            ? runExecutionContext.resumeBotChatImageMessageId : undefined
+          const botResumeReceipt = botResumeMessageId
+            ? (await import("../chat-images")).boundChatImageReceipt(threadId, botResumeMessageId) : undefined
+          const resumingBotImages = Boolean(botResumeMessageId &&
+            checkpointHasChatImages(durableRuntimeTail.checkpointTuple?.checkpoint, botResumeMessageId))
+          if (resumingBotImages) {
+            if (!botResumeReceipt?.images.length || botResumeReceipt.source !== "bot" ||
+                !runExecutionContext.validateBotChatImageAccess)
+              throw new Error("原 Bot 任务的图片授权不可用，请检查原任务")
+            runExecutionContext.validateBotChatImageAccess()
+          }
+          const hasHistoryImages = (allowDesktopImages && await durableTailRequiresImages(threadId, durableRuntimeTail)) ||
+            resumingBotImages
+          if (request.chatImages?.length && !approvedImages.length &&
+            !effectiveMessage.replace(/<attachment\b[^>]*media="image"[^>]*\/>/g, "").trim()) {
+            throw new Error("输入处理后没有可提交的内容")
+          }
+          const imageRouting = approvedImages.length || hasHistoryImages ? await resolveStandardTurnRouting({
+            taskSource: "chat", threadId, requiresImages: true, managedExecution,
+            continuation: resumingBotImages ? "resume" : undefined,
+            requestedModelId: modelId || parsedThreadMetadata.modelId,
+            routingMode: runExecutionContext.modelRoutingMode ?? getGlobalRoutingMode()
+          }) : undefined
+          throwIfInvokeAborted()
+          if (imageAdmission || (allowDesktopImages && hasHistoryImages)) runExecutionContext.validateChatDocument?.()
+          imageAdmission?.accept(effectiveMessage, approvedImages)
+          if (runExecutionContext.source === "bot" && approvedImages.length) {
+            if (!userMessageId) throw new Error("Bot 图片消息缺少任务标识")
+            const receipt = bindBotChatImages(threadId, userMessageId, message, effectiveMessage, approvedImages)
+            effectiveMessage = receipt.preparedText ?? effectiveMessage
+            approvedImages = receipt.images
+          }
           // A request-specific receipt distinguishes an admitted prompt from a hook or lease rejection.
-          if (!isInternalNotificationTurn) acknowledgePrompt(workspacePath)
+          if (!isInternalNotificationTurn) {
+            acknowledgePrompt(workspacePath)
+            runExecutionContext.onBotChatImageAdmission?.()
+          }
 
           if (!isCoordinatorNotificationTurn && effectiveAgentMode === "coordinator") {
             safeSendToWindow(window, channel, {
@@ -8696,7 +8902,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
             .filter((part): part is string => typeof part === "string" && part.length > 0)
             .join("\n\n")
-          const preparedRouting = await resolveStandardTurnRouting({
+          const preparedRouting = imageRouting ?? await resolveStandardTurnRouting({
             taskSource: "chat",
             message: routingDecisionMessage || effectiveMessage,
             threadId,
@@ -8807,6 +9013,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   }
                 })
 
+          if (approvedImages.length && userHumanMessage) {
+            userHumanMessage.additional_kwargs.cmb_chat_images = approvedImages
+            if (runExecutionContext.source === "bot")
+              userHumanMessage.additional_kwargs.cmb_chat_images_source = "bot"
+          }
+
           const notificationOccurrenceBoundary = isInternalNotificationTurn
             ? captureThreadMessageProviderOccurrenceBoundary(threadId)
             : undefined
@@ -8888,6 +9100,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             baseOptions: () => ({
               subagentLifecycle: subagentLifecycle.callbacks,
               threadId,
+              chatImageMessageScope: allowDesktopImages ? {
+                source: "desktop", messageId: approvedImages.length ? userMessageId : undefined
+              } :
+                runExecutionContext.source === "bot" && (approvedImages.length || resumingBotImages) ? {
+                  messageId: resumingBotImages ? botResumeMessageId : userMessageId,
+                  validateAccess: runExecutionContext.validateBotChatImageAccess
+                } : undefined,
+              validateChatDocument: allowDesktopImages ? runExecutionContext.validateChatDocument : undefined,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               onPrimaryModelRequestState:
@@ -9035,6 +9255,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               throwIfInvokeAborted()
               // First attempt sends the message; subsequent attempts resume from checkpoint
               const input = isFirstAttempt && !resumeCheckpointId ? { messages: humanMessages } : null
+              imageAdmission?.start()
               stream = await agent.stream(input, streamConfig)
               throwIfInvokeAborted()
               usedModelId = candidateId
@@ -10334,6 +10555,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             }
             turnStateShouldDispose = true
+            if (imageAdmission && invokeFinalOutcome === "success") {
+              imageAwaitingContinuation = await graphStillHasImageWork(threadId, () => agent!.getState(streamConfig))
+            }
             if (!autoModeTerminal) {
               if (invokeFinalOutcome === "success") {
                 markAutoModeTerminal("success", "normal")
@@ -11074,6 +11298,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard = undefined
       }
     }).finally(() => {
+      try {
+        if (imageWasStopped()) imageAdmission?.finish("cancelled")
+      } finally {
+        imageAdmission?.release()
+      }
       // Nothing classified this run: an early return, or a throw before the
       // main body ever started. Reporting `unknown` lets a managed caller tell
       // "ended without a reply" from "never reported".
@@ -11083,19 +11312,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
   // Transport adapter for renderer-originated agent invocations.
   ipcMain.on("agent:invoke", (event, request: AgentInvokeParams) => {
-    const window = BrowserWindow.fromWebContents(event.sender)
+    const window = chatWindowForSender(event, getChatWindow)
     if (!window) {
       console.error("[Agent] No window found")
       return
     }
 
-    void startAgentRun(request, createBrowserWindowAgentRunDelivery(window))
+    const validateChatDocument = () => { assertChatAttachmentWindow(event, getChatWindow) }
+    const imageInvoke = request.chatImages?.length ? trackDesktopImageInvoke(request.threadId) : undefined
+    void startAgentRun(request, createBrowserWindowAgentRunDelivery(window), {
+      source: "desktop", validateChatDocument, signal: imageInvoke?.signal
+    })
       .then((handle) => {
-        void handle.completion.catch((error) => {
+        void handle.completion.finally(imageInvoke?.release).catch((error) => {
           console.error(`[Agent] Run completion failed for thread ${handle.threadId}:`, error)
         })
       })
       .catch((error) => {
+        imageInvoke?.release()
         console.error(`[Agent] Failed to start run for thread ${request.threadId}:`, error)
       })
   })
@@ -11113,17 +11347,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         agentMode: requestedAgentMode
       }: AgentResumeParams
     ) => {
+      const window = chatWindowForSender(event, getChatWindow)
+      if (!window) return
       const channel = resolveAgentStreamRequestChannel(`agent:stream:${threadId}`, streamRequestId)
       lastFetchErrorByChannel.delete(channel)
       lastFailoverByChannel.delete(channel)
-      const window = BrowserWindow.fromWebContents(event.sender)
-
       console.log("[Agent] Received resume request:", { threadId, command, modelId })
 
-      if (!window) {
-        console.error("[Agent] No window found for resume")
-        return
-      }
       if (rejectAgentStartDuringShutdown(window, channel)) return
       if (rejectClosedSideThread(threadId, window, channel)) return
       if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
@@ -11793,6 +12023,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           onHookSkippedFactory
         })
 
+        let resumeImageMessageId: string | undefined
+        let resumeImagePending: boolean | undefined = false
+        let releaseResumeImage: (() => void) | undefined
         let resumeErrorModelId: string | undefined
         let resumeAutoModeTerminal: AutoModeTerminal | undefined
         const resumeWorkflowLaunchedRunIds = new Set<string>()
@@ -11804,7 +12037,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard = undefined
         try {
           const requestedModelIdResume = modelId || (metadata.model as string | undefined)
+          const resumeRow = getThreadCore(threadId)
+          const resumeDurableRuntimeTail = await getDurableRuntimeTail(threadId, {
+            userInputProjections: resumeRow ? botHistoryInputProjection(threadId, resumeRow) : undefined
+          })
+          const imageOriginId = forkBoundarySetup.value ?? turnState.turnId
+          const exactResumeImageId = imageOriginId &&
+            checkpointDesktopImageMessageIds(resumeDurableRuntimeTail.checkpointTuple?.checkpoint).includes(imageOriginId)
+            ? imageOriginId : undefined
+          if (metadata.botHostId !== "local" && imageOriginId &&
+              getCheckpointUserMessageIndex(resumeDurableRuntimeTail.checkpointTuple?.checkpoint, imageOriginId) >= 0) {
+            const { trackContinuedChatImageSubmission } = await import("../chat-images")
+            releaseResumeImage = trackContinuedChatImageSubmission(threadId, imageOriginId)
+            if (releaseResumeImage) resumeImageMessageId = imageOriginId
+          }
           const preparedResumeRouting = await resolveStandardTurnRouting({
+            requiresImages: metadata.botHostId !== "local" && await durableTailRequiresImages(threadId, resumeDurableRuntimeTail),
             taskSource: "chat",
             threadId,
             continuation: "resume",
@@ -11832,10 +12080,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const decisions = Array.from({ length: pendingCount }, () => ({ type: decisionType }))
           const resumeValue = { decisions }
           flushPendingStreamTranscriptMessages(threadId, runToken)
-          const resumeRow = getThreadCore(threadId)
-          const resumeDurableRuntimeTail = await getDurableRuntimeTail(threadId, {
-            userInputProjections: resumeRow ? botHistoryInputProjection(threadId, resumeRow) : undefined
-          })
           throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
           if (resumeDurableRuntimeTail.persistedMessages.length > 0) {
             throw new Error(
@@ -11866,6 +12110,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
               subagentLifecycle: resumeSubagentLifecycle.callbacks,
+              chatImageMessageScope: metadata.botHostId === "local" ? undefined : {
+                source: "desktop", messageId: exactResumeImageId
+              },
+              validateChatDocument: () => { assertChatAttachmentWindow(event, getChatWindow) },
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
               onTurnCompletionRecovery: (input, writeToStream) => {
@@ -12257,6 +12505,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
+            if (resumeImageMessageId && !completionFailure) {
+              resumeImagePending = await graphStillHasImageWork(threadId, () => resumeAgentRuntime!.getState(resumeStreamConfig))
+            }
             resumeAutoModeTerminal = completionFailure
               ? createAutoModeTerminal("error", "unknown", completionFailure)
               : createAutoModeTerminal("success", "normal")
@@ -12380,6 +12631,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // 门禁状态按 threadId::runToken 挂在进程级 Map 上；每个物理运行的每条
           // 退出路径都必须清理，否则 Map 只增不减（三个入口都会产生状态）。
           clearTurnCompletionGateState(threadId, runToken)
+          await finishContinuedImageRun(threadId, resumeImageMessageId, resumeAutoModeTerminal,
+            resumeImagePending, runToken, abortController, releaseResumeImage)
           await settlePhysicalAgentRun({
             kind: "resume",
             threadId,
@@ -12463,19 +12716,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   // longer interrupted via HITL middleware. This handler remains for backward
   // compatibility and non-execute tool interrupts.
   ipcMain.on("agent:interrupt", async (event, params: AgentInterruptParams) => {
+    const window = chatWindowForSender(event, getChatWindow)
+    if (!window) return
     const { threadId, streamRequestId, decision } = params
     const channel = resolveAgentStreamRequestChannel(`agent:stream:${threadId}`, streamRequestId)
     lastFetchErrorByChannel.delete(channel)
     lastFailoverByChannel.delete(channel)
-    const window = BrowserWindow.fromWebContents(event.sender)
     const boundaryGoal = goalManager.getActive(threadId)
     const boundaryGoalId = boundaryGoal?.goalId ?? null
     const boundaryGoalActiveWindowId = boundaryGoal?.activeWindowId ?? null
 
-    if (!window) {
-      console.error("[Agent] No window found for interrupt response")
-      return
-    }
     if (rejectAgentStartDuringShutdown(window, channel)) return
     if (rejectClosedSideThread(threadId, window, channel)) return
     if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
@@ -12975,6 +13225,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         onHookSkippedFactory
       })
 
+      let interruptImageMessageId: string | undefined
+      let interruptImagePending: boolean | undefined = false
+      let releaseInterruptImage: (() => void) | undefined
       let interruptErrorModelId: string | undefined
       let interruptAutoModeTerminal: AutoModeTerminal | undefined
       const interruptWorkflowLaunchedRunIds = new Set<string>()
@@ -12985,7 +13238,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       physicalStreamRunSetupGuard.handoff()
       pendingPhysicalStreamRunSetupGuard = undefined
       try {
+        const interruptTail = await getDurableRuntimeTail(threadId)
+        const imageOriginId = forkBoundarySetup.value ?? turnState.turnId
+        const exactInterruptImageId = imageOriginId &&
+          checkpointDesktopImageMessageIds(interruptTail.checkpointTuple?.checkpoint).includes(imageOriginId)
+          ? imageOriginId : undefined
+        if (metadata.botHostId !== "local" && imageOriginId &&
+            getCheckpointUserMessageIndex(interruptTail.checkpointTuple?.checkpoint, imageOriginId) >= 0) {
+          const { trackContinuedChatImageSubmission } = await import("../chat-images")
+          releaseInterruptImage = trackContinuedChatImageSubmission(threadId, imageOriginId)
+          if (releaseInterruptImage) interruptImageMessageId = imageOriginId
+        }
         const preparedInterruptRouting = await resolveStandardTurnRouting({
+          requiresImages: metadata.botHostId !== "local" && await durableTailRequiresImages(threadId, interruptTail),
           taskSource: "chat",
           threadId,
           continuation: "interrupt",
@@ -13027,6 +13292,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
               subagentLifecycle: interruptSubagentLifecycle.callbacks,
+              chatImageMessageScope: metadata.botHostId === "local" ? undefined : {
+                source: "desktop", messageId: exactInterruptImageId
+              },
+            validateChatDocument: () => { assertChatAttachmentWindow(event, getChatWindow) },
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
@@ -13405,6 +13674,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
+            if (interruptImageMessageId && !completionFailure) {
+              interruptImagePending = await graphStillHasImageWork(threadId, () => intAgentRuntime!.getState(interruptStreamConfig))
+            }
             interruptAutoModeTerminal = completionFailure
               ? createAutoModeTerminal("error", "unknown", completionFailure)
               : createAutoModeTerminal("success", "normal")
@@ -13542,6 +13814,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       } finally {
         // 同 resume：门禁状态必须随物理运行一起释放。
         clearTurnCompletionGateState(threadId, runToken)
+        await finishContinuedImageRun(threadId, interruptImageMessageId, interruptAutoModeTerminal,
+          interruptImagePending, runToken, abortController, releaseInterruptImage)
         await settlePhysicalAgentRun({
           kind: "interrupt",
           threadId,
@@ -13683,6 +13957,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             })
         }
+        const pendingImageInvokes = cancelWorkers ? [] : [...(desktopImageInvokes.get(threadId) ?? [])]
         const detachedShellCancelled =
           !cancelWorkers && !controller && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
         if (controller && !cancelWorkers) {
@@ -13691,7 +13966,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // entrypoint with cancelWorkers=true and must not abort the foreground turn.
           LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
           if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
-          controller.abort()
+          stopDesktopRun(controller)
           // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.
@@ -13699,7 +13974,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         } else if (!detachedShellCancelled && !controller && !cancelWorkers) {
           console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
         }
-        const cancelled = Boolean(controller && !cancelWorkers) || detachedShellCancelled
+        for (const pending of pendingImageInvokes) stopDesktopRun(pending)
+        const cancelled = Boolean(controller && !cancelWorkers) || detachedShellCancelled || pendingImageInvokes.length > 0
         if (cancelled) handleAutoModeAgentCancelled(threadId)
         else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled

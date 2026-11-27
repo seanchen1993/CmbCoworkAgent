@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { HumanMessage } from "@langchain/core/messages"
 import { ChatOpenAICompletions } from "@langchain/openai"
 import * as storage from "../storage"
 import { getModelInstance } from "./runtime"
@@ -51,6 +52,22 @@ afterEach(() => {
 })
 
 describe("Maodou model runtime availability", () => {
+  it("preserves the local service-hours reason for image requests", async () => {
+    const send = vi.fn(async () => new Response("temporary failure", { status: 503 }))
+    vi.stubGlobal("fetch", send)
+    vi.spyOn(Math, "random").mockReturnValue(0)
+    const onFetchError = vi.fn()
+    const onRetry = vi.fn(() => vi.setSystemTime(new Date("2026-11-04T07:00:01+08:00")))
+    const model = getModelInstance({ ...config, inputModalities: ["text", "image"] },
+      { onFetchError, onRetry }, 2)
+    const message = new HumanMessage({ content: [
+      { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } }
+    ] })
+    await expect(model.invoke([message])).rejects.toMatchObject({ code: "idle_model_outside_service_hours" })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(onFetchError.mock.calls[0][0].rawBody).toContain("idle_model_outside_service_hours")
+  })
+
   it.each(["HTTP", "network"])(
     "blocks a %s retry when backoff crosses 07:00",
     async (failure) => {

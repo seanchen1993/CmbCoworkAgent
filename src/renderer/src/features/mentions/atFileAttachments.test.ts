@@ -2,6 +2,7 @@ import type { FileInfo } from "@/types"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { buildAttachmentMessageParts } from "../../../../shared/attachment-message-parts"
 import { formatTransferredBotReplyEdit } from "../../../../shared/bots/message-reply"
+import { searchWorkspaceMentionFiles } from "./at-file-mention-index"
 import {
   isMentionedWorkspaceFileForWorkspace,
   readBoundedWorkspaceMentionFile,
@@ -16,6 +17,36 @@ afterEach(() => {
 })
 
 describe("bounded @file attachment reads", () => {
+  it("offers images only in the ordinary composer, reads them outside the text budget, and retains failures", async () => {
+    const workspaceFiles = ["chart.PNG", "report.md", "other.gif"].map(path =>
+      ({ path, name: path, is_dir: false } as FileInfo))
+    const names = async (allowImages: boolean) => (await searchWorkspaceMentionFiles(
+      workspaceFiles, "", { allowImages }
+    )).map(file => file.filename)
+    expect(await names(false)).toEqual(["report.md"])
+    expect(await names(true)).toEqual(expect.arrayContaining(["chart.PNG", "report.md"]))
+    expect(await names(true)).not.toContain("other.gif")
+
+    const readWorkspaceFile = vi.fn()
+    const readWorkspaceImage = vi.fn(async () => ({
+      image: { id: "original", width: 1, height: 1, filename: "chart.PNG" },
+      filename: "chart.PNG", filePath: "", size: 10, truncated: false,
+      content: "", mimeType: "image/webp"
+    }))
+    const params = {
+      rawMessage: "review @chart.PNG", attachments: [], mentionedFiles: [], workspacePath: "/workspace",
+      workspaceFiles, maxAttachments: 3, maxTotalChars: 0, readWorkspaceFile
+    }
+    expect((await resolveAtFileAttachments(params)).attachments).toEqual([])
+    const result = await resolveAtFileAttachments({ ...params, readWorkspaceImage })
+    expect(result.attachments[0].image?.id).toBe("original")
+    expect(result.cleanedMessage).toBe("review chart.PNG")
+    expect(readWorkspaceImage).toHaveBeenCalledWith("/chart.PNG", expect.any(Number))
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    readWorkspaceImage.mockRejectedValueOnce(new Error("image failed"))
+    await expect(resolveAtFileAttachments({ ...params, readWorkspaceImage })).rejects.toThrow("image failed")
+  })
+
   it("counts only new @files against an already full attachment list", async () => {
     const workspaceFiles = ["a.txt", "b.txt", "c.txt", "d.txt"].map(path => ({ path, name: path, is_dir: false } as FileInfo))
     const attachments = workspaceFiles.slice(0, 3).map(file => ({
