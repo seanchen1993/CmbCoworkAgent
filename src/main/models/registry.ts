@@ -11,12 +11,13 @@ import {
   MAODOU_PRO_MODEL_NAME,
   IDLE_ULTRA_MODEL_ID,
   IDLE_ULTRA_MODEL_NAME,
-  IDLE_MODEL_MAX_TOKENS,
-  IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS,
+  MAODOU_PRO_MODEL_DEFAULT_MAX_TOKENS,
+  IDLE_ULTRA_MODEL_MAX_TOKENS,
   IDLE_MODEL_NOTICE,
   IDLE_MODEL_UAT_NOTICE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   isModelAvailable,
+  isModelSelectable,
   isValidSapId,
   type BuiltinModelLockedField
 } from "../../shared/model-catalog"
@@ -75,8 +76,18 @@ interface BuiltinModelDefinition extends CustomModelConfig {
 
 const BUNDLED_CREDENTIAL_MODEL = "minimax-m2p5-229b-w8a8"
 const MAODOU_GATEWAY_MODELS = [
-  { id: MAODOU_PRO_MODEL_ID, name: MAODOU_PRO_MODEL_NAME, model: "pro" },
-  { id: IDLE_ULTRA_MODEL_ID, name: IDLE_ULTRA_MODEL_NAME, model: "ultra" }
+  {
+    id: MAODOU_PRO_MODEL_ID,
+    name: MAODOU_PRO_MODEL_NAME,
+    model: "pro",
+    maxTokens: MAODOU_PRO_MODEL_DEFAULT_MAX_TOKENS
+  },
+  {
+    id: IDLE_ULTRA_MODEL_ID,
+    name: IDLE_ULTRA_MODEL_NAME,
+    model: "ultra",
+    maxTokens: IDLE_ULTRA_MODEL_MAX_TOKENS
+  }
 ] as const
 
 const FALLBACK_CATALOG: RemoteModelCatalogItem[] = [
@@ -312,10 +323,6 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
       {
         ...preset,
         baseUrl,
-        maxTokens:
-          environment.idleModelEnvironment === "uat"
-            ? IDLE_MODEL_UAT_DEFAULT_MAX_TOKENS
-            : IDLE_MODEL_MAX_TOKENS,
         apiKey: environment.apiKey,
         enableThinking: true,
         enableThinkingEffort: true,
@@ -333,6 +340,16 @@ function getBaseDefinitions(): BuiltinModelDefinition[] {
   }))
   const gatewayIds = new Set<string>(gatewayModels.map((item) => item.id))
   return [...gatewayModels, ...definitions.filter((item) => !gatewayIds.has(item.id))]
+}
+
+function getLockedContextWindow(config: CustomModelConfig): number | undefined {
+  if (
+    config.transport === "idle-gateway" &&
+    (config.model === "ultra" || config.idleModelEnvironment === "production")
+  ) {
+    return config.maxTokens
+  }
+  return undefined
 }
 
 function normalizeOverride(
@@ -397,10 +414,9 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
     let override: BuiltinModelOverride = {}
     try {
       const stored = overrides[base.id]
+      const lockedMaxTokens = getLockedContextWindow(base)
       override = normalizeOverride(
-        base.idleModelEnvironment === "production" && stored
-          ? { ...stored, maxTokens: IDLE_MODEL_MAX_TOKENS }
-          : stored,
+        stored && lockedMaxTokens !== undefined ? { ...stored, maxTokens: lockedMaxTokens } : stored,
         base
       )
     } catch (error) {
@@ -434,7 +450,7 @@ export function getBuiltinModelPublicConfigs(): BuiltinModelPublicConfig[] {
       "baseUrl",
       "model",
       "apiKey",
-      ...(config.idleModelEnvironment === "production" ? ["maxTokens" as const] : [])
+      ...(getLockedContextWindow(config) !== undefined ? ["maxTokens" as const] : [])
     ]
   }))
 }
@@ -526,6 +542,17 @@ export function getAvailableModelConfigOrDefault(
   const requested = getModelConfigByRef(value)
   assertIdleModelServiceHours(requested)
   if (isModelAvailable(requested)) return requested
+  return getAvailableDefaultModelConfig()
+}
+
+/** Resolve a model for a conversation before it sends a request. */
+export function getSelectableModelConfigOrDefault(value?: string | null): ResolvedModelConfig | null {
+  const requested = getModelConfigByRef(value)
+  if (requested && isModelSelectable(requested)) return requested
+  return getAvailableDefaultModelConfig()
+}
+
+function getAvailableDefaultModelConfig(): ResolvedModelConfig | null {
   const selectedDefault = getDefaultModelConfig()
   if (isModelAvailable(selectedDefault)) return selectedDefault
   return getModelConfigs().find(isModelAvailable) ?? null
@@ -539,12 +566,13 @@ export function getModelByTier(tier: "premium" | "economy"): ResolvedModelConfig
 export function updateBuiltinModelOverride(id: string, input: BuiltinModelOverride): void {
   const base = getBaseDefinitions().find((item) => item.id === id)
   if (!base) throw new Error("未找到内置模型")
+  const lockedMaxTokens = getLockedContextWindow(base)
   if (
-    base.idleModelEnvironment === "production" &&
+    lockedMaxTokens !== undefined &&
     input.maxTokens !== undefined &&
-    input.maxTokens !== IDLE_MODEL_MAX_TOKENS
+    input.maxTokens !== lockedMaxTokens
   ) {
-    throw new Error(`${base.name}在生产环境的上下文窗口固定为 128k，不能修改`)
+    throw new Error(`${base.name}的上下文窗口固定为 ${lockedMaxTokens / 1_000}k，不能修改`)
   }
   const normalized = normalizeOverride(input, base)
   const diff: BuiltinModelOverride = {}
@@ -573,8 +601,8 @@ function persistBuiltinModelOverride(
   base: BuiltinModelDefinition,
   override: BuiltinModelOverride
 ): void {
-  if (base.idleModelEnvironment === "production") {
-    // Keep the UAT context override when saving or resetting production settings.
+  if (base.id === MAODOU_PRO_MODEL_ID && base.idleModelEnvironment === "production") {
+    // Keep Pro's UAT context override when saving or resetting production settings.
     const uatMaxTokens = getBuiltinModelOverrides()[base.id]?.maxTokens
     if (uatMaxTokens !== undefined) override.maxTokens = uatMaxTokens
   }

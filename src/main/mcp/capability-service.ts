@@ -1,10 +1,12 @@
 import { createHash } from "crypto"
+import { setTimeout as delay } from "node:timers/promises"
 import { join } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
 import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser-mcp-tools"
 import { buildMcpServerConfig } from "../ipc/mcp"
 import { getEnabledMcpConnectors, getPlugins, getUserInfo, parseMcpJsonFile } from "../storage"
 import type { PluginMcpServerConfig } from "../types"
+import { waitForAbort } from "../utils/wait-for-abort"
 import { buildAliasMaps, buildCapabilityAliases, type McpCapabilitySeed } from "./aliasing"
 import { resolveMcpConnectorKind } from "./connector-kind"
 import type {
@@ -174,16 +176,19 @@ function shouldRetryMcpInvocationError(error: unknown): boolean {
 async function invokeToolWithRetry(
   callTool: (request: { name: string; arguments: Record<string, unknown> }) => Promise<unknown>,
   request: { name: string; arguments: Record<string, unknown> },
+  signal?: AbortSignal,
   retries = 1
 ): Promise<unknown> {
+  signal?.throwIfAborted()
   try {
     return await callTool(request)
   } catch (error) {
+    signal?.throwIfAborted()
     if (retries <= 0 || !shouldRetryMcpInvocationError(error)) {
       throw error
     }
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    return invokeToolWithRetry(callTool, request, retries - 1)
+    await delay(500, undefined, { signal })
+    return invokeToolWithRetry(callTool, request, signal, retries - 1)
   }
 }
 
@@ -233,8 +238,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     return this.resolveTool(idOrAlias)
   }
 
-  async invoke(idOrAlias: string, args: Record<string, unknown>): Promise<McpInvocationResult> {
-    await this.ensureInitialized()
+  async invoke(
+    idOrAlias: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<McpInvocationResult> {
+    signal?.throwIfAborted()
+    await waitForAbort(this.ensureInitialized(), signal)
+    signal?.throwIfAborted()
 
     const tool = this.resolveTool(idOrAlias)
     if (!tool) {
@@ -246,22 +257,32 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       throw new Error("MCP runtime is not initialized")
     }
 
-    const serverClient = await client.getClient(tool.providerKey)
+    const serverClient = await waitForAbort(client.getClient(tool.providerKey), signal)
     if (!serverClient) {
       throw new Error(`MCP client is unavailable for provider ${tool.providerDisplayName}`)
     }
 
     const raw = await invokeToolWithRetry(
-      (serverClient as {
-        callTool(
-          request: { name: string; arguments: Record<string, unknown> }
-        ): Promise<unknown>
-      }).callTool.bind(serverClient),
+      async (request) => {
+        if (!signal) return serverClient.callTool(request)
+        // The SDK retains its abort listener after a request settles. Give
+        // each attempt its own signal and disconnect it from the side at settlement.
+        const requestController = new AbortController()
+        const abortRequest = () => requestController.abort(signal.reason)
+        signal.addEventListener("abort", abortRequest, { once: true })
+        try {
+          return await serverClient.callTool(request, undefined, { signal: requestController.signal })
+        } finally {
+          signal.removeEventListener("abort", abortRequest)
+        }
+      },
       {
         name: tool.toolName,
         arguments: args
-      }
+      },
+      signal
     )
+    signal?.throwIfAborted()
 
     const result = normalizeMcpInvocationResult(tool.capabilityId, raw)
 

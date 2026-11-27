@@ -1,11 +1,13 @@
 import { cancelThreadSearchNavigation, isThreadSearchSurface, useThreadSearch } from "@/lib/thread-search-navigation"
-import { useAppStore } from "@/lib/store"
+import { useShallow } from "zustand/react/shallow"
+import { isBtwThreadId } from "../../../../shared/btw-chat"
+import { selectThreadSummary, useAppStore } from "@/lib/store"
 import { useBotConversationLink } from "@/components/bots/use-bot-conversation-link"
 import { LinkedBotConversation } from "@/components/bots/LinkedBotConversation"
 import { ConversationTaskControls } from "@/components/bots/ConversationTaskControls"
 import { isRegularChatThread, isManagedLocalWorkConversation } from "@/lib/thread-classification"
 import { isRemoteInboxThread } from "@/lib/remote-thread-display"
-import { lazy, Suspense, useEffect, useRef, useState } from "react"
+import { lazy, memo, Suspense, useEffect, useRef, useState } from "react"
 import { useThreadActions, useThreadContext, useThreadStateSelector } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
 import { ChatContainer, type ChatSurface } from "@/components/chat/ChatContainer"
@@ -72,7 +74,7 @@ function OrdinaryChatWithDraft({ threadId, ...props }: ChatProps) {
   </>
 }
 
-export function TabbedPanel({
+export const TabbedPanel = memo(function TabbedPanel({
   threadId,
   showTabBar = true,
   floatingChat = false,
@@ -83,20 +85,24 @@ export function TabbedPanel({
   searchAccessPending = false,
   onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
-  const row = useAppStore((state) => state.threads.find((thread) => thread.thread_id === threadId))
   const interactionDisabled = historyOnly || searchAccessPending
-  const managedCandidate = !interactionDisabled && isManagedLocalWorkConversation(row)
+  const { managedCandidate, mayAssociate } = useAppStore(useShallow(state => {
+    const row = isBtwThreadId(threadId) ? undefined : selectThreadSummary(state, threadId)
+    return {
+      managedCandidate: !interactionDisabled && isManagedLocalWorkConversation(row),
+      mayAssociate: Boolean(
+        !interactionDisabled && window.api.bots?.conversations &&
+        isRegularChatThread(row) &&
+        resolveAgentModeFromMetadata(row?.metadata) === "normal" &&
+        !isRemoteInboxThread(row) &&
+        !row?.metadata?.remoteState &&
+        !row?.metadata?.remoteReadOnly &&
+        !row?.metadata?.scheduledTaskId &&
+        !threadId.startsWith("heartbeat")
+      )
+    }
+  }))
   const linked = useBotConversationLink(threadId, managedCandidate)
-  const mayAssociate = Boolean(
-    !interactionDisabled && window.api.bots?.conversations &&
-    isRegularChatThread(row) &&
-    resolveAgentModeFromMetadata(row?.metadata) === "normal" &&
-    !isRemoteInboxThread(row) &&
-    !row?.metadata?.remoteState &&
-    !row?.metadata?.remoteReadOnly &&
-    !row?.metadata?.scheduledTaskId &&
-    !threadId.startsWith("heartbeat")
-  )
   const activeTab = useThreadStateSelector(threadId, (state) => state.activeTab) ?? "agent"
   const openFiles = useThreadStateSelector(threadId, (state) => state.openFiles) ?? []
   const pendingApproval = useThreadStateSelector(threadId, (state) => state.pendingApproval)
@@ -229,4 +235,4 @@ export function TabbedPanel({
       </div>
     </div>
   )
-}
+})

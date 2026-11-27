@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { createChatSearchPlan, appendChatSearchToolSummaries } from "./chat-search-plan"
+import { appendBtwReferences } from "./btw-references"
+import { splitBotInlineReasoning } from "./bots/inline-reasoning"
+import { CHAT_SEARCH_INPUT_LIMIT, createChatSearchPlan, appendChatSearchToolSummaries } from "./chat-search-plan"
+import { createThreadSearchMessagePlan } from "./thread-search-projection"
 import {
   createChatSearchPlanQueryFilter,
   findChatSearchLocations,
@@ -215,6 +218,66 @@ describe("search fragment coordinates", () => {
     expect(text).toContain("report.txt")
     expect(text).toContain("visible")
     expect(text).not.toContain("secret")
+  })
+
+  it("indexes auxiliary user message bodies without exposing selection chips or their transport", () => {
+    const question = appendBtwReferences("Explain this", [{ text: "quote-only target" }])
+    const attachment = '\n<attachment filename="report.txt">hidden contents</attachment>'
+    for (const [content, expected] of [[question, "Explain this"], [question + attachment, "📎 report.txt\n\nExplain this"]]) {
+      const live = createChatSearchPlan("user", content, { sideConversation: true })
+      const durable = createThreadSearchMessagePlan("user", content, [], null, null, false, false, undefined, true)!
+      for (const plan of [live, durable]) {
+        const segments = projectChatSearchPlan(plan)
+        const matches = findChatSearchLocations(segments, "Explain this")
+        expect(matches).toHaveLength(1)
+        expect(matches[0].context).toBe(expected)
+        expect(findChatSearchLocations(segments, "quote-only")).toEqual([])
+        expect(findChatSearchLocations(segments, "userselect")).toEqual([])
+      }
+    }
+    const invalid = "Explain this\n\n# userselect:\n```userselect\nordinary text\n```"
+    const segments = projectChatSearchPlan(createChatSearchPlan("user", invalid, { sideConversation: true }))
+    expect(findChatSearchLocations(segments, "ordinary text")).toHaveLength(1)
+  })
+
+  it("searches the displayed side reply after leading whitespace without admitting an oversized reasoning block", () => {
+    const body = "The visible answer. ".repeat(8).trimEnd()
+    const reply = `${" ".repeat(80)}<think>private reasoning</think>\n${body}`
+    const live = createChatSearchPlan("assistant", reply, { sideConversation: true })
+    const durable = createThreadSearchMessagePlan("assistant", reply, [], null, null, false, false, undefined, true)!
+    expect(splitBotInlineReasoning(reply)).toEqual({ body, reasoning: "private reasoning" })
+    for (const plan of [live, durable]) {
+      const segments = projectChatSearchPlan(plan)
+      expect(segments.map(segment => segment.text)).toEqual([body])
+      expect(findChatSearchLocations(segments, "private reasoning")).toEqual([])
+    }
+
+    for (const padding of [80, CHAT_SEARCH_INPUT_LIMIT + 1]) {
+      const large = createChatSearchPlan("assistant", `${" ".repeat(padding)}<think>${"x".repeat(CHAT_SEARCH_INPUT_LIMIT)}`, {
+        sideConversation: true
+      })
+      expect(large.truncated).toBe(true)
+      expect(large.segments).toEqual([])
+    }
+  })
+
+  it("searches literal /goal text in auxiliary messages and the Goal card title in ordinary ones", () => {
+    for (const content of ["/goal ship", [{ type: "text", text: "/goal ship" }], [
+      { type: "text", text: "/goal" }, { type: "text", text: "ship" }
+    ]]) {
+      const side = createChatSearchPlan("user", content, { sideConversation: true })
+      expect(projectChatSearchPlan(side)[0].text).toMatch(/^\/goal\s+ship$/)
+    }
+    expect(projectChatSearchPlan(createChatSearchPlan("user", "/goal ship"))[0].text).toContain("设为 Goal")
+  })
+
+  it("keeps literal userselect examples searchable in ordinary and durable user messages", () => {
+    const example = appendBtwReferences("Example", [{ text: "literal quote" }])
+    for (const plan of [createChatSearchPlan("user", example), createThreadSearchMessagePlan("user", example, [], null)!]) {
+      const [segment] = projectChatSearchPlan(plan)
+      expect(segment.text).toBe(example)
+      expect(findChatSearchLocations([segment], "literal quote")).toHaveLength(1)
+    }
   })
 
   it("bounds tool parameters before constructing their collapsed summaries", () => {

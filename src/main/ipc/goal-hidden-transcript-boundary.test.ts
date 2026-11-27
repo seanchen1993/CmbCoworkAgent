@@ -10,7 +10,10 @@ import {
   TURN_COMPLETION_GATE_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_MARKER_PREFIX
 } from "../../shared/checkpoint-transcript"
-import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import {
+  INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
 import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
@@ -37,6 +40,7 @@ import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import * as db from "../db"
 import {
   createPhysicalRunHiddenUserMessage,
+  getCheckpointInitialNotificationUserMessageId,
   persistAndForwardPhysicalRunStreamChunk
 } from "./agent"
 import { STOP_HOOK_REVISION_PROMPT_PREFIX } from "./stop-hook-context"
@@ -64,20 +68,113 @@ const window = {
 it("routes physical hidden inputs through the durable boundary helper", () => {
   const agentSource = readFileSync(join(__dirname, "agent.ts"), "utf8")
   expect(agentSource).toMatch(
-    /: isWorkflowNotificationTurn\s+\? createPhysicalRunHiddenUserMessage\(/
+    /: isWorkflowNotificationTurn\s+\? createPhysicalRunHiddenUserMessage\([^)]*"notification",\s*\{ turn: turnState, initial: true \}/
   )
   expect(agentSource).toMatch(
-    /const coordinatorNotificationInput = coordinatorNotificationFields\s+\? isCoordinatorNotificationTurn\s+\? createPhysicalRunHiddenUserMessage\(/
+    /const coordinatorNotificationInput = coordinatorNotificationFields\s+\? isCoordinatorNotificationTurn\s+\? createPhysicalRunHiddenUserMessage\([^)]*"notification",\s*\{ turn: turnState, initial: true \}/
   )
   expect(agentSource).toContain("const goalInput = createPhysicalRunHiddenUserMessage(")
   expect(
-    agentSource.match(/const revisionInput = createPhysicalRunHiddenUserMessage\(/g)
+    agentSource.match(/const revisionInput = createPhysicalRunHiddenUserMessage\([^)]*\{ turn: turnState \}/g)
   ).toHaveLength(3)
   const runtimeSource = readFileSync(join(__dirname, "../agent/runtime.ts"), "utf8")
   expect(runtimeSource).toMatch(
     /createRecoveryMessage: \(threadId, messages, prompt\) =>\s+createPhysicalScopedGateRecoveryMessage\(/
   )
   expect(agentSource).toMatch(/adoptGraphTranscriptBoundaryFromValues\(\s*threadId,/)
+})
+
+it("keeps the initial notification as the side context cutoff during a revision", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cmb-notification-side-context-"))
+  storage.path = join(directory, "threads.sqlite")
+  const threadId = "notification-side-context"
+  const runToken = "notification-run"
+  const signal = new AbortController().signal
+  const turn = { runToken, userMessageId: "scheduler-request" }
+  await db.initializeDatabase()
+  try {
+    db.createThread(threadId)
+    setCurrentRunMessageQueueOwner(threadId, runToken)
+    db.upsertThreadMessages(threadId, [
+      { id: "user", role: "user", content: "Previous request", created_at: new Date() },
+      { id: "reply", role: "assistant", content: "Completed reply", created_at: new Date() }
+    ])
+    const initial = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, null, {
+      content: `${COORDINATOR_NOTIFICATION_PROMPT_PREFIX} Worker finished`
+    }, "notification", { turn, initial: true })
+    db.upsertThreadMessages(threadId, [
+      { id: "draft", role: "assistant", content: "Rejected notification draft", created_at: new Date() }
+    ])
+    const revision = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, null, {
+      content: `${STOP_HOOK_REVISION_PROMPT_PREFIX} Revise`
+    }, "notification", { turn })
+
+    expect(turn.userMessageId).toBe(initial.id)
+    expect(db.getThreadTranscriptBoundaryOrdinal(threadId, turn.userMessageId)).toBe(2)
+    expect(db.getThreadTranscriptBoundaryOrdinal(threadId, revision.id!)).toBe(4)
+    expect(revision.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]).toBe(true)
+    const gate = createPhysicalScopedGateRecoveryMessage(threadId, runToken, [revision], "Finish the revision")
+    expect(gate.additional_kwargs[INITIAL_NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]).toBe(initial.id)
+
+    const checkpointPath = join(directory, "checkpoint.sqlite")
+    const config = { configurable: { thread_id: threadId, checkpoint_ns: "" } }
+    const saver = new SqlJsSaver(checkpointPath)
+    try {
+      await saver.put(config, {
+        v: 1,
+        id: "held-notification",
+        ts: new Date().toISOString(),
+        channel_values: { messages: [initial, new AIMessage("Rejected notification draft"), revision] },
+        channel_versions: { messages: 1 },
+        versions_seen: {}
+      }, { source: "loop", step: 1, parents: {} })
+    } finally {
+      await saver.close()
+    }
+    await db.closeDatabase()
+    await db.initializeDatabase()
+    const reopened = new SqlJsSaver(checkpointPath)
+    try {
+      const held = await reopened.getTuple(config)
+      const userMessageId = getCheckpointInitialNotificationUserMessageId(threadId, held?.checkpoint)
+      expect(userMessageId).toBe(initial.id)
+      const resumedRunToken = "resumed-notification-run"
+      setCurrentRunMessageQueueOwner(threadId, resumedRunToken)
+      const resumedTurn = { runToken: resumedRunToken, userMessageId }
+      const resumedRevision = createPhysicalRunHiddenUserMessage(threadId, resumedRunToken, signal, null, {
+        content: `${STOP_HOOK_REVISION_PROMPT_PREFIX} Revise after approval`
+      }, "notification", { turn: resumedTurn })
+      expect(resumedTurn.userMessageId).toBe(initial.id)
+      expect(getCheckpointInitialNotificationUserMessageId(threadId, {
+        channel_values: { messages: [initial, revision, resumedRevision] }
+      })).toBe(initial.id)
+      expect(getCheckpointInitialNotificationUserMessageId("another-thread", held?.checkpoint)).toBeUndefined()
+      expect(getCheckpointInitialNotificationUserMessageId(threadId, {
+        channel_values: { messages: [revision] }
+      })).toBeUndefined()
+      expect(getCheckpointInitialNotificationUserMessageId(threadId, {
+        channel_values: { messages: [initial, revision, new HumanMessage("Unrelated new request")] }
+      })).toBeUndefined()
+    } finally {
+      await reopened.close()
+    }
+
+    const nextRunToken = "replacement-notification-run"
+    setCurrentRunMessageQueueOwner(threadId, nextRunToken)
+    const nextTurn = { runToken: nextRunToken, userMessageId: "replacement-scheduler-request" }
+    const nextInitial = createPhysicalRunHiddenUserMessage(threadId, nextRunToken, signal, null, {
+      content: `${COORDINATOR_NOTIFICATION_PROMPT_PREFIX} Another worker finished`
+    }, "notification", { turn: nextTurn, initial: true })
+    expect(nextTurn.userMessageId).toBe(nextInitial.id)
+    expect(nextInitial.id).not.toBe(initial.id)
+    expect(getCheckpointInitialNotificationUserMessageId(threadId, {
+      channel_values: { messages: [initial, revision, nextInitial] }
+    })).toBe(nextInitial.id)
+  } finally {
+    clearCurrentRunMessageQueue(threadId)
+    await db.closeDatabase()
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 it.each([

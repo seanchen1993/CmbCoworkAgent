@@ -27,7 +27,8 @@ export function createThreadSearchMessagePlan(
   reasoningSample: string | null = null,
   reasoningOmitted = false,
   bodyOnly = false,
-  replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role">
+  replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role">,
+  sideConversation = false
 ): (ChatSearchPlan & { reasoningVisibilityUnverified?: boolean }) | null {
   // Completed tool details are folded and have no independent transcript row.
   if (role === "tool") return null
@@ -63,7 +64,7 @@ export function createThreadSearchMessagePlan(
   const plan = createChatSearchPlan(
     role,
     reply?.message ?? (visible.contentChanged ? visible.contentText : displayContent),
-    { stripThink }
+    { stripThink, sideConversation }
   )
   const reasoningVisibilityUnverified =
     reasoningOmitted &&

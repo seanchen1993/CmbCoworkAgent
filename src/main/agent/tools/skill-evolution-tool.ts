@@ -33,6 +33,8 @@ import { discoverSkillsSync } from "../../skills/discovery"
 import { getDiscoveredSkillId, normalizeSkillId } from "../../skills/ids"
 import { bumpHookCatalogGlobalRevision } from "../../hook-catalog/revision"
 import { beginSkillCatalogTopologyMutation } from "../../skill-plugin-catalog/topology-mutation-gate"
+import { isBtwThreadId, type BtwSkillRequestClosed } from "../../../shared/btw-chat"
+import { sanitizeSkillId } from "../../utils/skill-identifiers"
 
 // ─────────────────────────────────────────────────────────
 // Helpers
@@ -68,6 +70,7 @@ function notifyRenderer(channel: string, payload?: unknown): void {
 export interface SkillConfirmRequest {
   threadId: string
   requestId: string
+  source?: "proposal"
   skillId: string
   name: string
   description: string
@@ -84,7 +87,10 @@ export interface SkillConfirmResponse {
 // ─────────────────────────────────────────────────────────
 
 /** Generic map of pending one-shot IPC responses keyed by requestId */
-const _pendingResponses = new Map<string, (value: unknown) => void>()
+const _pendingResponses = new Map<string, {
+  kind: BtwSkillRequestClosed["kind"]
+  settle: (value: unknown) => void
+}>()
 
 let _responseHandlerRegistered = false
 function ensureResponseHandler(): void {
@@ -94,40 +100,45 @@ function ensureResponseHandler(): void {
   // Handle both intent responses ("yes / no, create skill?") and full confirm responses ("adopt / reject")
   ipcMain.handle("skill:intentResponse", (_event, { requestId, accepted }: { requestId: string; accepted: boolean }) => {
     console.log(`[SkillEvolution] Received intent response: ${requestId} accepted=${accepted}`)
-    const resolve = _pendingResponses.get(requestId)
-    if (resolve) {
-      _pendingResponses.delete(requestId)
-      resolve(accepted)
-    }
+    const pending = _pendingResponses.get(requestId)
+    if (pending?.kind !== "intent" || typeof accepted !== "boolean") return false
+    pending.settle(accepted)
+    return true
   })
 
   ipcMain.handle("skill:confirmResponse", (_event, { requestId, approved, content }: { requestId: string; approved: boolean; content?: string }) => {
     console.log(`[SkillEvolution] Received confirmation response: ${requestId} approved=${approved}`)
-    const resolve = _pendingResponses.get(requestId)
-    if (resolve) {
-      _pendingResponses.delete(requestId)
-      resolve({ approved, content })
-    }
+    const pending = _pendingResponses.get(requestId)
+    if (pending?.kind !== "confirm" || typeof approved !== "boolean") return
+    pending.settle({ approved, content })
   })
 }
 
 function waitForResponse<T>(
-  requestId: string,
+  { requestId, threadId }: { requestId: string; threadId: string },
+  kind: BtwSkillRequestClosed["kind"],
   fallback: T,
-  timeoutMs = 5 * 60 * 1000
+  signal?: AbortSignal
 ): Promise<T> {
   ensureResponseHandler()
   return new Promise((resolve) => {
+    const onAbort = () => settle(fallback)
     const timer = setTimeout(() => {
-      _pendingResponses.delete(requestId)
       console.warn(`[SkillEvolution] Response timed out for requestId: ${requestId}`)
-      resolve(fallback)
-    }, timeoutMs)
+      settle(fallback)
+    }, 5 * 60 * 1000)
 
-    _pendingResponses.set(requestId, (value) => {
+    const settle = (value: unknown) => {
+      _pendingResponses.delete(requestId)
       clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+      if (isBtwThreadId(threadId)) {
+        notifyRenderer("skill:btwRequestClosed", { threadId, requestId, kind } satisfies BtwSkillRequestClosed)
+      }
       resolve(value as T)
-    })
+    }
+    _pendingResponses.set(requestId, { kind, settle })
+    signal?.addEventListener("abort", onAbort, { once: true })
   })
 }
 
@@ -156,8 +167,9 @@ export interface SkillIntentRequest {
  * Ask the user (via a lightweight banner) whether they want to create a skill
  * from the current conversation.  Returns true if they click "Yes".
  */
-export async function requestSkillIntent(req: SkillIntentRequest): Promise<boolean> {
-  const promise = waitForResponse<boolean>(req.requestId, false)
+export async function requestSkillIntent(req: SkillIntentRequest, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return false
+  const promise = waitForResponse<boolean>(req, "intent", false, signal)
   notifyRenderer("skill:intentRequest", req)
   console.log(
     `[SkillEvolution] Sent intent request: ${req.requestId} mode=${req.mode} turnCount=${req.turnCount} toolCallCount=${req.toolCallCount}`
@@ -176,25 +188,16 @@ export async function requestSkillIntent(req: SkillIntentRequest): Promise<boole
  * Exported so the auto-trigger path in agent.ts can reuse the same flow.
  */
 export async function requestSkillConfirmation(
-  req: SkillConfirmRequest
+  req: SkillConfirmRequest,
+  signal?: AbortSignal
 ): Promise<SkillConfirmResponse> {
-  const promise = waitForResponse<SkillConfirmResponse>(req.requestId, { approved: false })
+  if (signal?.aborted) return { approved: false }
+  const promise = waitForResponse<SkillConfirmResponse>(req, "confirm", { approved: false }, signal)
   notifyRenderer("skill:confirmRequest", req)
   console.log(
     `[SkillEvolution] Sent confirmation request: ${req.requestId} for skill "${req.name}" (${req.skillId})`
   )
   return promise
-}
-
-/** Sanitize a skill name into a safe directory name */
-export function sanitizeSkillId(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\-_]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 64)
 }
 
 function isSafeSkillPathSegment(segment: string): boolean {
@@ -318,6 +321,7 @@ interface SkillEvolutionToolContext {
   /** The thread that owns this agent run — forwarded into IPC events so the
    *  renderer can filter out events that belong to a different thread. */
   threadId?: string
+  abortSignal?: AbortSignal
 }
 
 export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}) {
@@ -395,8 +399,9 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
             name: input.name,
             description: input.description,
             content: input.content
-          })
+          }, context.abortSignal)
 
+          if (context.abortSignal?.aborted) return "Skill creation cancelled. No files were written."
           if (!decision.approved) {
             console.log(`[SkillEvolution] User rejected skill creation: "${input.name}"`)
             return JSON.stringify({

@@ -721,7 +721,7 @@ export function CustomModelDialog({
           <DialogDescription>
             {config.source === "builtin"
               ? config.lockedFields?.includes("maxTokens")
-                ? "连接信息、模型模式和 128k 上下文窗口由系统管理。"
+                ? `连接信息、模型模式和 ${Number(config.maxTokensInput) / 1_000}k 上下文窗口由系统管理。`
                 : "连接信息由系统管理；你可以调整上下文、采样、思考和路由参数。"
               : "配置兼容 OpenAI 接口格式的模型服务。"}
           </DialogDescription>

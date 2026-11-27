@@ -1,3 +1,4 @@
+import { isBtwThreadId } from "../../shared/btw-chat"
 import type { BotMessageReply } from "../../shared/bots/contracts"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { publishedThreadMessageFragmentsSql } from "../db/thread-message-fragment-storage"
@@ -341,7 +342,8 @@ export function searchDurableThreadMessages(
         candidate.reasoningSample,
         candidate.reasoningOmitted,
         options.bodyOnly,
-        verifiedReplies?.get(candidate.messageId)
+        verifiedReplies?.get(candidate.messageId),
+        isBtwThreadId(normalizedThreadId)
       )
       if (!plan) {
         advancedCandidateCount = header.index + 1

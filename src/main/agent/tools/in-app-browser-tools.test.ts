@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   state: vi.fn(),
   prepare: vi.fn(),
+  prepareTarget: vi.fn(),
   extractIframes: vi.fn(),
   readWpsDocument: vi.fn()
 }))
@@ -18,6 +19,8 @@ vi.mock("../../browser/cdp/playwright-mcp-bridge", () => ({
 }))
 vi.mock("../../browser/core/browser-service-registry", () => ({
   getGlobalBrowserService: () => ({
+    requestPanel: () => {},
+    prepareTarget: mocks.prepareTarget,
     extractIframeInformation: mocks.extractIframes,
     readWpsDocumentText: mocks.readWpsDocument
   })
@@ -100,6 +103,53 @@ describe("in-app browser agent tools", () => {
     })
     expect(mocks.prepare).toHaveBeenCalledWith(expect.objectContaining(context))
     expect(mocks.readWpsDocument).toHaveBeenCalledOnce()
+  })
+  it.each([2, 3])("cancels browser helper %s during preparation", async (index) => {
+    const bridge = await vi.importActual<typeof import("../../browser/cdp/playwright-mcp-bridge")>(
+      "../../browser/cdp/playwright-mcp-bridge"
+    )
+    mocks.prepare.mockImplementation(bridge.preparePlaywrightInAppBrowser)
+    const controller = new AbortController()
+    const started = Promise.withResolvers<void>()
+    const target = Promise.withResolvers<void>()
+    mocks.prepareTarget.mockImplementation(() => {
+      started.resolve()
+      return target.promise
+    })
+    const tools = await createInAppBrowserTools(capabilities, {
+      ...context,
+      abortSignal: controller.signal
+    })
+    const outcome = expect(tools[index].invoke({})).rejects.toMatchObject({ name: "AbortError" })
+
+    await started.promise
+    controller.abort()
+    await outcome
+    target.resolve()
+    expect(mocks.extractIframes).not.toHaveBeenCalled()
+    expect(mocks.readWpsDocument).not.toHaveBeenCalled()
+  })
+  it.each([
+    { index: 2, read: mocks.extractIframes },
+    { index: 3, read: mocks.readWpsDocument }
+  ])("cancels browser helper $index while its read is pending", async ({ index, read }) => {
+    const controller = new AbortController()
+    const started = Promise.withResolvers<void>()
+    const result = Promise.withResolvers<unknown>()
+    read.mockImplementation(() => {
+      started.resolve()
+      return result.promise
+    })
+    const tools = await createInAppBrowserTools(capabilities, {
+      ...context,
+      abortSignal: controller.signal
+    })
+    const outcome = expect(tools[index].invoke({})).rejects.toMatchObject({ name: "AbortError" })
+
+    await started.promise
+    controller.abort()
+    await outcome
+    result.resolve({ text: "late result" })
   })
   it("rejects existing tools after browser control is disabled", async () => {
     const tools = await createInAppBrowserTools(capabilities, context)

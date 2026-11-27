@@ -445,8 +445,13 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "requestCoordinatorWorkers(currentThreadId, true)",
-    "thread context subscribes worker updates only for the active thread"
+    "const writableThreadId = foregroundHistoryReadOnly || absentHistoryPanel ? null : currentThreadId",
+    "only a writable foreground thread is eligible for coordinator update subscriptions"
+  )
+  assertIncludes(
+    threadContext,
+    "requestCoordinatorWorkers(writableThreadId, true)",
+    "thread context subscribes worker updates for the writable active thread"
   )
   assertIncludes(
     threadContext,

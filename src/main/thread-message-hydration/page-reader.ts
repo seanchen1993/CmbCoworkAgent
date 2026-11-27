@@ -24,7 +24,10 @@ import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "./order-sql"
 import { readPriorToolReplayIds } from "./tool-replay-evidence"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
-import { readLegacyImportedCheckpointReplayEvidence } from "../../shared/tool-transcript-replay"
+import {
+  readHistoricalToolReplayId,
+  readLegacyImportedCheckpointReplayEvidence
+} from "../../shared/tool-transcript-replay"
 import {
   getRawWorkerToolCallId,
   getWorkerToolResultKey,
@@ -34,6 +37,10 @@ import {
   type ToolOwnershipMessage,
   type VerifiedToolOutcome
 } from "../../shared/tool-result-ownership"
+import {
+  coordinatorTranscriptContentToText, isQuietCoordinatorToolName, QUIET_COORDINATOR_TOOL_NAMES
+} from "../../shared/internal-notification-turn"
+import { isVisibleTranscriptMessage } from "../../shared/transcript-visibility"
 import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -89,6 +96,7 @@ interface CandidateRow {
 interface FragmentSummary {
   prefix: string
   length: number
+  tail?: { parts: string[]; first: number; length: number }
 }
 
 interface LegacyCheckpointMigrationBoundary {
@@ -244,6 +252,69 @@ function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value))
 }
 
+function projectSideContextMessage(
+  row: ThreadMessageRow,
+  fragment: FragmentSummary | undefined,
+  cancellation: Int32Array,
+  byteBudget: number,
+  textByteBudget: number,
+  historicalReplayOf?: string
+): { message: Message; truncated: boolean; bytes: number } {
+  const message: Message = {
+    id: row.message_id,
+    ordinal: row.ordinal,
+    role: row.role,
+    content: "",
+    created_at: dateFromTimestamp(row.created_at) ?? new Date(),
+    ...(row.role === "tool" && row.name ? { name: row.name } : {})
+  }
+  const overhead = jsonBytes(message)
+  if (row.role !== "user" && row.role !== "assistant" && row.role !== "tool") {
+    return { message, truncated: false, bytes: overhead }
+  }
+  // Recovery reads can still include the physical polling row for source verification.
+  if (row.role === "tool" && isQuietCoordinatorToolName(row.name)) {
+    return { message, truncated: false, bytes: overhead }
+  }
+  // Omit replay text while keeping the physical row available for pagination.
+  if (historicalReplayOf && readHistoricalToolReplayId({
+    ...message,
+    provider_source_id: row.provider_source_id ?? undefined,
+    provider_occurrence: row.provider_occurrence ?? undefined,
+    tool_call_id: row.tool_call_id ?? undefined,
+    historical_tool_replay_id: historicalReplayOf
+  })) {
+    return { message, truncated: false, bytes: overhead }
+  }
+  const content = parseJsonValue(row.content_json, cancellation)
+  const visibilityText = typeof content === "string" && fragment
+    ? content + fragment.prefix
+    : coordinatorTranscriptContentToText(content)
+  // Identify internal prompts while their opening marker is still present.
+  if (!visibilityText || !isVisibleTranscriptMessage(row.role, visibilityText)) {
+    return { message, truncated: false, bytes: overhead }
+  }
+  const available = Math.min(textByteBudget, Math.max(0, byteBudget - overhead))
+  if (available <= 0) return { message, truncated: true, bytes: overhead }
+  let text = visibilityText
+  if (typeof content === "string" && fragment?.tail) {
+    const { parts, first } = fragment.tail
+    const tail = parts.slice(first).join("").slice(-(available + 1))
+    text = fragment.length === tail.length ? content + tail : tail
+  }
+  const size = Buffer.byteLength(text)
+  if (size <= available) {
+    message.content = text
+    return { message, truncated: false, bytes: overhead + size }
+  }
+  // One extra UTF-16 code unit lets the UTF-8 boundary check handle pairs.
+  const tail = Buffer.from(text.slice(-(available + 1)))
+  let start = tail.length - available
+  while (start < tail.length && (tail[start] & 0xc0) === 0x80) start++
+  message.content = tail.subarray(start).toString("utf8")
+  return { message, truncated: true, bytes: overhead + tail.length - start }
+}
+
 function safeSliceEnd(value: string, end: number): number {
   if (end <= 0 || end >= value.length) return Math.max(0, Math.min(value.length, end))
   const previous = value.charCodeAt(end - 1)
@@ -347,17 +418,45 @@ function projectMessageToByteBudget(
   return { message: projected, truncated: true, bytes: projectedBytes }
 }
 
+export function getBackwardThreadMessageCandidatesSql(
+  userScan: boolean,
+  createdAtBoundarySql = ""
+): string {
+  // Without SQLite statistics, the general ordinal index can scan all roles in this range.
+  const userIndex = userScan ? " INDEXED BY idx_thread_messages_role_order" : ""
+  return `SELECT m.message_id, m.ordinal,
+                1024 +
+                CASE
+                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
+                  ELSE length(CAST(m.content_json AS BLOB))
+                END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
+                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
+         FROM thread_messages AS m${userIndex}
+         LEFT JOIN thread_message_fragment_states AS fragments
+           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+         WHERE m.thread_id = ?
+           ${userScan
+             ? "AND m.role = 'user' AND m.ordinal > ? AND (m.ordinal, m.message_id) < (?, ?)"
+             : THREAD_MESSAGE_BEFORE_CURSOR_SQL}
+           ${createdAtBoundarySql}
+         ORDER BY m.ordinal DESC, m.message_id DESC
+         LIMIT ?`
+}
+
 function readCandidates(
   database: DatabaseSync,
   request: ThreadMessageHydrationReadRequest,
   limit: number,
   cancellation: Int32Array,
-  legacyMigration: LegacyCheckpointMigrationBoundary | null
+  legacyMigration: LegacyCheckpointMigrationBoundary | null,
+  excludeQuietCoordinatorResults: boolean
 ): { rows: CandidateRow[]; verifiedAnchor?: import("../types").ThreadMessagesPage["verifiedAnchor"] } {
   const beforeOrdinal = request.options.beforeOrdinal
   const beforeMessageId = request.options.beforeMessageId?.trim() ?? ""
   const targetMessageId = request.options.targetMessageId?.trim() ?? ""
   const anchorMessageId = request.options.anchorMessageId?.trim() ?? ""
+  const userOrdinalFloor = request.options.userOrdinalFloor
   const hasBeforeOrdinal = Number.isSafeInteger(beforeOrdinal) && (beforeOrdinal ?? -1) >= 0
   const hasBeforeMessageId = beforeMessageId.length > 0
   const hasTargetMessageId = targetMessageId.length > 0
@@ -402,6 +501,9 @@ function readCandidates(
     throw new Error(
       "Thread message page cursor requires beforeOrdinal and beforeMessageId together"
     )
+  }
+  if (userOrdinalFloor !== undefined && !hasBeforeOrdinal) {
+    throw new Error("Thread message user scan requires a backward cursor")
   }
   if (hasAnchorMessageId && hasBeforeOrdinal) {
     throw new Error(
@@ -487,6 +589,12 @@ function readCandidates(
     )
   }
 
+  const quietToolNames = excludeQuietCoordinatorResults ? [...QUIET_COORDINATOR_TOOL_NAMES] : []
+  // Filter before LIMIT and body-size estimation so hidden polls cannot break up side-context pages.
+  const candidateBoundarySql = quietToolNames.length > 0
+    ? `${createdAtBoundarySql}\n           AND (m.role <> 'tool' OR COALESCE(m.name, '') NOT IN (${quietToolNames.map(() => "?").join(", ")}))`
+    : createdAtBoundarySql
+  const candidateBoundaryBindings = [...boundaryBindings, ...quietToolNames]
   const statement = database.prepare(
     hasAnchorMessageId
       ? `SELECT m.message_id, m.ordinal,
@@ -502,7 +610,7 @@ function readCandidates(
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
            AND (m.ordinal > ? OR (m.ordinal = ? AND m.message_id > ?))
-           ${createdAtBoundarySql}
+           ${candidateBoundarySql}
          ORDER BY m.ordinal ASC, m.message_id ASC
          LIMIT ?`
       : hasTargetMessageId
@@ -519,26 +627,11 @@ function readCandidates(
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
            AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id <= ?))
-           ${createdAtBoundarySql}
+           ${candidateBoundarySql}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
         : hasBeforeOrdinal
-      ? `SELECT m.message_id, m.ordinal,
-                1024 +
-                CASE
-                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
-                  ELSE length(CAST(m.content_json AS BLOB))
-                END +
-                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
-                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
-         FROM thread_messages AS m
-         LEFT JOIN thread_message_fragment_states AS fragments
-           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
-         WHERE m.thread_id = ?
-           ${THREAD_MESSAGE_BEFORE_CURSOR_SQL}
-           ${createdAtBoundarySql}
-         ORDER BY m.ordinal DESC, m.message_id DESC
-         LIMIT ?`
+      ? getBackwardThreadMessageCandidatesSql(userOrdinalFloor !== undefined, candidateBoundarySql)
       : `SELECT m.message_id, m.ordinal,
                 1024 +
                 CASE
@@ -551,7 +644,7 @@ function readCandidates(
          LEFT JOIN thread_message_fragment_states AS fragments
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
-           ${createdAtBoundarySql}
+           ${candidateBoundarySql}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
   )
@@ -561,7 +654,7 @@ function readCandidates(
           exactMessageOrdinal as number,
           exactMessageOrdinal as number,
           anchorMessageId,
-          ...boundaryBindings,
+          ...candidateBoundaryBindings,
           limit + 1
         ]
       : hasTargetMessageId
@@ -570,17 +663,19 @@ function readCandidates(
             exactMessageOrdinal as number,
             exactMessageOrdinal as number,
             targetMessageId,
-            ...boundaryBindings,
+            ...candidateBoundaryBindings,
             limit + 1
           ]
       : hasBeforeOrdinal
         ? [
             request.threadId,
-            ...threadMessageBeforeCursorBindings(request.threadId, beforeMessageId, beforeOrdinal as number),
-            ...boundaryBindings,
+            ...(userOrdinalFloor === undefined
+              ? threadMessageBeforeCursorBindings(request.threadId, beforeMessageId, beforeOrdinal as number)
+              : [userOrdinalFloor, beforeOrdinal as number, beforeMessageId]),
+            ...candidateBoundaryBindings,
             limit + 1
           ]
-      : [request.threadId, ...boundaryBindings, limit + 1]
+      : [request.threadId, ...candidateBoundaryBindings, limit + 1]
   const rows: CandidateRow[] = []
   for (const raw of statement.iterate(...bindings)) {
     throwIfCancelled(cancellation)
@@ -647,7 +742,8 @@ function readFragmentSummaries(
   threadId: string,
   messageIds: readonly string[],
   cancellation: Int32Array,
-  onFragment?: (messageId: string, text: string) => void
+  onFragment?: (messageId: string, text: string) => void,
+  tailLimit?: number
 ): Map<string, FragmentSummary> {
   const fragments = new Map<string, FragmentSummary>()
   const uniqueIds = [...new Set(messageIds.filter(Boolean))]
@@ -665,18 +761,38 @@ function readFragmentSummaries(
       throwIfCancelled(cancellation)
       if (typeof raw.message_id !== "string" || typeof raw.content_text !== "string") continue
       onFragment?.(raw.message_id, raw.content_text)
-      const existing = fragments.get(raw.message_id) ?? { prefix: "", length: 0 }
-      const remainingPrefix = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - existing.prefix.length)
-      fragments.set(raw.message_id, {
-        prefix:
-          remainingPrefix > 0
-            ? `${existing.prefix}${raw.content_text.slice(0, remainingPrefix)}`
-            : existing.prefix,
-        length: existing.length + raw.content_text.length
-      })
+      const summary = fragments.get(raw.message_id) ?? { prefix: "", length: 0 }
+      const length = summary.length + raw.content_text.length
+      if (tailLimit !== undefined && length > THREAD_MESSAGE_TEXT_LIMIT && raw.content_text) {
+        appendFragmentTail(summary, raw.content_text, tailLimit)
+      }
+      const remainingPrefix = THREAD_MESSAGE_TEXT_LIMIT - summary.prefix.length
+      if (remainingPrefix > 0) summary.prefix += raw.content_text.slice(0, remainingPrefix)
+      summary.length = length
+      fragments.set(raw.message_id, summary)
     }
   }
   return fragments
+}
+
+function appendFragmentTail(summary: FragmentSummary, text: string, limit: number): void {
+  // Fragments are read in order. Keep a sliding list of whole chunks to
+  // avoid copying the accumulated suffix for each new fragment.
+  if (!summary.tail) {
+    const initial = summary.prefix.slice(-limit)
+    summary.tail = { parts: initial ? [initial] : [], first: 0, length: initial.length }
+  }
+  const tail = summary.tail
+  const chunk = text.slice(-limit)
+  tail.parts.push(chunk)
+  tail.length += chunk.length
+  while (tail.length - tail.parts[tail.first].length >= limit) {
+    tail.length -= tail.parts[tail.first++].length
+  }
+  if (tail.first * 2 >= tail.parts.length) {
+    tail.parts = tail.parts.slice(tail.first)
+    tail.first = 0
+  }
 }
 
 function hasVisibleThreadConversation(
@@ -897,6 +1013,11 @@ export function readThreadMessagesPage(
   const cancellation = new Int32Array(request.cancellationBuffer)
   const limit = normalizePageLimit(request.options.limit)
   const byteBudget = normalizeByteBudget(request.options.byteBudget)
+  const requestedSideTextBytes = request.options.sideContextTextByteBudget
+  const sideContextTextByteBudget = requestedSideTextBytes !== undefined &&
+    Number.isSafeInteger(requestedSideTextBytes) && requestedSideTextBytes > 0
+    ? Math.min(requestedSideTextBytes, byteBudget)
+    : undefined
   const isForwardPage = Boolean(request.options.anchorMessageId?.trim())
   throwIfCancelled(cancellation)
 
@@ -933,7 +1054,8 @@ export function readThreadMessagesPage(
       request,
       limit,
       cancellation,
-      legacyCheckpointMigration
+      legacyCheckpointMigration,
+      sideContextTextByteBudget !== undefined && !request.options.recoveryCheckpointId
     )
     const residentOrdinals = request.options.targetMessageId && request.options.residentMessageIds
       ? readResidentOrdinals(database, request.threadId, request.options.residentMessageIds, Math.floor(byteBudget / 4))
@@ -998,12 +1120,21 @@ export function readThreadMessagesPage(
       request.threadId,
       physicalIds,
       cancellation,
-      contentHashes.size ? (id, fragment) => contentHashes.get(id)?.update(fragment, "utf16le") : undefined
+      contentHashes.size ? (id, fragment) => contentHashes.get(id)?.update(fragment, "utf16le") : undefined,
+      sideContextTextByteBudget === undefined ? undefined : sideContextTextByteBudget + 1
     )
     const matchesCheckpointContent = !legacyCheckpointMigration?.requiresContentProof ||
       (selected.length === rowsById.size && rowsById.size === contentHashes.size &&
         Array.from(contentHashes).every(([id, hash]) =>
         hash.digest("hex") === expectedHashes.get(id)))
+    const queryToolReplayIds: Parameters<typeof readPriorToolReplayIds>[2] = (sql, threadId, ids, cutoff) =>
+      database.prepare(sql).all(threadId, ids, cutoff).map(({ message_id, earlier_id }) => [message_id, earlier_id])
+    const sideContextReplayIds = sideContextTextByteBudget !== undefined && !request.options.recoveryCheckpointId
+      ? readPriorToolReplayIds(request.threadId, Array.from(rowsById.values(), (row) => ({
+        id: row.message_id, ordinal: row.ordinal, role: row.role,
+        provider_occurrence: row.provider_occurrence ?? undefined
+      })), queryToolReplayIds, { includeInPage: true })
+      : undefined
     const orderedMessages: Message[] = []
     const returnedCandidates: CandidateRow[] = []
     const truncatedMessageIds: string[] = []
@@ -1013,16 +1144,26 @@ export function readThreadMessagesPage(
       if (candidate.missingSourceRow) continue
       const row = rowsById.get(candidate.message_id)
       if (!row) continue
-      const hydrated = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
-      const logicalId = logicalIds.get(candidate.message_id)
-      if (logicalId !== undefined && logicalId !== hydrated.message.id) hydrated.message.id = logicalId
       const remaining = Math.max(1, byteBudget - responseBytes)
-      const projected = projectMessageToByteBudget(hydrated.message, remaining)
-      if (orderedMessages.length > 0 && projected.truncated) break
+      let projected
+      let hydratedTruncated = false
+      if (sideContextTextByteBudget !== undefined) {
+        projected = projectSideContextMessage(
+          row, fragments.get(candidate.message_id), cancellation, remaining, sideContextTextByteBudget,
+          sideContextReplayIds?.get(candidate.message_id)
+        )
+      } else {
+        const hydrated = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
+        const logicalId = logicalIds.get(candidate.message_id)
+        if (logicalId !== undefined && logicalId !== hydrated.message.id) hydrated.message.id = logicalId
+        projected = projectMessageToByteBudget(hydrated.message, remaining)
+        if (orderedMessages.length > 0 && projected.truncated) break
+        hydratedTruncated = hydrated.truncated
+      }
       orderedMessages.push(projected.message)
       returnedCandidates.push(candidate)
       responseBytes += projected.bytes + 1
-      if (projected.truncated || hydrated.truncated) {
+      if (projected.truncated || hydratedTruncated) {
         truncatedMessageIds.push(candidate.message_id)
       }
     }
@@ -1030,10 +1171,8 @@ export function readThreadMessagesPage(
     const hasNewerMessages = head && Boolean(database.prepare(`SELECT 1 FROM thread_messages
       WHERE thread_id = ? AND (ordinal, message_id) > (?, ?) LIMIT 1`)
       .get(request.threadId, head.ordinal, head.message_id))
-    if (!request.options.recoveryCheckpointId) {
-      const priorResults = readPriorToolReplayIds(request.threadId, orderedMessages,
-        (sql, threadId, ids, oldest) => database.prepare(sql).all(threadId, ids, oldest)
-          .map(({ message_id, earlier_id }) => [message_id, earlier_id]))
+    if (!request.options.recoveryCheckpointId && sideContextTextByteBudget === undefined) {
+      const priorResults = readPriorToolReplayIds(request.threadId, orderedMessages, queryToolReplayIds)
       for (const message of orderedMessages) {
         const earlier = priorResults.get(message.id)
         if (!earlier || message.content_preview_notice) continue

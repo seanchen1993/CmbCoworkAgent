@@ -1,3 +1,5 @@
+import { BtwPane, BTW_LAUNCHER_TAB } from "./components/panels/BtwPane"
+import { useBtwChat, useDesktopBtwViewport } from "./lib/btw-chat"
 import { ProjectAgentWorkspaceHost } from "@/components/dashboard/ProjectAgentWorkspaceHost"
 import { ThreadSearchButton, ThreadSearchDialog } from "@/components/search/ThreadSearchDialog"
 import {
@@ -325,24 +327,6 @@ function App(): React.JSX.Element {
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
-  const {
-    rightPanelSplitRef,
-    rightPanelMainRef,
-    rightPanelContainerRef,
-    previewFullscreen,
-    browserFullscreen,
-    showRightResizeHandle,
-    mainClassName: fullscreenMainClassName,
-    mainStyle: fullscreenMainStyle,
-    panelClassName: fullscreenRightPanelClassName,
-    panelStyle: fullscreenRightPanelStyle,
-    handleRightResizeStart,
-    handleRightResize,
-    handleRightResizeEnd,
-    setPreviewFullscreen,
-    setBrowserFullscreen
-  } = useRightPanelLayout({ rightModule })
-
   // Version and local-IP metadata belong to the application lifetime, not to a
   // ChatContainer. Keeping these listeners here avoids repeating IPC requests
   // and user-info refreshes every time a thread surface remounts.
@@ -418,6 +402,29 @@ function App(): React.JSX.Element {
   const renderRoutePending = renderedRoute !== selectedRenderRoute
   const renderedMainView = renderedRoute.mainView
   const renderedThreadId = renderedRoute.threadId
+  const desktopBtw = useDesktopBtwViewport()
+  const hasBtw = useBtwChat(state => state.tabs.some(tab => tab.parentId === renderedThreadId))
+  const hasBtwLauncher = useBtwChat(state => renderedThreadId !== null && state.selected[renderedThreadId] === BTW_LAUNCHER_TAB)
+  const showBtw = desktopBtw && rightModule === "btw" && (hasBtw || hasBtwLauncher)
+  const panelModule = rightModule === "btw" && (!showBtw || renderedMainView !== "thread") ? "work" : rightModule
+  const {
+    rightPanelSplitRef,
+    rightPanelMainRef,
+    rightPanelContainerRef,
+    previewFullscreen,
+    browserFullscreen,
+    showRightResizeHandle,
+    mainClassName: fullscreenMainClassName,
+    mainStyle: fullscreenMainStyle,
+    panelClassName: fullscreenRightPanelClassName,
+    panelStyle: fullscreenRightPanelStyle,
+    handleRightResizeStart,
+    handleRightResize,
+    handleRightResizeEnd,
+    setPreviewFullscreen,
+    setBrowserFullscreen
+  } = useRightPanelLayout({ rightModule: panelModule, sidebarWidth: sidebarCollapsed ? 0 : leftWidth })
+
   const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
   const isThreadWorkerFocusActive =
     renderedMainView === "thread" &&
@@ -703,6 +710,14 @@ function App(): React.JSX.Element {
   const showRightPanelModuleControls =
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
 
+  const showBtwTabs = Boolean(showBtw && renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && !showCustomizeView)
+  const [fullSideParent, setFullSideParent] = useState<string | null>(null)
+  const fullSideParentHasTab = useBtwChat(state => Boolean(fullSideParent && state.selected[fullSideParent]))
+  useEffect(() => {
+    if (fullSideParent && !fullSideParentHasTab) setFullSideParent(null)
+  }, [fullSideParent, fullSideParentHasTab])
+  const sideFull = showBtwTabs && fullSideParent === renderedThreadId
+  const sidePanelStyle = sideFull ? { flex: 1 } : fullscreenRightPanelStyle
   const selectGitModule = useCallback(() => {
     if (activeRightPanelThreadId) {
       setGitChangeNoticePending(activeRightPanelThreadId, false)
@@ -730,9 +745,9 @@ function App(): React.JSX.Element {
       previousActiveRightPanelThreadId !== activeRightPanelThreadId
 
     if (!shouldPreserveCurrentModule) {
-      // Keep right panel behavior predictable when entering thread-like views and for
-      // non-browser module switches between threads.
-      setRightModule("work")
+      const side = useBtwChat.getState()
+      const selectedSideTab = activeRightPanelThreadId ? side.selected[activeRightPanelThreadId] : undefined
+      setRightModule(mainView === "thread" && selectedSideTab ? "btw" : "work")
     }
 
     try {
@@ -1006,6 +1021,7 @@ function App(): React.JSX.Element {
       <BotConversationTransitions />
       <ThreadSearchDialog activateChat={() => {
         if (previewFullscreen || browserFullscreen) setRightModule("work")
+        if (sideFull) setFullSideParent(null)
       }} />
       {/*
         isolate：把 app 内部的 z-index 关进自己的层叠上下文。
@@ -1082,7 +1098,7 @@ function App(): React.JSX.Element {
             {!showCustomizeView &&
               showRightPanelModuleControls &&
               !rightPanelCollapsed &&
-              !isAgentFocusActive && (
+              !isAgentFocusActive && !sideFull && (
                 <>
                   <button
                     type="button"
@@ -1150,7 +1166,10 @@ function App(): React.JSX.Element {
                     ? "text-muted-foreground/90 hover:text-foreground hover:bg-muted/45"
                     : "text-foreground bg-muted/35 hover:bg-muted/50"
                 }`}
-                onClick={toggleRightPanel}
+                onClick={() => {
+                  if (sideFull) setFullSideParent(null)
+                  toggleRightPanel()
+                }}
                 title={rightPanelToggleText}
                 aria-label={rightPanelToggleText}
                 aria-pressed={!rightPanelCollapsed}
@@ -1276,7 +1295,7 @@ function App(): React.JSX.Element {
                         <main
                           ref={rightPanelMainRef}
                           className={fullscreenMainClassName}
-                          style={fullscreenMainStyle}
+                          style={sideFull ? { display: "none" } : fullscreenMainStyle}
                         >
                           {renderedThreadId ? (
                             <TabbedPanel threadId={renderedThreadId} showTabBar={false} floatingChat />
@@ -1293,7 +1312,7 @@ function App(): React.JSX.Element {
 
                 {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
                   <>
-                    {showRightResizeHandle && (
+                    {showRightResizeHandle && !sideFull && (
                       <ResizeHandle
                         onDragStart={handleRightResizeStart}
                         onDrag={handleRightResize}
@@ -1303,17 +1322,26 @@ function App(): React.JSX.Element {
                     {/* Right Panel - floating style */}
                     <div
                       ref={rightPanelContainerRef}
-                      style={fullscreenRightPanelStyle}
-                      className={fullscreenRightPanelClassName}
+                      style={sidePanelStyle}
+                      className={`${fullscreenRightPanelClassName} ${showBtw ? "border-l border-border" : ""}`}
                     >
+                      {/* Keep the main thread's file tracking and work-panel state alive during side chat. */}
                       <RightPanel
                         threadId={renderedThreadId}
-                        moduleMode={rightModule}
+                        moduleMode={panelModule}
                         onRequestPreviewMode={selectPreviewModule}
                         onRequestWorkMode={selectWorkModule}
                         onPreviewFullscreenChange={setPreviewFullscreen}
                         onBrowserFullscreenChange={setBrowserFullscreen}
                       />
+                      {showBtw && renderedThreadId && (
+                        <BtwPane
+                          key={renderedThreadId}
+                          parentId={renderedThreadId}
+                          full={sideFull}
+                          toggleFull={() => setFullSideParent(sideFull ? null : renderedThreadId)}
+                        />
+                      )}
                     </div>
                   </>
                 )}
@@ -1434,7 +1462,7 @@ function App(): React.JSX.Element {
                       >
                         <RightPanel
                           threadId={renderedHarnessSessionThreadId}
-                          moduleMode={rightModule}
+                          moduleMode={panelModule}
                           showSystemConstraints={renderedMainView === "harness"}
                           onRequestPreviewMode={selectPreviewModule}
                           onRequestWorkMode={selectWorkModule}
@@ -1501,6 +1529,7 @@ function App(): React.JSX.Element {
                 isAgentFocusActive={isAgentFocusActive}
                 renderedMainView={renderedMainView}
                 renderedPanelThreadId={renderedRightPanelThreadId}
+                btwPaneVisible={showBtwTabs}
               />
             )}
           </div>

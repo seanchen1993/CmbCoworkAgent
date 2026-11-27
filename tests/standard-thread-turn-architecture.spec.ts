@@ -109,6 +109,22 @@ assert(
   count(desktop, "sendHarnessAgentContextLoadError(window, channel, error, modelId)") === 2,
   "resume and interrupt surface Harness context failures before Runtime setup"
 )
+const invokeFence = desktop.slice(
+  desktop.indexOf("const throwIfInvokeAborted ="),
+  desktop.indexOf("const pauseActiveGoalForRuntimeStop =")
+)
+assertIncludes(
+  invokeFence,
+  "getSideThreadLifetimeSignal(threadId)?.aborted",
+  "desktop invoke checks whether the side conversation closed before physical cancellation"
+)
+const completionHooksStart = desktop.indexOf("const completionOutcome = await runCompletionHooksWithRevision(")
+const completionOutcomeCheck = desktop.indexOf('if (completionOutcome === "failed")', completionHooksStart)
+assertIncludes(
+  desktop.slice(completionHooksStart, completionOutcomeCheck),
+  "throwIfInvokeAborted()",
+  "desktop invoke fences the Hook result before proceeding to completion and notifications"
+)
 assertIncludes(
   harnessService,
   "const sessionContext = requireCompleteHarnessSessionContext(",

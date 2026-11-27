@@ -1,5 +1,15 @@
-import { clearOnceStateForSession, runHooks, type HookResultCallback } from "./runner"
-import type { HookContext } from "./runner"
+import { resolve } from "node:path"
+import { getWorkspaceExecutionKey } from "../agent/file-operation-lock"
+import { getBtwParentId } from "../../shared/btw-chat"
+import {
+  clearOnceStateForSession,
+  runHooks,
+  runSetupHooks,
+  type HookContext,
+  type HookResultCallback
+} from "./runner"
+import { getSideThreadLifetimeSignal } from "../side-thread-registry"
+import { waitForAbort } from "../utils/wait-for-abort"
 import {
   resolveEnabledHooksForRun,
   type HookScopeController,
@@ -15,6 +25,9 @@ import {
 //   - fireSessionEndAll()       ← before-quit drains everything
 // As long as both call sites stay wired, this Map is bounded by live thread count.
 interface StartedSession {
+  // Cleared when Setup or SessionStart is dispatched and SessionEnd becomes due.
+  preparing?: AbortController
+  setup?: Promise<void>
   workspacePath?: string
   pluginOutputDir?: string
   systemId?: string
@@ -32,10 +45,56 @@ interface StartedSession {
 }
 
 const startedSessions = new Map<string, StartedSession>()
+// A close may be awaiting a workspace command when the app begins its quit drain.
+const closingSideSessions = new Map<string, Promise<void>>()
+interface SideSetup {
+  parentId: string
+  workspaceKey: string
+  lifetime: AbortSignal
+  attempt: Promise<void>
+}
+const pendingSideSetups = new Set<SideSetup>()
+// Keep only same-family attempts overlapping a marker read, including ones that end before it returns.
+const markerReads = new Set<{ parentId: string; candidates: Set<SideSetup> }>()
+
+// Only a closing side can hand off Setup. Independent sessions keep their original concurrency.
+async function needsWorkspaceSetup(parentId: string, workspacePath: string, signal: AbortSignal): Promise<boolean> {
+  const candidates = new Set([...pendingSideSetups].filter(setup => setup.parentId === parentId))
+  const read = { parentId, candidates }
+  markerReads.add(read)
+  try {
+    if (await hasWorkspaceBeenInitialised(workspacePath, signal)) return false
+    const workspaceKey = resolve(workspacePath)
+    let targetDirectory: Promise<string> | undefined
+    while (!signal.aborted) {
+      const closing = [...candidates].filter(setup => setup.lifetime.aborted)
+      if (closing.length === 0) return true
+      const initialised = Promise.withResolvers<boolean>()
+      const attempts = closing.map(async setup => {
+        candidates.delete(setup)
+        if (setup.workspaceKey === workspaceKey) {
+          await setup.attempt
+        } else {
+          targetDirectory ??= getWorkspaceExecutionKey(workspaceKey)
+          const aliases = Promise.all([targetDirectory, getWorkspaceExecutionKey(setup.workspaceKey)])
+            .then(([target, source]) => target === source, () => false)
+          if (await Promise.race([aliases, setup.attempt.then(() => false)])) await setup.attempt
+        }
+        if (!signal.aborted && await hasWorkspaceBeenInitialised(workspacePath, signal)) initialised.resolve(true)
+      })
+      const done = Promise.race([initialised.promise, Promise.all(attempts).then(() => false)])
+      if (await waitForAbort(done, signal)) return false
+      // All checked attempts failed. A different side may have closed while we waited.
+    }
+    return false
+  } finally {
+    markerReads.delete(read)
+  }
+}
 
 /** True when there are still-active sessions awaiting SessionEnd. */
 export function hasActiveSessions(): boolean {
-  return startedSessions.size > 0
+  return startedSessions.size > 0 || closingSideSessions.size > 0
 }
 
 /** Fire SessionStart exactly once per threadId lifetime (within the main-process run). */
@@ -60,11 +119,14 @@ export async function fireSessionStartOnce(
     | "harnessNodeStatus"
     | "projectCode"
     | "projectDir"
-  >
+  >,
+  runSignal?: AbortSignal
 ): Promise<void> {
+  const lifetime = getSideThreadLifetimeSignal(threadId)
+  if (lifetime?.aborted || runSignal?.aborted) return
   const existing = startedSessions.get(threadId)
   if (existing) {
-    startedSessions.set(threadId, {
+    Object.assign(existing, {
       workspacePath: workspacePath ?? existing.workspacePath,
       pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
       systemId: systemId ?? existing.systemId,
@@ -81,9 +143,11 @@ export async function fireSessionStartOnce(
       projectDir: harnessContext?.projectDir ?? existing.projectDir,
       hookScope: hookScope ?? existing.hookScope
     })
-    return
+    return existing.setup
   }
-  startedSessions.set(threadId, {
+  const preparing = new AbortController()
+  const session: StartedSession = {
+    preparing,
     workspacePath,
     pluginOutputDir,
     systemId,
@@ -98,49 +162,75 @@ export async function fireSessionStartOnce(
     projectCode: harnessContext?.projectCode,
     projectDir: harnessContext?.projectDir,
     hookScope
-  })
+  }
+  startedSessions.set(threadId, session)
 
-  // PR-11 — Setup fires (per-workspace) *before* SessionStart when this is
-  // the workspace's first encounter on this machine. SessionStart remains
-  // per-thread; this gives a clean "repo init" extension point that doesn't
-  // re-fire for every new thread in the same workspace.
-  //
-  // PR-11 follow-up — runHooks's "Setup" branch is now awaited and surfaces
-  // a synthetic blocking result when any hook timed out or returned non-zero
-  // exit. We only write the workspace setup-state marker when that returns
-  // null (success), so a failed init run will be retried on the next session.
-  if (workspacePath && !hasWorkspaceBeenInitialised(workspacePath)) {
-    const setupContext: HookContext = {
-      workspacePath,
-      sessionId: threadId,
-      turnId,
-      pluginOutputDir,
-      systemId,
-      ...harnessContext,
-      setupTrigger: "init"
-    }
+  const parentId = getBtwParentId(threadId) ?? threadId
+  let needsSetup = false
+  if (workspacePath) {
+    const signals = [preparing.signal, lifetime, runSignal].filter((s): s is AbortSignal => !!s)
+    const signal = AbortSignal.any(signals)
     try {
-      const result = await runHooks(
-        resolveEnabledHooksForRun(workspacePath, "Setup", setupContext, hookScope, onHookSkipped),
-        "Setup",
-        setupContext,
-        onHookResult
-      )
-      // null == every Setup hook completed with a zero exit code.
-      // A non-null blocking result signals timeout or non-zero exit;
-      // skip the marker so the next session retries the chain.
-      if (result === null) {
-        markWorkspaceInitialised(workspacePath)
-      } else {
-        console.warn(
-          `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
-          result.stderr || result.stdout || "(no detail)"
-        )
-      }
+      needsSetup = await waitForAbort(needsWorkspaceSetup(parentId, workspacePath, signal), signal)
+      signal.throwIfAborted()
     } catch (e) {
-      console.warn("[Hooks] Setup(init) hook error:", e)
+      if (startedSessions.get(threadId) === session) startedSessions.delete(threadId)
+      if (signal.aborted) return
+      throw e
     }
   }
+  delete session.preparing
+  if (workspacePath && needsSetup) {
+    try {
+      const setupContext: HookContext = {
+        workspacePath,
+        sessionId: threadId,
+        turnId,
+        pluginOutputDir,
+        systemId,
+        ...harnessContext,
+        setupTrigger: "init"
+      }
+      const hooks = resolveEnabledHooksForRun(
+        workspacePath,
+        "Setup",
+        setupContext,
+        hookScope,
+        onHookSkipped
+      )
+      // Closing the initiating side releases its wait. A later session joins
+      // the actual batch and can retry with its own context if it fails.
+      const attempt = runSetupHooks(hooks, setupContext, onHookResult)
+        .then(async (result) => {
+          if (result === null) {
+            await markWorkspaceInitialised(workspacePath)
+          } else if (!lifetime?.aborted) {
+            console.warn(
+              `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
+              result.stderr || result.stdout || "(no detail)"
+            )
+          }
+        })
+        .catch((e) => {
+          if (!lifetime?.aborted) console.warn("[Hooks] Setup(init) hook error:", e)
+        })
+      if (lifetime) {
+        const setup = { parentId, workspaceKey: resolve(workspacePath), lifetime, attempt }
+        pendingSideSetups.add(setup)
+        for (const read of markerReads) {
+          if (read.parentId === parentId) read.candidates.add(setup)
+        }
+        void attempt.then(() => pendingSideSetups.delete(setup))
+      }
+      session.setup = attempt
+      await waitForAbort(attempt, lifetime)
+    } catch (e) {
+      if (!lifetime?.aborted) console.warn("[Hooks] Setup(init) hook error:", e)
+    } finally {
+      delete session.setup
+    }
+  }
+  if (lifetime?.aborted || startedSessions.get(threadId) !== session) return
 
   const context: HookContext = {
     workspacePath,
@@ -200,8 +290,13 @@ export async function fireSessionEnd(
   reason: "clear" | "logout" | "prompt_input_exit" | "other" = "clear"
 ): Promise<void> {
   const started = startedSessions.get(threadId)
-  if (!started) return
+  if (!started) return closingSideSessions.get(threadId)
   startedSessions.delete(threadId)
+  if (started.preparing) {
+    started.preparing.abort()
+    clearOnceStateForSession(threadId)
+    return
+  }
   const effectiveWorkspacePath = workspacePath ?? started.workspacePath
   const effectivePluginOutputDir = pluginOutputDir ?? started.pluginOutputDir
   const context: HookContext = {
@@ -221,12 +316,15 @@ export async function fireSessionEnd(
     sessionId: threadId,
     sessionEndReason: reason
   }
-  await runHooks(
+  const end = runHooks(
     resolveEnabledHooksForRun(effectiveWorkspacePath, "SessionEnd", context, started.hookScope),
     "SessionEnd",
     context,
     onHookResult
-  ).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
+  ).then(() => undefined, (e) => console.warn("[Hooks] SessionEnd hook error:", e))
+  if (getSideThreadLifetimeSignal(threadId)) closingSideSessions.set(threadId, end)
+  await end
+  if (closingSideSessions.get(threadId) === end) closingSideSessions.delete(threadId)
   // Drop this thread's `once` fired-state so a future thread with the same id
   // (re-import / re-create) starts fresh. Bounded — runs after SessionEnd hooks
   // complete so `once` SessionEnd hooks themselves still fire correctly.
@@ -243,37 +341,12 @@ export async function fireSessionEndAll(
   timeoutMs = 5000,
   getOnHookResult?: (threadId: string) => HookResultCallback | undefined
 ): Promise<void> {
-  const entries = Array.from(startedSessions.entries())
-  startedSessions.clear()
-  if (entries.length === 0) return
-  const all = Promise.allSettled(
-    entries.map(([id, session]) => {
-      const context: HookContext = {
-        sessionId: id,
-        workspacePath: session.workspacePath,
-        pluginOutputDir: session.pluginOutputDir,
-        systemId: session.systemId,
-        pluginWorkspace: session.pluginWorkspace,
-        featureId: session.featureId,
-        harnessProjectId: session.harnessProjectId,
-        harnessAdapterId: session.harnessAdapterId,
-        harnessAdapterName: session.harnessAdapterName,
-        harnessAdapterVersion: session.harnessAdapterVersion,
-        harnessNodeName: session.harnessNodeName,
-        harnessNodeStatus: session.harnessNodeStatus,
-        projectCode: session.projectCode,
-        projectDir: session.projectDir,
-        // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.
-        sessionEndReason: "logout"
-      }
-      return runHooks(
-        resolveEnabledHooksForRun(session.workspacePath, "SessionEnd", context, session.hookScope),
-        "SessionEnd",
-        context,
-        getOnHookResult?.(id)
-      ).finally(() => clearOnceStateForSession(id))
-    })
-  )
+  const pending = [...closingSideSessions.values()]
+  for (const threadId of [...startedSessions.keys()]) {
+    pending.push(fireSessionEnd(threadId, undefined, getOnHookResult?.(threadId), undefined, "logout"))
+  }
+  if (pending.length === 0) return
+  const all = Promise.allSettled(pending)
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))
   await Promise.race([all, timeout])
 }

@@ -1,3 +1,4 @@
+import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
 import type { GitGraphPage } from "../shared/git-graph"
 import type {
   GitBranchKind,
@@ -31,6 +32,11 @@ import type {
   RunAnalysisStages,
   RunAnalysisSessions
 } from "../shared/project-run-analysis"
+import type { PersonalEfficiencyExportOptions } from "../shared/personal-efficiency-export"
+import type {
+  PersonalEfficiencyData,
+  PersonalEfficiencyFilters
+} from "../shared/personal-efficiency"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -1472,6 +1478,11 @@ const api = {
         ipcRenderer.removeListener("threads:changed", handler)
       }
     }
+  },
+  btw: {
+    create: (request: BtwRequest): Promise<{ id: string; ordinal: number; thread: Thread }> =>
+      ipcRenderer.invoke("btw:create", request),
+    close: (id: string): Promise<void> => ipcRenderer.invoke("btw:close", id)
   },
   models: {
     getCatalog: (): Promise<{
@@ -3141,8 +3152,8 @@ const api = {
         ipcRenderer.removeListener("skill:intentRequest", handler)
       }
     },
-    intentResponse: (requestId: string, accepted: boolean): Promise<void> =>
-      ipcRenderer.invoke("skill:intentResponse", { requestId, accepted }) as Promise<void>,
+    intentResponse: (requestId: string, accepted: boolean): Promise<boolean> =>
+      ipcRenderer.invoke("skill:intentResponse", { requestId, accepted }) as Promise<boolean>,
     retryGeneration: (
       threadId: string,
       retryContext: { context: unknown; intentMode: string }
@@ -3158,6 +3169,7 @@ const api = {
       callback: (req: {
         threadId?: string
         requestId: string
+        source?: "proposal"
         skillId: string
         name: string
         description: string
@@ -3169,6 +3181,7 @@ const api = {
         req: {
           threadId?: string
           requestId: string
+          source?: "proposal"
           skillId: string
           name: string
           description: string
@@ -3188,12 +3201,17 @@ const api = {
         approved,
         content
       }) as Promise<void>,
+    onBtwRequestClosed: (callback: (request: BtwSkillRequestClosed) => void): (() => void) => {
+      const handler = (_event: unknown, request: BtwSkillRequestClosed): void => callback(request)
+      ipcRenderer.on("skill:btwRequestClosed", handler)
+      return () => ipcRenderer.removeListener("skill:btwRequestClosed", handler)
+    },
 
     // ── Streaming generation progress ──────────────────────────
     onGenerating: (
       callback: (event: {
         threadId?: string
-        phase: "start" | "token" | "done" | "error"
+        phase: "start" | "token" | "done" | "error" | "settled"
         text: string
       }) => void
     ): (() => void) => {
@@ -3201,7 +3219,7 @@ const api = {
         _: unknown,
         evt: {
           threadId?: string
-          phase: "start" | "token" | "done" | "error"
+          phase: "start" | "token" | "done" | "error" | "settled"
           text: string
         }
       ): void => {
@@ -4200,6 +4218,24 @@ const api = {
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
+    personalEfficiency: (
+      filters: PersonalEfficiencyFilters,
+      sapId?: string
+    ): Promise<{ success: boolean; data?: PersonalEfficiencyData; error?: string }> =>
+      ipcRenderer.invoke("dashboard:personalEfficiency", filters, sapId),
+    personalEfficiencyExport: (
+      filters: PersonalEfficiencyFilters,
+      options?: PersonalEfficiencyExportOptions
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke("dashboard:personalEfficiencyExport", filters, options),
+    projectMetricOverview: (
+      filters: ProjectMetricFilters
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricOverview", filters),
+    projectMetricIndicatorExport: (
+      filters: ProjectMetricFilters
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricIndicatorExport", filters),
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>

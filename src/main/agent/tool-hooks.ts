@@ -26,6 +26,7 @@ export interface ToolHookMiddlewareOptions {
   workspacePath: string
   threadId: string
   hookScope: HookScopeController
+  abortSignal?: AbortSignal
   resolveHooksForContext: (event: HookEvent, context: HookContext) => HookConfig[]
   onHookResult?: HookResultCallback
   hookTurnId?: string
@@ -78,7 +79,8 @@ function buildHookContext(
     projectCode: options.projectCode,
     projectDir: options.projectDir,
     workspaceHookCwd: options.workspaceHookCwd,
-    forceSyncWorkspaceHooks: options.forceSyncWorkspaceHooks
+    forceSyncWorkspaceHooks: options.forceSyncWorkspaceHooks,
+    ...(options.abortSignal && { abortSignal: options.abortSignal, stopPendingHooksOnAbort: true })
   }
 }
 
@@ -250,11 +252,13 @@ function mergeUpdatedInput(
 
 export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
   const skipToolNames = options.skipToolNames ?? new Set<string>()
+  const { abortSignal } = options
 
   return createMiddleware({
     name: "toolHookMiddleware",
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapToolCall: async (request: any, handler: any): Promise<any> => {
+      abortSignal?.throwIfAborted()
       const agentId = getHookAgentIdFromRequest(request) ?? options.agentId
       return runWithHookAgentId(agentId, async () => {
         const toolCall = request.toolCall as
@@ -262,7 +266,9 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           | undefined
         const toolName = toolCall?.name
         if (!toolName || skipToolNames.has(toolName)) {
-          return handler(request)
+          const result = await handler(request)
+          abortSignal?.throwIfAborted()
+          return result
         }
 
         const baseToolArgs = normalizeToolArgs(toolCall.args)
@@ -273,6 +279,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           hookContext,
           options.onHookResult
         )
+        abortSignal?.throwIfAborted()
         if (preResult) {
           options.hookScope.activatePersistentHooks(
             options.resolveHooksForContext("PreToolUse", hookContext)
@@ -291,6 +298,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
         }
 
         const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
+        abortSignal?.throwIfAborted()
         const result = await handler({
           ...request,
           toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
@@ -299,6 +307,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
               ? { ...(request.state as Record<string, unknown>) }
               : request.state
         })
+        abortSignal?.throwIfAborted()
 
         const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
         const alreadyRecordedThrowFailure = Boolean(
@@ -317,6 +326,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           options.onFailureFuseNotice?.(failureFuseDecision)
         }
         if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
+        abortSignal?.throwIfAborted()
 
         const postContext: HookContext = {
           ...hookContext,
@@ -329,6 +339,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           postContext,
           options.onHookResult
         )
+        abortSignal?.throwIfAborted()
         if (postResult) {
           options.hookScope.activatePersistentHooks(
             options.resolveHooksForContext("PostToolUse", postContext)

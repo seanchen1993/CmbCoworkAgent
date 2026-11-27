@@ -567,6 +567,31 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
   )
 }
 
+export async function restoreSideConversationParentTranscript(
+  databasePath: string,
+  messageDatabasePath: string,
+  threadId: string,
+  signal: AbortSignal
+): Promise<void> {
+  signal.throwIfAborted()
+  if (!existsSync(databasePath) && !hasSqliteRecoverySidecar(databasePath)) return
+
+  // A recovery request can hold the parent's mutation lock. Keep it out of
+  // the shared projection worker queue used by foreground checkpoint reads.
+  const client = new CheckpointRuntimeProjectionClient()
+  let closing: Promise<void> | undefined
+  const close = () => (closing ??= client.close())
+  const cancel = () => { void close().catch(() => undefined) }
+  signal.addEventListener("abort", cancel, { once: true })
+  try {
+    await client.bootstrapLegacyTranscript(databasePath, messageDatabasePath, threadId, "", undefined, { signal })
+  } finally {
+    signal.removeEventListener("abort", cancel)
+    // Maintain the parent's mutation lock until any SQLite writes have drained.
+    await close()
+  }
+}
+
 export function hasVisibleCheckpointTranscriptInWorker(
   databasePath: string,
   threadId: string,

@@ -432,6 +432,8 @@ export interface LocalSandboxOptions {
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
   abortSignal?: AbortSignal
+  /** Stop waiting for hooks owned by a conversation whose cancellation ends the invocation. */
+  stopPendingHooksOnAbort?: boolean
   /** Logical thread/run owner used for background-task cancellation and hook/session identity. */
   runId?: string
   /** Parent conversation that must wait for this child runtime's shell tasks during deletion. */
@@ -839,11 +841,15 @@ export class LocalSandbox
   private readOnlyShellEnforced = false
   /** AbortSignal: when signalled, in-flight child processes are killed immediately. */
   private abortSignal?: AbortSignal
+  private readonly stopPendingHooksOnAbort: boolean
   private backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   private foregroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Whether the conversation-level abort signal has been triggered. */
   get isAborted(): boolean {
     return this.abortSignal?.aborted ?? false
+  }
+  private get hookCancellationSignal(): AbortSignal | undefined {
+    return this.stopPendingHooksOnAbort ? this.abortSignal : undefined
   }
   /** Cached from parent's private fields to avoid (this as any) scattered everywhere */
   private readonly _resolvePath: (key: string) => string
@@ -2207,6 +2213,7 @@ export class LocalSandbox
     })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
+    this.stopPendingHooksOnAbort = options.stopPendingHooksOnAbort === true
     this.backgroundCommandLifecycle = options.backgroundCommandLifecycle
     this.foregroundCommandLifecycle = options.foregroundCommandLifecycle
 
@@ -3002,9 +3009,15 @@ export class LocalSandbox
   }
 
   private prepareHookContext(context: HookContext): HookContext {
+    const ownerSignal = this.hookCancellationSignal
+    const callerSignal = context.abortSignal
     return {
       ...context,
-      abortSignal: context.abortSignal ?? this.abortSignal,
+      abortSignal:
+        ownerSignal && callerSignal && ownerSignal !== callerSignal
+          ? AbortSignal.any([ownerSignal, callerSignal])
+          : callerSignal ?? this.abortSignal,
+      ...(ownerSignal && { stopPendingHooksOnAbort: true }),
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
@@ -3068,6 +3081,8 @@ export class LocalSandbox
     }: { executePostPolicy?: ExecutePostHookPolicy; failureSignal?: ToolFailureSignal } = {}
   ): Promise<HookResult | null> {
     const hookContext = this.prepareHookContext(context)
+    const abortSignal = hookContext.stopPendingHooksOnAbort ? hookContext.abortSignal : undefined
+    abortSignal?.throwIfAborted()
     const hooks = executePostPolicy?.scopedHooks ?? this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(
       executePostPolicy?.matchedHooks ?? hooks,
@@ -3075,6 +3090,7 @@ export class LocalSandbox
       hookContext,
       this._onHookResult
     )
+    abortSignal?.throwIfAborted()
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -3098,6 +3114,7 @@ export class LocalSandbox
       if (shouldSendFailureFuseNotice(failureFuseDecision)) {
         this._onFailureFuseNotice?.(failureFuseDecision)
       }
+      abortSignal?.throwIfAborted()
       result = LocalSandbox.mergeFailureFuseWarning(result, failureFuseDecision)
       if (signal) this.maybeFirePostToolUseFailureFromResult(hookContext, signal)
       if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
@@ -4278,6 +4295,8 @@ export class LocalSandbox
     limit = READ_FILE_DEFAULT_LIMIT,
     options: LocalSandboxReadFileOptions = {}
   ): Promise<string> {
+    const abortSignal = this.hookCancellationSignal
+    abortSignal?.throwIfAborted()
     if (this.isHiddenSkillPath(filePath)) {
       return `Error reading file '${filePath}': skill is disabled`
     }
@@ -4379,6 +4398,7 @@ export class LocalSandbox
           this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
+        abortSignal?.throwIfAborted()
         if (isHookHaltError(hookError) || isFailureFuseHaltError(hookError)) throw hookError
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
@@ -4408,6 +4428,7 @@ export class LocalSandbox
         },
         this.abortSignal
       )
+      abortSignal?.throwIfAborted()
 
       if (!hasNonWhitespace) {
         recordTrustedToolFilePreviewSource(resolvedPath, "read")
@@ -4497,8 +4518,10 @@ export class LocalSandbox
       if (formattedLines.length > 0) {
         await this.recordPluginSystemConstraintRead(resolvedPath, options.traceContext)
       }
+      abortSignal?.throwIfAborted()
       return finalResult
     } catch (e: unknown) {
+      abortSignal?.throwIfAborted()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return await this.applyPostToolUseHookToText(
@@ -7600,8 +7623,14 @@ export class LocalSandbox
   }
 
   /** Isolated checkout teardown waits for both process ownership and pending starts. */
-  static async cancelBackgroundTasksAndWait(threadId: string, taskIds?: readonly string[]): Promise<void> {
-    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({ threadId, taskIds: taskIds && new Set(taskIds) }))
+  static async cancelBackgroundTasksAndWait(
+    threadId: string,
+    taskIds?: readonly string[],
+    { includeChildRuns = false }: { includeChildRuns?: boolean } = {}
+  ): Promise<void> {
+    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({
+      threadId, includeChildRuns, taskIds: taskIds && new Set(taskIds)
+    }))
   }
 
   static async cancelOwnedBackgroundTasksAndWait(threadId: string, ownerId: string): Promise<void> {

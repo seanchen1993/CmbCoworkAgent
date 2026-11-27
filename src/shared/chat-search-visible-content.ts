@@ -1,4 +1,5 @@
 import { isGoalClearAlias, isGoalResumeDisplayText } from "./goal-slash"
+import { readBtwReferences } from "./btw-references"
 import { projectMarkdownVisibleText, type MarkdownSearchProjection } from "./markdown-visible-text"
 import { buildStreamingMarkdownPreview } from "./streaming-markdown-preview"
 import { getSystemNoticePresentation, projectGoalNoticeVisibleText, systemNoticeBlockText } from "./goal-notice-presentation"
@@ -163,16 +164,21 @@ export function projectVisibleChatSearchContentWithMetadata(
 }
 
 /** A source fragment has already passed the message-wide admission budget. */
-export function projectChatSearchFragment(role: string, text: string, trackSource = false): MarkdownSearchProjection {
+export function projectChatSearchFragment(
+  role: string,
+  text: string,
+  { trackSource = false, sideUserContent }: { trackSource?: boolean; sideUserContent?: "text" | "blocks" } = {}
+): MarkdownSearchProjection {
   if (role === "system") return projectSystemNoticeSearchText(text, trackSource)
   if (role === "user") {
-    const visible = parseUserTransportText(text).visibleText
-    return { text: projectGoalUserText(visible) ?? visible, truncated: false }
+    const { visibleText } = parseUserTransportText(text)
+    if (sideUserContent) return { text: sideUserContent === "text" ? readBtwReferences(visibleText).body : visibleText, truncated: false }
+    return { text: projectGoalUserText(visibleText) ?? visibleText, truncated: false }
   }
   return projectMarkdownVisibleText(text, trackSource)
 }
 
-export function projectChatSearchUserBlocks(blocks: readonly string[]): string {
+export function projectChatSearchUserBlocks(blocks: readonly string[], sideConversation = false): string {
   const visible = blocks.map((block) => parseUserTransportText(block).visibleText).join("\n")
-  return projectGoalUserText(visible) ?? visible
+  return sideConversation ? visible : projectGoalUserText(visible) ?? visible
 }

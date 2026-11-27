@@ -50,6 +50,7 @@ import {
 
 interface CapturedVirtuosoProps {
   data: readonly number[]
+  followOutput: false | ((atBottom: boolean) => false)
   initialTopMostItemIndex?: {
     index: number | "LAST"
     align?: "start" | "center" | "end"
@@ -155,11 +156,15 @@ function makeVirtualListProps(
 
 function renderVirtualList(
   messageCount: number,
-  runtime: ChatScrollRuntimeHarness
+  runtime: ChatScrollRuntimeHarness,
+  mountWhenEmpty = false
 ): CapturedVirtuosoProps | null {
   virtuosoProbe.latestProps = null
   renderToStaticMarkup(
-    React.createElement(ChatMessageVirtualList, makeVirtualListProps(messageCount, runtime))
+    React.createElement(ChatMessageVirtualList, {
+      ...makeVirtualListProps(messageCount, runtime),
+      mountWhenEmpty
+    })
   )
   return virtuosoProbe.latestProps as unknown as CapturedVirtuosoProps | null
 }
@@ -191,6 +196,18 @@ describe("chat scroll render/runtime harness", () => {
     virtuosoProbe.renderCount = 0
   })
 
+  it("mounts the confirmed empty workbench list without announcing rendered messages", () => {
+    const runtime = new ChatScrollRuntimeHarness()
+    const virtuoso = renderVirtualList(0, runtime, true)
+
+    expect(virtuoso?.data).toEqual([])
+    expect(virtuoso?.followOutput).toBe(false)
+    expect(virtuoso?.initialTopMostItemIndex).toBeUndefined()
+    virtuoso?.itemsRendered()
+    expect(runtime.state).toMatchObject({ mode: "initializing", dataReady: false })
+    expect(runtime.scrollCommands).toEqual([])
+  })
+
   it("hydrates 0 to 500 rows at LAST and survives out-of-order layout callbacks", async () => {
     const runtime = new ChatScrollRuntimeHarness()
 
@@ -201,6 +218,8 @@ describe("chat scroll render/runtime harness", () => {
     const virtuoso = renderVirtualList(500, runtime)
     expect(virtuoso).not.toBeNull()
     expect(virtuoso?.data).toHaveLength(500)
+    const follow = virtuoso?.followOutput
+    expect(typeof follow === "function" && [follow(false), follow(true)]).toEqual([false, false])
     expect(virtuoso?.initialTopMostItemIndex).toEqual({
       index: "LAST",
       align: "end",

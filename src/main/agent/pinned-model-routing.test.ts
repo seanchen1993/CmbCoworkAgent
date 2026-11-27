@@ -72,17 +72,24 @@ describe("pinned model runtime admission", () => {
       expect(state.createProvider).not.toHaveBeenCalled()
     }
   )
-  it("keeps the usable pin as the only runtime candidate after credentials are restored", async () => {
-    state.key = "synthetic-only"
-    const routing = await resolveStandardTurnRouting({
-      taskSource: "chat",
-      threadId: "thread",
-      requestedModelId: "custom:cheap",
-      routingMode: "pinned"
-    })
-    expect(routing.orderedModelIds).toEqual(["custom:cheap"])
-    expect(state.defaultLookup).not.toHaveBeenCalled()
-  })
+  it.each([
+    ["thread", "pinned"],
+    ["btw-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002", "auto"]
+  ] as const)(
+    "keeps the usable pin as the only runtime candidate for %s in global mode %s",
+    async (threadId, routingMode) => {
+      state.key = "synthetic-only"
+      const routing = await resolveStandardTurnRouting({
+        taskSource: "chat",
+        message: "检查当前项目",
+        threadId,
+        requestedModelId: "custom:cheap",
+        routingMode
+      })
+      expect(routing.orderedModelIds).toEqual(["custom:cheap"])
+      expect(state.defaultLookup).not.toHaveBeenCalled()
+    }
+  )
   it("never echoes credentials or credential-bearing URLs in the actionable error", () => {
     const raw = "https://secret-user:synthetic-key@example.invalid/v1"
     const error = new SelectedModelUnavailableError(raw, "missing_credentials")
