@@ -110,6 +110,11 @@ function literal(word: Word | undefined): string | null {
   return word && word.parts.every((part) => typeof part === "string") ? word.parts.join("") : null
 }
 
+function literalPath(word: Word): boolean {
+  const value = literal(word)
+  return value !== null && /^[a-zA-Z0-9./_][a-zA-Z0-9./_@~-]*$/.test(value)
+}
+
 function resolveWord(word: Word, scope: Scope, allowSubstitution = false): string {
   return word.parts
     .map((part) => {
@@ -216,7 +221,7 @@ class Parser {
       throw new Error("empty command list")
     }
     while (true) {
-      this.command(scope, allowLoop)
+      this.command(scope, allowLoop, inLoop)
       while (this.at("2>&1")) this.index++
       if (["|", "&&", "||"].some((value) => this.at(value))) {
         this.index++
@@ -234,7 +239,7 @@ class Parser {
     }
   }
 
-  private command(scope: Scope, allowLoop: boolean): void {
+  private command(scope: Scope, allowLoop: boolean, inLoop: boolean): void {
     if (allowLoop && this.at("for")) {
       this.loop(scope)
       return
@@ -245,6 +250,27 @@ class Parser {
     }
     if (!words.length) throw new Error("missing command")
     const executable = literal(words[0])
+    // Only direct commands may read files. Command substitutions keep their narrower grammar.
+    if (allowLoop || inLoop) {
+      if ((executable === "cat" || executable === "/bin/cat") && words.length === 2) {
+        const operand = words[1]
+        if (literalPath(operand)) return
+        const [part] = operand.parts
+        // loop() already validated every possible value as one non-option word.
+        if (
+          operand.parts.length === 1 &&
+          typeof part === "object" &&
+          "variable" in part &&
+          scope.has(part.variable)
+        )
+          return
+      }
+      if (executable === "ls" || executable === "/bin/ls") {
+        const hasFlags = /^-(?:a|l|al|la)$/.test(literal(words[1]) ?? "")
+        const pathIndex = hasFlags ? 2 : 1
+        if (words.length === pathIndex + 1 && literalPath(words[pathIndex])) return
+      }
+    }
     if (executable === "git" && words.length > 1 && gitQuery(words, scope)) return
     if (executable === "echo") {
       words.slice(1).forEach((word) => resolveWord(word, scope, true))

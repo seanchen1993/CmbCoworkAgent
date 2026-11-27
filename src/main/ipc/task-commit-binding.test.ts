@@ -38,6 +38,7 @@ import { isTaskCommitRendererUrl, registerTaskCommitBindingHandlers } from "./ta
 type Handler = (...args: unknown[]) => unknown
 const handlers = new Map<string, Handler>()
 const sender = { id: 1 }
+const notifyChanged = vi.fn()
 const event = { sender }
 function invoke<K extends keyof TaskCommitBindingApi>(
   key: K,
@@ -81,7 +82,8 @@ beforeAll(async () => {
     {
       handle: (channel: string, handler: Handler) => handlers.set(channel, handler)
     } as unknown as IpcMain,
-    (entry) => entry.sender === (sender as unknown)
+    (entry) => entry.sender === (sender as unknown),
+    notifyChanged
   )
 })
 
@@ -108,6 +110,7 @@ describe("task-local commit authorization", { timeout: 30_000 }, () => {
     expect(await invoke("choose", edit.token)).toEqual(state.pick)
     writeFileSync(join(repo, "existing.txt"), "user change")
     const binding = await invoke("save", edit.token, "K-1", [repo, otherRepo])
+    expect(notifyChanged).toHaveBeenCalledWith("A")
     expect(await readTaskCommitBinding("A")).toMatchObject({
       ...binding,
       dirtyAtSelection: { [repo]: ["existing.txt"], [otherRepo]: [] }

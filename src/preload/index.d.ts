@@ -1,4 +1,5 @@
 import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
+import type { GitPanelRepository } from "../shared/git-panel-repository"
 import type { GitGraphPage } from "../shared/git-graph"
 import type { TaskCommitBindingApi } from "../shared/task-commit-binding"
 import type {
@@ -1659,10 +1660,12 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
+    listGitPanelRepositories: (threadId: string) => Promise<GitPanelRepository[]>
     getGitPanelMeta: (
       threadId: string,
       options?: {
         worktreePath?: string
+        panelRepository?: boolean
         includeSummary?: boolean
         refreshHead?: boolean
         includePushability?: boolean
@@ -1689,6 +1692,7 @@ interface CustomAPI {
         statusUntrackedMode?: "all" | "normal" | "no"
         visibleFileLimit?: number
         worktreePath?: string
+        panelRepository?: boolean
         commitBindingVersion?: string
         includeCommitTarget?: boolean
       }
@@ -1721,7 +1725,12 @@ interface CustomAPI {
     getGitPanelFileDiff: (
       threadId: string,
       filePath: string,
-      options?: { worktreePath?: string; commitBindingVersion?: string; commitPreviewRevision?: string }
+      options?: {
+        worktreePath?: string
+        panelRepository?: boolean
+        commitBindingVersion?: string
+        commitPreviewRevision?: string
+      }
     ) => Promise<{
       success: boolean
       isWorktree: boolean

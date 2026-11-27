@@ -4,14 +4,16 @@
  * The test creates a main checkout plus a linked worktree below a non-Git
  * parent, changes the same tracked file in both, then drives the real Git Panel
  * through Playwright. It proves that the repository selector is reachable and
- * that submitting the dialog commits only the selected linked worktree.
+ * that submitting the dialog commits only the selected linked worktree. It
+ * also authorizes a same-named checkout outside the workspace and verifies
+ * that the panel isolates its file list and diff until access is revoked.
  *
  * Run:
  *   npm run test:git:e2e
  */
 
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs"
 import { rm as rmAsync } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
@@ -32,8 +34,11 @@ const ELECTRON_LAUNCHER =
     ? join(PROJECT_ROOT, "tests", "support", "electron-launcher.cmd")
     : ELECTRON_BINARY
 const MAIN_ENTRY = join(PROJECT_ROOT, "out", "main", "index.js")
+const SCREENSHOT_DIR = join(PROJECT_ROOT, "tests", "screenshots")
 const THREAD_TITLE = `Git multi-repository commit E2E ${process.pid}-${Date.now()}`
+const WORKSPACE_BRANCH = "e2e-workspace"
 const LINKED_BRANCH = "e2e-linked-worktree"
+const EXTERNAL_BRANCH = "e2e-authorized"
 const EXPECTED_COMMIT_MESSAGE =
   "M10000749-9 #comment fix:e2e multi-repository target #CMBDevClaw"
 
@@ -120,6 +125,7 @@ function initializeRepository(mainRepository: string, linkedWorktree: string): s
   writeFileSync(join(mainRepository, "tracked.txt"), "initial\n")
   git(mainRepository, ["add", "tracked.txt"])
   git(mainRepository, ["commit", "-q", "-m", "initial"])
+  git(mainRepository, ["branch", "-m", WORKSPACE_BRANCH])
   const initialCommit = git(mainRepository, ["rev-parse", "HEAD"])
   git(mainRepository, ["worktree", "add", "-q", "-b", LINKED_BRANCH, linkedWorktree])
   writeFileSync(join(mainRepository, "tracked.txt"), "pending in main checkout\n")
@@ -244,12 +250,67 @@ async function runGitPanelCommit(page: Page): Promise<void> {
   log("PASS 真实 Electron UI 完成 Commit")
 }
 
+async function verifyAuthorizedPanel(
+  page: Page,
+  mainRepository: string,
+  linkedWorktree: string,
+  external: string
+): Promise<void> {
+  const picker = page.getByRole("button", { name: /^操作仓库/ })
+  const option = (repository: string) =>
+    page.getByRole("dialog").getByRole("button").filter({ hasText: repository })
+  await picker.click()
+  const mainOption = option(mainRepository)
+  const externalOption = option(external)
+  await mainOption.filter({ hasText: WORKSPACE_BRANCH }).waitFor()
+  await externalOption.filter({ hasText: EXTERNAL_BRANCH }).waitFor()
+  await page.screenshot({ path: join(SCREENSHOT_DIR, "git-panel-authorized-repositories.png") })
+  log("PASS 同名工作区仓库与新授权仓库均显示绝对路径和分支")
+
+  const file = (path: string) =>
+    page.getByRole("button", { name: `查看 ${path} 的 diff`, exact: true })
+  await mainOption.click()
+  await file("workspace-only.txt").waitFor()
+  await file("external-only.txt").waitFor({ state: "hidden" })
+  await file("tracked.txt").click()
+  const workspaceLine = page.getByText("pending in main checkout", { exact: true })
+  await workspaceLine.waitFor()
+
+  await picker.click()
+  await externalOption.click()
+  await file("external-only.txt").waitFor()
+  await file("workspace-only.txt").waitFor({ state: "hidden" })
+  await file("tracked.txt").click()
+  const externalLine = page.getByText("reviewed external change", { exact: true })
+  await externalLine.waitFor()
+  await workspaceLine.waitFor({ state: "hidden" })
+  await page.screenshot({ path: join(SCREENSHOT_DIR, "git-panel-authorized-diff.png") })
+  log("PASS 切换同名仓库后只显示所选仓库的文件列表和 tracked.txt 内容")
+
+  await picker.click()
+  await option(linkedWorktree).filter({ hasText: LINKED_BRANCH }).click()
+  await file("linked-only.txt").waitFor()
+  await file("workspace-only.txt").waitFor({ state: "hidden" })
+  await externalLine.waitFor({ state: "hidden" })
+  await picker.click()
+  await externalOption.click()
+  await file("tracked.txt").click()
+  await externalLine.waitFor()
+  log("PASS 从外部仓库切回指定的工作区子仓库并再次打开外部 diff")
+}
+
 async function verifyExternalTaskBinding(
   app: ElectronApplication,
   page: Page,
   threadId: string,
+  mainRepository: string,
+  linkedWorktree: string,
   external: string
 ): Promise<void> {
+  writeFileSync(join(mainRepository, "workspace-only.txt"), "workspace only\n")
+  writeFileSync(join(linkedWorktree, "linked-only.txt"), "linked only\n")
+  writeFileSync(join(external, "external-only.txt"), "external only\n")
+  writeFileSync(join(external, "tracked.txt"), "reviewed external change\n")
   // Supply only the native folder-picker response. The desktop frame, binding
   // editor, authorization checks, database, preview and Git execution are real.
   await app.evaluate(({ dialog }, folder) => {
@@ -269,12 +330,18 @@ async function verifyExternalTaskBinding(
   await settings.getByRole("button", { name: "选择或输入任务卡号" }).click()
   await page.getByPlaceholder("手动输入卡号").fill("QA-EXTERNAL")
   await page.keyboard.press("Escape")
-  const screenshotDir = join(PROJECT_ROOT, "tests", "screenshots")
-  mkdirSync(screenshotDir, { recursive: true })
-  await settings.screenshot({ path: join(screenshotDir, "task-commit-desktop.png") })
+  mkdirSync(SCREENSHOT_DIR, { recursive: true })
+  await settings.screenshot({ path: join(SCREENSHOT_DIR, "task-commit-desktop.png") })
   await settings.getByRole("button", { name: "确认本任务授权" }).click()
   await settings.waitFor({ state: "hidden" })
   await page.getByRole("button", { name: "QA-EXTERNAL", exact: true }).waitFor()
+  try {
+    await verifyAuthorizedPanel(page, mainRepository, linkedWorktree, external)
+  } catch (error) {
+    console.error(`[git-e2e] 授权仓库面板快照：\n${await page.locator("body").innerText()}`)
+    throw error
+  }
+  unlinkSync(join(external, "external-only.txt"))
 
   const hooks = join(external, ".git", "task-hooks")
   mkdirSync(hooks)
@@ -284,7 +351,6 @@ async function verifyExternalTaskBinding(
     'test "$(git diff --cached --name-only)" = tracked.txt || exit 1',
     'echo checked > "$(git rev-parse --git-dir)/task-hook-receipt"'
   ].join("\n") + "\n", { mode: 0o755 })
-  writeFileSync(join(external, "tracked.txt"), "reviewed external change\n")
   const message = "QA-EXTERNAL #comment test:review external change #CMBDevClaw"
   const openPreview = () =>
     page.evaluate(
@@ -343,6 +409,25 @@ async function verifyExternalTaskBinding(
   assert(result.success, result.error || "桌面授权的外部仓库已完成提交")
   assert(existsSync(join(external, ".git", "task-hook-receipt")), "外仓配置的提交钩子已验证候选暂存区")
   assert(git(external, ["log", "-1", "--format=%s"]) === message, "外部提交使用已保存的任务卡号")
+
+  await page.getByText("当前仓库没有待查看的文件改动", { exact: true }).waitFor()
+  await page.getByText("分支 same-tip-branch", { exact: true }).waitFor()
+  log("PASS 外部提交后当前面板自动更新分支并清空变更列表")
+  writeFileSync(join(external, "tracked.txt"), "pending when access revoked\n")
+  await page.getByRole("button", { name: "刷新", exact: true }).click()
+  await page.getByRole("button", { name: "查看 tracked.txt 的 diff", exact: true }).click()
+  const pendingLine = page.getByText("pending when access revoked", { exact: true })
+  await pendingLine.waitFor()
+
+  await page.getByRole("button", { name: "QA-EXTERNAL", exact: true }).click()
+  await settings.getByRole("button", { name: "撤销授权", exact: true }).click()
+  await settings.waitFor({ state: "hidden" })
+  await page.getByRole("button", { name: "任务提交设置", exact: true }).waitFor()
+  await pendingLine.waitFor({ state: "hidden" })
+  await page.getByRole("button", { name: /^操作仓库/ }).click()
+  await page.getByText(mainRepository, { exact: true }).waitFor()
+  await page.getByText(external, { exact: true }).waitFor({ state: "hidden" })
+  log("PASS 撤销后无需重开面板，外部仓库和 diff 消失，工作区仓库仍可选择")
 }
 
 async function deleteWorkspaceThread(page: Page, threadId: string): Promise<void> {
@@ -415,11 +500,14 @@ async function main(): Promise<void> {
     assert(linkedHead !== initialCommit, "linked worktree 分支产生新 commit")
     assert(mainHead === initialCommit, "主仓库分支 HEAD 未被移动")
     assert(linkedSubject === EXPECTED_COMMIT_MESSAGE, "最终 commit message 符合 CMB 规范")
-    const external = join(testRoot, "external")
+    const outside = join(testRoot, "outside")
+    mkdirSync(outside)
+    const external = join(outside, "main")
     git(testRoot, ["clone", "-q", "--no-local", mainRepository, external])
+    git(external, ["checkout", "-q", "-b", EXTERNAL_BRANCH])
     git(external, ["config", "user.name", "Task Commit QA"])
     git(external, ["config", "user.email", "test@example.invalid"])
-    await verifyExternalTaskBinding(app, page, threadId, external)
+    await verifyExternalTaskBinding(app, page, threadId, mainRepository, linkedWorktree, external)
     assert(git(mainRepository, ["rev-parse", "HEAD"]) === mainHead, "外部提交保留会话内主仓库的 HEAD")
     log("ALL PASS multi-repository Git commit E2E")
   } finally {

@@ -94,7 +94,8 @@ import {
   executeTaskBoundGitCommit
 } from "../services/task-bound-git-commit"
 import { forgetTaskCommitIndex, recoverPendingTaskIndex, rememberTaskCommitIndex } from "../services/task-commit-recovery"
-import { readCurrentTaskCommitBinding } from "../services/task-commit-binding"
+import type { GitPanelRepository } from "../../shared/git-panel-repository"
+import { readCurrentTaskCommitBinding, readTaskCommitBinding } from "../services/task-commit-binding"
 import { resolveTaskCommitTarget } from "../services/task-commit-target"
 import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import { mutateLatestThreadMetadata, parseThreadMetadata } from "../services/thread-metadata"
@@ -2213,6 +2214,85 @@ async function getContextGitRepositories(
   return repositories
 }
 
+type GitPanelContext = Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
+
+async function getGitPanelRepositories(
+  threadId: string,
+  context: GitPanelContext
+): Promise<GitPanelRepository[]> {
+  if (!context.workspacePath) return []
+  const [workspaceRepos, binding] = await Promise.all([
+    context.isGitRepo ? getContextGitRepositories(context) : [],
+    readTaskCommitBinding(threadId)
+  ])
+  const repositories = workspaceRepos.map(({ repoPath }): GitPanelRepository => ({
+    path: repoPath,
+    branch: null,
+    source: "workspace"
+  }))
+  if (binding && !path.relative(binding.workspacePath, context.workspacePath)) {
+    // Binding paths are canonical. Keep the workspace spelling and its read scope
+    // when the same checkout was also selected through a directory alias.
+    const registered = new Set(
+      await Promise.all(
+        repositories.map(async (repo) =>
+          getCacheKeyForPath(await fs.realpath(repo.path).catch(() => repo.path))
+        )
+      )
+    )
+    for (const scope of binding.repositoryPaths) {
+      const key = getCacheKeyForPath(scope)
+      if (!registered.has(key)) {
+        repositories.push({ path: scope, source: "authorized", branch: null })
+        registered.add(key)
+      }
+    }
+  }
+  await runWithConcurrency(repositories, GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY, async (repo) => {
+    try {
+      repo.branch = (await readCurrentBranch(repo.path, true)) ?? "HEAD（分离）"
+    } catch {
+      // A checkout can disappear mid-scan. Keep its path and the other branches usable.
+      throwIfGitReadCancelled()
+    }
+  })
+  if (binding && readCurrentTaskCommitBinding(threadId)?.version !== binding.version) {
+    return repositories.filter((repo) => repo.source === "workspace")
+  }
+  return repositories
+}
+
+async function withAuthorizedGitPanelRead<T>(
+  threadId: string,
+  requestedPath: string | undefined,
+  read: (scope: GitPanelContext, repository: string) => Promise<T>
+): Promise<T> {
+  const binding = await readTaskCommitBinding(threadId)
+  const repository =
+    requestedPath && path.isAbsolute(requestedPath)
+      ? binding?.repositoryPaths.find((scope) => path.relative(scope, requestedPath) === "")
+      : undefined
+  if (!binding || !repository) {
+    throw new Error("该仓库未获当前任务授权，请刷新 Git 面板")
+  }
+  // Scope only this read. Mutation and Agent preview handlers continue to resolve
+  // the actual thread workspace and apply their own target/preview checks.
+  const scopedContext: GitPanelContext = {
+    workspacePath: repository,
+    metadata: {},
+    repositories: [],
+    isGitRepo: true,
+    isWorktree: await detectIsWorktreePath(repository),
+    worktreeBaseCommit: null,
+    worktreeBranch: null
+  }
+  const result = await read(scopedContext, repository)
+  if (readCurrentTaskCommitBinding(threadId)?.version !== binding.version) {
+    throw new Error("当前任务的仓库授权已变更，请刷新 Git 面板")
+  }
+  return result
+}
+
 function prefixRepositoryPath(repo: DiscoveredGitRepository, filePath: string): string {
   const normalizedFile = normalizeGitRelativePath(filePath)
   return repo.workspaceRelativePath === "."
@@ -2476,7 +2556,7 @@ async function readUntrackedPreview(
 export async function buildGitPanelFileDiff(
   worktreePath: string,
   relPath: string,
-  options?: { silent?: boolean; status?: GitPanelFileStatus }
+  options?: { silent?: boolean; status?: GitPanelFileStatus; synthesizeUntracked?: boolean }
 ): Promise<GitPanelFileDiff | null> {
   const silent = Boolean(options?.silent)
   const fileStatus = options?.status ?? "modified"
@@ -2626,7 +2706,7 @@ export async function buildGitPanelFileDiff(
     hasDiffStats = additions > 0 || deletions > 0
   }
 
-  if (!hasDiffStats && !diffText.trim()) {
+  if (!hasDiffStats && !diffText.trim() && options?.synthesizeUntracked !== false) {
     // New untracked file: synthesize a minimal unified diff and stats.
     // To avoid loading huge files into memory, cap synthesized preview size.
     try {
@@ -4068,6 +4148,40 @@ export async function buildGitPanelFileDiffState(
   }
 }
 
+async function readAuthorizedGitPanelFileDiff(
+  threadId: string,
+  scope: GitPanelContext,
+  repository: string,
+  filePath: string
+): Promise<GitPanelFileDiffPayload> {
+  const candidate = resolveWorktreeRelativeCandidate(repository, filePath)
+  if (!candidate || candidate !== filePath) throw new Error("请选择仓库中的变更文件")
+  const changed = await getChangedFileEntriesForGitOps(repository, [candidate], {
+    silent: true,
+    combineMoves: false
+  })
+  const entry = changed.find((item) => item.path === candidate)
+  if (!entry) throw new Error("该文件不在当前仓库的变更列表中")
+  const diff = await buildGitPanelFileDiff(repository, candidate, {
+    silent: true,
+    status: entry.status,
+    synthesizeUntracked: entry.status === "untracked"
+  })
+  return {
+    success: true,
+    isGitRepo: true,
+    isWorktree: scope.isWorktree,
+    taskId: threadId,
+    file: {
+      ...entry,
+      diff: truncateGitPanelDiff(diff?.diff ?? "", candidate),
+      diffLoaded: true,
+      additions: diff?.additions ?? 0,
+      deletions: diff?.deletions ?? 0
+    }
+  }
+}
+
 async function getGitRoot(folderPath: string): Promise<string | null> {
   const cacheKey = getCacheKeyForPath(folderPath)
   return getCachedPromise(gitRootCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
@@ -4235,7 +4349,9 @@ function modelProvidersFromConfigs(configs: ReturnType<typeof getModelConfigs>):
 }
 
 export function registerModelHandlers(
-  ipcMain: IpcMain, getMainWindow: () => BrowserWindow | null = () => null
+  ipcMain: IpcMain,
+  getMainWindow: () => BrowserWindow | null = () => null,
+  trustedTaskRenderer: (event: IpcMainInvokeEvent) => boolean = () => false
 ): void {
   const workspaceScanCleanupOwners = new Set<number>()
   // List all effective models. The first call waits for the remote manifest so
@@ -5575,6 +5691,19 @@ export function registerModelHandlers(
   )
 
   ipcMain.handle(
+    "workspace:listGitPanelRepositories",
+    (event, { threadId }: { threadId: string }) =>
+      gitReadRequestCoordinator.run(event.sender, "panel", "repositories", threadId, async () => {
+        if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看仓库")
+        const context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          requestScope: "git-panel-repositories"
+        })
+        return getGitPanelRepositories(threadId, context)
+      })
+  )
+
+  ipcMain.handle(
     "workspace:getGitPanelMeta",
     async (
       event,
@@ -5585,6 +5714,7 @@ export function registerModelHandlers(
         threadId: string
         options?: {
           worktreePath?: string
+          panelRepository?: boolean
           includeSummary?: boolean
           refreshHead?: boolean
           includePushability?: boolean
@@ -5594,6 +5724,17 @@ export function registerModelHandlers(
       gitReadRequestCoordinator.run(event.sender, "panel", "meta", threadId, async () => {
         let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
         try {
+          if (options?.panelRepository) {
+            if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看授权仓库")
+            return await withAuthorizedGitPanelRead(
+              threadId, options.worktreePath, (scope, repository) =>
+                buildGitPanelMetaState(threadId, scope, {
+                  ...options,
+                  worktreePath: repository,
+                  includePushability: false
+                })
+            )
+          }
           context = await resolveThreadWorkspaceContext(threadId, {
             webContentsId: event.sender.id,
             requestScope: "git-panel-meta"
@@ -5624,17 +5765,34 @@ export function registerModelHandlers(
           statusUntrackedMode?: GitStatusUntrackedMode
           visibleFileLimit?: number
           worktreePath?: string
+          panelRepository?: boolean
           commitBindingVersion?: string
           includeCommitTarget?: boolean
         }
       }
-    ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "diffs", threadId, async () => {
+    ) => {
+      const family =
+        !options?.panelRepository && (options?.includeCommitTarget || options?.commitBindingVersion)
+          ? "commit-preview"
+          : "panel"
+      return gitReadRequestCoordinator.run(event.sender, family, "diffs", threadId, async () => {
         let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
         try {
+          if (options?.panelRepository) {
+            if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看授权仓库")
+            return await withAuthorizedGitPanelRead(
+              threadId, options.worktreePath, (scope, repository) =>
+                buildGitPanelDiffState(threadId, scope, {
+                  ...options,
+                  worktreePath: repository,
+                  commitBindingVersion: undefined,
+                  includeCommitTarget: false
+                })
+            )
+          }
           context = await resolveThreadWorkspaceContext(threadId, {
             webContentsId: event.sender.id,
-            requestScope: "git-panel-diffs"
+            requestScope: `git-${family}-diffs`
           })
           return await buildGitPanelDiffState(threadId, context, options)
         } catch (e) {
@@ -5645,6 +5803,7 @@ export function registerModelHandlers(
           })
         }
       })
+    }
   )
 
   ipcMain.handle(
@@ -5658,15 +5817,31 @@ export function registerModelHandlers(
       }: {
         threadId: string
         filePath: string
-        options?: { worktreePath?: string; commitBindingVersion?: string; commitPreviewRevision?: string }
+        options?: {
+          worktreePath?: string
+          panelRepository?: boolean
+          commitBindingVersion?: string
+          commitPreviewRevision?: string
+        }
       }
-    ) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "file-diff", threadId, async () => {
+    ) => {
+      const family =
+        !options?.panelRepository && (options?.commitPreviewRevision || options?.commitBindingVersion)
+          ? "commit-preview"
+          : "panel"
+      return gitReadRequestCoordinator.run(event.sender, family, "file-diff", threadId, async () => {
         let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
         try {
+          if (options?.panelRepository) {
+            if (!trustedTaskRenderer(event)) throw new Error("请在桌面任务窗口查看授权仓库")
+            return await withAuthorizedGitPanelRead(
+              threadId, options.worktreePath, (scope, repository) =>
+                readAuthorizedGitPanelFileDiff(threadId, scope, repository, filePath)
+            )
+          }
           context = await resolveThreadWorkspaceContext(threadId, {
             webContentsId: event.sender.id,
-            requestScope: "git-panel-file-diff"
+            requestScope: `git-${family}-file-diff`
           })
           return await buildGitPanelFileDiffState(threadId, context, filePath, options)
         } catch (e) {
@@ -5677,6 +5852,7 @@ export function registerModelHandlers(
           })
         }
       })
+    }
   )
 
   ipcMain.handle(

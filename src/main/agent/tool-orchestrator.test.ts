@@ -700,6 +700,61 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     }
   })
 
+  it("runs a report-reading loop in Bash only after ordinary command approval", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "report-loop-"))
+    const command =
+      "cd . && ls -la .cmbdevclaw && for f in case-01/result.json case-02/result.json; " +
+      'do echo "===== $f"; /bin/cat "$f"; done; echo "== git =="; ' +
+      "git status --short 2>&1 | head -20; git log --oneline 2>&1 | head -10"
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" })
+    const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash"
+    try {
+      initRepository(root)
+      mkdirSync(path.join(root, ".cmbdevclaw"))
+      for (const folder of ["case-01", "case-02"]) {
+        mkdirSync(path.join(root, folder))
+        writeFileSync(path.join(root, folder, "result.json"), JSON.stringify({ folder }) + "\n")
+      }
+      const head = git("rev-parse", "HEAD")
+      const index = git("ls-files", "--stage")
+      const rawExecute = vi.fn<RawExecuteFn>().mockImplementation(async (script) => ({
+        output: execFileSync(bash, ["--noprofile", "--norc", "-c", script], {
+          cwd: root,
+          encoding: "utf8"
+        }),
+        exitCode: 0,
+        truncated: false
+      }))
+      for (const type of ["reject", "approve"] as const) {
+        const request = vi.fn<RequestApprovalFn>().mockResolvedValue({ type, tool_call_id: "test" })
+        const orchestrator = new ToolOrchestrator(
+          new ApprovalStore(),
+          rawExecute,
+          request,
+          () => false
+        )
+        const result = await orchestrator.execute(command, root, "none", "posix")
+        expect(request).toHaveBeenCalledTimes(1)
+        expect(request.mock.calls[0][0].operation).toBe("execute")
+        if (type === "reject") {
+          expect(rawExecute).not.toHaveBeenCalled()
+          expect(result.output).toContain("Command rejected")
+        } else {
+          expect(rawExecute).toHaveBeenCalledTimes(1)
+          expect(result.exitCode).toBe(0)
+          expect(result.output).toContain('{"folder":"case-01"}')
+          expect(result.output).toContain('{"folder":"case-02"}')
+          expect(result.output).toContain(" M file.txt")
+          expect(result.output).toContain("initial")
+        }
+      }
+      expect(git("rev-parse", "HEAD")).toBe(head)
+      expect(git("ls-files", "--stage")).toBe(index)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
   it("lets the user reject a read-only POSIX loop without executing it", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({

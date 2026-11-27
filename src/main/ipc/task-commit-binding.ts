@@ -52,17 +52,18 @@ export function isTaskCommitRendererUrl(
 /** Only the app's top-level desktop UI can create or change a task authorization. */
 export function registerTaskCommitBindingHandlers(
   ipc: IpcMain,
-  trusted: (event: IpcMainInvokeEvent) => boolean
+  trusted: (event: IpcMainInvokeEvent) => boolean,
+  notifyChanged: (threadId: string) => void
 ): void {
   let editor: Editor | null = null
   onHarnessFeatureCatalogChange((id, slugs) => {
-    invalidateMissingTaskCommitFeatures(id, slugs)
+    invalidateMissingTaskCommitFeatures(id, slugs).forEach(notifyChanged)
     if (editor?.state.feature?.projectId === id && !slugs.has(editor.state.feature.slug))
       editor = null
   })
   onFeatureRepositoryMappingChange((projectId, slug, mappings) => {
     const paths = new Map(mappings.map((unit) => [unit.deployUnitIdMapping, unit.localRepoPath]))
-    invalidateRemovedTaskCommitMappings(projectId, slug, paths)
+    invalidateRemovedTaskCommitMappings(projectId, slug, paths).forEach(notifyChanged)
     if (
       editor?.state.feature?.projectId === projectId &&
       editor.state.feature.slug === slug &&
@@ -205,6 +206,7 @@ export function registerTaskCommitBindingHandlers(
         }
       )
       if (editor?.token === token) editor = null
+      notifyChanged(state.identity.threadId)
       return result
     }
   )
@@ -212,6 +214,7 @@ export function registerTaskCommitBindingHandlers(
   ipc.handle("taskCommitBinding:revoke", (event, token: string) => {
     const { state } = current(event, token)
     revokeTaskCommitBinding(state.identity)
+    notifyChanged(state.identity.threadId)
     editor = null
   })
 }
