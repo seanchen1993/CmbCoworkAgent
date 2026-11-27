@@ -58,6 +58,72 @@ describe("market plugin installation request", () => {
       id: "market-id"
     })
   })
+  it("extracts developer name and sapId directly from structured market user_id on plugin install", async () => {
+    const buffer = new ArrayBuffer(0)
+    vi.spyOn(marketApi, "fetchInstallBytes").mockResolvedValue({
+      buffer,
+      filename: "scene-lite.zip",
+      contentType: "application/zip"
+    })
+    const install = vi.fn(async () => ({ success: true }))
+    const userProfiles = vi.fn()
+    vi.stubGlobal("window", { api: { plugins: { install }, dashboard: { userProfiles } } })
+    const item = {
+      name: "AutoBizDevOps_Scene_Lite",
+      id: "scene-lite-id",
+      version: "0.0.1",
+      user_id: "80306415 / 郭滕 / 零售信息应用开发七室(杭州)/数字营销二组",
+      filename: "scene-lite.zip"
+    } as MarketItem
+    expect(await marketApi.downloadItem(item.name, "plugin", false, false, item)).toEqual({
+      success: true,
+      error: undefined
+    })
+    expect(userProfiles).not.toHaveBeenCalled()
+    expect(install).toHaveBeenCalledWith(buffer, "scene-lite.zip", "market", "0.0.1", {
+      name: "AutoBizDevOps_Scene_Lite",
+      id: "scene-lite-id",
+      developerName: "郭滕",
+      developerSapId: "80306415"
+    })
+  })
+  it("resolves developer name from userProfiles when market user_id only has an ID, and degrades cleanly on failure", async () => {
+    const buffer = new ArrayBuffer(0)
+    vi.spyOn(marketApi, "fetchInstallBytes").mockResolvedValue({
+      buffer,
+      filename: "scene-lite.zip",
+      contentType: "application/zip"
+    })
+    const install = vi.fn(async () => ({ success: true }))
+    const userProfiles = vi.fn(async () => ({
+      success: true,
+      data: [{ sapId: "80306415", userName: "郭滕", orgName: "零售信息应用开发七室" }]
+    }))
+    vi.stubGlobal("window", { api: { plugins: { install }, dashboard: { userProfiles } } })
+    const item = {
+      name: "AutoBizDevOps_Scene_Lite",
+      id: "scene-lite-id",
+      version: "0.0.1",
+      user_id: "306415",
+      filename: "scene-lite.zip"
+    } as MarketItem
+    expect((await marketApi.downloadItem(item.name, "plugin", false, false, item)).success).toBe(true)
+    expect(install).toHaveBeenCalledWith(buffer, "scene-lite.zip", "market", "0.0.1", {
+      name: "AutoBizDevOps_Scene_Lite",
+      id: "scene-lite-id",
+      developerName: "郭滕",
+      developerSapId: "80306415"
+    })
+
+    install.mockClear()
+    userProfiles.mockRejectedValueOnce(new Error("network down"))
+    expect((await marketApi.downloadItem(item.name, "plugin", false, false, item)).success).toBe(true)
+    expect(install).toHaveBeenCalledWith(buffer, "scene-lite.zip", "market", "0.0.1", {
+      name: "AutoBizDevOps_Scene_Lite",
+      id: "scene-lite-id",
+      developerSapId: "306415"
+    })
+  })
   it("does not uninstall the current plugin before an update download succeeds", async () => {
     const remove = vi.fn()
     vi.stubGlobal("window", { api: { plugins: { delete: remove } } })

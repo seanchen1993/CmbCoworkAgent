@@ -129,8 +129,17 @@ describe("market content IPC regression", () => {
   })
 
   it("persists market identity across renamed project plugin updates and clears it for originals", async () => {
-    const marketplace = { name: "市场项目模式插件", id: "project-market-id" }
-    const install = async (name: string, origin = "market") => {
+    const marketplace = {
+      name: "市场项目模式插件",
+      id: "project-market-id",
+      developerName: "郭滕",
+      developerSapId: "80306415"
+    }
+    const install = async (
+      name: string,
+      origin = "market",
+      overrideMarketplace: typeof marketplace | { name: string; id?: string } = marketplace
+    ) => {
       const zip = new AdmZip()
       zip.addFile("plugin.json", Buffer.from(JSON.stringify({ name, author: "uploader" })))
       zip.addFile("skills/action/SKILL.md", Buffer.from(original(name)))
@@ -138,13 +147,20 @@ describe("market content IPC regression", () => {
         buffer: bytes(zip.toBuffer()),
         fileName: "project.zip",
         origin,
-        marketplace
+        marketplace: overrideMarketplace
       })
     }
     expect((await install("internal-project-plugin")).success).toBe(true)
     const first = storage.getPlugins().find((p) => p.marketplace?.id === marketplace.id)!
     expect(first.marketplace).toEqual(marketplace)
-    expect((await install("renamed-internal-project-plugin")).success).toBe(true)
+    expect(
+      (
+        await install("renamed-internal-project-plugin", "market", {
+          name: marketplace.name,
+          id: marketplace.id
+        })
+      ).success
+    ).toBe(true)
     const installed = storage.getPlugins().filter((p) => p.marketplace?.id === marketplace.id)
     expect(installed).toHaveLength(1)
     expect(installed[0]).toMatchObject({

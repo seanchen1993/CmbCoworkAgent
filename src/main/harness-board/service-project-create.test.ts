@@ -4,12 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { HarnessProjectMetadata } from "../../shared/harness-board-types"
 
 const state = vi.hoisted(() => ({
-  root: `/tmp/harness-project-create-${process.pid}-${Date.now()}`
+  root: `/tmp/harness-project-create-${process.pid}-${Date.now()}`,
+  pluginFields: {} as Record<string, unknown>
 }))
 vi.mock("../storage", () => ({
   getOpenworkDir: () => state.root,
   getUserInfo: () => null,
-  getPlugins: () => [{ id: "plugin", name: "plugin", path: join(state.root, "plugin") }]
+  getPlugins: () => [
+    { id: "plugin", name: "plugin", path: join(state.root, "plugin"), ...state.pluginFields }
+  ]
 }))
 vi.mock("./notifications", () => ({ harnessNotifications: {} }))
 vi.mock("./managed-run-store", () => ({ managedRunStore: {} }))
@@ -19,7 +22,12 @@ vi.mock("./catalog-client", () => ({
     const store = JSON.parse(await readFile(storePath(), "utf8")) as {
       projects: HarnessProjectMetadata[]
     }
-    const plugin = { id: "plugin", name: "plugin", path: join(state.root, "plugin") }
+    const plugin = {
+      id: "plugin",
+      name: "plugin",
+      path: join(state.root, "plugin"),
+      ...state.pluginFields
+    }
     const value = JSON.parse(
       await readFile(join(plugin.path, "board_core", "board_config.json"), "utf8")
     )
@@ -358,6 +366,49 @@ describe("create project in a selected directory", () => {
       expect(logs).toHaveBeenCalledWith(expect.stringContaining("exit 1: spawn python ENOENT"))
       await expect(readFile(storePath())).rejects.toMatchObject({ code: "ENOENT" })
     } finally {
+      logs.mockRestore()
+    }
+  })
+
+  it.each([
+    [
+      {
+        origin: "market",
+        marketplace: { name: "plugin", developerName: "郭滕", developerSapId: "80306415" }
+      },
+      "插件「plugin」执行「create_project」失败，请联系插件开发者 郭滕（80306415）"
+    ],
+    [
+      {
+        origin: "market",
+        marketplace: { name: "plugin", developerName: "郭滕" }
+      },
+      "插件「plugin」执行「create_project」失败，请联系插件开发者 郭滕"
+    ],
+    [
+      {
+        origin: "market",
+        marketplace: { name: "plugin", developerSapId: "80306415" }
+      },
+      "插件「plugin」执行「create_project」失败，请联系插件开发者（80306415）"
+    ],
+    [
+      {
+        origin: "local",
+        author: "本地作者",
+        marketplace: { name: "plugin", developerName: "郭滕", developerSapId: "80306415" }
+      },
+      "插件「plugin」执行「create_project」失败，请联系插件开发者"
+    ]
+  ])("formats developer contact in failure messages for %j", async (pluginFields, expected) => {
+    const logs = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      state.pluginFields = pluginFields
+      await writeFile(join(state.root, "plugin", "init.cjs"), 'console.error("boom"); process.exit(1)')
+
+      await expect(createHarnessProject(input())).rejects.toMatchObject({ message: expected })
+    } finally {
+      state.pluginFields = {}
       logs.mockRestore()
     }
   })
