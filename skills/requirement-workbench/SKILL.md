@@ -11,10 +11,13 @@ Turn the requirement information in the current message and workspace into an ac
 
 1. Read the original requirement.
    - For a text requirement, use the initial description supplied in the message.
-   - For an uploaded requirement, read `source-preview.md` and the available source files.
+   - For an uploaded requirement, read `source-preview.md` when it exists and the available source files.
    - For a linked requirement, retrieve the online requirement according to the URL guidance below.
-2. Read supplementary material in the `source` folder.
-3. Before drafting the PRD, call the task subagent with `subagent_type="analyst"`. Include the original requirement and the relevant background content already collected in its prompt. Ask it to analyze only the supplied content, without rereading the workspace or collecting background again, and identify missing questions, scope risks, assumptions, edge cases, and pass/fail acceptance criteria. Treat its findings as analysis, not as user-confirmed decisions.
+2. If a `source` folder exists, read the relevant supplementary material in it. Do not block the workflow when the folder is absent or empty.
+3. Before drafting the PRD, call the task subagent with `subagent_type="analyst"`.
+   - Include the original requirement and the relevant background content already collected. Ask it to analyze only the supplied content, without rereading the workspace or collecting background again.
+   - Ask it to identify missing questions, scope risks, assumptions, edge cases, and pass/fail acceptance criteria. Treat its findings as analysis, not as user-confirmed decisions.
+   - If the analyst subagent is unavailable, errors, times out, or returns no usable analysis, skip this step without retrying or blocking the workflow. Continue with the material already collected.
 4. Synthesize the requirement goal, user scenarios, scope, business rules, and key open questions. Use the `request_user_input` tool to clarify unresolved decisions with the user one by one. Do not invent answers or treat analyst suggestions as confirmed.
 5. After the user has confirmed the requirement scope, key business rules, and outstanding questions, use the `requirement-to-prd` skill to generate the formal PRD. Follow that skill's instructions and cover target users, user stories, key flows, business rules, exceptions, permissions, notifications, success metrics, and acceptance criteria as applicable.
 6. Publish only when the formal PRD is ready and the user has explicitly authorized publication.
