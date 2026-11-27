@@ -152,7 +152,7 @@ import {
   harnessDeployUnitTelemetry
 } from "../services/harness-deploy-unit-attribution"
 import { recordTrustedToolFilePreviewSource } from "../services/trusted-tool-file-preview"
-import { resolvePluginSystemConstraintPath } from "./plugin-system-constraint"
+import { resolveSystemConstraintPath } from "./system-constraint-path"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
@@ -2970,7 +2970,7 @@ export class LocalSandbox
     return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
   }
 
-  private async recordPluginSystemConstraintRead(
+  private async recordSuccessfulSystemConstraintRead(
     resolvedPath: string,
     traceContext?: TraceContext
   ): Promise<void> {
@@ -2986,12 +2986,12 @@ export class LocalSandbox
     const harnessNodeStatus =
       traceContext?.harnessFeature?.nodeStatus?.trim() || this.harnessNodeStatus
 
-    if (!this.pluginRoot || !traceId || !harnessProjectId || !harnessFeatureSlug) {
+    if (!traceId || !harnessProjectId || !harnessFeatureSlug) {
       return
     }
 
     try {
-      const constraintFile = await resolvePluginSystemConstraintPath(this.pluginRoot, resolvedPath)
+      const constraintFile = await resolveSystemConstraintPath(this.pluginRoot, resolvedPath)
       if (!constraintFile) return
       const bindingKey = JSON.stringify([traceId, harnessProjectId, harnessFeatureSlug])
       let binding = this.constraintReadBindings.get(bindingKey)
@@ -4534,7 +4534,7 @@ export class LocalSandbox
         hookVisibleResult
       )
       if (formattedLines.length > 0) {
-        await this.recordPluginSystemConstraintRead(resolvedPath, options.traceContext)
+        await this.recordSuccessfulSystemConstraintRead(resolvedPath, options.traceContext)
       }
       abortSignal?.throwIfAborted()
       return finalResult
@@ -8919,11 +8919,16 @@ export class LocalSandbox
     result: ExecuteResponse,
     shellSyntax: CommandShellSyntax
   ): void {
-    if (!this._shellFileTelemetry || !this.pluginRoot || result.exitCode !== 0) return
-    if (!LocalSandbox.hasStdoutContent(result.output)) return
+    if (!this._shellFileTelemetry || result.exitCode !== 0) return
     const traceContext = executeTraceContext.getStore()
+    if (
+      !(traceContext?.harnessFeature?.projectId?.trim() || this.harnessProjectId) ||
+      !LocalSandbox.hasStdoutContent(result.output)
+    ) {
+      return
+    }
     for (const readPath of extractShellCommandReadPaths(command, cwd, shellSyntax)) {
-      void this.recordPluginSystemConstraintRead(readPath, traceContext)
+      void this.recordSuccessfulSystemConstraintRead(readPath, traceContext)
     }
   }
 

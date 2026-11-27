@@ -383,6 +383,13 @@ describe("shell command telemetry profiles", () => {
     expect(shellPathMatches("C:\\Repo\\src", "c:\\repo\\src\\x.ts")).toBe(true)
   })
 
+  it("extracts a PowerShell knowledge read path with repeated Windows separators", () => {
+    const file = "C:\\Users\\DevUser\\\\.cmbcoworkagent\\knowledge\\shared-rules\\read\\rules.md"
+    expect(
+      extractShellCommandReadPaths('Get-Content "' + file + '"', "C:\\repo", "powershell")
+    ).toEqual(["C:\\Users\\DevUser\\.cmbcoworkagent\\knowledge\\shared-rules\\read\\rules.md"])
+  })
+
   it("handles inline shell wrappers and for-loop scopes", async () => {
     expect((await profileShellCommand(`bash -c 'printf x > a.ts'`, "/ws")).namedPaths).toContain(
       "/ws/a.ts"
