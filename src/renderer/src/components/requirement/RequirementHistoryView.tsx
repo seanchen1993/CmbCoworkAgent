@@ -61,6 +61,21 @@ export function RequirementHistoryView({
   const [mineOnly, setMineOnly] = useState(false)
   const deferredQuery = useDeferredValue(query)
   const listSystemFilterId = useRequirementStore((state) => state.listSystemFilterId)
+  const setRequirementSystemOptions = useRequirementStore(
+    (state) => state.setRequirementSystemOptions
+  )
+
+  useEffect(() => {
+    const systems = new Map<string, string>()
+    for (const requirement of requirements) {
+      if (!systems.has(requirement.systemId)) systems.set(requirement.systemId, requirement.system)
+    }
+    setRequirementSystemOptions(
+      Array.from(systems, ([id, name]) => ({ id, name })).sort((a, b) =>
+        a.name.localeCompare(b.name, "zh-CN")
+      )
+    )
+  }, [requirements, setRequirementSystemOptions])
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {

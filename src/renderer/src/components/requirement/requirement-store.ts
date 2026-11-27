@@ -1,9 +1,6 @@
 import { create } from "zustand"
 import type { DesignSystemInfo } from "../design/types"
-import {
-  getRequirementSettings,
-  updateRequirementSettings
-} from "@/lib/requirement-product-store"
+import { getRequirementSettings, updateRequirementSettings } from "@/lib/requirement-product-store"
 
 export const ALL_REQUIREMENT_SYSTEMS_VALUE = "all"
 
@@ -13,13 +10,11 @@ function readCustomSystems(): RequirementSystemInfo[] {
   try {
     const value = getRequirementSettings().customSystems
     return Array.isArray(value)
-      ? value.filter(
-          (system): system is RequirementSystemInfo => {
-            if (!system || typeof system !== "object") return false
-            const candidate = system as Record<string, unknown>
-            return typeof candidate.id === "string" && typeof candidate.name === "string"
-          }
-        )
+      ? value.filter((system): system is RequirementSystemInfo => {
+          if (!system || typeof system !== "object") return false
+          const candidate = system as Record<string, unknown>
+          return typeof candidate.id === "string" && typeof candidate.name === "string"
+        })
       : []
   } catch {
     return []
@@ -53,6 +48,7 @@ function findSystem(systems: DesignSystemInfo[], systemId: string | null): Desig
 
 type RequirementStore = {
   systemList: RequirementSystemInfo[]
+  requirementSystemOptions: Array<{ id: string; name: string }>
   systemsLoaded: boolean
   /** Last system used when creating a requirement. Persisted across sessions. */
   selectedSystemId: string | null
@@ -61,11 +57,13 @@ type RequirementStore = {
   setSystemList: (systems: DesignSystemInfo[]) => void
   setSelectedSystemId: (systemId: string | null) => void
   setListSystemFilterId: (systemId: string | null) => void
+  setRequirementSystemOptions: (systems: Array<{ id: string; name: string }>) => void
   addCustomSystem: (name: string) => RequirementSystemInfo
 }
 
 export const useRequirementStore = create<RequirementStore>((set) => ({
   systemList: readCustomSystems(),
+  requirementSystemOptions: [],
   systemsLoaded: false,
   selectedSystemId: readLastSelectedSystemId(),
   listSystemFilterId: null,
@@ -91,15 +89,27 @@ export const useRequirementStore = create<RequirementStore>((set) => ({
   },
   setListSystemFilterId: (systemId) => {
     set((state) => {
-      const listSystemFilterId = findSystem(state.systemList, systemId)?.id ?? null
+      const listSystemFilterId = systemId?.trim() || null
       return listSystemFilterId === state.listSystemFilterId ? state : { listSystemFilterId }
+    })
+  },
+  setRequirementSystemOptions: (requirementSystemOptions) => {
+    set((state) => {
+      const listSystemFilterId = requirementSystemOptions.some(
+        (system) => system.id === state.listSystemFilterId
+      )
+        ? state.listSystemFilterId
+        : null
+      return { requirementSystemOptions, listSystemFilterId }
     })
   },
   addCustomSystem: (name) => {
     const trimmedName = name.trim()
     const existing = useRequirementStore
       .getState()
-      .systemList.find((system) => system.name.toLocaleLowerCase() === trimmedName.toLocaleLowerCase())
+      .systemList.find(
+        (system) => system.name.toLocaleLowerCase() === trimmedName.toLocaleLowerCase()
+      )
     if (existing) return existing
     const system: RequirementSystemInfo = {
       id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
