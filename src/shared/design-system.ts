@@ -6,7 +6,7 @@ export interface DesignSystemInfo {
   id: string
   name: string
   description: string
-  ownership?: "builtin" | "user"
+  ownership?: "builtin" | "user" | "market"
   libraryId?: string
   version?: number
   isLatest?: boolean
@@ -17,6 +17,12 @@ export interface DesignSystemInfo {
   origin?: string
   license?: string
   path: string
+  marketSystemId?: string
+  marketVersion?: string
+  marketVersionId?: string
+  marketOwnerName?: string
+  palette?: [string, string, string, string]
+  removedFromPicker?: boolean
   tokens?: {
     bg: string
     surface: string
@@ -32,7 +38,7 @@ export interface DesignSystemDraft {
   content: string
   /** Updating requires the exact revision being edited; omitted for new copies. */
   baseId?: string
-  source?: "file" | "web" | "builtin-copy" | "manual"
+  source?: "file" | "web" | "builtin-copy" | "market-copy" | "manual"
   sourceUrl?: string
 }
 

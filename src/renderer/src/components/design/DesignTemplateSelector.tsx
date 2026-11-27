@@ -8,11 +8,15 @@ import type { useDesignTemplateSelection } from "./use-design-template-selection
 export function DesignTemplateSelector({
   picker,
   headingId = "template-heading",
-  browserPreview = true
+  browserPreview = true,
+  onChangeDesignSystem,
+  onBrowseMarket
 }: {
   picker: ReturnType<typeof useDesignTemplateSelection>
   headingId?: string
   browserPreview?: boolean
+  onChangeDesignSystem?: () => void
+  onBrowseMarket?: () => void
 }) {
   const {
     templateMode,
@@ -25,6 +29,9 @@ export function DesignTemplateSelector({
     templatesError,
     selectedTemplateId,
     setSelectedTemplateId,
+    selectedEntryPath,
+    setMarketTemplateEntryPath,
+    getTemplateCompatibility,
     templatePage,
     setTemplatePage,
     uploadedTemplate,
@@ -37,6 +44,7 @@ export function DesignTemplateSelector({
     setTemplateAssociation,
     selectTemplateFile,
     readImportedTemplate,
+    selectedTemplate,
     templatePageCount,
     visibleTemplates
   } = picker
@@ -108,54 +116,130 @@ export function DesignTemplateSelector({
               {templatesError}
             </p>
           ) : templates.length === 0 ? (
-            <p className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-              {templateScope === "exclusive"
-                ? hasDesignSystem
-                  ? "当前设计系统暂无专属模板，可切换到公共模板。"
-                  : "请先选择设计系统，查看其专属模板。"
-                : "暂无可用的公共模板。"}
-            </p>
+            <div className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground space-y-2">
+              <p>
+                {templateScope === "exclusive"
+                  ? hasDesignSystem
+                    ? "当前设计系统暂无专属模板，可切换到公共模板。"
+                    : "请先选择设计系统，查看其专属模板。"
+                  : "暂无可用的公共模板。"}
+              </p>
+              {templateScope === "exclusive" && hasDesignSystem && onBrowseMarket && (
+                <Button type="button" size="sm" variant="outline" onClick={onBrowseMarket}>
+                  浏览设计市场
+                </Button>
+              )}
+            </div>
           ) : (
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {visibleTemplates.map((template) => {
-                const active = template.id === selectedTemplateId
-                return (
-                  <div
-                    key={template.id}
-                    className={cn(
-                      "overflow-hidden rounded-lg border text-left transition-colors",
-                      active
-                        ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
-                        : "border-border bg-background hover:border-border-emphasis"
-                    )}
-                  >
-                    <HtmlThumbnailPreview
-                      html={template.html}
-                      title={`${template.name}模板预览`}
-                      className="h-50"
-                      onSelect={() => setSelectedTemplateId(template.id)}
-                      browserUrl={template.previewPath}
-                      showBrowserPreview={browserPreview && Boolean(template.previewPath)}
-                    />
-                    <button
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => setSelectedTemplateId(template.id)}
-                      className="flex w-full cursor-pointer gap-2 border-t border-border px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                {visibleTemplates.map((template) => {
+                  const active = template.id === selectedTemplateId
+                  const compat = getTemplateCompatibility(template.id)
+                  const disabled = !compat.compatible
+                  return (
+                    <div
+                      key={template.id}
+                      className={cn(
+                        "overflow-hidden rounded-lg border text-left transition-colors",
+                        disabled
+                          ? "border-border bg-muted/40 opacity-65"
+                          : active
+                            ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
+                            : "border-border bg-background hover:border-border-emphasis"
+                      )}
                     >
-                      <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                      <span className="min-w-0">
-                        <span className="block text-xs font-semibold text-foreground">
-                          {template.name}
+                      {template.previewImageDataUrl ? (
+                        <div className="relative h-50 w-full overflow-hidden bg-white">
+                          <img
+                            src={template.previewImageDataUrl}
+                            alt={`${template.name}模板预览`}
+                            className="h-full w-full object-cover object-top"
+                          />
+                          {!disabled && (
+                            <button
+                              type="button"
+                              aria-label={`选择${template.name}模板预览`}
+                              onClick={() => setSelectedTemplateId(template.id)}
+                              className="absolute inset-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                            />
+                          )}
+                        </div>
+                      ) : (
+                        <HtmlThumbnailPreview
+                          html={template.html}
+                          title={`${template.name}模板预览`}
+                          className="h-50"
+                          onSelect={disabled ? undefined : () => setSelectedTemplateId(template.id)}
+                          browserUrl={template.previewPath}
+                          showBrowserPreview={browserPreview && Boolean(template.previewPath)}
+                        />
+                      )}
+                      <button
+                        type="button"
+                        aria-pressed={active}
+                        disabled={disabled}
+                        onClick={() => setSelectedTemplateId(template.id)}
+                        className="flex w-full cursor-pointer gap-2 border-t border-border px-3 py-2.5 text-left disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                      >
+                        <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-1.5 text-xs font-semibold text-foreground">
+                            <span>{template.name}</span>
+                            {template.source === "market" && (
+                              <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                                来自设计市场
+                              </span>
+                            )}
+                          </span>
+                          <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                            {template.source === "market" && template.marketVersion
+                              ? `v${template.marketVersion} · ${template.description}`
+                              : template.description}
+                          </span>
+                          {disabled && compat.reason && (
+                            <span className="mt-1 block text-[11px] font-medium text-amber-700">
+                              {compat.reason}
+                            </span>
+                          )}
                         </span>
-                        <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                          {template.description}
-                        </span>
-                      </span>
-                    </button>
-                  </div>
-                )
-              })}
+                      </button>
+                      {disabled && onChangeDesignSystem && (
+                        <div className="border-t border-border/70 px-3 py-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 w-full text-[11px]"
+                            onClick={onChangeDesignSystem}
+                          >
+                            更换设计系统
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              {selectedTemplate?.source === "market" && (selectedTemplate.pages?.length ?? 0) > 1 && (
+                <label className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  市场模板入口页
+                  <select
+                    aria-label="市场模板入口页"
+                    value={selectedEntryPath ?? selectedTemplate.package?.entryPath ?? ""}
+                    onChange={(event) =>
+                      setMarketTemplateEntryPath(selectedTemplate.id, event.target.value)
+                    }
+                    className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-foreground"
+                  >
+                    {selectedTemplate.pages!.map((page) => (
+                      <option key={page} value={page}>
+                        {page}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
           )}
           {templatePageCount > 1 && (

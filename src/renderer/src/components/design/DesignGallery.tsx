@@ -23,6 +23,7 @@ export function DesignGallery({
   workspaceLoading,
   onSelectWorkspace,
   onManageSystems,
+  onBrowseMarket
 }: {
   sessionIndex: SessionMeta[]
   onOpen: (id: string) => void
@@ -32,6 +33,7 @@ export function DesignGallery({
   workspaceLoading: boolean
   onSelectWorkspace: () => void
   onManageSystems: () => void
+  onBrowseMarket?: () => void
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -74,6 +76,13 @@ export function DesignGallery({
           )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {onBrowseMarket && (
+            <button
+              type="button"
+              onClick={onBrowseMarket}
+              style={{ padding: "8px 12px", fontSize: 13, background: "#fff", color: "#1a1a1a", border: "1px solid #d4d2cc", borderRadius: 10, cursor: "pointer", fontFamily: "inherit" }}
+            >浏览设计市场</button>
+          )}
           <button
             type="button"
             onClick={onManageSystems}

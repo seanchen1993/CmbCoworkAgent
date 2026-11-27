@@ -22,6 +22,7 @@ import {
   HeartPulse,
   Clock,
   ShoppingBag,
+  Layers,
   Settings,
   Bot as BotIcon
 } from "lucide-react"
@@ -1363,6 +1364,23 @@ export const ThreadSidebar = memo(function ThreadSidebar({
               </div>
               <span className={mainView === "market" ? "text-foreground" : "text-muted-foreground"}>
                 应用市场
+              </span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "w-full justify-start gap-2 text-sm font-semibold",
+                mainView === "design-market" && "bg-muted"
+              )}
+              aria-current={mainView === "design-market" ? "page" : undefined}
+              onClick={() => setMainView("design-market")}
+            >
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                <Layers className="size-3" />
+              </div>
+              <span className={mainView === "design-market" ? "text-foreground" : "text-muted-foreground"}>
+                设计市场
               </span>
             </Button>
             <Button

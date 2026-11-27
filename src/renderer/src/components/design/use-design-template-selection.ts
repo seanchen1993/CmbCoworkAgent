@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
+  checkTemplateSystemCompatibility,
   designSystemKey,
   isTemplateVisible,
   type DesignTemplatePackage,
   type DesignTemplateReference,
-  type DesignTemplateSummary
+  type DesignTemplateSummary,
+  type TemplateSystemCompatibility
 } from "../../../../shared/design-template"
 import type { DesignSystemInfo } from "../../../../shared/design-system"
 import type { DesignCreationSelection } from "./types"
@@ -17,6 +19,12 @@ type TemplateOption = {
   description: string
   html: string
   previewPath: string
+  previewImageDataUrl?: string
+  pages?: string[]
+  source?: "builtin" | "local" | "market"
+  marketVersion?: string
+  marketMinSystemVersion?: string
+  marketOwnerName?: string
   designSystemKey?: string | null
   package?: DesignTemplateReference
 }
@@ -26,14 +34,15 @@ const TEMPLATE_PAGE_SIZE = 4
 export function useDesignTemplateSelection(
   initial?: DesignPageTemplate | null,
   currentSystem?: DesignSystemInfo | null,
-  systems: DesignSystemInfo[] = []
+  systems: DesignSystemInfo[] = [],
+  catalogRevision = 0
 ) {
   const currentKey = designSystemKey(currentSystem)
   const [templateMode, setTemplateMode] = useState<DesignPageTemplate["mode"]>(
     initial?.mode === "none" ? "none" : initial?.mode === "upload" ? "upload" : "select"
   )
   const [templateScope, setScope] = useState<TemplateScope>(
-    initial?.mode === "select" && initial.html
+    initial?.mode === "select" && (initial.html || initial.package)
       ? initial.designSystemKey
         ? "exclusive"
         : "public"
@@ -45,6 +54,7 @@ export function useDesignTemplateSelection(
   const [templatesLoading, setTemplatesLoading] = useState(true)
   const [templatesError, setTemplatesError] = useState<string | null>(null)
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
+  const [selectedEntryPaths, setSelectedEntryPaths] = useState<Record<string, string>>({})
   const [templatePage, setTemplatePage] = useState(0)
   const [packageSelection, setUploadedTemplate] = useState<DesignTemplatePackage | null>(null)
   const [allImportedTemplates, setImportedTemplates] = useState<DesignTemplateSummary[]>([])
@@ -56,30 +66,45 @@ export function useDesignTemplateSelection(
   const [association, setAssociation] = useState<string | null>(currentKey)
   const initialRef = useRef(initial)
   const mounted = useRef(false)
+  const initialLoaded = useRef(false)
   const operation = useRef(0)
-  const catalogRevision = useRef(0)
-  const context = useRef({ key: currentKey, systems, scope: templateScope })
-  context.current = { key: currentKey, systems, scope: templateScope }
+  const catalogRevisionRef = useRef(0)
+  const context = useRef({ key: currentKey, system: currentSystem, systems, scope: templateScope })
+  context.current = { key: currentKey, system: currentSystem, systems, scope: templateScope }
   const uploadedRef = useRef(packageSelection)
   uploadedRef.current = packageSelection
+
+  const mapTemplateOption = useCallback(
+    (item: Awaited<ReturnType<typeof window.api.design.listTemplates>>[number]): TemplateOption => ({
+      id: item.path,
+      name: item.name,
+      description: item.description,
+      html: item.previewHtml,
+      previewPath: item.previewPath,
+      previewImageDataUrl: item.previewImageDataUrl,
+      pages: item.pages,
+      source: item.source,
+      marketVersion: item.marketVersion,
+      marketMinSystemVersion: item.marketMinSystemVersion,
+      marketOwnerName: item.marketOwnerName,
+      designSystemKey: item.designSystemKey,
+      package: item.package
+    }),
+    []
+  )
 
   useEffect(() => {
     mounted.current = true
     const operations = operation
     let cancelled = false
+    const isInitialLoad = !initialLoaded.current
+    initialLoaded.current = true
+
     void window.api.design
       .listTemplates()
       .then((items) => {
         if (cancelled) return
-        const next: TemplateOption[] = items.map((item) => ({
-          id: item.path,
-          name: item.name,
-          description: item.description,
-          html: item.previewHtml,
-          previewPath: item.previewPath,
-          designSystemKey: item.designSystemKey,
-          package: item.package
-        }))
+        const next: TemplateOption[] = items.map(mapTemplateOption)
         const prior = initialRef.current
         // Only legacy inline snapshots need this fallback; a known catalog ID must not bypass filtering.
         if (
@@ -98,36 +123,57 @@ export function useDesignTemplateSelection(
           })
         }
         setTemplates(next)
-        const available = next.filter((item) => isTemplateVisible(item, context.current.key))
-        const priorItem = next.find((item) =>
-          prior?.builtinPath
-            ? item.id === prior.builtinPath
-            : item.name === prior?.name && item.html === prior?.html
-        )
-        const selected =
-          prior?.mode === "select"
-            ? priorItem
-            : available.find((item) =>
-                context.current.scope === "public"
-                  ? item.designSystemKey == null
-                  : item.designSystemKey != null
+        if (isInitialLoad) {
+          const available = next.filter((item) => {
+            const compat = checkTemplateSystemCompatibility(item, context.current.system)
+            return compat.visible && compat.compatible
+          })
+          const priorItem = next.find((item) =>
+            prior?.builtinPath
+              ? item.id === prior.builtinPath
+              : prior?.package?.id
+                ? item.package?.id === prior.package.id
+                : item.name === prior?.name && item.html === prior?.html
+          )
+          const selected =
+            prior?.mode === "select"
+              ? priorItem
+              : available.find((item) =>
+                  context.current.scope === "public"
+                    ? item.designSystemKey == null
+                    : item.designSystemKey != null
+                )
+          const selectedCompat = selected
+            ? checkTemplateSystemCompatibility(selected, context.current.system)
+            : null
+          if (selected && selectedCompat?.visible && selectedCompat.compatible) {
+            setSelectedTemplateId(selected.id)
+            if (prior?.package?.entryPath && selected.pages?.includes(prior.package.entryPath)) {
+              setSelectedEntryPaths((prev) => ({
+                ...prev,
+                [selected.id]: prior.package!.entryPath
+              }))
+            }
+            const scope = selected.designSystemKey == null ? "public" : "exclusive"
+            setScope(scope)
+            const group = next.filter(
+              (item) =>
+                checkTemplateSystemCompatibility(item, context.current.system).visible &&
+                (scope === "public" ? item.designSystemKey == null : item.designSystemKey != null)
+            )
+            setTemplatePage(
+              Math.max(
+                0,
+                Math.floor(group.findIndex((item) => item.id === selected.id) / TEMPLATE_PAGE_SIZE)
               )
-        setSelectedTemplateId(
-          selected && isTemplateVisible(selected, context.current.key) ? selected.id : ""
-        )
-        if (selected && isTemplateVisible(selected, context.current.key)) {
-          const scope = selected.designSystemKey == null ? "public" : "exclusive"
-          setScope(scope)
-          const group = available.filter((item) =>
-            scope === "public" ? item.designSystemKey == null : item.designSystemKey != null
-          )
-          setTemplatePage(
-            Math.floor(group.findIndex((item) => item.id === selected.id) / TEMPLATE_PAGE_SIZE)
-          )
+            )
+          } else {
+            setSelectedTemplateId("")
+          }
         }
       })
       .catch((error: unknown) => {
-        if (!cancelled)
+        if (!cancelled && isInitialLoad)
           setTemplatesError(error instanceof Error ? error.message : "加载模板列表失败")
       })
       .finally(() => {
@@ -136,7 +182,9 @@ export function useDesignTemplateSelection(
     void window.api.design
       .listImportedTemplates()
       .then((items) => {
-        if (!cancelled && catalogRevision.current === 0) setImportedTemplates(items)
+        if (!cancelled && (catalogRevisionRef.current === 0 || !isInitialLoad)) {
+          setImportedTemplates(items)
+        }
       })
       .catch((error) => console.warn("[Design] Imported template list unavailable", error))
     return () => {
@@ -144,25 +192,31 @@ export function useDesignTemplateSelection(
       mounted.current = false
       operations.current++
     }
-  }, [])
+  }, [catalogRevision, mapTemplateOption])
 
   useEffect(() => {
     setTemplatePage(0)
     setTemplateNotice(null)
     setAssociation(currentKey)
     const selected = allTemplates.find((item) => item.id === selectedTemplateId)
+    const compat = selected ? checkTemplateSystemCompatibility(selected, currentSystem) : null
+    const keepSelected = Boolean(selected && compat?.visible && compat.compatible)
     setScope(
-      selected && isTemplateVisible(selected, currentKey)
-        ? selected.designSystemKey == null
+      keepSelected
+        ? selected!.designSystemKey == null
           ? "public"
           : "exclusive"
         : currentKey
           ? "exclusive"
           : "public"
     )
-    if (selected && !isTemplateVisible(selected, currentKey)) {
+    if (selected && !keepSelected) {
       setSelectedTemplateId("")
-      setTemplateNotice("已取消原设计系统的专属模板，请重新选择")
+      setTemplateNotice(
+        compat?.visible && !compat.compatible
+          ? `已取消原模板选择：${compat.reason || "不兼容当前设计系统版本"}`
+          : "已取消原设计系统的专属模板，请重新选择"
+      )
     }
     if (packageSelection && !isTemplateVisible(packageSelection, currentKey)) {
       setUploadedTemplate(null)
@@ -170,7 +224,7 @@ export function useDesignTemplateSelection(
     } else if (packageSelection) setAssociation(packageSelection.designSystemKey ?? null)
     // Context changes reset the pending import. Results use context.current to avoid stale selection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentKey])
+  }, [currentKey, currentSystem?.id, currentSystem?.marketVersion])
 
   const loadPackage = useCallback(
     async (
@@ -187,7 +241,7 @@ export function useDesignTemplateSelection(
         if (!mounted.current || operation.current !== token || result.canceled) return
         if (!result.template) throw new Error(result.error || "无法读取模板包")
         const template = result.template
-        catalogRevision.current++
+        catalogRevisionRef.current++
         if (isTemplateVisible(template, context.current.key)) {
           setUploadedTemplate(template)
           setAssociation(template.designSystemKey ?? null)
@@ -256,17 +310,39 @@ export function useDesignTemplateSelection(
     if (reference) void readImportedTemplate(reference.id, reference.entryPath)
   }, [readImportedTemplate])
 
-  const templates = allTemplates.filter(
-    (item) =>
-      isTemplateVisible(item, currentKey) &&
+  const compatibilityById = new Map<string, TemplateSystemCompatibility>()
+  for (const item of allTemplates) {
+    compatibilityById.set(item.id, checkTemplateSystemCompatibility(item, currentSystem))
+  }
+  const getTemplateCompatibility = (id: string): TemplateSystemCompatibility =>
+    compatibilityById.get(id) ?? { visible: false, compatible: false }
+
+  const templates = allTemplates.filter((item) => {
+    const compat = getTemplateCompatibility(item.id)
+    return (
+      compat.visible &&
       (templateScope === "public" ? item.designSystemKey == null : item.designSystemKey != null)
-  )
+    )
+  })
   const importedTemplates = allImportedTemplates.filter((item) =>
     isTemplateVisible(item, currentKey)
   )
   const uploadedTemplate =
     packageSelection && isTemplateVisible(packageSelection, currentKey) ? packageSelection : null
   const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
+  const selectedCompat = selectedTemplate ? getTemplateCompatibility(selectedTemplate.id) : null
+  const selectedEntryPath =
+    selectedTemplate?.package
+      ? (selectedEntryPaths[selectedTemplate.id] ?? selectedTemplate.package.entryPath)
+      : undefined
+  const setMarketTemplateEntryPath = (templateId: string, entryPath: string) => {
+    setSelectedEntryPaths((prev) => ({ ...prev, [templateId]: entryPath }))
+  }
+  const selectTemplateById = (id: string) => {
+    const compat = getTemplateCompatibility(id)
+    if (!compat.visible || !compat.compatible) return
+    setSelectedTemplateId(id)
+  }
   const templatePageCount = Math.ceil(templates.length / TEMPLATE_PAGE_SIZE)
   const visibleTemplates = templates.slice(
     templatePage * TEMPLATE_PAGE_SIZE,
@@ -275,7 +351,12 @@ export function useDesignTemplateSelection(
   const designSystemOptions = Array.from(
     new Map(
       systems
-        .filter((item) => item.isLatest !== false || item.id === currentSystem?.id)
+        .filter(
+          (item) =>
+            item.ownership !== "market" &&
+            !item.removedFromPicker &&
+            (item.isLatest !== false || item.id === currentSystem?.id)
+        )
         .map((item) => [designSystemKey(item), item])
     ).values()
   )
@@ -298,8 +379,11 @@ export function useDesignTemplateSelection(
         ? `${uploadedTemplate.rootDir}/${uploadedTemplate.entryPath}`
         : null,
     package:
-      templateMode === "select"
-        ? selectedTemplate?.package
+      templateMode === "select" && selectedTemplate?.package
+        ? {
+            ...selectedTemplate.package,
+            entryPath: selectedEntryPath ?? selectedTemplate.package.entryPath
+          }
         : templateMode === "upload" && uploadedTemplate
           ? { id: uploadedTemplate.id, entryPath: uploadedTemplate.entryPath }
           : undefined,
@@ -317,7 +401,9 @@ export function useDesignTemplateSelection(
   const canConfirm =
     !templateUploading &&
     (templateMode === "none" ||
-      (templateMode === "upload" ? Boolean(uploadedTemplate) : Boolean(selectedTemplate)))
+      (templateMode === "upload"
+        ? Boolean(uploadedTemplate)
+        : Boolean(selectedTemplate && selectedCompat?.compatible)))
   return {
     templateMode,
     setTemplateMode,
@@ -328,7 +414,10 @@ export function useDesignTemplateSelection(
     templatesLoading,
     templatesError,
     selectedTemplateId,
-    setSelectedTemplateId,
+    setSelectedTemplateId: selectTemplateById,
+    selectedEntryPath,
+    setMarketTemplateEntryPath,
+    getTemplateCompatibility,
     templatePage,
     setTemplatePage,
     uploadedTemplate,

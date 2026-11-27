@@ -32,15 +32,19 @@ export type DesignSystemLibraryMode = "select" | "manage" | "inspect"
 const fieldClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 const sourceLabel = (system: DesignSystemInfo) =>
-  system.source === "web"
-    ? "网页提取"
-    : system.source === "file"
-      ? "文件上传"
-      : system.source === "builtin-copy"
-        ? "内置规范副本"
-        : system.ownership === "user"
-          ? "我的规范"
-          : "系统内置"
+  system.ownership === "market"
+    ? `设计市场 · ${system.marketOwnerName || "作者"}`
+    : system.source === "web"
+      ? "网页提取"
+      : system.source === "file"
+        ? "文件上传"
+        : system.source === "builtin-copy"
+          ? "内置规范副本"
+          : system.source === "market-copy"
+            ? "市场规范副本"
+            : system.ownership === "user"
+              ? "我的规范"
+              : "系统内置"
 
 export function DesignSystemLibraryDialog({
   systems,
@@ -49,7 +53,8 @@ export function DesignSystemLibraryDialog({
   modelId,
   onChanged,
   onSelect,
-  onClose
+  onClose,
+  onBrowseMarket
 }: {
   systems: DesignSystemInfo[]
   mode: DesignSystemLibraryMode
@@ -58,14 +63,24 @@ export function DesignSystemLibraryDialog({
   onChanged: () => Promise<void>
   onSelect: (system: DesignSystemInfo | null) => void
   onClose: () => void
+  onBrowseMarket?: () => void
 }) {
   const initial = systems.find((item) => item.id === initialId)
-  const [group, setGroup] = useState<"builtin" | "user">(
-    initial?.ownership === "user" ? "user" : "builtin"
+  const [group, setGroup] = useState<"builtin" | "market" | "user">(
+    initial?.ownership === "user"
+      ? "user"
+      : initial?.ownership === "market"
+        ? "market"
+        : "builtin"
   )
   const [selectedId, setSelectedId] = useState<string | null>(
-    initialId || systems.find((item) => item.isLatest !== false)?.id || null
+    initialId || systems.find((item) => item.isLatest !== false && !item.removedFromPicker)?.id || null
   )
+  const [confirmRemoveMarket, setConfirmRemoveMarket] = useState<{
+    id: string
+    name: string
+    affectedCount: number
+  } | null>(null)
   const [loaded, setLoaded] = useState<{ system: DesignSystemInfo; content: string } | null>(null)
   const [panel, setPanel] = useState<"library" | "upload" | "capture" | "edit">("library")
   const [draft, setDraft] = useState<DesignSystemDraft | null>(null)
@@ -89,8 +104,13 @@ export function DesignSystemLibraryDialog({
   const busyRef = useRef(false)
   const items = systems.filter(
     (item) =>
+      !item.removedFromPicker &&
       item.isLatest !== false &&
-      (group === "user" ? item.ownership === "user" : item.ownership !== "user")
+      (group === "user"
+        ? item.ownership === "user"
+        : group === "market"
+          ? item.ownership === "market"
+          : item.ownership !== "user" && item.ownership !== "market")
   )
 
   useEffect(() => {
@@ -406,6 +426,76 @@ export function DesignSystemLibraryDialog({
   const latestUserCount = systems.filter(
     (item) => item.ownership === "user" && item.isLatest !== false
   ).length
+  const latestMarketCount = systems.filter(
+    (item) => item.ownership === "market" && !item.removedFromPicker && item.isLatest !== false
+  ).length
+  const currentMarketVersions =
+    currentSystem?.ownership === "market" && currentSystem.marketSystemId
+      ? systems.filter(
+          (item) =>
+            item.ownership === "market" &&
+            !item.removedFromPicker &&
+            item.marketSystemId === currentSystem.marketSystemId
+        )
+      : []
+
+  const handleCopyMarketSystemToLocal = async (localId: string) => {
+    const api = window.api?.designMarket
+    if (!api) return
+    setWorking(true)
+    setError(null)
+    try {
+      const res = await api.copySystemToLocal(localId)
+      if (!res.success || !res.data) {
+        setError(res.error || "另存为本地副本失败")
+        return
+      }
+      await onChanged()
+      setGroup("user")
+      setSelectedId(res.data.id)
+      setMessage(`已另存为「${res.data.name}」`)
+    } finally {
+      setWorking(false)
+    }
+  }
+
+  const requestRemoveMarketSystem = async (system: DesignSystemInfo) => {
+    const api = window.api?.designMarket
+    if (!api) return
+    const affected = await api.countAffectedTemplatesForSystemRemoval(system.id)
+    if (affected > 0) {
+      setConfirmRemoveMarket({
+        id: system.id,
+        name: `${system.name} v${system.marketVersion || ""}`,
+        affectedCount: affected
+      })
+      return
+    }
+    await executeRemoveMarketSystem(system.id)
+  }
+
+  const executeRemoveMarketSystem = async (localId: string) => {
+    const api = window.api?.designMarket
+    if (!api) return
+    setWorking(true)
+    setError(null)
+    try {
+      await api.removeSystemFromPicker(localId)
+      setConfirmRemoveMarket(null)
+      await onChanged()
+      const nextMarket = systems.find(
+        (item) =>
+          item.id !== localId &&
+          item.ownership === "market" &&
+          !item.removedFromPicker &&
+          item.isLatest !== false
+      )
+      setSelectedId(nextMarket?.id || null)
+      setMessage("已从选择器移除（历史设计仍可读取该版本）")
+    } finally {
+      setWorking(false)
+    }
+  }
 
   return (
     <Dialog
@@ -451,7 +541,7 @@ export function DesignSystemLibraryDialog({
               {!inspect && (
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-6 py-3">
                   <div role="tablist" aria-label="设计系统来源" className="flex gap-1">
-                    {(["builtin", "user"] as const).map((value) => (
+                    {(["builtin", "market", "user"] as const).map((value) => (
                       <button
                         key={value}
                         id={`design-system-tab-${value}`}
@@ -467,23 +557,36 @@ export function DesignSystemLibraryDialog({
                         )}
                         onClick={() => {
                           setGroup(value)
+                          setConfirmRemoveMarket(null)
                           setSelectedId(
                             systems.find(
                               (item) =>
+                                !item.removedFromPicker &&
                                 item.isLatest !== false &&
                                 (value === "user"
                                   ? item.ownership === "user"
-                                  : item.ownership !== "user")
+                                  : value === "market"
+                                    ? item.ownership === "market"
+                                    : item.ownership !== "user" && item.ownership !== "market")
                             )?.id || null
                           )
                           setError(null)
                         }}
                       >
-                        {value === "builtin" ? "系统内置" : `我的 · ${latestUserCount}`}
+                        {value === "builtin"
+                          ? "系统内置"
+                          : value === "market"
+                            ? `已下载 · ${latestMarketCount}`
+                            : `我的 · ${latestUserCount}`}
                       </button>
                     ))}
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    {onBrowseMarket && (
+                      <Button variant="outline" size="sm" onClick={onBrowseMarket}>
+                        浏览设计市场
+                      </Button>
+                    )}
                     <Button variant="outline" size="sm" onClick={() => showPanel("upload")}>
                       <Upload className="size-3.5" />
                       上传 design.md
@@ -532,13 +635,17 @@ export function DesignSystemLibraryDialog({
                           <span className="mt-2 block text-[11px] text-muted-foreground">
                             {item.ownership === "user"
                               ? `我的 · v${item.version || 1}`
-                              : "系统内置"}
+                              : item.ownership === "market"
+                                ? `来自设计市场 · v${item.marketVersion || "1.0.0"}`
+                                : "系统内置"}
                           </span>
                         </button>
                       ))
                     ) : (
                       <p className="py-8 text-sm text-muted-foreground">
-                        上传文件或从网页提取，创建你的第一份设计规范。
+                        {group === "market"
+                          ? "暂无已下载的设计市场规范，可点击右上角“浏览设计市场”下载。"
+                          : "上传文件或从网页提取，创建你的第一份设计规范。"}
                       </p>
                     )}
                   </div>
@@ -556,9 +663,48 @@ export function DesignSystemLibraryDialog({
                         <span className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground">
                           {currentSystem.ownership === "user"
                             ? `我的 · v${currentSystem.version}`
-                            : "系统内置 · 只读"}
+                            : currentSystem.ownership === "market"
+                              ? `设计市场 · v${currentSystem.marketVersion || "1.0.0"} · 只读`
+                              : "系统内置 · 只读"}
                         </span>
+                        {!inspect && currentMarketVersions.length > 1 && (
+                          <select
+                            aria-label="切换已下载版本"
+                            value={currentSystem.id}
+                            onChange={(event) => {
+                              setSelectedId(event.target.value)
+                              setError(null)
+                            }}
+                            className="rounded border border-border bg-background px-2 py-1 text-xs"
+                          >
+                            {currentMarketVersions.map((ver) => (
+                              <option key={ver.id} value={ver.id}>
+                                v{ver.marketVersion}
+                                {ver.isLatest ? "（最新已下载）" : ""}
+                              </option>
+                            ))}
+                          </select>
+                        )}
                       </div>
+                      {confirmRemoveMarket && confirmRemoveMarket.id === currentSystem.id && (
+                        <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs space-y-2">
+                          <p className="font-medium text-amber-900">
+                            移除「{confirmRemoveMarket.name}」后，将有 {confirmRemoveMarket.affectedCount} 个本地模板失去可用兼容版本并提示补齐（历史设计仍可读取）。
+                          </p>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => void executeRemoveMarketSystem(confirmRemoveMarket.id)}
+                            >
+                              确认移除
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => setConfirmRemoveMarket(null)}>
+                              取消
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                       <p className="mt-2 break-all text-xs text-muted-foreground">
                         来源：{sourceLabel(currentSystem)}
                         {currentSystem.sourceUrl && ` · ${currentSystem.sourceUrl}`}
@@ -605,6 +751,26 @@ export function DesignSystemLibraryDialog({
                                 }}
                               >
                                 上传新版本
+                              </Button>
+                            </>
+                          ) : currentSystem.ownership === "market" ? (
+                            <>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={busy}
+                                onClick={() => void handleCopyMarketSystemToLocal(currentSystem.id)}
+                              >
+                                <Copy className="size-3.5" />
+                                另存为我的副本
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy}
+                                onClick={() => void requestRemoveMarketSystem(currentSystem)}
+                              >
+                                从选择器移除
                               </Button>
                             </>
                           ) : (

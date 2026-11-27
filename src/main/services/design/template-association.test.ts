@@ -29,6 +29,38 @@ const b: DesignSystemInfo = {
 }
 
 describe("template association validation", () => {
+  it("keeps a selected secondary entry from the registered market package", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "template-market-association-"))
+    temporary.push(dir)
+    const system: DesignSystemInfo = {
+      ...b, ownership: "market", marketSystemId: "market-system", marketVersion: "1.0.0"
+    }
+    const packageId = "mkt_template"
+    const pages = ["index.html", "detail.html"]
+    for (const page of pages) fs.writeFileSync(path.join(dir, page), `<p>${page}</p>`)
+    const packages = new DesignTemplatePackages(path.join(dir, "library"))
+    packages.registerMarket(packageId, dir, {
+      id: packageId, name: "市场模板", entryPath: "index.html", pages, files: pages,
+      designSystemKey: "market:market-system", totalBytes: 0, framework: "HTML",
+      importedAt: new Date().toISOString(), source: "market", marketTemplateId: "template",
+      marketSystemId: "market-system", marketVersion: "1.0.0", marketVersionId: "version",
+      marketMinSystemVersion: "1.0.0", marketOwnerName: "作者"
+    })
+    const catalog = [{
+      path: path.join(dir, "index.html"), name: "市场模板", previewHtml: "",
+      designSystemKey: "market:market-system", marketMinSystemVersion: "1.0.0",
+      package: { id: packageId, entryPath: "index.html" }
+    }]
+    const selection = {
+      mode: "select" as const, builtinPath: catalog[0].path,
+      package: { id: packageId, entryPath: "detail.html" }
+    }
+    validateTemplateSelection(selection, system, packages, catalog)
+    expect(selection.package).toEqual({ id: packageId, entryPath: "detail.html" })
+    selection.package.entryPath = "missing.html"
+    expect(() => validateTemplateSelection(selection, system, packages, catalog)).toThrow("HTML 页面")
+  })
+
   it("uses stable identities across revisions, and distinguishes same-name systems", () => {
     expect(designSystemKey(a)).toBe(designSystemKey(a2))
     expect(designSystemKey(a)).not.toBe(designSystemKey(b))

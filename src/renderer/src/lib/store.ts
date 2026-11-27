@@ -942,6 +942,7 @@ type MainView =
   | "evolution"
   | "scheduled"
   | "market"
+  | "design-market"
   | "kanban"
   | "design"
   | "harness"
@@ -1168,6 +1169,10 @@ interface AppState {
   //design actions
   showDesignView: boolean
   setShowDesignView: (show: boolean) => void
+  designMarketCreateNonce: number
+  designMarketPendingCreate: { systemLocalId?: string | null } | null
+  openNewDesignFromMarket: (systemLocalId?: string | null) => void
+  consumeDesignMarketPendingCreate: () => { systemLocalId?: string | null } | null
 
   // Harness board actions
   setShowHarnessBoardView: (show: boolean) => void
@@ -1276,6 +1281,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   showKanbanView: false,
   showSubagentsInKanban: true,
   showDesignView: false,
+  designMarketCreateNonce: 0,
+  designMarketPendingCreate: null,
   showHarnessBoardView: false,
   showClaudeCodeView: false,
   showDashboardView: false,
@@ -2477,8 +2484,36 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ marketInitialTab: tab })
   },
 
+  openNewDesignFromMarket: (systemLocalId = null) => {
+    const prev = get().previousThreadId || get().currentThreadId
+    set((state) => ({
+      mainView: "design",
+      showDesignView: true,
+      showCustomizeView: false,
+      showKanbanView: false,
+      showHarnessBoardView: false,
+      showClaudeCodeView: false,
+      showDashboardView: false,
+      previousThreadId: prev,
+      currentThreadId: null,
+      workerFocusView: null,
+      workerFocusMessagesThreadId: null,
+      workerFocusMessages: [],
+      subagentFocusView: null,
+      workflowAgentFocusView: null,
+      designMarketCreateNonce: state.designMarketCreateNonce + 1,
+      designMarketPendingCreate: { systemLocalId }
+    }))
+  },
+
+  consumeDesignMarketPendingCreate: () => {
+    const pending = get().designMarketPendingCreate
+    if (pending) set({ designMarketPendingCreate: null })
+    return pending
+  },
+
   setMainView: (view) => {
-    if (view === "scheduled" || view === "market" || view === "bots") {
+    if (view === "scheduled" || view === "market" || view === "design-market" || view === "bots") {
       set({
         mainView: view,
         showCustomizeView: false,

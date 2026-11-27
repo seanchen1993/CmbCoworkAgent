@@ -8,6 +8,10 @@ import type {
 } from "../shared/design-package"
 import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
 import {
+  DESIGN_MARKET_DOWNLOAD_PROGRESS,
+  type DesignMarketApi
+} from "../shared/design-market"
+import {
   DESIGN_SYSTEM_EXTRACTION_PROGRESS,
   type DesignSystemLibraryApi,
   type DesignSystemInfo
@@ -5259,6 +5263,202 @@ const api = {
     cancel: (sessionId: string): Promise<void> => ipcRenderer.invoke("design:cancel", sessionId),
     saveVariant: (variantId: string, html: string): Promise<{ filePath: string }> =>
       ipcRenderer.invoke("design:save-variant", variantId, html)
+  },
+  designMarket: {
+    getActor: (() =>
+      ipcRenderer.invoke("design-market:get-actor")) satisfies DesignMarketApi["getActor"],
+    listCatalog: ((query) =>
+      ipcRenderer.invoke("design-market:list-catalog", query)) satisfies DesignMarketApi["listCatalog"],
+    getSystemDetail: ((systemId) =>
+      ipcRenderer.invoke(
+        "design-market:get-system-detail",
+        systemId
+      )) satisfies DesignMarketApi["getSystemDetail"],
+    getTemplateDetail: ((templateId) =>
+      ipcRenderer.invoke(
+        "design-market:get-template-detail",
+        templateId
+      )) satisfies DesignMarketApi["getTemplateDetail"],
+    listMyUploads: (() =>
+      ipcRenderer.invoke("design-market:list-my-uploads")) satisfies DesignMarketApi["listMyUploads"],
+    listDownloaded: (() =>
+      ipcRenderer.invoke("design-market:list-downloaded")) satisfies DesignMarketApi["listDownloaded"],
+    extractPalette: ((markdown) =>
+      ipcRenderer.invoke(
+        "design-market:extract-palette",
+        markdown
+      )) satisfies DesignMarketApi["extractPalette"],
+    pickSystemMarkdownFile: (() =>
+      ipcRenderer.invoke(
+        "design-market:pick-system-markdown"
+      )) satisfies DesignMarketApi["pickSystemMarkdownFile"],
+    createSystemDraft: ((input) =>
+      ipcRenderer.invoke(
+        "design-market:create-system-draft",
+        input
+      )) satisfies DesignMarketApi["createSystemDraft"],
+    createSystemDraftFromLocal: ((localSystemId) =>
+      ipcRenderer.invoke(
+        "design-market:create-system-draft-from-local",
+        localSystemId
+      )) satisfies DesignMarketApi["createSystemDraftFromLocal"],
+    saveSystemDraft: ((input) =>
+      ipcRenderer.invoke(
+        "design-market:save-system-draft",
+        input
+      )) satisfies DesignMarketApi["saveSystemDraft"],
+    discardSystemDraft: ((systemId) =>
+      ipcRenderer.invoke(
+        "design-market:discard-system-draft",
+        systemId
+      )) satisfies DesignMarketApi["discardSystemDraft"],
+    publishSystem: ((input) =>
+      ipcRenderer.invoke(
+        "design-market:publish-system",
+        input
+      )) satisfies DesignMarketApi["publishSystem"],
+    setSystemStatus: ((systemId, status) =>
+      ipcRenderer.invoke(
+        "design-market:set-system-status",
+        systemId,
+        status
+      )) satisfies DesignMarketApi["setSystemStatus"],
+    pickAndStageTemplatePackage: ((source) =>
+      ipcRenderer.invoke(
+        "design-market:pick-and-stage-template",
+        source
+      )) satisfies DesignMarketApi["pickAndStageTemplatePackage"],
+    stageLocalTemplatePackage: ((reference) =>
+      ipcRenderer.invoke(
+        "design-market:stage-local-template",
+        reference
+      )) satisfies DesignMarketApi["stageLocalTemplatePackage"],
+    pickManualCoverImage: (() =>
+      ipcRenderer.invoke(
+        "design-market:pick-manual-cover"
+      )) satisfies DesignMarketApi["pickManualCoverImage"],
+    createTemplateDraft: ((input) =>
+      ipcRenderer.invoke(
+        "design-market:create-template-draft",
+        input
+      )) satisfies DesignMarketApi["createTemplateDraft"],
+    saveTemplateDraft: ((input) =>
+      ipcRenderer.invoke(
+        "design-market:save-template-draft",
+        input
+      )) satisfies DesignMarketApi["saveTemplateDraft"],
+    discardTemplateDraft: ((templateId) =>
+      ipcRenderer.invoke(
+        "design-market:discard-template-draft",
+        templateId
+      )) satisfies DesignMarketApi["discardTemplateDraft"],
+    publishTemplate: ((input) =>
+      ipcRenderer.invoke(
+        "design-market:publish-template",
+        input
+      )) satisfies DesignMarketApi["publishTemplate"],
+    setTemplateStatus: ((templateId, status) =>
+      ipcRenderer.invoke(
+        "design-market:set-template-status",
+        templateId,
+        status
+      )) satisfies DesignMarketApi["setTemplateStatus"],
+    setTemplateVisibilityBySystemOwner: ((templateId, visibility, reason) =>
+      ipcRenderer.invoke(
+        "design-market:set-template-visibility",
+        templateId,
+        visibility,
+        reason
+      )) satisfies DesignMarketApi["setTemplateVisibilityBySystemOwner"],
+    adminTakedown: ((kind, assetId, reason) =>
+      ipcRenderer.invoke(
+        "design-market:admin-takedown",
+        kind,
+        assetId,
+        reason
+      )) satisfies DesignMarketApi["adminTakedown"],
+    adminRestore: ((kind, assetId, reason) =>
+      ipcRenderer.invoke(
+        "design-market:admin-restore",
+        kind,
+        assetId,
+        reason
+      )) satisfies DesignMarketApi["adminRestore"],
+    planDownload: ((kind, assetId, versionId, selectedLocalSystemId) =>
+      ipcRenderer.invoke(
+        "design-market:plan-download",
+        kind,
+        assetId,
+        versionId,
+        selectedLocalSystemId
+      )) satisfies DesignMarketApi["planDownload"],
+    downloadSystem: ((systemId, versionId) =>
+      ipcRenderer.invoke(
+        "design-market:download-system",
+        systemId,
+        versionId
+      )) satisfies DesignMarketApi["downloadSystem"],
+    downloadTemplate: ((templateId, versionId, selectedLocalSystemId) =>
+      ipcRenderer.invoke(
+        "design-market:download-template",
+        templateId,
+        versionId,
+        selectedLocalSystemId
+      )) satisfies DesignMarketApi["downloadTemplate"],
+    cancelDownload: ((downloadKey) =>
+      ipcRenderer.invoke(
+        "design-market:cancel-download",
+        downloadKey
+      )) satisfies DesignMarketApi["cancelDownload"],
+    countAffectedTemplatesForSystemRemoval: ((localSystemId) =>
+      ipcRenderer.invoke(
+        "design-market:count-affected-templates",
+        localSystemId
+      )) satisfies DesignMarketApi["countAffectedTemplatesForSystemRemoval"],
+    removeSystemFromPicker: ((localSystemId) =>
+      ipcRenderer.invoke(
+        "design-market:remove-system",
+        localSystemId
+      )) satisfies DesignMarketApi["removeSystemFromPicker"],
+    restoreSystemToPicker: ((localSystemId) =>
+      ipcRenderer.invoke(
+        "design-market:restore-system",
+        localSystemId
+      )) satisfies DesignMarketApi["restoreSystemToPicker"],
+    removeTemplateFromPicker: ((localTemplateId) =>
+      ipcRenderer.invoke(
+        "design-market:remove-template",
+        localTemplateId
+      )) satisfies DesignMarketApi["removeTemplateFromPicker"],
+    restoreTemplateToPicker: ((localTemplateId) =>
+      ipcRenderer.invoke(
+        "design-market:restore-template",
+        localTemplateId
+      )) satisfies DesignMarketApi["restoreTemplateToPicker"],
+    copySystemToLocal: ((localSystemId) =>
+      ipcRenderer.invoke(
+        "design-market:copy-system-local",
+        localSystemId
+      )) satisfies DesignMarketApi["copySystemToLocal"],
+    copyTemplateToLocal: ((localTemplateId) =>
+      ipcRenderer.invoke(
+        "design-market:copy-template-local",
+        localTemplateId
+      )) satisfies DesignMarketApi["copyTemplateToLocal"],
+    previewDownloadedTemplate: ((localTemplateId, entryPath) =>
+      ipcRenderer.invoke(
+        "design-market:preview-downloaded-template",
+        localTemplateId,
+        entryPath
+      )) satisfies DesignMarketApi["previewDownloadedTemplate"],
+    onDownloadProgress: ((callback) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        event: Parameters<typeof callback>[0]
+      ) => callback(event)
+      ipcRenderer.on(DESIGN_MARKET_DOWNLOAD_PROGRESS, listener)
+      return () => ipcRenderer.removeListener(DESIGN_MARKET_DOWNLOAD_PROGRESS, listener)
+    }) satisfies DesignMarketApi["onDownloadProgress"]
   },
   requirements: requirementsApi,
   app: {

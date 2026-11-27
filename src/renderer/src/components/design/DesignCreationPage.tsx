@@ -79,6 +79,8 @@ export function DesignCreationPage({
   selectedDesignSystemId,
   onDesignSystemChange,
   onOpenSystemLibrary,
+  onBrowseMarket,
+  catalogRevision = 0,
   importingSource,
   onImportUrl,
   onImportHtml,
@@ -93,6 +95,8 @@ export function DesignCreationPage({
   selectedDesignSystemId: string | null
   onDesignSystemChange: (id: string | null) => void
   onOpenSystemLibrary: (mode: "select" | "manage") => void
+  onBrowseMarket?: (systemId?: string | null) => void
+  catalogRevision?: number
   importingSource: "url" | "html" | "prototype_zip" | null
   onImportUrl: () => void
   onImportHtml: () => void
@@ -104,7 +108,8 @@ export function DesignCreationPage({
   const templatePicker = useDesignTemplateSelection(
     undefined,
     selectedDesignSystem,
-    designSystemGroups.flatMap((group) => group.items)
+    designSystemGroups.flatMap((group) => group.items),
+    catalogRevision
   )
   const { templateMode, selectedTemplate, uploadedTemplate } = templatePicker
   const [requirementMode, setRequirementMode] = useState<SelectionMode>("select")
@@ -208,6 +213,16 @@ export function DesignCreationPage({
         <span className="text-xs text-muted-foreground">/</span>
         <span className="text-sm font-semibold text-foreground">新建设计</span>
         <span className="flex-1" />
+        {onBrowseMarket && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onBrowseMarket(selectedDesignSystem?.marketSystemId ?? null)}
+          >
+            浏览设计市场
+          </Button>
+        )}
         <Button type="button" variant="outline" size="sm" onClick={() => onOpenSystemLibrary("manage")}>设计系统库</Button>
       </header>
 
@@ -257,7 +272,15 @@ export function DesignCreationPage({
               <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg bg-muted/40 px-3 py-3 text-sm">
                 <FileText className="size-4 text-muted-foreground" />
                 <span>{selectedDesignSystem?.name || "暂不使用设计系统"}</span>
-                {selectedDesignSystem && <span className="text-xs text-muted-foreground">{selectedDesignSystem.ownership === "user" ? `我的 · v${selectedDesignSystem.version || 1}` : "系统内置"}</span>}
+                {selectedDesignSystem && (
+                  <span className="text-xs text-muted-foreground">
+                    {selectedDesignSystem.ownership === "user"
+                      ? `我的 · v${selectedDesignSystem.version || 1}`
+                      : selectedDesignSystem.ownership === "market"
+                        ? `来自设计市场 · v${selectedDesignSystem.marketVersion || "1.0.0"} · 已下载`
+                        : "系统内置"}
+                  </span>
+                )}
                 <span className="flex-1" />
                 {selectedDesignSystem && <Button type="button" variant="ghost" size="sm" onClick={() => onDesignSystemChange(null)}>移除</Button>}
               </div>
@@ -318,7 +341,15 @@ export function DesignCreationPage({
               className="mt-6 border-t border-border pt-6"
               aria-labelledby="template-heading"
             >
-              <DesignTemplateSelector picker={templatePicker} />
+              <DesignTemplateSelector
+                picker={templatePicker}
+                onChangeDesignSystem={() => onOpenSystemLibrary("select")}
+                onBrowseMarket={
+                  onBrowseMarket
+                    ? () => onBrowseMarket(selectedDesignSystem?.marketSystemId ?? null)
+                    : undefined
+                }
+              />
             </section>
 
             <section

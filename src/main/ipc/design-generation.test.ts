@@ -78,6 +78,7 @@ vi.mock("../services/design/run-manager", () => ({
 }))
 vi.mock("./design-url-import", () => ({ registerDesignUrlImportHandlers: vi.fn() }))
 vi.mock("./design-system-library", () => ({ registerDesignSystemLibraryHandlers: vi.fn() }))
+vi.mock("./design-market", () => ({ registerDesignMarketHandlers: vi.fn() }))
 vi.mock("../services/design/patch-executor", async (original) => ({
   ...(await original<typeof import("../services/design/patch-executor")>()),
   executeDesignPatch: mocks.patch

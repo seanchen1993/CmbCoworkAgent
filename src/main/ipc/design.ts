@@ -15,6 +15,8 @@ import { DesignTemplatePackages, buildTemplatePackageContext } from "../services
 import { listBuiltinTemplateBundle, prepareBuiltinTemplatePreview } from "../services/design/builtin-template-bundles"
 import { registerDesignUrlImportHandlers } from "./design-url-import"
 import { registerDesignSystemLibraryHandlers } from "./design-system-library"
+import { registerDesignMarketHandlers } from "./design-market"
+import { DesignMarketLocalStore } from "../services/design/market-local-store"
 import { DesignSystemLibrary } from "../services/design/system-library"
 import type { DesignSystemInfo } from "../../shared/design-system"
 import { DesignTemplatePreview } from "../services/design/template-preview"
@@ -708,44 +710,55 @@ function personalDesignSystemLibrary(): DesignSystemLibrary {
   return new DesignSystemLibrary(path.join(getOpenworkDir(), "design-system-library"))
 }
 
+let cachedMarketLocalStore: { dir: string; store: DesignMarketLocalStore } | null = null
+function marketLocalStore(): DesignMarketLocalStore {
+  const dir = path.join(getOpenworkDir(), "design-market-local")
+  if (!cachedMarketLocalStore || cachedMarketLocalStore.dir !== dir) {
+    cachedMarketLocalStore = { dir, store: new DesignMarketLocalStore(dir) }
+  }
+  return cachedMarketLocalStore.store
+}
+
 function listDesignSystems(): DesignSystemInfo[] {
-  const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_SYSTEMS_DIRNAME))
-  if (!root) return personalDesignSystemLibrary().list()
   const systems: DesignSystemInfo[] = []
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    const dirPath = path.join(root, entry.name)
-    const designPath = path.join(dirPath, "DESIGN.md")
-    if (!fs.existsSync(designPath)) continue
-    try {
-      const content = fs.readFileSync(designPath, "utf-8")
-      const fm = parseFrontmatterBlock(content)
-      const meta = readJsonFile<DesignSystemInfo>(path.join(dirPath, "meta.json")) ?? {}
-      const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
-      const frontmatterName = parseSimpleYamlScalar(fm, "name")
-      const frontmatterDescription = parseSimpleYamlScalar(fm, "description")
-      const description = content
-        .split(/\r?\n/)
-        .find((line) => line.trim() && !line.startsWith("#") && !line.startsWith("---"))
-        ?.trim()
-      systems.push({
-        id: entry.name,
-        ownership: "builtin",
-        version: 1,
-        name: typeof meta.name === "string" ? meta.name : (frontmatterName || title || entry.name),
-        description: typeof meta.description === "string" ? meta.description : (frontmatterDescription || description || ""),
-        category: typeof meta.category === "string" ? meta.category : undefined,
-        source: typeof meta.source === "string" ? meta.source : undefined,
-        origin: typeof meta.origin === "string" ? meta.origin : undefined,
-        license: typeof meta.license === "string" ? meta.license : undefined,
-        path: designPath,
-        tokens: extractDesignSystemTokens(content),
-      })
-    } catch {
-      // Ignore malformed systems.
+  const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_SYSTEMS_DIRNAME))
+  if (root) {
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const dirPath = path.join(root, entry.name)
+      const designPath = path.join(dirPath, "DESIGN.md")
+      if (!fs.existsSync(designPath)) continue
+      try {
+        const content = fs.readFileSync(designPath, "utf-8")
+        const fm = parseFrontmatterBlock(content)
+        const meta = readJsonFile<DesignSystemInfo>(path.join(dirPath, "meta.json")) ?? {}
+        const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
+        const frontmatterName = parseSimpleYamlScalar(fm, "name")
+        const frontmatterDescription = parseSimpleYamlScalar(fm, "description")
+        const description = content
+          .split(/\r?\n/)
+          .find((line) => line.trim() && !line.startsWith("#") && !line.startsWith("---"))
+          ?.trim()
+        systems.push({
+          id: entry.name,
+          ownership: "builtin",
+          version: 1,
+          name: typeof meta.name === "string" ? meta.name : (frontmatterName || title || entry.name),
+          description: typeof meta.description === "string" ? meta.description : (frontmatterDescription || description || ""),
+          category: typeof meta.category === "string" ? meta.category : undefined,
+          source: typeof meta.source === "string" ? meta.source : undefined,
+          origin: typeof meta.origin === "string" ? meta.origin : undefined,
+          license: typeof meta.license === "string" ? meta.license : undefined,
+          path: designPath,
+          tokens: extractDesignSystemTokens(content),
+        })
+      } catch {
+        // Ignore malformed systems.
+      }
     }
   }
   systems.push(...personalDesignSystemLibrary().list())
+  systems.push(...marketLocalStore().listAllSystemInfos())
   return systems.sort((a, b) => {
     const aPinned = DESIGN_SYSTEM_PINNED_ORDER.get(a.id)
     const bPinned = DESIGN_SYSTEM_PINNED_ORDER.get(b.id)
@@ -804,47 +817,49 @@ function findDesignTemplatePreview(dirPath: string): string | null {
 }
 
 function listDesignTemplates(packages: DesignTemplatePackages): DesignTemplateInfo[] {
-  const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_TEMPLATES_DIRNAME))
-  if (!root) return []
   const templates: DesignTemplateInfo[] = []
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    const dirPath = path.join(root, entry.name)
-    try {
-      templates.push(...listBuiltinTemplateBundle(dirPath, packages))
-    } catch (error) {
-      console.warn(`[Design] Failed to load builtin template bundle: ${entry.name}`, error)
-    }
-    const skillPath = path.join(dirPath, "SKILL.md")
-    if (!fs.existsSync(skillPath)) continue
-    try {
-      const previewPath = findDesignTemplatePreview(dirPath)
-      if (!previewPath) continue
-      const content = fs.readFileSync(skillPath, "utf-8")
-      const fm = parseFrontmatterBlock(content)
-      const name = parseSimpleYamlScalar(fm, "name") || entry.name
-      const description = parseSimpleYamlScalar(fm, "description") || ""
-      const mode = fm.match(/^\s*mode:\s*(.+)$/m)?.[1]?.trim() || "prototype"
-      const platform = fm.match(/^\s*platform:\s*(.+)$/m)?.[1]?.trim() || null
-      const scenario = fm.match(/^\s*scenario:\s*(.+)$/m)?.[1]?.trim() || "design"
-      const templateMeta = readJsonFile<{ designSystemKey: string | null }>(path.join(dirPath, "meta.json"))
-      templates.push({
-        designSystemKey: normalizeTemplateSystemKey(
-          templateMeta?.designSystemKey !== undefined ? templateMeta.designSystemKey : parseSimpleYamlScalar(fm, "designSystemKey")
-        ),
-        name,
-        description,
-        path: skillPath,
-        mode,
-        platform,
-        scenario,
-        previewHtml: fs.readFileSync(previewPath, "utf-8"),
-        previewPath
-      })
-    } catch {
-      // Ignore malformed templates.
+  const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_TEMPLATES_DIRNAME))
+  if (root) {
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const dirPath = path.join(root, entry.name)
+      try {
+        templates.push(...listBuiltinTemplateBundle(dirPath, packages))
+      } catch (error) {
+        console.warn(`[Design] Failed to load builtin template bundle: ${entry.name}`, error)
+      }
+      const skillPath = path.join(dirPath, "SKILL.md")
+      if (!fs.existsSync(skillPath)) continue
+      try {
+        const previewPath = findDesignTemplatePreview(dirPath)
+        if (!previewPath) continue
+        const content = fs.readFileSync(skillPath, "utf-8")
+        const fm = parseFrontmatterBlock(content)
+        const name = parseSimpleYamlScalar(fm, "name") || entry.name
+        const description = parseSimpleYamlScalar(fm, "description") || ""
+        const mode = fm.match(/^\s*mode:\s*(.+)$/m)?.[1]?.trim() || "prototype"
+        const platform = fm.match(/^\s*platform:\s*(.+)$/m)?.[1]?.trim() || null
+        const scenario = fm.match(/^\s*scenario:\s*(.+)$/m)?.[1]?.trim() || "design"
+        const templateMeta = readJsonFile<{ designSystemKey: string | null }>(path.join(dirPath, "meta.json"))
+        templates.push({
+          designSystemKey: normalizeTemplateSystemKey(
+            templateMeta?.designSystemKey !== undefined ? templateMeta.designSystemKey : parseSimpleYamlScalar(fm, "designSystemKey")
+          ),
+          name,
+          description,
+          path: skillPath,
+          mode,
+          platform,
+          scenario,
+          previewHtml: fs.readFileSync(previewPath, "utf-8"),
+          previewPath
+        })
+      } catch {
+        // Ignore malformed templates.
+      }
     }
   }
+  templates.push(...marketLocalStore().listSelectableTemplateInfos(packages))
   return templates.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
 }
 
@@ -3618,6 +3633,16 @@ export function registerDesignHandlers(): void {
 
   ipcMain.handle("design:list-systems", async (): Promise<DesignSystemInfo[]> => listDesignSystems())
   registerDesignSystemLibraryHandlers(personalDesignSystemLibrary, getDesignSystemById, getModel)
+  registerDesignMarketHandlers({
+    localStore: marketLocalStore(),
+    systemLibrary: personalDesignSystemLibrary,
+    readLocalSystem: getDesignSystemById,
+    templatePackages,
+    templatePreview,
+    onLocalAssetsChanged: () => {
+      marketLocalStore().registerAllTemplatesInPackages(templatePackages)
+    }
+  })
 
   ipcMain.handle("design:list-templates", async (): Promise<DesignTemplateInfo[]> =>
     Promise.all(listDesignTemplates(templatePackages).map((item) =>

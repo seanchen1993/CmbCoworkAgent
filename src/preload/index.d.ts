@@ -7,6 +7,7 @@ import type {
   DesignPackageStageResult
 } from "../shared/design-package"
 import type { DesignTemplateApi, DesignTemplateInfo } from "../shared/design-template"
+import type { DesignMarketApi } from "../shared/design-market"
 import type { DesignSystemLibraryApi, DesignSystemInfo } from "../shared/design-system"
 import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import type { ProjectAgentRunListener } from "../shared/project-agent-run"
@@ -2510,6 +2511,7 @@ interface CustomAPI {
     cancel: (sessionId: string) => Promise<void>
     saveVariant: (variantId: string, html: string) => Promise<{ filePath: string }>
   }
+  designMarket: DesignMarketApi
   requirements: RequirementsApi
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">

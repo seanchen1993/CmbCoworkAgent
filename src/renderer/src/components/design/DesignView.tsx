@@ -57,6 +57,7 @@ import { DesignAttachmentMenu } from "./DesignAttachmentMenu"
 import { ExportDesignModal, ImportPackageEntryModal, ImportUrlModal } from "./DesignModals"
 import { DesignCreationPage } from "./DesignCreationPage"
 import { DesignSystemLibraryDialog, type DesignSystemLibraryMode } from "./DesignSystemLibraryDialog"
+import { DesignMarketOverlay } from "./market/DesignMarketOverlay"
 import { DesignWorkspaceLayout } from "./DesignWorkspaceLayout"
 import { DesignTemplateDialog } from "./DesignTemplateDialog"
 import { designSystemKey, isTemplateVisible } from "../../../../shared/design-template"
@@ -232,7 +233,11 @@ function compareDesignSystemsForDisplay(a: DesignSystemInfo, b: DesignSystemInfo
 }
 
 function getDefaultDesignSystemId(systems: DesignSystemInfo[]): string | null {
-  return systems.find((system) => system.id === "neutral-modern")?.id ?? systems.find(system => system.isLatest !== false)?.id ?? null
+  return (
+    systems.find((system) => system.id === "neutral-modern" && !system.removedFromPicker)?.id ??
+    systems.find((system) => !system.removedFromPicker && system.isLatest !== false)?.id ??
+    null
+  )
 }
 
 function getSessionKindLabel(
@@ -1236,19 +1241,24 @@ export function DesignView({
   onListVisibilityChange?: (visible: boolean) => void
 }): React.JSX.Element {
   // ── Session / gallery state ───────────────────────────────
+  const [initialMarketCreate] = useState(() =>
+    useAppStore.getState().consumeDesignMarketPendingCreate()
+  )
+  const designMarketCreateNonce = useAppStore((state) => state.designMarketCreateNonce)
   const pendingProductNavigation = useRequirementProductStore.getState().navigation
   const requirementDesignPending =
     pendingProductNavigation?.target === "design" && pendingProductNavigation.entries.length > 0
   const [sessionIndex, setSessionIndex] = useState<SessionMeta[]>(() => loadIndex())
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
     () =>
-      initialScreen === "gallery" || requirementDesignPending
+      initialMarketCreate || initialScreen === "gallery" || requirementDesignPending
         ? null
         : localStorage.getItem(SESSION_LAST_KEY) ?? null
   )
 
   const [_init] = useState<ReturnType<typeof loadSessionById>>(() => {
-    if (initialScreen === "gallery" || requirementDesignPending) return defaultSession()
+    if (initialMarketCreate || initialScreen === "gallery" || requirementDesignPending)
+      return defaultSession()
     const sid = localStorage.getItem(SESSION_LAST_KEY)
     return sid ? loadSessionById(sid) : defaultSession()
   })
@@ -1268,7 +1278,14 @@ export function DesignView({
     id?: string | null
     sessionId?: string
   } | null>(null)
-  const [createDesignSystemId, setCreateDesignSystemId] = useState<string | null>(null)
+  const [marketOverlay, setMarketOverlay] = useState<{
+    open: boolean
+    initialSystemId?: string | null
+  }>({ open: false })
+  const [catalogRevision, setCatalogRevision] = useState(0)
+  const [createDesignSystemId, setCreateDesignSystemId] = useState<string | null>(
+    () => initialMarketCreate?.systemLocalId ?? null
+  )
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   // 记录当前需求入口，供需求模式顶部栏展示并手动回写 Manifest。
@@ -1278,9 +1295,10 @@ export function DesignView({
   // Open the creation workspace when there is no editor session to restore.
   const [creationPageOpen, setCreationPageOpen] = useState(
     () =>
-      initialScreen !== "gallery" &&
-      !requirementDesignPending &&
-      !localStorage.getItem(SESSION_LAST_KEY)
+      Boolean(initialMarketCreate) ||
+      (initialScreen !== "gallery" &&
+        !requirementDesignPending &&
+        !localStorage.getItem(SESSION_LAST_KEY))
   )
   useEffect(() => {
     onListVisibilityChange?.(
@@ -1526,7 +1544,13 @@ export function DesignView({
   }, [canvasContainer])
   const selectedDesignSystem =
     designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
-  const orderedDesignSystems = designSystems.filter(system => system.isLatest !== false || system.id === createDesignSystemId).sort(compareDesignSystemsForDisplay)
+  const orderedDesignSystems = designSystems
+    .filter(
+      (system) =>
+        (!system.removedFromPicker && system.isLatest !== false) ||
+        system.id === createDesignSystemId
+    )
+    .sort(compareDesignSystemsForDisplay)
   const designSystemGroups = groupByLabel(orderedDesignSystems, (system) =>
     getDesignSystemGroupLabel(system.category || system.source)
   )
@@ -1767,7 +1791,7 @@ export function DesignView({
       designSystemsLoaded.current = true
       setDesignSystems(systems)
       setCreateDesignSystemId((prev) => {
-        if (prev && systems.some((system) => system.id === prev)) return prev
+        if (prev && systems.some((system) => system.id === prev && !system.removedFromPicker)) return prev
         return initializeSelection ? getDefaultDesignSystemId(systems) : null
       })
     } catch {
@@ -1775,6 +1799,22 @@ export function DesignView({
       setCreateDesignSystemId(null)
     }
   }, [])
+
+  const refreshMarketAssets = useCallback(() => {
+    void loadDesignSystems()
+    void loadAvailableSkills()
+    setCatalogRevision((prev) => prev + 1)
+  }, [loadAvailableSkills, loadDesignSystems])
+
+  useEffect(() => {
+    if (designMarketCreateNonce === 0) return
+    const pending = useAppStore.getState().consumeDesignMarketPendingCreate()
+    if (!pending) return
+    setCurrentSessionId(null)
+    setCreationPageOpen(true)
+    if (pending.systemLocalId) setCreateDesignSystemId(pending.systemLocalId)
+    refreshMarketAssets()
+  }, [designMarketCreateNonce, refreshMarketAssets])
 
   const loadDesignModels = useCallback(async (): Promise<ModelOption[]> => {
     const models = await window.api.models.list()
@@ -4913,7 +4953,14 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       mode={systemLibrary.mode}
       initialId={systemLibrary.id}
       modelId={systemLibrary.sessionId ? ts.selectedModelId : undefined}
-      onChanged={loadDesignSystems}
+      onChanged={async () => {
+        await loadDesignSystems()
+        setCatalogRevision((prev) => prev + 1)
+      }}
+      onBrowseMarket={() => {
+        setSystemLibrary(null)
+        setMarketOverlay({ open: true, initialSystemId: null })
+      }}
       onSelect={(system) => {
         if (systemLibrary.mode !== "select") return
         if (system) setDesignSystems(previous => previous.some(item => item.id === system.id) ? previous : [...previous, system])
@@ -4965,6 +5012,25 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     />
   )
 
+  const marketOverlayDialog = (
+    <DesignMarketOverlay
+      open={marketOverlay.open}
+      initialSystemId={marketOverlay.initialSystemId}
+      selectedLocalSystemId={
+        creationPageOpen
+          ? createDesignSystemId
+          : currentSessionId
+            ? ts.selectedDesignSystemId
+            : null
+      }
+      onClose={() => {
+        setMarketOverlay({ open: false })
+        refreshMarketAssets()
+      }}
+      onAssetsChanged={refreshMarketAssets}
+    />
+  )
+
   if (creationPageOpen) {
     return (
       <>
@@ -4977,6 +5043,10 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           selectedDesignSystemId={createDesignSystemId}
           onDesignSystemChange={setCreateDesignSystemId}
           onOpenSystemLibrary={(mode) => setSystemLibrary({ mode, id: createDesignSystemId })}
+          onBrowseMarket={(systemId) =>
+            setMarketOverlay({ open: true, initialSystemId: systemId ?? null })
+          }
+          catalogRevision={catalogRevision}
           importingSource={importingSource}
           onEnterDesign={(selection) => {
             createSession(undefined, {
@@ -4990,6 +5060,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onImportPrototypeZip={() => void handleImportPrototypeZip("gallery")}
         />
         {systemLibraryDialog}
+        {marketOverlayDialog}
         <ImportUrlModal
           open={linkModalOpen}
           url={linkModalText}
@@ -5019,6 +5090,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           onOpen={openSession}
           onNew={() => setCreationPageOpen(true)}
           onManageSystems={() => setSystemLibrary({ mode: "manage" })}
+          onBrowseMarket={() => setMarketOverlay({ open: true, initialSystemId: null })}
           onDelete={deleteSession}
           workspacePath={workspacePath}
           workspaceLoading={workspaceLoading}
@@ -5027,6 +5099,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           }}
         />
         {systemLibraryDialog}
+        {marketOverlayDialog}
         <ImportUrlModal
           open={linkModalOpen}
           url={linkModalText}
@@ -5068,15 +5141,20 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   return (
     <div style={S.root}>
       {systemLibraryDialog}
+      {marketOverlayDialog}
       {templatePickerOpen && (
         <DesignTemplateDialog
           key={templatePickerSessionId}
           initial={pageTemplate}
           currentSystem={selectedDesignSystem}
           systems={designSystems}
+          catalogRevision={catalogRevision}
           onConfirm={(template) => applyPageTemplate(template, templatePickerSessionId)}
           onClose={() => setTemplatePickerSessionId(null)}
           onRestoreFocus={() => composerRef.current?.focus()}
+          onBrowseMarket={(systemId) =>
+            setMarketOverlay({ open: true, initialSystemId: systemId ?? null })
+          }
         />
       )}
       {/* Code & Link modals — rendered at root so they overlay everything */}

@@ -109,8 +109,44 @@ function entryRank(file: string): number {
 /** Imported bytes are immutable; sessions keep references instead of embedding vendor bundles. */
 export class DesignTemplatePackages {
   private readonly builtins = new Map<string, { rootDir: string; manifest: DesignTemplateSummary }>()
+  private readonly markets = new Map<string, { rootDir: string; manifest: DesignTemplateSummary }>()
 
   constructor(readonly storageDir: string) {}
+
+  registerMarket(
+    id: string,
+    sourceDir: string,
+    meta: {
+      id: string
+      name: string
+      designSystemKey: string | null
+      entryPath: string
+      pages: string[]
+      files: string[]
+      totalBytes: number
+      framework: string
+      importedAt: string
+      source: "market"
+      marketTemplateId: string
+      marketSystemId: string
+      marketVersion: string
+      marketVersionId: string
+      marketMinSystemVersion: string
+      marketOwnerName: string
+      previewImageDataUrl?: string
+    }
+  ): void {
+    if (!/^mkt_[a-zA-Z0-9_-]+$/.test(id)) throw new Error("市场模板 ID 无效")
+    const rootDir = path.resolve(sourceDir)
+    this.markets.set(id, {
+      rootDir,
+      manifest: {
+        ...meta,
+        sourceKind: "zip",
+        designSystemKey: normalizeTemplateSystemKey(meta.designSystemKey)
+      }
+    })
+  }
 
   /** Bundled resources stay in the app until materialized into a design's own directory. */
   registerBuiltin(id: string, sourceDir: string, designSystemKey: string | null): void {
@@ -186,10 +222,11 @@ export class DesignTemplatePackages {
 
   read(reference: DesignTemplateReference): DesignTemplatePackage {
     const builtin = this.builtins.get(reference.id)
-    const manifest = builtin?.manifest ?? this.manifest(reference.id)
+    const market = this.markets.get(reference.id)
+    const manifest = builtin?.manifest ?? market?.manifest ?? this.manifest(reference.id)
     const entryPath = templateRelativePath(reference.entryPath)
     if (!manifest.pages.includes(entryPath)) throw new Error("请选择模板包内的 HTML 页面")
-    const rootDir = builtin?.rootDir ?? path.join(this.directory(reference.id), "files")
+    const rootDir = builtin?.rootDir ?? market?.rootDir ?? path.join(this.directory(reference.id), "files")
     const html = fs.readFileSync(this.checkedFile(rootDir, entryPath), "utf8")
     const warnings = new Set<string>()
     for (const ref of htmlReferences(html)) {
@@ -221,6 +258,9 @@ export class DesignTemplatePackages {
     designSystemKey: string | null
   ): DesignTemplatePackage {
     if (this.builtins.has(reference.id)) throw new Error("内置模板的设计系统关联不可修改")
+    if (this.markets.has(reference.id) || /^mkt_/.test(reference.id)) {
+      throw new Error("市场下载模板的系统归属不可修改，请先另存为本地副本")
+    }
     const template = this.read(reference)
     const manifest = {
       ...this.manifest(reference.id),
@@ -362,6 +402,26 @@ export class DesignTemplatePackages {
       fs.rmSync(directory, { recursive: true, force: true })
       throw error
     }
+  }
+
+  importLocalCopy(
+    sourceDir: string,
+    options: { name: string; entryPath?: string; designSystemKey?: string | null }
+  ): DesignTemplatePackage {
+    const imported = this.importSource(sourceDir, options.designSystemKey ?? null)
+    const targetEntry =
+      options.entryPath && imported.pages.includes(options.entryPath)
+        ? options.entryPath
+        : imported.entryPath
+    const directory = this.directory(imported.id)
+    const manifest = {
+      ...this.manifest(imported.id),
+      name: options.name.trim().slice(0, 80) || imported.name,
+      entryPath: targetEntry,
+      source: "local" as const
+    }
+    fs.writeFileSync(path.join(directory, "manifest.json"), JSON.stringify(manifest, null, 2))
+    return this.read({ id: imported.id, entryPath: targetEntry })
   }
 
   /** Copy into each artifact once; further edits must not overwrite session-owned dependencies. */

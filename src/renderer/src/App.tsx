@@ -61,6 +61,11 @@ const ScheduledPanel = lazy(() =>
 const MarketPanel = lazy(() =>
   import("@/components/customize/MarketPanel").then((m) => ({ default: m.MarketPanel }))
 )
+const DesignMarketPanel = lazy(() =>
+  import("@/components/design/market/DesignMarketPanel").then((m) => ({
+    default: m.DesignMarketPanel
+  }))
+)
 const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
@@ -1300,7 +1305,9 @@ function App(): React.JSX.Element {
                       <KanbanView />
                     </Suspense>
                   </main>
-                ) : renderedMainView === "scheduled" || renderedMainView === "market" ? (
+                ) : renderedMainView === "scheduled" ||
+                  renderedMainView === "market" ||
+                  renderedMainView === "design-market" ? (
                   <main className="relative flex flex-1 min-w-0 overflow-hidden bg-background">
                     <Suspense
                       fallback={
@@ -1311,6 +1318,14 @@ function App(): React.JSX.Element {
                     >
                       {renderedMainView === "scheduled" ? (
                         <ScheduledPanel />
+                      ) : renderedMainView === "design-market" ? (
+                        <DesignMarketPanel
+                          key={accountRevision}
+                          mode="standalone"
+                          onOpenNewDesign={(systemLocalId) =>
+                            useAppStore.getState().openNewDesignFromMarket(systemLocalId)
+                          }
+                        />
                       ) : (
                         <MarketPanel key={accountRevision} />
                       )}

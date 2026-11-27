@@ -42,6 +42,16 @@ export function useProductModeController(): {
   }, [])
 
   useEffect(() => {
+    return useAppStore.subscribe((state, previous) => {
+      if (state.designMarketCreateNonce !== previous.designMarketCreateNonce) {
+        setProductNavigationVisible(false)
+        setOpenDesignGallery(false)
+        setActiveModeTab("design")
+      }
+    })
+  }, [])
+
+  useEffect(() => {
     return useRequirementProductStore.subscribe((state, previous) => {
       if (state.navigation === previous.navigation) return
       if (state.navigation?.target === "design") {

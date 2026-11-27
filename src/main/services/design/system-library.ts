@@ -118,7 +118,7 @@ export class DesignSystemLibrary {
           .find((line) => line.trim() && !line.startsWith("#"))
           ?.trim()
           .slice(0, 160) || "我的设计规范",
-      source: ["file", "web", "builtin-copy", "manual"].includes(input.source || "")
+      source: ["file", "web", "builtin-copy", "market-copy", "manual"].includes(input.source || "")
         ? input.source
         : previous?.source || "manual",
       sourceUrl,

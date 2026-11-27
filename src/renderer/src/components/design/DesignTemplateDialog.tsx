@@ -19,18 +19,22 @@ export function DesignTemplateDialog({
   initial,
   currentSystem,
   systems,
+  catalogRevision = 0,
   onConfirm,
   onClose,
-  onRestoreFocus
+  onRestoreFocus,
+  onBrowseMarket
 }: {
   initial?: DesignPageTemplate | null
   currentSystem?: DesignSystemInfo | null
   systems: DesignSystemInfo[]
+  catalogRevision?: number
   onConfirm: (template: DesignPageTemplate) => void
   onClose: () => void
   onRestoreFocus: () => void
+  onBrowseMarket?: (systemId?: string | null) => void
 }) {
-  const picker = useDesignTemplateSelection(initial, currentSystem, systems)
+  const picker = useDesignTemplateSelection(initial, currentSystem, systems, catalogRevision)
   return (
     <Dialog
       open
@@ -56,6 +60,11 @@ export function DesignTemplateDialog({
             picker={picker}
             headingId="editor-template-heading"
             browserPreview={false}
+            onBrowseMarket={
+              onBrowseMarket
+                ? () => onBrowseMarket(currentSystem?.marketSystemId ?? null)
+                : undefined
+            }
           />
         </div>
         <DialogFooter className="shrink-0 gap-2 border-t border-border px-6 py-4">

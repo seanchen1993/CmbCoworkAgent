@@ -1,6 +1,6 @@
 import {
+  checkTemplateSystemCompatibility,
   designSystemKey,
-  isTemplateVisible,
   normalizeTemplateSystemKey,
   type DesignTemplateReference
 } from "../../../shared/design-template"
@@ -36,6 +36,7 @@ export function validateTemplateSelection(
     name: string
     previewHtml: string
     designSystemKey?: string | null
+    marketMinSystemVersion?: string | null
     package?: DesignTemplateReference
   }>
 ): void {
@@ -51,11 +52,23 @@ export function validateTemplateSelection(
           )
         : undefined
   if (selection.builtinPath && !template) throw new Error("模板不存在，请刷新后重新选择")
-  if (template && !isTemplateVisible(template, designSystemKey(currentSystem)))
-    throw new Error("模板不属于当前设计系统，请刷新后重新选择")
+  if (template) {
+    const compat = checkTemplateSystemCompatibility(template, currentSystem)
+    if (!compat.visible) throw new Error("模板不属于当前设计系统，请刷新后重新选择")
+    if (!compat.compatible) throw new Error(compat.reason || "模板不兼容当前设计系统版本")
+  }
   if (selection.mode === "select" && template && "previewHtml" in template) {
     // Use the host's package identity, never a renderer-supplied reference or preview base URL.
-    selection.package = template.package ? { ...template.package } : undefined
+    const reference = template.package
+    if (reference) {
+      const entryPath = selection.package?.id === reference.id
+        ? selection.package.entryPath
+        : reference.entryPath
+      const verified = packages.read({ id: reference.id, entryPath })
+      selection.package = { id: reference.id, entryPath: verified.entryPath }
+    } else {
+      selection.package = undefined
+    }
     selection.html = template.previewHtml
   }
 }
