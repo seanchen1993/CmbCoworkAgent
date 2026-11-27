@@ -63,6 +63,31 @@ async function main(): Promise<void> {
       "utf8"
     )
   ).replace(/\r\n/g, "\n")
+  const requirementConversationSource = (
+    await readFile(
+      resolve(
+        __dirname,
+        "../src/renderer/src/components/requirement/RequirementConversationView.tsx"
+      ),
+      "utf8"
+    )
+  ).replace(/\r\n/g, "\n")
+
+  assert.match(
+    source,
+    /export function useThreadStreamLoading[\s\S]*getStreamData\(threadId\)\.isLoading/,
+    "loading-only consumers need a scalar stream subscription"
+  )
+  assert.match(
+    requirementConversationSource,
+    /const streamLoading = useThreadStreamLoading\(threadId \?\? ""\)/,
+    "the requirement workbench must not re-render its three-column layout for every stream token"
+  )
+  assert.doesNotMatch(
+    requirementConversationSource,
+    /useThreadStream\(threadId \?\? ""\)\.isLoading/,
+    "the requirement workbench must stay off complete StreamData snapshots"
+  )
 
   for (const [name, consumerSource] of [
     ["model switcher", modelSwitcherSource],

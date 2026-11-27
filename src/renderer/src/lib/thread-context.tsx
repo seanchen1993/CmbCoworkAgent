@@ -8769,6 +8769,26 @@ export function useThreadStream(threadId: string): StreamData {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
+/**
+ * Subscribe only to a thread's loading flag. Stream snapshots change for every
+ * token and partial tool argument, so consumers that only need loading state
+ * must not subscribe to the complete StreamData object.
+ */
+export function useThreadStreamLoading(threadId: string): boolean {
+  const context = useThreadContext()
+
+  const subscribe = useCallback(
+    (callback: () => void) => context.subscribeToStream(threadId, callback),
+    [context, threadId]
+  )
+  const getSnapshot = useCallback(
+    () => context.getStreamData(threadId).isLoading,
+    [context, threadId]
+  )
+
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+}
+
 // Hook to access current thread's state and actions
 export function useCurrentThread(threadId: string): ThreadState & ThreadActions {
   const context = useThreadContext()

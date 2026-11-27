@@ -18,7 +18,7 @@ import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-te
 import {
   useThreadActions,
   useThreadStateSelector,
-  useThreadStream,
+  useThreadStreamLoading,
   type ThreadState
 } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
@@ -277,7 +277,7 @@ function RequirementConversationSession({
   const expertProcessThreadId = threadId
   const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
-  const streamLoading = useThreadStream(threadId ?? "").isLoading
+  const streamLoading = useThreadStreamLoading(threadId ?? "")
   const conversationLoading = streamLoading || scheduledTaskLoading
   const autoQueuedPrdGenerationThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
