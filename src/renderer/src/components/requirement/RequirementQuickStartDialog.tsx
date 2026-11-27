@@ -68,17 +68,11 @@ const personas: Array<{
   }
 ]
 
-function readStoredPersona(): RequirementPersona | null {
-  return readStoredRequirementPersona()
-}
-
-function readSkipPersonaSelection(): boolean {
-  return readSkipRequirementPersonaSelection()
-}
-
 function initialStep(): "persona" | "source" {
-  const persona = readStoredPersona()
-  return readSkipPersonaSelection() && persona && persona !== "business" ? "source" : "persona"
+  const persona = readStoredRequirementPersona()
+  return readSkipRequirementPersonaSelection() && persona && persona !== "business"
+    ? "source"
+    : "persona"
 }
 
 const quickStartItems: Array<{

@@ -15,7 +15,12 @@ import {
   revalidateSkillCatalog
 } from "@/lib/app-catalog-cache"
 import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
-import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
+import {
+  useThreadActions,
+  useThreadStateSelector,
+  useThreadStream,
+  type ThreadState
+} from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import { formatSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
@@ -49,9 +54,7 @@ import {
   type RequirementDesignEntry
 } from "@/lib/requirement-design-entry"
 import {
-  enableRequirementSessionExperts,
-  enableRequirementSessionSkills,
-  getRequirementSessionCapabilities,
+  ensureRequirementSessionCapabilities,
   REQUIREMENT_WORKBENCH_SKILL_ID
 } from "./requirement-session-capabilities"
 import { RequirementDetailsPanel } from "./RequirementDetailsPanel"
@@ -76,6 +79,22 @@ const LEGACY_REQUIREMENT_WORKBENCH_SKILL_INSTRUCTION =
 const pendingNewConversationPrompts = new Map<string, string>()
 type PreviewTab = "expert-process" | "source" | "prd"
 type PrototypeRoute = "design" | "skip" | null
+const EMPTY_SUBAGENTS: ThreadState["subagents"] = []
+const EMPTY_QUEUED_MESSAGES: ThreadState["queuedMessages"] = []
+const EMPTY_WORKSPACE_FILES: ThreadState["workspaceFiles"] = []
+const selectWorkspacePath = (state: ThreadState): ThreadState["workspacePath"] =>
+  state.workspacePath
+const selectWorkspaceFiles = (state: ThreadState): ThreadState["workspaceFiles"] =>
+  state.workspaceFiles
+const selectSubagents = (state: ThreadState): ThreadState["subagents"] => state.subagents
+const selectScheduledTaskLoading = (state: ThreadState): boolean => state.scheduledTaskLoading
+const selectQueueAutoDrainSuppressed = (state: ThreadState): boolean =>
+  state.queueAutoDrainSuppressed
+const selectGoalStatus = (state: ThreadState): string | undefined => state.goalUi.goal?.status
+const selectHistoryLoading = (state: ThreadState): boolean => state.historyLoading
+const selectQueuedMessages = (state: ThreadState): ThreadState["queuedMessages"] =>
+  state.queuedMessages
+const selectMessageCount = (state: ThreadState): number => state.messages.length
 
 async function resolveRequirementWorkbenchSlashSkill(): Promise<SkillMetadata> {
   const select = (catalog: NonNullable<ReturnType<typeof readSkillCatalogCache>>) =>
@@ -224,6 +243,7 @@ function RequirementConversationSession({
   const setShowHarnessBoardView = useAppStore((state) => state.setShowHarnessBoardView)
   const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
+  const productModeActive = useAppStore((state) => state.mainView === "design")
   const patchThreadMetadata = useAppStore((state) => state.patchThreadMetadata)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
     activeThreadId && requirement.threadIds.includes(activeThreadId)
@@ -238,27 +258,27 @@ function RequirementConversationSession({
         : (requirement.threadIds[0] ?? null)
   const currentThreadIdRef = useRef(threadId)
   currentThreadIdRef.current = threadId
-  const threadState = useThreadState(threadId)
-  const allThreadStates = useAllThreadStates()
-  const setWorkspaceFiles = threadState?.setWorkspaceFiles
-  const expertProcessThreadId = useMemo(() => {
-    if (threadId && (allThreadStates[threadId]?.subagents.length ?? 0) > 0) return threadId
-    return (
-      [...requirement.threadIds]
-        .reverse()
-        .find(
-          (candidateThreadId) => (allThreadStates[candidateThreadId]?.subagents.length ?? 0) > 0
-        ) ?? threadId
-    )
-  }, [allThreadStates, requirement.threadIds, threadId])
-  const subagents = useMemo(
-    () => allThreadStates[expertProcessThreadId ?? ""]?.subagents ?? [],
-    [allThreadStates, expertProcessThreadId]
-  )
+  const [previewTab, setPreviewTab] = useState<PreviewTab>("source")
+  const threadActions = useThreadActions(threadId)
+  const threadWorkspacePath = useThreadStateSelector(threadId, selectWorkspacePath)
+  const workspaceFiles =
+    useThreadStateSelector(threadId, selectWorkspaceFiles) ?? EMPTY_WORKSPACE_FILES
+  const subagents = useThreadStateSelector(threadId, selectSubagents) ?? EMPTY_SUBAGENTS
+  const scheduledTaskLoading =
+    useThreadStateSelector(threadId, selectScheduledTaskLoading) ?? false
+  const queueAutoDrainSuppressed =
+    useThreadStateSelector(threadId, selectQueueAutoDrainSuppressed) ?? false
+  const goalStatus = useThreadStateSelector(threadId, selectGoalStatus)
+  const historyLoading = useThreadStateSelector(threadId, selectHistoryLoading) ?? false
+  const queuedMessages =
+    useThreadStateSelector(threadId, selectQueuedMessages) ?? EMPTY_QUEUED_MESSAGES
+  const messageCount = useThreadStateSelector(threadId, selectMessageCount) ?? 0
+  const setWorkspaceFiles = threadActions?.setWorkspaceFiles
+  const expertProcessThreadId = threadId
   const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
-  const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
+  const conversationLoading = streamLoading || scheduledTaskLoading
   const autoQueuedPrdGenerationThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
   const restoredManifestThreadRef = useRef<string | null>(null)
@@ -270,7 +290,6 @@ function RequirementConversationSession({
   const publishRequestQueuedRef = useRef(false)
   // A requirement can own multiple conversations. Do not render a requirement-level PRD
   // cache before the selected conversation's manifest has been read and validated.
-  const [previewTab, setPreviewTab] = useState<PreviewTab>("source")
   const [prototypeRoute, setPrototypeRoute] = useState<PrototypeRoute>(null)
   const prdPreviewReloadToken = 0
   const [sourcePreview, setSourcePreview] = useState("")
@@ -292,7 +311,7 @@ function RequirementConversationSession({
     const files = resolveRequirementDevelopmentFiles(
       requirement,
       requirementSpaceManifest,
-      threadState?.workspacePath ?? requirement.requirementPath
+      threadWorkspacePath ?? requirement.requirementPath
     )
     const prompt = buildRequirementDevelopmentPrompt({
       title: requirement.title,
@@ -309,7 +328,7 @@ function RequirementConversationSession({
       ...files
     })
     setShowHarnessBoardView(true)
-  }, [requirement, requirementSpaceManifest, setShowHarnessBoardView, threadState?.workspacePath])
+  }, [requirement, requirementSpaceManifest, setShowHarnessBoardView, threadWorkspacePath])
   const continueRequirementDevelopment = useCallback(
     (developmentThreadId: string): void => {
       writeRequirementDevelopmentIntent({
@@ -375,6 +394,7 @@ function RequirementConversationSession({
     return true
   }, [expertProcessThreadId, openSubagentFocusView, subagents])
   useEffect(() => {
+    if (!productModeActive) return
     const previous = observedSubagentStatesRef.current
     const runningSubagents = subagents.filter((item) => item.status === "running")
     const started =
@@ -390,18 +410,28 @@ function RequirementConversationSession({
     observedSubagentStatesRef.current = new Map(
       subagents.map((subagent) => [subagent.id, subagent.status])
     )
-  }, [focusExpertProcess, subagents])
+  }, [focusExpertProcess, productModeActive, subagents])
   useEffect(() => {
-    if (previewTab !== "expert-process" || subagentFocusView?.threadId === expertProcessThreadId)
+    if (
+      !productModeActive ||
+      previewTab !== "expert-process" ||
+      subagentFocusView?.threadId === expertProcessThreadId
+    )
       return
     focusExpertProcess()
-  }, [expertProcessThreadId, focusExpertProcess, previewTab, subagentFocusView?.threadId])
+  }, [
+    expertProcessThreadId,
+    focusExpertProcess,
+    previewTab,
+    productModeActive,
+    subagentFocusView?.threadId
+  ])
   const sourceFiles = useMemo(
     () =>
-      (threadState?.workspaceFiles ?? []).filter(
+      workspaceFiles.filter(
         (file) => file.path === "/source" || file.path.startsWith("/source/")
       ),
-    [threadState?.workspaceFiles]
+    [workspaceFiles]
   )
   const sourceDocumentFiles = useMemo(
     () => sourceFiles.filter((file) => !file.is_dir),
@@ -442,7 +472,7 @@ function RequirementConversationSession({
   const fullPrdDesignEntry = useMemo((): RequirementDesignEntry | null => {
     const prd = requirementSpaceManifest?.prd
     if (!prd?.htmlId) return null
-    const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+    const workspacePath = threadWorkspacePath ?? requirement.requirementPath
     const relativePrdFile = normalizeRequirementPrdFilePath(prd.file).replace(/^\/+/, "")
     const separator = workspacePath.includes("\\") ? "\\" : "/"
     const requirementFilePath = `${workspacePath.replace(/[\\/]+$/, "")}${separator}${relativePrdFile.replace(/\//g, separator)}`
@@ -459,7 +489,7 @@ function RequirementConversationSession({
       htmlId: prd.htmlId,
       htmlFile: prd.htmlFile || undefined
     }
-  }, [requirement, requirementSpaceManifest?.prd, threadId, threadState?.workspacePath])
+  }, [requirement, requirementSpaceManifest?.prd, threadId, threadWorkspacePath])
   const prototypeCompleted = isRequirementPrototypeComplete({
     skipped: prototypeRoute === "skip",
     allFunctionsComplete: allPrototypeFunctionsCompleted,
@@ -530,7 +560,7 @@ function RequirementConversationSession({
       htmlId?: string
       htmlFile?: string
     }): RequirementDesignEntry => {
-      const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+      const workspacePath = threadWorkspacePath ?? requirement.requirementPath
       const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
       const relativeFile = normalizeRequirementPrdFilePath(functionInfo.file).replace(/^\/+/, "")
       const relativeOverviewFile = normalizeRequirementPrdFilePath(
@@ -565,7 +595,7 @@ function RequirementConversationSession({
       requirement.title,
       requirementSpaceManifest?.prd.file,
       threadId,
-      threadState?.workspacePath
+      threadWorkspacePath
     ]
   )
   const requestPrototypeDesign = useCallback(
@@ -636,7 +666,7 @@ function RequirementConversationSession({
       }
       const groupedEntries = groupedFunctionGroups.map(buildGroupedEntry)
       if (mode === "full-prd") {
-        const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+        const workspacePath = threadWorkspacePath ?? requirement.requirementPath
         const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
         if (!requirementSpaceManifest?.prd.file?.trim()) throw new Error("未找到完整 PRD 文档")
         const relativePrdFile = normalizeRequirementPrdFilePath(
@@ -730,7 +760,7 @@ function RequirementConversationSession({
       requirementSpaceManifest?.prd.htmlFile,
       requirementSpaceManifest?.prd.htmlId,
       threadId,
-      threadState?.workspacePath
+      threadWorkspacePath
     ]
   )
   const clearPrototypeDesign = useCallback(async (): Promise<void> => {
@@ -810,7 +840,7 @@ function RequirementConversationSession({
   )
   const revealRequirementFile = useCallback(
     (filePath: string): void => {
-      const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+      const workspacePath = threadWorkspacePath ?? requirement.requirementPath
       const normalizedWorkspace = workspacePath.replace(/[\\/]+$/, "")
       const normalizedFile = normalizeRequirementPrdFilePath(filePath).replace(/^\/+/, "")
       const absolutePath = `${normalizedWorkspace}/${normalizedFile}`
@@ -823,7 +853,7 @@ function RequirementConversationSession({
         })
         .catch(() => toast.error("无法在文件夹中显示该文件"))
     },
-    [requirement.requirementPath, threadState?.workspacePath]
+    [requirement.requirementPath, threadWorkspacePath]
   )
   const openWorkspaceFilePreview = useCallback(
     (filePath: string): void => {
@@ -837,7 +867,7 @@ function RequirementConversationSession({
     },
     [threadId]
   )
-  const hasThreadState = threadState !== null
+  const hasThreadState = threadActions !== null
 
   useEffect(() => {
     conversationLoadingObservedRef.current = false
@@ -889,12 +919,11 @@ function RequirementConversationSession({
 
   useEffect(() => {
     const sessionPaused =
-      threadState?.queueAutoDrainSuppressed === true ||
-      threadState?.goalUi.goal?.status === "paused"
+      queueAutoDrainSuppressed || goalStatus === "paused"
     if (!sessionPaused || !publishRequestQueuedRef.current) return
     publishRequestQueuedRef.current = false
     setPublishRequestQueued(false)
-  }, [threadState?.goalUi.goal?.status, threadState?.queueAutoDrainSuppressed])
+  }, [goalStatus, queueAutoDrainSuppressed])
 
   const attachConversation = useCallback(
     async (
@@ -999,11 +1028,7 @@ function RequirementConversationSession({
         }
       },
       onCreateConversation: async (item, initialPrompt) => {
-        const capabilities = getRequirementSessionCapabilities()
-        await Promise.all([
-          enableRequirementSessionExperts(capabilities.experts),
-          enableRequirementSessionSkills(capabilities.skills)
-        ])
+        await ensureRequirementSessionCapabilities()
         const conversationNumber = String(item.threadIds.length + 1).padStart(3, "0")
         const thread = await createThread(
           {
@@ -1175,7 +1200,7 @@ function RequirementConversationSession({
     (token: string): void => {
       const normalizedToken = token.trim()
       if (
-        !threadState ||
+        !threadActions ||
         !normalizedToken ||
         isRequirementSpacePublished(requirementSpaceManifest) ||
         publishRequestQueuedRef.current
@@ -1185,7 +1210,7 @@ function RequirementConversationSession({
 
       publishRequestQueuedRef.current = true
       setPublishRequestQueued(true)
-      threadState.addQueuedMessage({
+      threadActions.addQueuedMessage({
         id: crypto.randomUUID(),
         text: `${REQUIREMENT_SPACE_PUBLISH_MESSAGE}\n\n${LEANSTAR_TOKEN_MESSAGE_PREFIX}${normalizedToken}`,
         created_at: new Date(),
@@ -1193,12 +1218,12 @@ function RequirementConversationSession({
       })
       toast.success("已向对话发送发布到需求空间请求")
     },
-    [requirementSpaceManifest, threadState]
+    [requirementSpaceManifest, threadActions]
   )
 
   const handlePublishToRequirementSpace = useCallback(async (): Promise<void> => {
     if (
-      !threadState ||
+      !threadActions ||
       isRequirementSpacePublished(requirementSpaceManifest) ||
       publishRequestQueuedRef.current
     ) {
@@ -1221,7 +1246,7 @@ function RequirementConversationSession({
     } finally {
       setTokenSaving(false)
     }
-  }, [queuePublishToRequirementSpace, requirementSpaceManifest, threadState])
+  }, [queuePublishToRequirementSpace, requirementSpaceManifest, threadActions])
 
   const handleConfirmLeanstarToken = useCallback(async (): Promise<void> => {
     const token = tokenDraft.trim()
@@ -1259,20 +1284,20 @@ function RequirementConversationSession({
     if (
       !threadId ||
       !pendingNewConversationPrompts.has(threadId) ||
-      !threadState ||
-      threadState.historyLoading
+      !threadActions ||
+      historyLoading
     ) {
       return
     }
 
     const initialPrompt = pendingNewConversationPrompts.get(threadId)
     pendingNewConversationPrompts.delete(threadId)
-    if (initialPrompt) threadState.setDraftInput(initialPrompt)
-  }, [threadId, threadState, threadState?.historyLoading])
+    if (initialPrompt) threadActions.setDraftInput(initialPrompt)
+  }, [historyLoading, threadActions, threadId])
 
   useEffect(() => {
-    if (!threadState) return
-    const legacyDrafts = threadState.queuedMessages.filter(
+    if (!threadActions) return
+    const legacyDrafts = queuedMessages.filter(
       (message) =>
         message.contextLabel === "requirement-workbench" &&
         message.skillName === REQUIREMENT_WORKBENCH_SKILL_ID &&
@@ -1284,7 +1309,7 @@ function RequirementConversationSession({
       .then((skill) => {
         const skillBlock = formatRequirementWorkbenchSlashSkill(skill)
         for (const draft of legacyDrafts) {
-          threadState.updateQueuedMessage(draft.id, {
+          threadActions.updateQueuedMessage(draft.id, {
             skillBlock,
             skillName: skill.name,
             skillDescription: skill.description
@@ -1295,7 +1320,7 @@ function RequirementConversationSession({
         console.error("[RequirementConversationView] Failed to repair legacy draft:", error)
         toast.error("需求工作台初始化失败，请重试")
       })
-  }, [threadState, threadState?.queuedMessages])
+  }, [queuedMessages, threadActions])
 
   useEffect(() => {
     if (
@@ -1304,9 +1329,9 @@ function RequirementConversationSession({
       autoQueuedPrdGenerationThreadIdsRef.current.has(threadId) ||
       isRequirementGenerated(requirement) ||
       isRequirementPublished(requirement) ||
-      !threadState ||
-      threadState.messages.length > 0 ||
-      threadState.queuedMessages.length > 0
+      !threadActions ||
+      messageCount > 0 ||
+      queuedMessages.length > 0
     ) {
       return
     }
@@ -1315,7 +1340,7 @@ function RequirementConversationSession({
     void resolveRequirementWorkbenchSlashSkill()
       .then((skill) => {
         const now = new Date()
-        threadState.addQueuedMessage({
+        threadActions.addQueuedMessage({
           id: crypto.randomUUID(),
           text: buildRequirementInitializationMessage(requirement),
           contextLabel: "requirement-workbench",
@@ -1335,9 +1360,9 @@ function RequirementConversationSession({
     autoGeneratePrd,
     requirement,
     threadId,
-    threadState,
-    threadState?.messages.length,
-    threadState?.queuedMessages.length
+    messageCount,
+    queuedMessages.length,
+    threadActions
   ])
 
   useEffect(() => {
@@ -1375,7 +1400,7 @@ function RequirementConversationSession({
       if (!refreshesWorkspaceOnTabChange) {
         const workspaceResult = await window.api.workspace.loadFromDisk(threadId)
         if (!cancelled && workspaceResult.success) {
-          threadState.setWorkspaceFiles(workspaceResult.files)
+          threadActions?.setWorkspaceFiles(workspaceResult.files)
         }
       }
       // Reset publish queue when the conversation ended without a successful publish
@@ -1400,7 +1425,7 @@ function RequirementConversationSession({
     requirement.coreFilesMissing,
     requirement.workspaceMissing,
     threadId,
-    threadState
+    threadActions
   ])
 
   return (
@@ -1486,7 +1511,7 @@ function RequirementConversationSession({
             previewTab={previewTab}
             collapsed={rightPanelCollapsed}
             threadId={threadId}
-            workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
+            workspacePath={threadWorkspacePath ?? requirement.requirementPath}
             sourcePreview={sourcePreview}
             sourcePreviewLoading={sourcePreviewLoading}
             sourcePreviewError={sourcePreviewError}

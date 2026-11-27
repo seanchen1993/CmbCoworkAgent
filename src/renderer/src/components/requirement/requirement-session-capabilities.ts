@@ -48,3 +48,12 @@ export async function enableRequirementSessionSkills(skills: readonly string[]):
   await Promise.all(skills.map((skillId) => window.api.skills.setDisabledState(skillId, false)))
   invalidateSkillCatalog()
 }
+
+export async function ensureRequirementSessionCapabilities(): Promise<RequirementSessionCapabilities> {
+  const capabilities = getRequirementSessionCapabilities()
+  await Promise.all([
+    enableRequirementSessionExperts(capabilities.experts),
+    enableRequirementSessionSkills(capabilities.skills)
+  ])
+  return capabilities
+}

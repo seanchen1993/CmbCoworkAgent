@@ -25,11 +25,7 @@ import {
   sortRequirementsByUpdatedAt,
   type RequirementRecord
 } from "./requirement-data"
-import {
-  enableRequirementSessionExperts,
-  enableRequirementSessionSkills,
-  getRequirementSessionCapabilities
-} from "./requirement-session-capabilities"
+import { ensureRequirementSessionCapabilities } from "./requirement-session-capabilities"
 import {
   getRequirementSystemName,
   getSelectedRequirementSystem,
@@ -648,11 +644,7 @@ export function RequirementEntryView({
   const ensureRequirementThread = async (
     requirement: RequirementRecord
   ): Promise<{ requirement: RequirementRecord; threadId: string }> => {
-    const capabilities = getRequirementSessionCapabilities()
-    await Promise.all([
-      enableRequirementSessionExperts(capabilities.experts),
-      enableRequirementSessionSkills(capabilities.skills)
-    ])
+    await ensureRequirementSessionCapabilities()
     const threadIds = getRequirementThreadIds(requirement)
     if (threadIds[0]) return { requirement, threadId: threadIds[0] }
 
