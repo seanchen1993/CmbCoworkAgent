@@ -1,4 +1,5 @@
 import Store from "electron-store"
+import type { ChatProject } from "../../shared/chat-project"
 import { v4 as uuid } from "uuid"
 import { createThread as dbCreateThread } from "../db"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
@@ -21,7 +22,7 @@ const settingsStore = new Store({
 
 export async function createThreadService(
   metadata?: Record<string, unknown>,
-  options: { managedWorkspace?: boolean } = {}
+  options: { managedWorkspace?: boolean; newWorkspaceProject?: ChatProject } = {}
 ): Promise<Thread> {
   const threadId = uuid()
   const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
@@ -124,7 +125,11 @@ export async function createThreadService(
   const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
   nextMetadata.title = title
 
-  const thread = dbCreateThread(threadId, nextMetadata, { newDurableTranscript: true })
+  const thread = dbCreateThread(threadId, nextMetadata, {
+    newDurableTranscript: true,
+    inheritWorkspaceProject: true,
+    newWorkspaceProject: options.newWorkspaceProject
+  })
   return {
     thread_id: thread.thread_id,
     created_at: new Date(thread.created_at),

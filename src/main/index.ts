@@ -1,3 +1,4 @@
+import { startChatProjectReporter, stopChatProjectReporter } from "./services/chat-project-reporter"
 import { registerThreadSearchHandlers, closeThreadSearchWorker } from "./ipc/thread-search"
 import { closeDurableMessageSearchWorker } from "./thread-search/durable-message-search-client"
 import { cleanupMarketRuntimeContent } from "./services/market-content"
@@ -1143,6 +1144,7 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
+    startChatProjectReporter()
     initializeNotificationRuntime()
     await notificationService.recover()
     // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
@@ -1773,6 +1775,7 @@ if (browserNativeMessagingHostLaunch) {
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopAllWatching()
+    stopChatProjectReporter()
     stopRegisteredGitHookEventSync()
     stopKnowledgeBaseManager()
     stopBuiltinModelCatalogRefresh()

@@ -1,3 +1,7 @@
+import { chatGenerationMode, readChatProject, type ChatProject } from "../../../../shared/chat-project"
+import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
+import { WorkspaceProjectButton } from "./WorkspaceProjectButton"
+import { ChatProjectDialog, type ChatProjectTarget } from "./ChatProjectDialog"
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore, memo, lazy, Suspense } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
@@ -14,6 +18,7 @@ import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
+  Tag,
   Maximize2,
   Minimize2,
   FolderPlus,
@@ -39,7 +44,7 @@ import botWorkspaceMarkUrl from "@/assets/bot-workspace-mark.svg"
 import { ThreadDeleteDialog } from "./ThreadDeleteDialog"
 import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
 import { ThreadGroupDeleteDialog } from "./ThreadGroupDeleteDialog"
-import { useAppStore } from "@/lib/store"
+import { applyThreadProjectChange, useAppStore } from "@/lib/store"
 import {
   useThreadContext,
   type ThreadStateSummary
@@ -280,6 +285,7 @@ function ThreadListItemImpl({
   onFork,
   onForkFromCheckpoint,
   onRunFinished,
+  onProjectEdit,
   onStartEditing,
   onSaveTitle,
   onCancelEditing,
@@ -310,6 +316,7 @@ function ThreadListItemImpl({
   onFork?: () => void
   onForkFromCheckpoint?: () => void
   onRunFinished: () => void
+  onProjectEdit?: (target: ChatProjectTarget) => void
   onStartEditing: () => void
   onSaveTitle: () => void
   onCancelEditing: () => void
@@ -338,6 +345,11 @@ function ThreadListItemImpl({
     wasRunningRef.current = isRunning
   }, [isRunning])
 
+  const project = readChatProject(thread.metadata?.chatProject)
+  const editProject =
+    !readOnly && onProjectEdit && chatGenerationMode(thread.thread_id, thread.metadata ?? {}) === "chat"
+      ? () => onProjectEdit({ kind: "thread", id: thread.thread_id, name: getDisplayThreadTitle(thread), project })
+      : undefined
   const displayTitle = getDisplayThreadTitle(thread)
   const managedWork = isLocalWorkConversation(thread)
   const remoteThreadKind = getRemoteThreadKind(thread)
@@ -430,6 +442,19 @@ function ThreadListItemImpl({
                     {pendingUserInputBadge}
                   </>
                 )}
+                {project && editProject && (
+                  <button
+                    type="button"
+                    title="更改会话项目"
+                    className="ml-1 max-w-24 truncate text-[10px] text-primary"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      editProject()
+                    }}
+                  >
+                    {project.code}
+                  </button>
+                )}
               </div>
             )}
             {!isEditing && isLocalWorkConversation(thread) && (
@@ -477,6 +502,15 @@ function ThreadListItemImpl({
               {formatCompactTime(thread.updated_at)}
             </span>
             {!readOnly && <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:static group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:static group-focus-within:opacity-100">
+              {editProject && (
+                <IconPopoverButton
+                  icon={<Tag className="size-3" />}
+                  popoverContent="设置会话项目"
+                  stopPropagation
+                  className="size-6 p-0"
+                  onClick={editProject}
+                />
+              )}
               <IconPopoverButton
                 icon={<Pencil className="size-3" />}
                 popoverContent="重命名会话"
@@ -500,6 +534,7 @@ function ThreadListItemImpl({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        {editProject && <ContextMenuItem onClick={editProject}>设置会话项目</ContextMenuItem>}
         {!readOnly && <ContextMenuItem onClick={onStartEditing}>
           <Pencil className="size-4 mr-2" />
           重命名
@@ -557,6 +592,7 @@ function areThreadListItemPropsEqual(
 ): boolean {
   if (
     prev.thread !== next.thread ||
+    prev.onProjectEdit !== next.onProjectEdit ||
     prev.isLoading !== next.isLoading ||
     prev.hasPendingApproval !== next.hasPendingApproval ||
     prev.hasPendingUserInput !== next.hasPendingUserInput ||
@@ -610,6 +646,9 @@ function SidebarSettingsButton(): React.JSX.Element {
 }
 
 interface ThreadProjectHeaderProps extends WorkspaceRenameTarget {
+  workspaceProject: ChatProject | null
+  guideEligible: boolean
+  onProjectEdit: (target: ChatProjectTarget) => void
   projectKey: string
   threadCount: number
   isManagedInbox: boolean
@@ -674,6 +713,9 @@ function useSidebarThreadSummaries(): SidebarThreadSummaries {
 // The directory and activity stores update independently. Keep the menu and tooltip
 // trees for unaffected workspaces out of those renders.
 const ThreadProjectHeader = memo(function ThreadProjectHeader({
+  workspaceProject,
+  guideEligible,
+  onProjectEdit,
   projectKey,
   name,
   defaultName,
@@ -700,6 +742,10 @@ const ThreadProjectHeader = memo(function ThreadProjectHeader({
   const canManageProject = Boolean(path)
   const canRenameProject = canManageProject && !isManagedInbox
   const canCreateProjectThread = !isManagedInbox
+  const editDefault =
+    path && !isManagedInbox && !botWorkspaceName
+      ? () => onProjectEdit({ kind: "workspace", id: path, name, project: workspaceProject })
+      : undefined
   const openRenameDialog = (): void => {
     if (canRenameProject) renameProject({ path, name, defaultName, hasCustomName })
   }
@@ -716,19 +762,15 @@ const ThreadProjectHeader = memo(function ThreadProjectHeader({
                   ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
                   : "hover:bg-sidebar-hover"
               )}
-              onMouseEnter={() => setHoveredProjectKey(projectKey)}
-              onMouseLeave={() => setHoveredProjectKey(null)}
-              onFocus={() => setHoveredProjectKey(projectKey)}
-              onBlur={(e) => {
-                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-                  setHoveredProjectKey(null)
-                }
-              }}
             >
               <button
                 type="button"
                 className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                 onClick={() => toggleProject(projectKey)}
+                onMouseEnter={() => setHoveredProjectKey(projectKey)}
+                onMouseLeave={() => setHoveredProjectKey(null)}
+                onFocus={() => setHoveredProjectKey(projectKey)}
+                onBlur={() => setHoveredProjectKey(null)}
               >
                 {isCollapsed ? (
                   <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
@@ -829,6 +871,13 @@ const ThreadProjectHeader = memo(function ThreadProjectHeader({
                   />
                 </span>
               </span>
+              {editDefault && (
+                <WorkspaceProjectButton
+                  project={workspaceProject}
+                  guideEligible={guideEligible}
+                  onEdit={editDefault}
+                />
+              )}
             </div>
           </ContextMenuTrigger>
         </PopoverTrigger>
@@ -858,6 +907,7 @@ const ThreadProjectHeader = memo(function ThreadProjectHeader({
         </PopoverContent>
       </Popover>
       <ContextMenuContent>
+        {editDefault && <ContextMenuItem onClick={editDefault}>设置工作区默认项目</ContextMenuItem>}
         <ContextMenuItem
           disabled={!canManageProject}
           onClick={() => toggleProjectPin(projectKey)}
@@ -898,8 +948,8 @@ const ThreadProjectHeader = memo(function ThreadProjectHeader({
 
 // Settings visibility only changes the footer button, not the task list.
 export const ThreadSidebar = memo(function ThreadSidebar({
-  allowSearchAnchor = false
-}: { allowSearchAnchor?: boolean }): React.JSX.Element {
+  activeChatSidebar = false
+}: { activeChatSidebar?: boolean }): React.JSX.Element {
   const {
     threads,
     currentThreadId,
@@ -982,6 +1032,49 @@ export const ThreadSidebar = memo(function ThreadSidebar({
   const [confirmingProjectDeletion, setConfirmingProjectDeletion] = useState(false)
   const [deletionProgress, setDeletionProgress] = useState<ThreadGroupDeletionProgress | null>(null)
   const [projectToRename, setProjectToRename] = useState<WorkspaceRenameTarget | null>(null)
+  const [projectTarget, setProjectTarget] = useState<ChatProjectTarget | null>(null)
+  const [workspaceProjectsReady, setWorkspaceProjectsReady] = useState(false)
+  const [workspaceProjects, setWorkspaceProjects] = useState<Record<string, ChatProject>>({})
+  useEffect(() => {
+    let current = true
+    let loaded = false
+    const changed = new Map<string, ChatProject | null>()
+    const apply = (
+      values: Record<string, ChatProject>,
+      path: string,
+      project: ChatProject | null
+    ) => {
+      if (project) values[path] = project
+      else delete values[path]
+    }
+    const unsubscribe = window.api.threads.onChatProjectChanged((change) => {
+      if (change.kind === "thread") return applyThreadProjectChange(change)
+      const path = normalizeWorkspacePathKey(change.path)
+      if (!loaded) changed.set(path, change.project)
+      setWorkspaceProjects((previous) => {
+        const next = { ...previous }
+        apply(next, path, change.project)
+        return next
+      })
+    })
+    window.api.threads
+      .workspaceProjects()
+      .then((value) => {
+        if (!current) return
+        for (const [path, project] of changed) apply(value, path, project)
+        setWorkspaceProjects(value)
+        setWorkspaceProjectsReady(true)
+      })
+      .catch((error) => toast.error(String(error)))
+      .finally(() => {
+        loaded = true
+        changed.clear()
+      })
+    return () => {
+      current = false
+      unsubscribe()
+    }
+  }, [])
   const exportingThreadIdRef = useRef<string | null>(null)
   const forkingThreadIdRef = useRef<string | null>(null)
   const projectDeletionInFlightRef = useRef(false)
@@ -1207,6 +1300,18 @@ export const ThreadSidebar = memo(function ThreadSidebar({
     () => selectBoundedSidebarWindow(threadProjects, visibleProjectCount, selectedProjectIndex),
     [selectedProjectIndex, threadProjects, visibleProjectCount]
   )
+  const chatGuideActive = activeChatSidebar && mainView === "thread" && activeSidebarTab === "chat"
+  const firstConfigurableKey = visibleProjectWindow.items.find(
+    (group) => group.path && !group.isManagedInbox && !group.botWorkspace
+  )?.key
+  // Snapshot the first row on entry. An empty visit should not prompt immediately after adding a folder.
+  const [entryGuideKey, setEntryGuideKey] = useState<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (!chatGuideActive) setEntryGuideKey(undefined)
+    else if (workspaceProjectsReady) {
+      setEntryGuideKey((key) => key === undefined ? firstConfigurableKey ?? null : key)
+    }
+  }, [chatGuideActive, workspaceProjectsReady, firstConfigurableKey])
   const visibleBotThreadIds = useMemo(() => visibleProjectWindow.items.flatMap(project => {
     if (collapsedProjectKeys.has(project.key)) return []
     const selected = project.key === currentProjectKey && currentThreadId
@@ -1287,7 +1392,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
   const threadScrollAreaRef = useRef<HTMLDivElement>(null)
   const searchAnchor = useThreadSearch((state) => state.ordinarySidebarAnchor)
   useLayoutEffect(() => {
-    if (!allowSearchAnchor || activeSidebarTab !== "chat" || !searchAnchor) return undefined
+    if (!activeChatSidebar || activeSidebarTab !== "chat" || !searchAnchor) return undefined
     const consume = () => {
       if (useThreadSearch.getState().ordinarySidebarAnchor === searchAnchor) {
         useThreadSearch.setState({ ordinarySidebarAnchor: null })
@@ -1312,7 +1417,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
     if (viewport && revealSidebarThread(viewport, searchAnchor.threadId)) consume()
     return undefined
   }, [
-    activeSidebarTab, allowSearchAnchor, collapsedProjectKeys, currentProjectKey, currentThreadId,
+    activeSidebarTab, activeChatSidebar, collapsedProjectKeys, currentProjectKey, currentThreadId,
     expandProject, searchAnchor, visibleProjectWindow
   ])
 
@@ -1403,13 +1508,13 @@ export const ThreadSidebar = memo(function ThreadSidebar({
   }
 
   const handleNewProjectThread = useCallback(
-    async (project: Pick<ThreadProject, "key" | "path" | "isManagedInbox">): Promise<void> => {
+    async (project: Pick<ThreadProject, "key" | "path" | "isManagedInbox">, newWorkspaceProject?: ChatProject): Promise<void> => {
       if (project.isManagedInbox) return
       expandProject(project.key)
       await createThread({
         title: `Thread ${new Date().toLocaleDateString()}`,
         workspacePath: project.path ?? null
-      })
+      }, { newWorkspaceProject })
     },
     [createThread, expandProject]
   )
@@ -1420,10 +1525,19 @@ export const ThreadSidebar = memo(function ThreadSidebar({
     try {
       const workspacePath = await window.api.workspace.select()
       if (!workspacePath) return
-      await createThread({
-        title: `Thread ${new Date().toLocaleDateString()}`,
-        workspacePath
-      })
+      const key = normalizeWorkspacePathKey(workspacePath)
+      const knownWorkspace = threadProjects.some((group) =>
+        group.path && normalizeWorkspacePathKey(group.path) === key
+      )
+      if (!knownWorkspace && !workspaceProjects[key] && !botDefaultWorkspaceOwner(workspacePath)) {
+        setProjectTarget({
+          kind: "new-workspace", id: workspacePath, name: getWorkspaceName(workspacePath), project: null
+        })
+        return
+      }
+      await handleNewProjectThread({ key: workspacePath, path: workspacePath, isManagedInbox: false })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "新增工作区失败")
     } finally {
       setSelectingProjectFolder(false)
     }
@@ -1808,6 +1922,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
                   <FolderPlus className="size-3.5" />
                 )
               }
+              aria-label="新增工作区"
               popoverContent={selectingProjectFolder ? "正在选择工作区" : "新增工作区"}
               disabled={selectingProjectFolder}
               className="size-6 shrink-0 rounded-sm p-0"
@@ -1840,6 +1955,9 @@ export const ThreadSidebar = memo(function ThreadSidebar({
                 return (
                   <div key={project.key} className="space-y-1">
                     <ThreadProjectHeader
+                      workspaceProject={project.path ? workspaceProjects[normalizeWorkspacePathKey(project.path)] ?? null : null}
+                      guideEligible={chatGuideActive && project.key === entryGuideKey && !projectTarget && !selectingProjectFolder}
+                      onProjectEdit={setProjectTarget}
                       projectKey={project.key}
                       name={project.name}
                       defaultName={project.defaultName}
@@ -1881,6 +1999,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
 
                           return (
                             <ThreadListItem
+                              onProjectEdit={setProjectTarget}
                               botOwner={botThreadOwners.get(thread.thread_id)?.threadCreatedAt === new Date(thread.created_at).getTime()
                                 ? botThreadOwners.get(thread.thread_id) : undefined}
                               key={thread.thread_id}
@@ -2035,6 +2154,25 @@ export const ThreadSidebar = memo(function ThreadSidebar({
         }}
         onConfirm={() => void confirmDeleteProject()}
       />
+      {projectTarget && (
+        <ChatProjectDialog
+          key={projectTarget.id}
+          target={projectTarget}
+          onClose={() => setProjectTarget(null)}
+          onSave={async (project) => {
+            if (projectTarget.kind === "thread") {
+              await window.api.threads.setChatProject(projectTarget.id, project)
+            } else if (projectTarget.kind === "new-workspace") {
+              await handleNewProjectThread(
+                { key: projectTarget.id, path: projectTarget.id, isManagedInbox: false },
+                project ?? undefined
+              )
+            } else {
+              await window.api.threads.setWorkspaceProject(projectTarget.id, project)
+            }
+          }}
+        />
+      )}
       <WorkspaceRenameDialog
         open={!!projectToRename}
         workspace={projectToRename}

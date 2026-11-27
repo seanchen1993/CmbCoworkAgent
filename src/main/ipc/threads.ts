@@ -1,3 +1,6 @@
+import { readChatProject, type ChatProjectChange, type ChatProject } from "../../shared/chat-project"
+import { saveWorkspaceProject } from "../db/chat-project"
+import { notifyChatProjectEdit } from "../services/chat-project-reporter"
 import { createBotThreadReplyResolver } from "../bots/thread-message-replies"
 import { copyForkInputProjections, readForkReplyOrigins } from "../bots/fork-input-projection"
 import { BOT_PREPARED_USER_REQUEST_KEY } from "../agent/agent-run-service"
@@ -27,6 +30,7 @@ import {
   getThreadRowLifetime,
   searchThreadMessages,
   getDb,
+  setThreadChatProject,
   getFirstThreadRepliedUserMessageIdentity,
   getThreadHydrationCore,
   getThreadValuesJson,
@@ -1935,7 +1939,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
           await verifyForkCheckpointPersisted(targetThreadId, forkCheckpoint.id)
 
           const row = await withSubagentTranscriptContentMutationLock(async () => {
-            dbCreateThread(targetThreadId, targetMetadata)
+            dbCreateThread(targetThreadId, targetMetadata, { inheritWorkspaceProject: true })
             rowCreated = true
             const updated = dbUpdateThread(targetThreadId, {
               thread_values: JSON.stringify(filteredThreadValues)
@@ -3352,9 +3356,52 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       stopSideThread(threadId, BrowserWindow.fromWebContents(event.sender)))
   )
 
+  function publishChatProject(change: ChatProjectChange): void {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.webContents.isDestroyed())
+        window.webContents.send("threads:chatProjectChanged", change)
+    }
+  }
+  function projectInput(value: unknown): ChatProject | null {
+    if (value === null) return null
+    const project = readChatProject(value)
+    if (!project) throw new Error("项目编码无效")
+    return project
+  }
+  ipcMain.handle("threads:workspaceProjects", () => {
+    const rows = getDb().exec("SELECT path,code,lean,name FROM workspace_project_defaults")[0].values
+    return Object.fromEntries(
+      rows.map(([path, code, lean, name]) => [path, { code, fromLean: lean === 1, ...(name ? { name } : {}) }])
+    )
+  })
+  ipcMain.handle("threads:setWorkspaceProject", (_, path: string, value: unknown) => {
+    const project = projectInput(value)
+    saveWorkspaceProject(getDb(), path, project)
+    publishChatProject({ kind: "workspace", path, project })
+  })
+  ipcMain.handle("threads:setChatProject", (_, threadId: string, value: unknown) => {
+    const project = projectInput(value)
+    const row = setThreadChatProject(threadId, project)
+    notifyChatProjectEdit()
+    publishChatProject({
+      kind: "thread",
+      id: threadId,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      project
+    })
+  })
+
   // Create a new thread
-  ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
-    return createThreadService(metadata)
+  ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>, initialProject?: unknown) => {
+    if (initialProject == null) return createThreadService(metadata)
+    const project = projectInput(initialProject)
+    const path = metadata?.workspacePath
+    if (!project || typeof path !== "string" || !path.trim()) throw new Error("新增工作区需要项目编码和目录")
+    const thread = await createThreadService(metadata, { newWorkspaceProject: project })
+    publishChatProject({ kind: "workspace", path, project })
+    notifyChatProjectEdit()
+    return thread
   })
 
   ipcMain.handle("threads:fork", async (_event, params: ThreadForkParams) => {

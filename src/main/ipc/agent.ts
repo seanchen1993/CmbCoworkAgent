@@ -1,3 +1,5 @@
+import { chatGenerationMode } from "../../shared/chat-project"
+import { saveChatBinding } from "../db/chat-project"
 import { botSkillDispatchInput } from "../agent/bot-skill-dispatch"
 import {
   COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
@@ -121,6 +123,7 @@ import {
   appendThreadMessageTextDelta,
   ThreadMessageStreamAttempt,
   flushStrict,
+  getDb,
   getThreadCore,
   hasOrderedThreadGraphTranscriptBoundaries,
   isFirstThreadUserMessage,
@@ -7284,7 +7287,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         let harnessFeatureBinding: HarnessFeatureBindingContext | undefined
         let isWorkflowNotificationTrace = false
         try {
-          const bindingThread = getThread(threadId)
+          const bindingThread = getThreadCore(threadId)
           if (bindingThread?.metadata) {
             const bindingMetadata = JSON.parse(bindingThread.metadata) as Record<string, unknown>
             harnessFeatureBinding = await resolveHarnessFeatureBindingContext(bindingMetadata)
@@ -7292,6 +7295,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               isWorkflowNotificationInvoke &&
               (getAgentModeFromMetadata(bindingMetadata) === "workflow" ||
                 hasBotWorkflowCapability(bindingMetadata))
+            // Older ordinary threads have no binding metadata. Publish evidence of their
+            // mode without applying a workspace default retroactively.
+            if (!harnessFeatureBinding && !Object.hasOwn(bindingMetadata, "chatProject")) {
+              const mode = chatGenerationMode(threadId, bindingMetadata)
+              if (mode) saveChatBinding(getDb(), threadId, mode, null, true)
+            }
           }
         } catch {
           // Non-project threads or unparsable metadata: leave the trace untagged.

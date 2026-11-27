@@ -1,3 +1,4 @@
+import { fetchUserGenerationSplit } from "./user-generation-split"
 import { projectAgentProgress } from "./project-agent-progress"
 import { runProjectAnalysisAgent } from "../services/project-analysis-agent"
 import { registerProjectReportHandlers } from "./project-report"
@@ -17429,6 +17430,48 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:userGenerationSplit",
+    async (_, sapId: string, range: TimeRange) => {
+      if (
+        typeof sapId !== "string" ||
+        !sapId.trim() ||
+        sapId.length > 128 ||
+        !Number.isFinite(Date.parse(range?.from)) ||
+        !Number.isFinite(Date.parse(range?.to)) ||
+        Date.parse(range.from) > Date.parse(range.to)
+      )
+        throw new Error("用户或统计时间范围无效")
+      if (import.meta.env.DEV) {
+        const total = makeMockUserDetail(sapId, range).codeStats?.generatedLines ?? 0
+        const project = Math.floor(total * 0.4)
+        const lean = Math.floor(total * 0.3)
+        const custom = Math.floor(total * 0.1)
+        return {
+          success: true,
+          data: {
+            project,
+            unbound: total - project - lean - custom,
+            unknown: 0,
+            projects: [
+              { code: "P001", fromLean: true, lines: lean },
+              { code: "零售改造", fromLean: false, lines: custom }
+            ]
+          }
+        }
+      }
+      const access = requireDashboardAccess()
+      const data = await fetchUserGenerationSplit(
+        (body) => esQuery(getEsIndex("event"), body),
+        sapId.trim(),
+        range,
+        buildTraceAccessFilter(access)
+      )
+      return { success: true, data }
+    }
+  )
 
   registerScopedDashboardHandler(
     _ipcMain,

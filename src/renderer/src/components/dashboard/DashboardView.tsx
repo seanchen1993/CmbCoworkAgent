@@ -1,3 +1,4 @@
+import { UserGenerationDistribution } from "./UserGenerationDistribution"
 import { TimeControlBar } from "./TimeControlBar"
 import {
   formatRangeLabel,
@@ -1088,6 +1089,7 @@ function UserListPage({
 }
 
 function UserDetailPage({
+  range,
   data,
   loading,
   error,
@@ -1104,6 +1106,7 @@ function UserDetailPage({
   exporting,
   loadThreadTraces
 }: {
+  range: TimeRange
   data: DashboardUserDetail | null
   loading: boolean
   error: string | null
@@ -1265,6 +1268,14 @@ function UserDetailPage({
               <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
                 当前时间范围内暂无该用户的代码生成或采纳数据
               </div>
+            )}
+            {!projectMode && data.codeStats && (
+              <UserGenerationDistribution
+                key={JSON.stringify([data.sapId, range.from, range.to])}
+                sapId={data.sapId}
+                from={range.from}
+                to={range.to}
+              />
             )}
           </div>
 
@@ -4672,6 +4683,7 @@ function DashboardContent({
       ) : subPage.kind === "user-detail" ? (
         <ScrollArea className="flex-1">
           <UserDetailPage
+            range={range}
             data={userDetail}
             loading={userDetailLoading}
             error={userDetailError}

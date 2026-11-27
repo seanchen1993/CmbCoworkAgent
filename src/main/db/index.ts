@@ -1,3 +1,5 @@
+import { closeChatProjectSnapshots, initializeChatProjectTables, saveChatBinding, saveWorkspaceProject, workspaceProject } from "./chat-project"
+import { chatGenerationMode, type ChatProject } from "../../shared/chat-project"
 import { publishThreadDirectoryIdentityChanged } from "./thread-directory-lifecycle"
 import { ensureManagedRunSchedulesSchema } from "./managed-run-schedules"
 import { installThreadSearchSchema } from "../thread-search/schema"
@@ -82,7 +84,7 @@ import {
 import { createHash, randomUUID } from "crypto"
 import {
   attachFreshThreadIncarnation,
-  preserveThreadIncarnationMetadata
+  preserveDatabaseOwnedThreadMetadata
 } from "../services/thread-incarnation"
 import {
   legacySubagentMigrationBatchTransactionBytes,
@@ -432,6 +434,8 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   threadMessageIdAliases.clear()
   const opened = openNativeSqliteDatabase(dbPath, "DB")
   db = opened.database
+
+  initializeChatProjectTables(db)
 
   // Create tables if they don't exist
   db.run(`
@@ -981,6 +985,7 @@ export async function closeDatabase(): Promise<void> {
   if (!db) return
   const closingDatabase = db
   db = null
+  closeChatProjectSnapshots()
   closingDatabase.close()
 }
 
@@ -6345,11 +6350,19 @@ export function getThread(threadId: string): ThreadRow | null {
 export function createThread(
   threadId: string,
   metadata?: Record<string, unknown>,
-  options?: { newDurableTranscript?: boolean }
+  options?: { newDurableTranscript?: boolean; inheritWorkspaceProject?: boolean; newWorkspaceProject?: ChatProject }
 ): ThreadRow {
   const database = getDb()
   const now = Date.now()
   const storedMetadata = attachFreshThreadIncarnation(metadata)
+  const mode = options?.inheritWorkspaceProject ? chatGenerationMode(threadId, storedMetadata) : null
+  delete storedMetadata.chatProject
+  const initialProject = options?.newWorkspaceProject
+  const path = storedMetadata.workspacePath
+  if (initialProject && (mode !== "chat" || typeof path !== "string" || !path.trim()))
+    throw new Error("新增工作区需要普通会话和工作区路径")
+  const project = initialProject ?? (mode === "chat" ? workspaceProject(database, path) : null)
+  if (mode === "chat") storedMetadata.chatProject = project
   const title = (storedMetadata.title as string) || null
   const serializedMetadata = JSON.stringify(storedMetadata)
 
@@ -6357,11 +6370,13 @@ export function createThread(
     `INSERT INTO threads (thread_id, created_at, updated_at, metadata, status, title)
      VALUES (?, ?, ?, ?, ?, ?)`, [threadId, now, now, serializedMetadata, "idle", title]
   )
-  if (options?.newDurableTranscript) {
+  if (options?.newDurableTranscript || mode) {
     database.run("SAVEPOINT create_durable_thread")
     try {
       insertThread()
-      database.run(
+      if (initialProject && typeof path === "string") saveWorkspaceProject(database, path, initialProject)
+      if (mode) saveChatBinding(database, threadId, mode, project)
+      if (options?.newDurableTranscript) database.run(
         `INSERT INTO legacy_checkpoint_transcript_migrations
          (thread_id, checkpoint_id, total_messages, next_index, status, updated_at, search_projection_state)
          VALUES (?, ?, 0, 0, 'complete', ?, 'complete')`, [threadId, NATIVE_DURABLE_CHECKPOINT_ID, now]
@@ -6389,6 +6404,23 @@ export function createThread(
   }
 }
 
+export function setThreadChatProject(threadId: string, project: ChatProject | null): ThreadSummaryRow {
+  const db = getDb()
+  const updated = db.withImmediateWriteTransaction(() => {
+    const row = getThreadCore(threadId)
+    if (!row) throw new Error("会话不存在")
+    const metadata = JSON.parse(row.metadata || "{}") as Record<string, unknown>
+    if (chatGenerationMode(threadId, metadata) !== "chat") throw new Error("仅普通会话支持项目关联")
+    saveChatBinding(db, threadId, "chat", project)
+    const serialized = JSON.stringify({ ...metadata, chatProject: project })
+    const now = Date.now()
+    db.run("UPDATE threads SET metadata=?, updated_at=? WHERE thread_id=?", [serialized, now, threadId])
+    return { ...row, metadata: serialized, updated_at: now }
+  })
+  publishThreadDirectoryIdentityChanged(threadId)
+  return updated
+}
+
 export function updateThread(
   threadId: string,
   updates: Partial<Omit<ThreadRow, "thread_id" | "created_at">>
@@ -6403,7 +6435,7 @@ export function updateThread(
   const values: (string | number | null)[] = [now]
   const serializedMetadata =
     updates.metadata !== undefined
-      ? preserveThreadIncarnationMetadata(
+      ? preserveDatabaseOwnedThreadMetadata(
           existing.metadata,
           typeof updates.metadata === "string" ? updates.metadata : JSON.stringify(updates.metadata)
         )

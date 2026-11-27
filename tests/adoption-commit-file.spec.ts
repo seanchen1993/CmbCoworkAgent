@@ -422,6 +422,7 @@ async function testProductionShellGenerationClosedLoop(): Promise<void> {
           )
         )
         setAdoptionContext("production-shell", {
+          rootThreadId: "parent-chat",
           traceId: "production-shell-trace",
           modelId: "scripted-model"
         })
@@ -468,6 +469,12 @@ async function testProductionShellGenerationClosedLoop(): Promise<void> {
         )
         if (!yolo) assert(approvals > 0, "approval branch must actually execute")
         const sha = await commitAndMeasure(repo, "generated-by-production-execute")
+        assertEqual(gen[0].properties?.rootThreadId, "parent-chat", "generation belongs to the root chat")
+        assertEqual(
+          reporter.named("code_adopt", sha).map((event) => event.rootThreadId),
+          ["parent-chat"],
+          "commit retains the same project attribution key after the child turn ends"
+        )
         const files = reporter.named("code_commit_file", sha)
         assertEqual(files.length, 1, "the generated file is measured once")
         assertEqual(files[0].filePath, "hello100.html", "commit telemetry contains the actual path")
