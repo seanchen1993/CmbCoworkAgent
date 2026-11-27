@@ -1,5 +1,11 @@
 import type { ProjectMetricFilters, ProjectMetricGroup } from "../../../../shared/project-metrics"
 import { EfficiencyGroupFilter } from "./EfficiencyGroupFilter"
+import {
+  EFFICIENCY_FILTER_MENU,
+  EFFICIENCY_FILTER_OPTION,
+  EFFICIENCY_FILTER_TRIGGER,
+  EFFICIENCY_ORG_FILTER_WIDTH
+} from "./efficiency-filter-styles"
 import { TimeControlBar } from "./TimeControlBar"
 import {
   formatRangeLabel,
@@ -356,15 +362,21 @@ function OrgFilterBar({
   value,
   options,
   loading,
+  efficiencyStyle,
   onChange
 }: {
   value: string[]
   options: string[]
   loading: boolean
+  efficiencyStyle: boolean
   onChange: (orgList: string[]) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const selectedSet = new Set(value)
+  const optionClassName = efficiencyStyle
+    ? EFFICIENCY_FILTER_OPTION
+    : "rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
+  const checkClassName = cn("size-3.5 shrink-0", !efficiencyStyle && "text-primary")
 
   const toggleOrg = (org: string): void => {
     if (selectedSet.has(org)) {
@@ -390,7 +402,11 @@ function OrgFilterBar({
           <Button
             variant="outline"
             size="sm"
-            className="h-7 w-[240px] justify-between gap-1 text-xs font-normal"
+            className={
+              efficiencyStyle
+                ? cn(EFFICIENCY_FILTER_TRIGGER, EFFICIENCY_ORG_FILTER_WIDTH)
+                : "h-7 w-[240px] justify-between gap-1 text-xs font-normal"
+            }
             title={triggerLabel}
             disabled={loading && options.length === 0}
           >
@@ -400,23 +416,35 @@ function OrgFilterBar({
             <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-[240px] p-1">
+        <PopoverContent
+          align="start"
+          className={
+            efficiencyStyle
+              ? cn(EFFICIENCY_FILTER_MENU, "w-[var(--radix-popover-trigger-width)] p-1")
+              : "w-[240px] p-1"
+          }
+        >
           <button
             type="button"
-            className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
+            aria-pressed={efficiencyStyle ? !value.length : undefined}
+            className={cn("flex w-full items-center justify-between", optionClassName)}
             onClick={() => onChange([])}
           >
             <span
               className={
-                value.length === 0 ? "font-medium text-foreground" : "text-muted-foreground"
+                !efficiencyStyle
+                  ? value.length === 0
+                    ? "font-medium text-foreground"
+                    : "text-muted-foreground"
+                  : undefined
               }
             >
               全部
             </span>
-            {value.length === 0 && <Check className="size-3.5 text-primary" />}
+            {value.length === 0 && <Check className={checkClassName} />}
           </button>
           <div className="my-1 h-px bg-border" />
-          <div className="max-h-64 overflow-y-auto pr-1">
+          <div className={cn("max-h-64 overflow-y-auto", efficiencyStyle ? "space-y-0.5" : "pr-1")}>
             {options.length === 0 ? (
               <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
                 暂无可选室
@@ -428,13 +456,17 @@ function OrgFilterBar({
                   <button
                     key={org}
                     type="button"
-                    className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/60"
+                    aria-pressed={efficiencyStyle ? checked : undefined}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 text-left",
+                      optionClassName
+                    )}
                     onClick={() => toggleOrg(org)}
                   >
                     <span className={cn("truncate", checked && "font-medium text-foreground")}>
                       {orgOptionLabel(org)}
                     </span>
-                    {checked && <Check className="size-3.5 shrink-0 text-primary" />}
+                    {checked && <Check className={checkClassName} />}
                   </button>
                 )
               })
@@ -4602,6 +4634,7 @@ function DashboardContent({
                 value={selectedOrgLv1List}
                 options={orgOptions}
                 loading={loading}
+                efficiencyStyle={activeMainTab === "efficiency"}
                 onChange={(rooms) => {
                   setEfficiencyGroups((groups) =>
                     groups.some((group) => !rooms.includes(group.roomName))

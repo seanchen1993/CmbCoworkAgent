@@ -8,6 +8,12 @@ import {
 import { Button } from "@renderer/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@renderer/components/ui/popover"
 import { cn } from "@renderer/lib/utils"
+import {
+  EFFICIENCY_FILTER_MENU,
+  EFFICIENCY_FILTER_OPTION,
+  EFFICIENCY_FILTER_TRIGGER,
+  EFFICIENCY_ORG_FILTER_WIDTH
+} from "./efficiency-filter-styles"
 
 interface EfficiencyGroupFilterProps extends ProjectMetricGroupOptions {
   value: ProjectMetricGroup[]
@@ -84,7 +90,7 @@ export function EfficiencyGroupFilter({
             aria-label={`组筛选：${title}`}
             variant="outline"
             size="sm"
-            className="h-7 w-[190px] justify-between gap-1 text-xs font-normal"
+            className={cn(EFFICIENCY_FILTER_TRIGGER, EFFICIENCY_ORG_FILTER_WIDTH)}
             title={enabled ? title : "请先选择室"}
             disabled={!enabled}
           >
@@ -92,18 +98,21 @@ export function EfficiencyGroupFilter({
             <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-[240px] p-1">
+        <PopoverContent
+          align="start"
+          className={cn(EFFICIENCY_FILTER_MENU, "w-[var(--radix-popover-trigger-width)] p-1")}
+        >
           <button
             type="button"
             aria-pressed={!value.length}
-            className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
+            className={cn(EFFICIENCY_FILTER_OPTION, "flex w-full items-center justify-between")}
             onClick={() => onChange([])}
           >
             全部
-            {!value.length && <Check className="size-3.5 text-primary" />}
+            {!value.length && <Check className="size-3.5" />}
           </button>
           <div className="my-1 h-px bg-border" />
-          <div className="max-h-64 overflow-y-auto">
+          <div className="max-h-64 space-y-0.5 overflow-y-auto">
             {list.map((group) => {
               const key = projectMetricGroupKey(group)
               const checked = selected.has(key)
@@ -113,11 +122,11 @@ export function EfficiencyGroupFilter({
                   type="button"
                   aria-pressed={checked}
                   title={label(group)}
-                  className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/60"
+                  className={cn(EFFICIENCY_FILTER_OPTION, "flex w-full items-center justify-between gap-2")}
                   onClick={() => toggleGroup(group, key)}
                 >
                   <span className={cn("truncate", checked && "font-medium")}>{label(group)}</span>
-                  {checked && <Check className="size-3.5 shrink-0 text-primary" />}
+                  {checked && <Check className="size-3.5 shrink-0" />}
                 </button>
               )
             })}

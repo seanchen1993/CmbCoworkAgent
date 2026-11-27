@@ -521,6 +521,75 @@ describe("研发效能组筛选", () => {
 })
 
 describe("有效样本明细筛选", () => {
+  it("分位数按项目内插并对齐明细和 Excel，零报工仍按原汇总口径处理", async () => {
+    const roomName = "A室"
+    const groupName = "一组"
+    const { deps } = fixture({
+      projects: [
+        project("P0", { groupName, devWorkHours: 0, notAdjustFuns: 10, bugNum: null }),
+        project("P1", { groupName, devWorkHours: 152.25, notAdjustFuns: 10, bugNum: 0 }),
+        project("P2", { groupName, devWorkHours: 152.25, notAdjustFuns: 20, bugNum: 2 }),
+        project("P3", { groupName, devWorkHours: 1218, notAdjustFuns: 320, bugNum: 4 }),
+        project("P4", { groupName: "二组", devWorkHours: 152.25, notAdjustFuns: 999 })
+      ],
+      snapshots: []
+    })
+    const filters = { ...october, upperOrgLv1: [roomName], selectedGroups: [{ roomName, groupName }] }
+    const result = await fetchProjectMetricSummary(filters, deps)
+    const group = result.groups[1]
+    expect(group.functionPointsPerPersonMonth).toBe(36)
+    expect(group.samples.productivity).toBe(4)
+    expect(group.percentiles?.functionPointsPerPersonMonth).toEqual({
+      sampleCount: 3,
+      values: { 50: 20, 80: 32, 90: 36 }
+    })
+    expect(group.percentiles?.avgBugCount).toMatchObject({ sampleCount: 3, values: { 50: 2 } })
+    expect(group.percentiles?.featuresPerPersonMonth).toBeUndefined()
+    expect(result.groups[0].percentiles?.avgBugCount).toEqual({
+      sampleCount: 0,
+      values: { 50: null, 80: null, 90: null }
+    })
+    const singleton = await fetchProjectMetricSummary(
+      { ...filters, selectedGroups: [{ roomName, groupName: "二组" }] },
+      deps
+    )
+    expect(singleton.groups[1].percentiles?.functionPointsPerPersonMonth).toEqual({
+      sampleCount: 1,
+      values: { 50: 999, 80: 999, 90: 999 }
+    })
+
+    const details = await fetchProjectMetricProjects(
+      filters,
+      { metricSample: "productivity", percentileMetric: "functionPointsPerPersonMonth", exportAll: true },
+      deps
+    )
+    expect(details.items.map((item) => item.prjCode).sort()).toEqual(["P1", "P2", "P3"])
+    await expect(fetchProjectMetricProjects(
+      filters,
+      { metricSample: "throughput", percentileMetric: "featuresPerPersonMonth" },
+      deps
+    )).rejects.toThrow("项目分位数样本筛选无效")
+
+    const exported = await fetchProjectMetricIndicatorExport(filters, deps)
+    const workbook = XLSX.read(
+      await buildDashboardExcelBuffer(projectMetricIndicatorSheets(exported, filters)),
+      { type: "buffer" }
+    )
+    const findMetric = (label: string, mode = "常规") =>
+      workbookTable(workbook, "组级指标", "室").rows.find(
+        (row) => row["指标"] === label && row["项目类型或来源"] === mode
+      )
+    expect(findMetric("每人月产出功能点")).toMatchObject({
+      结果: 36, P50: 20, P80: 32, P90: 36, 分位数样本项目数: 3
+    })
+    expect(findMetric("每人月上线特性数")?.P50 || "").toBe("")
+    expect(findMetric("平均缺陷数", "智能化")).toMatchObject({ P50: "—", 分位数样本项目数: 0 })
+    const evidence = workbookTable(workbook, "项目依据", "项目编号").rows
+    expect(evidence.find((row) => row["项目编号"] === "P0")?.["每人月产出功能点"]).toBe("—")
+    expect(evidence.map((row) => row["每人月产出功能点"]).filter((value) => typeof value === "number"))
+      .toEqual([10, 20, 40])
+  })
+
   it("同日审批晚于日期精度的立项仍以零耗时计入，跨日倒置继续排除", async () => {
     const { deps } = fixture({
       projects: [
@@ -1105,8 +1174,8 @@ describe("五Sheet指标追溯", () => {
     const expectedMetrics = [
       "应用研发智能化特性占比",
       "AI代码入库率",
-      "月人均产出功能点",
-      "月人均特性吞吐率",
+      "每人月产出功能点",
+      "每人月上线特性数",
       "特性审批完成到开发完成耗时",
       "特性审批完成到立项完成耗时",
       "平均缺陷数",
@@ -1213,7 +1282,7 @@ describe("五Sheet指标追溯", () => {
         expect(denominator).toBeCloseTo(Number(dCell.v), 8)
         expect(result.f).toContain("ISNUMBER")
         const factor =
-          row["指标"] === "月人均产出功能点" || row["指标"] === "月人均特性吞吐率"
+          row["指标"] === "每人月产出功能点" || row["指标"] === "每人月上线特性数"
             ? 152.25
             : percentage || row["指标"] === "平均缺陷密度"
               ? 100
@@ -1326,8 +1395,8 @@ describe("五Sheet指标追溯", () => {
     expect(featureHeaders.slice(8)).toEqual([
       "对应用研发智能化特性占比分子贡献",
       "对应用研发智能化特性占比分母贡献",
-      "对月人均特性吞吐率分子贡献（智能化项目）",
-      "对月人均特性吞吐率分子贡献（常规项目）",
+      "对每人月上线特性数分子贡献（智能化项目）",
+      "对每人月上线特性数分子贡献（常规项目）",
       "应用研发智能化特性占比分类（按全部关联项目判断）",
       "特性审批完成日期"
     ])
@@ -1336,8 +1405,8 @@ describe("五Sheet指标追溯", () => {
         "应用研发智能化特性占比分类（按全部关联项目判断）",
         "对应用研发智能化特性占比分母贡献",
         "对应用研发智能化特性占比分子贡献",
-        "对月人均特性吞吐率分子贡献（智能化项目）",
-        "对月人均特性吞吐率分子贡献（常规项目）"
+        "对每人月上线特性数分子贡献（智能化项目）",
+        "对每人月上线特性数分子贡献（常规项目）"
       ])
     )
     const aFeature = workbookTable(workbook, "特性依据", "统计层级").rows.filter(
@@ -1361,7 +1430,7 @@ describe("五Sheet指标追溯", () => {
       roomRows.find(
         (r) =>
           r["统计组织"] === "A室" &&
-          r["指标"] === "月人均特性吞吐率" &&
+          r["指标"] === "每人月上线特性数" &&
           r["项目类型或来源"] === "智能化"
       )?.["结果"]
     ).toBeCloseTo(4 / 3)
@@ -1534,7 +1603,7 @@ describe("五Sheet指标追溯", () => {
     expect(projects.map((row) => row["缺陷数"])).toEqual([7, "—", 3, 0])
     const team = workbookTable(workbook, "团队指标", "统计组织")
     for (const [metric, numerator, denominator, result, samples] of [
-      ["月人均产出功能点", 120, 304.5, 60, 3],
+      ["每人月产出功能点", 120, 304.5, 60, 3],
       ["平均缺陷密度", 3, 150, 2, 2],
       ["平均功能点", 180, 4, 45, 4],
       ["平均缺陷数", 10, 3, 10 / 3, 3]
@@ -1696,7 +1765,11 @@ describe("2026年10月完整mock", () => {
       const octoberTrend = makeMockProjectMetricTrend({}).months.find(
         (month) => month.month === "2026-10"
       )
-      expect(octoberTrend?.groups).toEqual(makeMockProjectMetricSummary(october).groups)
+      const comparison = makeMockProjectMetricSummary(october)
+      expect(octoberTrend?.groups).toEqual(comparison.groups.map((group) => ({
+        ...group,
+        percentiles: undefined
+      })))
     } finally {
       vi.useRealTimers()
     }
@@ -1733,7 +1806,7 @@ describe("2026年10月完整mock", () => {
         expect(d).toBeCloseTo(Number(denominator.v), 8)
         const metric = String(table.rows[i]["指标"])
         const factor =
-          metric === "月人均产出功能点" || metric === "月人均特性吞吐率"
+          metric === "每人月产出功能点" || metric === "每人月上线特性数"
             ? 152.25
             : metric === "平均缺陷密度" ||
                 metric === "应用研发智能化特性占比" ||

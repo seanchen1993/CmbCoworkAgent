@@ -21,6 +21,12 @@ import {
   Loader2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Select, SelectValue } from "@/components/ui/select"
+import {
+  EfficiencySelectContent,
+  EfficiencySelectItem,
+  EfficiencySelectTrigger
+} from "../EfficiencyFilterSelect"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type {
@@ -725,71 +731,85 @@ function ComputeSection({
     <section className="space-y-3">
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <label htmlFor="efficiency-scope">统计口径</label>
-        <select
-          id="efficiency-scope"
+        <Select
           value={scope}
           disabled={loading}
-          onChange={(event) =>
-            onPluginFilterChange({
-              ...pluginFilter,
-              scope: event.target.value === "all" ? "all" : "dev"
-            })
+          onValueChange={(value) =>
+            onPluginFilterChange({ ...pluginFilter, scope: value === "all" ? "all" : "dev" })
           }
-          className="h-8 rounded-md border border-border bg-background px-2"
         >
-          <option value="dev">Dev 研发阶段</option>
-          <option value="all">全流程</option>
-        </select>
+          <EfficiencySelectTrigger id="efficiency-scope" className="w-36">
+            <SelectValue />
+          </EfficiencySelectTrigger>
+          <EfficiencySelectContent>
+            <EfficiencySelectItem value="dev">Dev 研发阶段</EfficiencySelectItem>
+            <EfficiencySelectItem value="all">全流程</EfficiencySelectItem>
+          </EfficiencySelectContent>
+        </Select>
         <label htmlFor="efficiency-plugin">算力统计插件</label>
-        <select
-          id="efficiency-plugin"
-          value={name}
+        <Select
+          value={name ? `option:${name}` : "all"}
           disabled={loading}
-          onChange={(event) =>
+          onValueChange={(value) =>
             onPluginFilterChange({
               ...pluginFilter,
-              adapterName: event.target.value || null,
+              adapterName: value === "all" ? null : value.slice("option:".length),
               adapterVersion: null
             })
           }
-          className="h-8 max-w-64 rounded-md border border-border bg-background px-2"
         >
-          <option value="">全部插件</option>
-          {name && !options.some((option) => option.adapterName === name) ? (
-            <option value={name}>{name}（本期无记录）</option>
-          ) : null}
-          {options.map((option) => (
-            <option key={option.adapterName} value={option.adapterName}>
-              {option.adapterName}
-            </option>
-          ))}
-        </select>
+          <EfficiencySelectTrigger id="efficiency-plugin" className="w-auto max-w-64">
+            <SelectValue />
+          </EfficiencySelectTrigger>
+          <EfficiencySelectContent className="w-auto min-w-[var(--radix-select-trigger-width)] max-w-80">
+            <EfficiencySelectItem value="all">全部插件</EfficiencySelectItem>
+            {name && !options.some((option) => option.adapterName === name) ? (
+              <EfficiencySelectItem value={`option:${name}`}>
+                {name}（本期无记录）
+              </EfficiencySelectItem>
+            ) : null}
+            {options.map((option) => (
+              <EfficiencySelectItem
+                key={option.adapterName}
+                value={`option:${option.adapterName}`}
+                className="whitespace-normal break-words"
+              >
+                {option.adapterName}
+              </EfficiencySelectItem>
+            ))}
+          </EfficiencySelectContent>
+        </Select>
         {name ? (
           <>
             <label htmlFor="efficiency-version">版本</label>
-            <select
-              id="efficiency-version"
-              value={version}
+            <Select
+              value={version ? `option:${version}` : "all"}
               disabled={loading}
-              onChange={(event) =>
+              onValueChange={(value) =>
                 onPluginFilterChange({
                   ...pluginFilter,
                   adapterName: name,
-                  adapterVersion: event.target.value || null
+                  adapterVersion: value === "all" ? null : value.slice("option:".length)
                 })
               }
-              className="h-8 max-w-48 rounded-md border border-border bg-background px-2"
             >
-              <option value="">全部版本</option>
-              {version && !versions.includes(version) ? (
-                <option value={version}>{version}（本期无记录）</option>
-              ) : null}
-              {versions.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
+              <EfficiencySelectTrigger id="efficiency-version" className="w-auto max-w-48">
+                <SelectValue />
+              </EfficiencySelectTrigger>
+              <EfficiencySelectContent className="w-auto min-w-[var(--radix-select-trigger-width)] max-w-72">
+                <EfficiencySelectItem value="all">全部版本</EfficiencySelectItem>
+                {version && !versions.includes(version) ? (
+                  <EfficiencySelectItem value={`option:${version}`}>
+                    {version}（本期无记录）
+                  </EfficiencySelectItem>
+                ) : null}
+                {versions.map((item) => (
+                  <EfficiencySelectItem key={item} value={`option:${item}`}>
+                    {item}
+                  </EfficiencySelectItem>
+                ))}
+              </EfficiencySelectContent>
+            </Select>
           </>
         ) : null}
       </div>

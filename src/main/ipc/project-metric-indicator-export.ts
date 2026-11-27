@@ -1,5 +1,6 @@
 import {
   PROJECT_METRIC_TEAM,
+  PROJECT_METRIC_PERCENTILES,
   type ProjectMetricFilters,
   type ProjectMetricIndicatorExportData,
   type ProjectMetricProjectEvidence,
@@ -11,7 +12,8 @@ import {
   PROJECT_METRIC_INDICATORS,
   PROJECT_AI_RATE_TIP,
   PROJECT_FEATURE_COVERAGE_TIP,
-  PROJECT_MONTHLY_TIP
+  PROJECT_MONTHLY_TIP,
+  readProjectMetricPercentileSample
 } from "../../shared/project-metric-indicators"
 import { formatProjectDate, projectDateMillis } from "../../shared/project-metric-calendar"
 import {
@@ -154,8 +156,8 @@ const featureFields: Field[] = [
   ["room", "项目所属室"],
   ["coverageSmart", "对应用研发智能化特性占比分子贡献"],
   ["coverageTotal", "对应用研发智能化特性占比分母贡献"],
-  ["throughputSmart", "对月人均特性吞吐率分子贡献（智能化项目）"],
-  ["throughputRegular", "对月人均特性吞吐率分子贡献（常规项目）"],
+  ["throughputSmart", "对每人月上线特性数分子贡献（智能化项目）"],
+  ["throughputRegular", "对每人月上线特性数分子贡献（常规项目）"],
   ["featureMode", "应用研发智能化特性占比分类（按全部关联项目判断）"],
   ["approved", "特性审批完成日期"]
 ]
@@ -318,6 +320,11 @@ const metricFields: Field[] = [
     })
   ).entries()
 ]
+const percentileBasisFields: Field[] = PROJECT_METRIC_INDICATORS.flatMap((metric) =>
+  metric.percentile && operands[metric.key].denominatorColumn
+    ? [[`percentile:${metric.key}`, metric.percentile.label] as Field]
+    : []
+)
 function countNumbers(
   table: Table,
   column: string,
@@ -344,7 +351,9 @@ const summaryFields: Field[] = [
   ["samples", "有效样本项目数"],
   ["formula", "计算说明"],
   ["numeratorLink", "分子依据"],
-  ["denominatorLink", "分母依据"]
+  ["denominatorLink", "分母依据"],
+  ...PROJECT_METRIC_PERCENTILES.map((percent): Field => [`p${percent}`, `P${percent}`]),
+  ["percentileSamples", "分位数样本项目数"]
 ]
 
 export function projectMetricIndicatorSheets(
@@ -396,6 +405,7 @@ export function projectMetricIndicatorSheets(
       ...projectFields,
       ...(scoped ? [["group", "项目所属组"] as Field] : []),
       ...metricFields,
+      ...percentileBasisFields,
       ...categories.map((category): Field => [`category:${category}`, `非功能问题－${category}`]),
       ...projectDateFields
     ],
@@ -404,7 +414,8 @@ export function projectMetricIndicatorSheets(
       [
         "说明",
         "每个项目一行，不参与该指标的值显示—，有效零值显示0。均值按数值项目计数；比率先分别合计对应分子、分母再计算。报工、代码和Token为项目累计值。"
-      ]
+      ],
+      ["分位数依据", "对同一组织和项目类型的有效项目值取分位数。项目比率使用本表的逐项目比率。"]
     ]
   )
   const featureTable = makeTable("特性依据", [
@@ -479,6 +490,11 @@ export function projectMetricIndicatorSheets(
         row[metricColumn(metric.key, "denominator")] = included
           ? num(values[operand.denominatorColumn])
           : "—"
+      if (metric.percentile && operand.denominatorColumn) {
+        row[`percentile:${metric.key}`] = included
+          ? num(readProjectMetricPercentileSample(metric, p))
+          : "—"
+      }
     }
     row.fp = reasons.functionPoint === null ? num(p.notAdjustFuns) : "—"
     row.bugs = reasons.bug === null ? num(p.bugNum) : "—"
@@ -608,11 +624,15 @@ export function projectMetricIndicatorSheets(
       lines: record.pushedAdoptedLines,
       effective: record.pushedEffectiveGeneratedLines
     })
-  const teamTable = makeTable("团队指标", summaryFields, metadata)
-  const roomTable = makeTable("各室指标", summaryFields, metadata)
+  const summaryMetadata: DashboardExcelCell[][] = [
+    ...metadata,
+    ["分位数口径", "P50、P80、P90 由有效项目的指标值按 PERCENTILE.INC 的线性插值口径计算。"]
+  ]
+  const teamTable = makeTable("团队指标", summaryFields, summaryMetadata)
+  const roomTable = makeTable("各室指标", summaryFields, summaryMetadata)
   const groupTable = makeTable("组级指标", [
     ["scope", "室"], ["group", "组"], ...summaryFields.slice(1)
-  ], metadata)
+  ], summaryMetadata)
   const addSummary = (
     table: Table,
     record: RecordCells,
@@ -626,6 +646,10 @@ export function projectMetricIndicatorSheets(
       d = cell(table, "denominator", row)
     const unit = String(record.unit)
     table.add({
+      p50: "",
+      p80: "",
+      p90: "",
+      percentileSamples: "",
       ...record,
       numerator,
       denominator,
@@ -674,6 +698,16 @@ export function projectMetricIndicatorSheets(
         const notApplicable =
           group.developmentMode === "non_devclaw" &&
           ["token", "codeLines", "tokensPerLine"].includes(operand.sample)
+        const distribution = notApplicable ? undefined : group.percentiles?.[metric.key]
+        const percentiles: RecordCells = {}
+        if (distribution) {
+          percentiles.percentileSamples = distribution.sampleCount
+          for (const percent of PROJECT_METRIC_PERCENTILES) {
+            const value = distribution.values[percent]
+            percentiles[`p${percent}`] =
+              value === null ? "—" : { value, numberFormat: `0.00" ${metric.unit}"` }
+          }
+        }
         const conditions = projectConditions(scope, modeNames[group.developmentMode])
         if (metric.key === "functionPointsPerPersonMonth")
           conditions.push(["fp", ">=0"], [metricColumn(metric.key, "denominator"), ">=0"])
@@ -696,6 +730,7 @@ export function projectMetricIndicatorSheets(
             group: scope.group ?? "",
             metric: metric.label,
             mode: modeNames[group.developmentMode],
+            ...percentiles,
             numeratorName: operand.numeratorName,
             denominatorName: operand.denominatorName,
             unit: metric.unit,

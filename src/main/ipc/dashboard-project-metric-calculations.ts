@@ -1,5 +1,7 @@
 import {
   PROJECT_HOURS_PER_PERSON_MONTH,
+  PROJECT_METRIC_PERCENTILES,
+  type ProjectMetricDistribution,
   type ProjectMetricProjectItem,
   type ProjectMetricSummaryGroup,
   type ProjectMetricFilters,
@@ -13,11 +15,43 @@ import {
   projectMetricSampleReasons,
   type ProjectMetricSampleKey
 } from "../../shared/project-metric-samples"
+import {
+  PROJECT_METRIC_INDICATORS,
+  readProjectMetricPercentileSample
+} from "../../shared/project-metric-indicators"
+
 export { projectInPeriod } from "../../shared/project-metric-samples"
+
+function projectMetricDistributions(
+  samples: Record<ProjectMetricSampleKey, ProjectMetricProjectItem[]>
+): NonNullable<ProjectMetricSummaryGroup["percentiles"]> {
+  const distributions: NonNullable<ProjectMetricSummaryGroup["percentiles"]> = {}
+  for (const indicator of PROJECT_METRIC_INDICATORS) {
+    if (!indicator.percentile) continue
+    const values = samples[indicator.sample]
+      .map((project) => readProjectMetricPercentileSample(indicator, project))
+      .filter((value): value is number => value !== null)
+      .sort((a, b) => a - b)
+    const sampleCount = values.length
+    const percentiles = Object.fromEntries(
+      PROJECT_METRIC_PERCENTILES.map((percent) => {
+        if (!sampleCount) return [percent, null]
+        const index = ((sampleCount - 1) * percent) / 100
+        const lowerIndex = Math.floor(index)
+        const lower = values[lowerIndex]
+        const upper = values[Math.ceil(index)]
+        return [percent, lower + (upper - lower) * (index - lowerIndex)]
+      })
+    ) as ProjectMetricDistribution["values"]
+    distributions[indicator.key] = { sampleCount, values: percentiles }
+  }
+  return distributions
+}
 
 export function projectMetricGroups(
   items: ProjectMetricProjectItem[],
-  filters: ProjectMetricFilters
+  filters: ProjectMetricFilters,
+  includePercentiles = true
 ): ProjectMetricSummaryGroup[] {
   const evaluated = items.map((item) => ({
     item,
@@ -101,6 +135,7 @@ export function projectMetricGroups(
       projectCount: projects.length,
       ...values,
       calculations,
+      ...(includePercentiles ? { percentiles: projectMetricDistributions(samples) } : {}),
       productivityFunctionPoints: calculations.functionPointsPerPersonMonth.numerator,
       productivityWorkHours: calculations.functionPointsPerPersonMonth.denominator,
       throughputFeatureCount: calculations.featuresPerPersonMonth.numerator,

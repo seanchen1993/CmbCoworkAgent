@@ -38,6 +38,10 @@ import {
 } from "../../shared/project-metric-samples"
 import { projectInPeriod, projectMetricGroups } from "./dashboard-project-metric-calculations"
 import {
+  PROJECT_METRIC_BY_KEY,
+  readProjectMetricPercentileSample
+} from "../../shared/project-metric-indicators"
+import {
   PROJECT_METRIC_MOCK_ROOMS,
   PROJECT_METRIC_MOCK_PROJECTS,
   PROJECT_METRIC_MOCK_FEATURES,
@@ -679,7 +683,7 @@ export async function fetchProjectMetricTrend(
   return {
     months: months.map(({ month, range }) => ({
       month,
-      groups: summarize(ctx, { ...filters, range }).groups
+      groups: projectMetricGroups(ctx.items, { ...filters, range }, false)
     })),
     truncated: false,
     warnings: ctx.warnings
@@ -730,6 +734,11 @@ function validateMetricSample(options: ProjectMetricListOptions): void {
     !PROJECT_METRIC_SAMPLE_KEYS.includes(options.metricSample)
   )
     throw new Error("项目指标样本筛选无效")
+  if (options.percentileMetric !== undefined) {
+    const indicator = PROJECT_METRIC_BY_KEY.get(options.percentileMetric)
+    if (!indicator?.percentile || indicator.sample !== options.metricSample)
+      throw new Error("项目分位数样本筛选无效")
+  }
 }
 function selectProjectMetricProjects(
   items: ProjectMetricProjectItem[],
@@ -738,10 +747,14 @@ function selectProjectMetricProjects(
 ): Pick<ProjectMetricProjectsData, "items" | "total" | "page" | "pageSize"> {
   const keyword = string(options.keyword).toLowerCase()
   const department = string(options.departmentKeyword).toLowerCase()
+  const percentileMetric = options.percentileMetric
+    ? PROJECT_METRIC_BY_KEY.get(options.percentileMetric)
+    : undefined
   const selectedItems = items.filter(
     (p) =>
       (!filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(p.roomName)) &&
       matchesProjectMetricGroups(p, filters.selectedGroups) &&
+      (!percentileMetric || readProjectMetricPercentileSample(percentileMetric, p) !== null) &&
       (options.metricSample
         ? projectMetricSampleReasons(p, filters)[options.metricSample] === null
         : projectInPeriod(
@@ -1499,7 +1512,7 @@ export function makeMockProjectMetricTrend(
   return {
     months: recentMonths().map(({ month, range }) => ({
       month,
-      groups: mockSummary(items, { ...filters, range }).groups
+      groups: projectMetricGroups(items, { ...filters, range }, false)
     })),
     truncated: false,
     warnings: [PROJECT_CALENDAR_NOTE]

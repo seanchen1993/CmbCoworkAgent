@@ -45,6 +45,7 @@ export interface ProjectMetricListOptions {
   developmentMode?: "all" | ProjectMetricDevelopmentMode
   /** 项目明细按指定指标的有效样本过滤，先筛选再分页。 */
   metricSample?: keyof ProjectMetricSamples
+  percentileMetric?: ProjectMetricValueKey
   keyword?: string
   departmentKeyword?: string
   page?: number
@@ -99,6 +100,14 @@ export type ProjectMetricValueKey =
   | "inputTokensPerAdoptedLine"
   | "outputTokensPerAdoptedLine"
 
+export const PROJECT_METRIC_PERCENTILES = [50, 80, 90] as const
+export type ProjectMetricPercentile = (typeof PROJECT_METRIC_PERCENTILES)[number]
+
+export interface ProjectMetricDistribution {
+  sampleCount: number
+  values: Record<ProjectMetricPercentile, number | null>
+}
+
 export interface ProjectMetricCalculation {
   numerator: number
   denominator: number
@@ -109,6 +118,7 @@ export interface ProjectMetricSummaryGroup {
   developmentMode: ProjectMetricDevelopmentMode
   projectCount: number
   calculations: Record<ProjectMetricValueKey, ProjectMetricCalculation>
+  percentiles?: Partial<Record<ProjectMetricValueKey, ProjectMetricDistribution>>
   functionPointsPerPersonMonth: number | null
   featuresPerPersonMonth: number | null
   avgApprovalDevelopmentDays: number | null
