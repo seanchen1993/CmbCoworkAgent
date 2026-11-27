@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -102,6 +103,7 @@ import {
   prepareHarnessKnowledgeDeposition,
   getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessRunDetail,
+  resolveHarnessCodeDialogueWorkspace,
   resolveHarnessFeatureCurrentStage,
   inspectHarnessManagedFeatureStatus
 } from "./service"
@@ -315,6 +317,32 @@ describe("page and conversation inspection sharing", () => {
       status: "已完成"
     })
     expect(await readFile(countFile, "utf8")).toBe("xxx")
+  })
+})
+
+describe("code dialogue workspace", () => {
+  it("uses the plan component inside a repository outside the project workspace", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "harness-code-repository-"))
+    try {
+      const component = join(repository, "packages", "report")
+      await mkdir(component, { recursive: true })
+      await updateHarnessFeatureDeployUnits({
+        projectId: "p",
+        featureId: "f",
+        selectedDeployUnits: [],
+        sessionWorkspace: { source: "directory", path: repository }
+      })
+      const script = join(state.root, "inspect-code-workspace.cjs")
+      const snapshot = { run: { codeDialogueWorkspace: component } }
+      await writeFile(script, `process.stdout.write(${JSON.stringify(JSON.stringify(snapshot))})`)
+      state.featureCommand = `"${process.execPath}" "${script}"`
+
+      await expect(resolveHarnessCodeDialogueWorkspace("p", "f")).resolves.toBe(
+        await realpath(component)
+      )
+    } finally {
+      await rm(repository, { recursive: true, force: true })
+    }
   })
 })
 

@@ -4237,29 +4237,23 @@ async function validateFeatureWorkspace(
 }
 
 export async function resolveHarnessCodeDialogueWorkspace(
-  projectId: string, featureId: string, fallback?: string
+  projectId: string,
+  featureId: string,
+  fallback?: string
 ): Promise<string> {
   const context = await requireProjectContext(projectId)
   const snapshot = await runInspectAdapter(
-    context.project, projectConfigContextFromWorker(context), "run", featureId, true
+    context.project,
+    projectConfigContextFromWorker(context),
+    "run",
+    featureId,
+    true
   )
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const candidate = normalizeText(run.codeDialogueWorkspace).trim()
   if (!candidate) return fallback ?? requireHarnessFeatureWorkspace(projectId, featureId)
   if (!isAbsolute(candidate)) throw new Error("Plan 中的 Code 仓库路径无效")
-  const [repo, project] = await Promise.all([
-    realpath(candidate), realpath(context.project.workspacePath)
-  ])
-  if (!isInsideDirectory(project, repo)) {
-    const bound = await findFeatureDeployUnitBinding(projectId, featureId)
-    const selected = [fallback, resolveFeatureWorkspace(bound?.sessionWorkspace, bound?.selectedDeployUnitMappings ?? []),
-      ...(bound?.selectedDeployUnitMappings ?? []).map((item) => item.localRepoPath)]
-    const roots = await Promise.all(
-      selected.filter((path): path is string => Boolean(path)).map((path) => realpath(path).catch(() => undefined))
-    )
-    if (!roots.includes(repo)) throw new Error(`Plan 仓库未绑定到当前 Feature：${repo}`)
-  }
-  return repo
+  return realpath(candidate)
 }
 
 export async function requireHarnessFeatureWorkspace(
