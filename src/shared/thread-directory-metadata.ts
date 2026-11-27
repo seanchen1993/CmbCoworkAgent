@@ -19,6 +19,7 @@ export const THREAD_LIST_PRIORITY_KEYS = [
   "botMockTransport",
   "botGroupId",
   "workspacePath",
+  "chatProject",
   "harnessFeature",
   "harnessProjectSession",
   "harnessProjectName",

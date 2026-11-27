@@ -1,3 +1,4 @@
+import type { ChatProject, ChatProjectChange, UserGenerationSplit } from "../shared/chat-project"
 import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
 import type { GitPanelOperationOptions, GitPanelRepository, GitPanelSnapshot } from "../shared/git-panel-repository"
 import type { GitGraphPage } from "../shared/git-graph"
@@ -1209,6 +1210,16 @@ const api = {
     }
   },
   threads: {
+    onChatProjectChanged: (callback: (change: ChatProjectChange) => void): (() => void) => {
+      const listener = (_: Electron.IpcRendererEvent, change: ChatProjectChange) => callback(change)
+      ipcRenderer.on("threads:chatProjectChanged", listener)
+      return () => ipcRenderer.removeListener("threads:chatProjectChanged", listener)
+    },
+    workspaceProjects: (): Promise<Record<string, ChatProject>> => ipcRenderer.invoke("threads:workspaceProjects"),
+    setWorkspaceProject: (path: string, project: ChatProject | null): Promise<void> =>
+      ipcRenderer.invoke("threads:setWorkspaceProject", path, project),
+    setChatProject: (id: string, project: ChatProject | null): Promise<void> =>
+      ipcRenderer.invoke("threads:setChatProject", id, project),
     searchEnabled: process.env.CMB_DISABLE_THREAD_SEARCH !== "1",
     searchStart: (request: ThreadSearchStartRequest): Promise<ThreadSearchPage> => ipcRenderer.invoke("threads:search-start", request),
     searchContinue: (cursor: string): Promise<ThreadSearchPage> => ipcRenderer.invoke("threads:search-continue", cursor),
@@ -1253,8 +1264,8 @@ const api = {
     ): Promise<Thread | null> => {
       return ipcRenderer.invoke("threads:get", threadId, options)
     },
-    create: (metadata?: Record<string, unknown>): Promise<Thread> => {
-      return ipcRenderer.invoke("threads:create", metadata)
+    create: (metadata?: Record<string, unknown>, newWorkspaceProject?: ChatProject): Promise<Thread> => {
+      return ipcRenderer.invoke("threads:create", metadata, newWorkspaceProject)
     },
     fork: (params: ThreadForkParams): Promise<ThreadForkResponse> => {
       return ipcRenderer.invoke("threads:fork", params)
@@ -4464,6 +4475,8 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:userList", range, options),
+    userGenerationSplit: (sapId: string, range: { from: string; to: string }): Promise<{ success: boolean; data?: UserGenerationSplit; error?: string }> =>
+      ipcRenderer.invoke("dashboard:userGenerationSplit", sapId, range),
     userDetail: (
       sapId: string,
       range: { from: string; to: string },

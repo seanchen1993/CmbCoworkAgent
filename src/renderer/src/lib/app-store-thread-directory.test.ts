@@ -3,6 +3,7 @@ import type { ThreadSummaryPage } from "../../../main/types"
 import type { Thread } from "../types"
 import {
   adoptThreadSearchSummary,
+  applyThreadProjectChange,
   initializeStartupWorkspace,
   registerSideThreadSummary,
   retireRendererThread,
@@ -53,6 +54,24 @@ describe("app store thread-directory loading", () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it("keeps a project rebind received while the directory reloads and rejects an older incarnation", async () => {
+    const thread = { ...createThread("rebind"), metadata: { remoteReadOnly: false } }
+    let resolvePage!: (page: ThreadSummaryPage) => void
+    const page = new Promise<ThreadSummaryPage>((resolve) => { resolvePage = resolve })
+    vi.stubGlobal("window", { api: { threads: { listPage: () => page } } })
+    useAppStore.setState({ threads: [thread] })
+    const loading = useAppStore.getState().loadThreads()
+    const change = {
+      kind: "thread" as const, id: "rebind", createdAt: 1, updatedAt: 10,
+      project: { code: "P001", fromLean: true }
+    }
+    applyThreadProjectChange(change)
+    applyThreadProjectChange({ ...change, createdAt: 0, project: null })
+    resolvePage(createPage([thread]))
+    await loading
+    expect(useAppStore.getState().threads[0].metadata).toEqual({ ...thread.metadata, chatProject: change.project })
   })
 
   it("keeps an incoming directory row when its stream starts before the first page arrives", async () => {

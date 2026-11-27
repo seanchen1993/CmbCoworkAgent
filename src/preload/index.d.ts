@@ -1,3 +1,4 @@
+import type { ChatProject, ChatProjectChange, UserGenerationSplit } from "../shared/chat-project"
 import type { BtwRequest, BtwSkillRequestClosed } from "../shared/btw-chat"
 import type { GitPanelOperationOptions, GitPanelRepository, GitPanelSnapshot } from "../shared/git-panel-repository"
 import type { GitGraphPage } from "../shared/git-graph"
@@ -1251,6 +1252,10 @@ interface CustomAPI {
     onWorkflowAgentStream: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
+    onChatProjectChanged: (callback: (change: ChatProjectChange) => void) => () => void
+    workspaceProjects: () => Promise<Record<string, ChatProject>>
+    setWorkspaceProject: (path: string, project: ChatProject | null) => Promise<void>
+    setChatProject: (id: string, project: ChatProject | null) => Promise<void>
     searchEnabled: boolean
     searchStart: (request: ThreadSearchStartRequest) => Promise<ThreadSearchPage>
     searchContinue: (cursor: string) => Promise<ThreadSearchPage>
@@ -1267,7 +1272,7 @@ interface CustomAPI {
       threadId: string,
       options?: { requestScope?: "foreground-hydration" }
     ) => Promise<Thread | null>
-    create: (metadata?: Record<string, unknown>) => Promise<Thread>
+    create: (metadata?: Record<string, unknown>, newWorkspaceProject?: ChatProject) => Promise<Thread>
     fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
     listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
     resolveForkCheckpointForMessage: (
@@ -3032,6 +3037,7 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardUserListOptions
     ) => Promise<{ success: boolean; data?: DashboardUserListData; error?: string }>
+    userGenerationSplit: (sapId: string, range: TimeRange) => Promise<{ success: boolean; data?: UserGenerationSplit; error?: string }>
     userDetail: (
       sapId: string,
       range: { from: string; to: string },

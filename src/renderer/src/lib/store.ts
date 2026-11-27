@@ -1,3 +1,4 @@
+import type { ChatProject, ChatProjectChange } from "../../../shared/chat-project"
 import {
   compatibleWorkerProviderIdentity,
   createWorkerSignatureMatches,
@@ -968,6 +969,7 @@ interface ThreadNavigationOptions {
 }
 
 interface ThreadCreationOptions extends ThreadNavigationOptions {
+  newWorkspaceProject?: ChatProject
   selectIf?: () => boolean
 }
 
@@ -1472,7 +1474,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadCreationOptions) => {
-    const thread = await window.api.threads.create(metadata)
+    const thread = await window.api.threads.create(metadata, options?.newWorkspaceProject)
     if (options?.selectIf?.() === false) {
       get().addThreadSummary(thread)
       return thread
@@ -2742,6 +2744,24 @@ export function selectSkillRetryContext(
 /** Only an acknowledged side-tab creation or a still-open tab may admit a new ID. */
 export function registerSideThreadSummary(thread: Thread): void {
   useAppStore.setState(state => ({ sideThreads: new Map(state.sideThreads).set(thread.thread_id, thread) }))
+}
+
+export function applyThreadProjectChange(
+  change: Extract<ChatProjectChange, { kind: "thread" }>
+): void {
+  const threads = useAppStore.getState().threads
+  const index = getThreadDirectoryIndex(threads).get(change.id)
+  if (index === undefined || isThreadDeletionPending(change.id)) return
+  const row = threads[index]
+  if (+new Date(row.created_at) !== change.createdAt) return
+  markThreadDirectoryMutation(change.id)
+  const next = [...threads]
+  next[index] = {
+    ...row,
+    updated_at: new Date(Math.max(+new Date(row.updated_at), change.updatedAt)),
+    metadata: { ...row.metadata, chatProject: change.project }
+  }
+  useAppStore.setState({ threads: adoptThreadDirectorySnapshot(next) })
 }
 
 export function selectThreadSummary(state: Pick<AppState, "threads" | "sideThreads">, threadId: string): Thread | undefined {

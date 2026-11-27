@@ -22,6 +22,7 @@ import { getUserInfo } from "../storage"
 import { getLocalIP } from "../net-utils"
 import { nowIsoLocal } from "../util/local-time"
 import { deriveUpperOrgLevelsFromPath } from "../org-levels"
+import { chatProjectEventSnapshot } from "../db/chat-project"
 
 // ─────────────────────────────────────────────────────────
 // Constants
@@ -459,12 +460,24 @@ export function buildEvent(
   eventCategory: EventCategory,
   properties?: Record<string, unknown>
 ): CoworkEvent {
+  const context = buildEventContext()
+  if (
+    properties &&
+    !properties.harnessProjectId &&
+    (eventName === "code_gen" || eventName === "code_adopt")
+  ) {
+    const snapshot = chatProjectEventSnapshot(
+      properties.rootThreadId ?? properties.threadId,
+      context.sapId
+    )
+    if (snapshot) properties = { ...properties, ...snapshot }
+  }
   return {
     eventId: randomUUID(),
     eventName,
     eventCategory,
     eventTime: nowIsoLocal(),
-    ...buildEventContext(),
+    ...context,
     properties
   }
 }

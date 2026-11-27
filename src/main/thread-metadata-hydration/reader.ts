@@ -57,6 +57,7 @@ const THREAD_LIST_KNOWN_STRING_KEYS = new Set([
   "projectName"
 ])
 const THREAD_LIST_SMALL_OBJECT_KEYS = new Set([
+  "chatProject",
   "harnessFeature",
   "harnessProjectSession",
   "routingState",
