@@ -136,25 +136,25 @@ export function RequirementQuickStartDialog({
   onSelect: (selection: RequirementQuickStartSelection) => void
 }): React.JSX.Element {
   const [step, setStep] = useState<"persona" | "source">(() => initialStep())
-  const [persona, setPersona] = useState<RequirementPersona | null>(() => readStoredPersona())
-  const [skipPersonaSelection, setSkipPersonaSelection] = useState(() => readSkipPersonaSelection())
+  const [persona, setPersona] = useState<RequirementPersona | null>(() => readStoredRequirementPersona())
+  const [skipPersonaSelection, setSkipPersonaSelection] = useState(() => readSkipRequirementPersonaSelection())
 
   useEffect(() => {
-    if (!open || !readSkipPersonaSelection() || readStoredPersona() !== "business") return
+    if (!open || !readSkipRequirementPersonaSelection() || readStoredRequirementPersona() !== "business") return
     onOpenChange(false)
     onSelect({ source: "text", target: "conversation" })
   }, [onOpenChange, onSelect, open])
 
   const changeOpen = (nextOpen: boolean): void => {
     if (!nextOpen) {
-      const storedPersona = readStoredPersona()
+      const storedPersona = readStoredRequirementPersona()
       setStep(
-        readSkipPersonaSelection() && storedPersona && storedPersona !== "business"
+        readSkipRequirementPersonaSelection() && storedPersona && storedPersona !== "business"
           ? "source"
           : "persona"
       )
       setPersona(storedPersona)
-      setSkipPersonaSelection(readSkipPersonaSelection())
+      setSkipPersonaSelection(readSkipRequirementPersonaSelection())
     }
     onOpenChange(nextOpen)
   }
