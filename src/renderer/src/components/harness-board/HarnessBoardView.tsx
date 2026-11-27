@@ -213,6 +213,11 @@ import {
   findSelectedAdapter
 } from "./project-dialog-plugin-visibility"
 import {
+  isImeComposing,
+  resolveNormalizedInputValue,
+  sanitizeHarnessNameInput
+} from "./harness-ime-input"
+import {
   HARNESS_PROJECT_DETAIL_BATCH_SIZE,
   MAX_HARNESS_PROJECT_DETAIL_CACHE_ENTRIES,
   cacheHarnessBoardCatalog,
@@ -680,10 +685,6 @@ function normalizeWorkspacePath(value: unknown): string | null {
 
 function getThreadWorkspacePath(thread: Thread | null | undefined): string | null {
   return normalizeWorkspacePath(thread?.metadata?.workspacePath)
-}
-
-function sanitizeHarnessNameInput(value: string): string {
-  return value.replace(/\s+/g, "")
 }
 
 function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
@@ -2444,6 +2445,7 @@ function EnterpriseProjectSearchInput({
   const [hasMore, setHasMore] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState("")
   const requestIdRef = useRef(0)
+  const isComposingRef = useRef(false)
   const keyword = searchKeyword.trim() === value.trim() ? searchKeyword.trim() : ""
   const shouldShowPopover =
     open &&
@@ -2500,6 +2502,17 @@ function EnterpriseProjectSearchInput({
     onSelect(project)
   }
 
+  const applyInputValue = (rawValue: string, composing: boolean): void => {
+    const nextValue = resolveNormalizedInputValue(rawValue, composing, normalizeValue)
+    requestIdRef.current += 1
+    setSearchKeyword(composing ? "" : nextValue)
+    setLoading(false)
+    setProjects([])
+    setHasMore(false)
+    onValueChange(nextValue)
+    setOpen(!composing && nextValue.trim().length > 0)
+  }
+
   return (
     <Popover
       open={shouldShowPopover}
@@ -2515,17 +2528,24 @@ function EnterpriseProjectSearchInput({
         <Input
           autoFocus={autoFocus}
           value={value}
+          onCompositionStart={() => {
+            isComposingRef.current = true
+          }}
+          onCompositionEnd={(event) => {
+            isComposingRef.current = false
+            applyInputValue(event.currentTarget.value, false)
+          }}
+          onBlur={(event) => {
+            if (!isComposingRef.current) return
+            isComposingRef.current = false
+            applyInputValue(event.currentTarget.value, false)
+          }}
           onChange={(event) => {
-            const nextValue = normalizeValue
-              ? normalizeValue(event.target.value)
-              : event.target.value
-            requestIdRef.current += 1
-            setSearchKeyword(nextValue)
-            setLoading(false)
-            setProjects([])
-            setHasMore(false)
-            onValueChange(nextValue)
-            setOpen(nextValue.trim().length > 0)
+            const composing = isImeComposing(
+              isComposingRef.current,
+              event.nativeEvent as InputEvent
+            )
+            applyInputValue(event.target.value, composing)
           }}
           onFocus={() => {
             if (keyword) setOpen(true)
@@ -3627,11 +3647,17 @@ function FeatureCreateDialog({
   const workspaceInputRef = useRef<HTMLInputElement>(null)
   const dialogTitleRef = useRef<HTMLHeadingElement>(null)
   const [botTarget, setBotTarget] = useState<BotFeatureTarget | null>(null)
+  const isFeatureNameComposingRef = useRef(false)
+  const [isFeatureNameComposing, setIsFeatureNameComposing] = useState(false)
   useEffect(() => {
     setBotTarget(null)
+    isFeatureNameComposingRef.current = false
+    setIsFeatureNameComposing(false)
   }, [project?.projectId, mode])
   const editing = mode === "edit"
-  const featureNameError = getHarnessNameError("特性名称", featureName)
+  const featureNameError = isFeatureNameComposing
+    ? null
+    : getHarnessNameError("特性名称", featureName)
   const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
   const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
   const customRequiredNodeIds = requiredWorkflowNodeIds(workflowConfig, workflowTemplate)
@@ -3951,7 +3977,34 @@ function FeatureCreateDialog({
             特性名称 *
             <Input
               value={featureName}
-              onChange={(event) => onChange(sanitizeHarnessNameInput(event.target.value))}
+              onCompositionStart={() => {
+                isFeatureNameComposingRef.current = true
+                setIsFeatureNameComposing(true)
+              }}
+              onCompositionEnd={(event) => {
+                isFeatureNameComposingRef.current = false
+                setIsFeatureNameComposing(false)
+                onChange(sanitizeHarnessNameInput(event.currentTarget.value))
+              }}
+              onBlur={(event) => {
+                if (!isFeatureNameComposingRef.current) return
+                isFeatureNameComposingRef.current = false
+                setIsFeatureNameComposing(false)
+                onChange(sanitizeHarnessNameInput(event.currentTarget.value))
+              }}
+              onChange={(event) => {
+                const composing = isImeComposing(
+                  isFeatureNameComposingRef.current,
+                  event.nativeEvent as InputEvent
+                )
+                onChange(
+                  resolveNormalizedInputValue(
+                    event.target.value,
+                    composing,
+                    sanitizeHarnessNameInput
+                  )
+                )
+              }}
               placeholder="请输入特性名称"
               className="bg-background shadow-none focus-visible:border-ring focus-visible:ring-0"
               autoFocus={!editing}

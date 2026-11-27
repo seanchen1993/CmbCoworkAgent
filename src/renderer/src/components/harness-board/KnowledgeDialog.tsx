@@ -273,7 +273,7 @@ export function KnowledgeDialog({
     index: number,
     event: React.KeyboardEvent<HTMLInputElement>
   ): void => {
-    if (event.key !== "Enter") return
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return
     event.preventDefault()
     const keyword = labelRows[index]?.deployUnitSearch ?? ""
     if (keyword.trim().length >= DEPLOY_UNIT_SEARCH_MIN_CHARS) {
