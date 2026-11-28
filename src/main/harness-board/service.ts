@@ -222,7 +222,12 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   sessionContext: "session_context_inject"
 }
 
-interface ConfiguredHarnessInvocation {
+interface HarnessPluginDeveloperContact {
+  developerName?: string
+  developerSapId?: string
+}
+
+interface ConfiguredHarnessInvocation extends HarnessPluginDeveloperContact {
   cwd: string
   pluginName: string
   configKey: HarnessInspectCommandConfigKey
@@ -234,19 +239,46 @@ interface ConfiguredHarnessInvocation {
 
 class HarnessPluginCommandError extends Error {
   constructor(
-    command: Pick<ConfiguredHarnessInvocation, "pluginName" | "configKey">,
+    command: Pick<
+      ConfiguredHarnessInvocation,
+      "pluginName" | "configKey" | "developerName" | "developerSapId"
+    >,
     readonly detail: string,
-    message = formatHarnessPluginCommandFailure(command.pluginName, command.configKey)
+    message = formatHarnessPluginCommandFailure(command.pluginName, command.configKey, command)
   ) {
     super(message)
   }
 }
 
+function getHarnessPluginDeveloperContact(
+  plugin: Pick<PluginMetadata, "origin" | "marketplace">
+): HarnessPluginDeveloperContact {
+  if (plugin.origin === "local") return {}
+  const developerName = plugin.marketplace?.developerName?.trim()
+  const developerSapId = plugin.marketplace?.developerSapId?.trim()
+  return {
+    ...(developerName ? { developerName } : {}),
+    ...(developerSapId ? { developerSapId } : {})
+  }
+}
+
+function formatHarnessPluginDeveloperContact(
+  developer?: HarnessPluginDeveloperContact | null
+): string {
+  const name = developer?.developerName?.trim() || ""
+  const sapId = developer?.developerSapId?.trim() || ""
+  if (name && sapId) return `插件开发者 ${name}（${sapId}）`
+  if (name) return `插件开发者 ${name}`
+  if (sapId) return `插件开发者（${sapId}）`
+  return "插件开发者"
+}
+
 function formatHarnessPluginCommandFailure(
   pluginName: string,
-  configKey: HarnessInspectCommandConfigKey
+  configKey: HarnessInspectCommandConfigKey,
+  developer?: HarnessPluginDeveloperContact | null
 ): string {
-  return `插件「${pluginName}」执行「${configKey}」失败，请联系插件开发者`
+  return `插件「${pluginName}」执行「${configKey}」失败，请联系${formatHarnessPluginDeveloperContact(developer)}`
 }
 
 type HarnessInvocationSuccessLogMode = "full" | "summary" | "none"
@@ -1037,7 +1069,11 @@ function configureHarnessInvocation(
 ): ConfiguredHarnessInvocation {
   const cwd = plugin.path
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
-  const commandContext = { pluginName: plugin.name, configKey }
+  const commandContext = {
+    pluginName: plugin.name,
+    configKey,
+    ...getHarnessPluginDeveloperContact(plugin)
+  }
   try {
     return {
       cwd,
@@ -2965,7 +3001,11 @@ async function readHarnessFeatureSessionContextAgentPrompt(
         }
       )
       return {
-        warning: formatHarnessPluginCommandFailure(configured.pluginName, configured.configKey)
+        warning: formatHarnessPluginCommandFailure(
+          configured.pluginName,
+          configured.configKey,
+          configured
+        )
       }
     }
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
@@ -4068,7 +4108,11 @@ async function loadHarnessProjectDetails(
             result[project.projectId] = await makeProjectErrorDetail(
               project,
               "Inspect 读取失败",
-              formatHarnessPluginCommandFailure(group.plugin.name, "project_status"),
+              formatHarnessPluginCommandFailure(
+                group.plugin.name,
+                "project_status",
+                getHarnessPluginDeveloperContact(group.plugin)
+              ),
               configContextByProjectId.get(project.projectId)
             )
             continue

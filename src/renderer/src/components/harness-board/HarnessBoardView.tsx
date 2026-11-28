@@ -7,7 +7,6 @@ import {
   withOwnedThreadSearchTransition
 } from "@/lib/thread-search-navigation"
 import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
-import { canReadPluginSource } from "../../../../shared/market-source-access"
 import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
@@ -210,8 +209,14 @@ import type { KnowledgeBaseListResult } from "../../../../shared/knowledge-base-
 import {
   filterProjectDialogInstalledAdapters,
   findInstalledPluginForAdapter,
+  findMarketPluginForAdapter,
   findSelectedAdapter
 } from "./project-dialog-plugin-visibility"
+import {
+  isImeComposing,
+  resolveNormalizedInputValue,
+  sanitizeHarnessNameInput
+} from "./harness-ime-input"
 import {
   HARNESS_PROJECT_DETAIL_BATCH_SIZE,
   MAX_HARNESS_PROJECT_DETAIL_CACHE_ENTRIES,
@@ -667,10 +672,6 @@ function normalizeWorkspacePath(value: unknown): string | null {
 
 function getThreadWorkspacePath(thread: Thread | null | undefined): string | null {
   return normalizeWorkspacePath(thread?.metadata?.workspacePath)
-}
-
-function sanitizeHarnessNameInput(value: string): string {
-  return value.replace(/\s+/g, "")
 }
 
 function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata | null {
@@ -1479,30 +1480,6 @@ function buildMarketPluginMap(items: MarketItem[]): Map<string, MarketItem> {
     if (name) map.set(name, item)
   }
   return map
-}
-
-function normalizeAdapterMatchKey(value?: string): string {
-  return normalizeAdapterMarketName(value).toLocaleLowerCase()
-}
-
-function findMarketPluginForAdapter(
-  marketPlugins: MarketItem[],
-  installedPlugin: PluginMetadata | undefined,
-  adapter: HarnessAdapterRegistryItem
-): MarketItem | undefined {
-  if (canReadPluginSource(installedPlugin)) return undefined
-
-  const adapterKeys = new Set(
-    [adapter.id, adapter.name].map(normalizeAdapterMatchKey).filter(Boolean)
-  )
-  return marketPlugins.find((marketPlugin) => {
-    if (installedPlugin && findInstalledPluginForMarketItem([installedPlugin], marketPlugin)) {
-      return true
-    }
-    return [marketPlugin.name, marketPlugin.id, marketPlugin.chinese_name].some((value) =>
-      adapterKeys.has(normalizeAdapterMatchKey(value))
-    )
-  })
 }
 
 function buildHarnessBoardStats(
@@ -3403,11 +3380,17 @@ function FeatureCreateDialog({
   const workspaceInputRef = useRef<HTMLInputElement>(null)
   const dialogTitleRef = useRef<HTMLHeadingElement>(null)
   const [botTarget, setBotTarget] = useState<BotFeatureTarget | null>(null)
+  const isFeatureNameComposingRef = useRef(false)
+  const [isFeatureNameComposing, setIsFeatureNameComposing] = useState(false)
   useEffect(() => {
     setBotTarget(null)
+    isFeatureNameComposingRef.current = false
+    setIsFeatureNameComposing(false)
   }, [project?.projectId, mode])
   const editing = mode === "edit"
-  const featureNameError = getHarnessNameError("特性名称", featureName)
+  const featureNameError = isFeatureNameComposing
+    ? null
+    : getHarnessNameError("特性名称", featureName)
   const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
   const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
   const customRequiredNodeIds = requiredWorkflowNodeIds(workflowConfig, workflowTemplate)
@@ -3727,7 +3710,34 @@ function FeatureCreateDialog({
             特性名称 *
             <Input
               value={featureName}
-              onChange={(event) => onChange(sanitizeHarnessNameInput(event.target.value))}
+              onCompositionStart={() => {
+                isFeatureNameComposingRef.current = true
+                setIsFeatureNameComposing(true)
+              }}
+              onCompositionEnd={(event) => {
+                isFeatureNameComposingRef.current = false
+                setIsFeatureNameComposing(false)
+                onChange(sanitizeHarnessNameInput(event.currentTarget.value))
+              }}
+              onBlur={(event) => {
+                if (!isFeatureNameComposingRef.current) return
+                isFeatureNameComposingRef.current = false
+                setIsFeatureNameComposing(false)
+                onChange(sanitizeHarnessNameInput(event.currentTarget.value))
+              }}
+              onChange={(event) => {
+                const composing = isImeComposing(
+                  isFeatureNameComposingRef.current,
+                  event.nativeEvent as InputEvent
+                )
+                onChange(
+                  resolveNormalizedInputValue(
+                    event.target.value,
+                    composing,
+                    sanitizeHarnessNameInput
+                  )
+                )
+              }}
               placeholder="请输入特性名称"
               className="bg-background shadow-none focus-visible:border-ring focus-visible:ring-0"
               autoFocus={!editing}

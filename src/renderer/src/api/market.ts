@@ -3,6 +3,11 @@ import {
   MARKET_SKILL_LIST_MAX_RESPONSE_BYTES,
   type MarketSkillCatalogPage
 } from "../../../shared/market-skill-catalog"
+import {
+  buildUploaderIdCandidates,
+  normalizeUploaderProfileField,
+  parseUploaderIdentity
+} from "../../../shared/market-item-visibility"
 import { MOCK_MARKET_DATA } from "../components/customize/MarketPanel/MarketMockData"
 import { toast } from "sonner"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
@@ -41,6 +46,54 @@ export interface MarketApiResponse {
 export interface DownloadResponse {
   success: boolean
   error?: string
+}
+
+const MARKET_DEVELOPER_LOOKUP_TIMEOUT_MS = 3000
+
+async function resolveMarketPluginDeveloper(
+  rawUserId?: string
+): Promise<{ developerName?: string; developerSapId?: string }> {
+  const parsed = parseUploaderIdentity(rawUserId)
+  if (!parsed) return {}
+
+  let developerName = parsed.userName || undefined
+  let developerSapId = parsed.sapId || undefined
+
+  if (
+    !developerName &&
+    developerSapId &&
+    typeof window.api?.dashboard?.userProfiles === "function"
+  ) {
+    try {
+      const candidates = buildUploaderIdCandidates(developerSapId)
+      if (candidates.length > 0) {
+        const response = await Promise.race([
+          window.api.dashboard.userProfiles(candidates),
+          new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), MARKET_DEVELOPER_LOOKUP_TIMEOUT_MS)
+          )
+        ])
+        if (response?.success && Array.isArray(response.data)) {
+          const target = response.data.find(
+            (user) =>
+              user.sapId?.trim() &&
+              candidates.some((candidate) => user.sapId.includes(candidate))
+          )
+          if (target) {
+            developerName = normalizeUploaderProfileField(target.userName) || undefined
+            developerSapId = normalizeUploaderProfileField(target.sapId) || developerSapId
+          }
+        }
+      }
+    } catch {
+      // Best-effort lookup only; never fail or block plugin installation.
+    }
+  }
+
+  return {
+    ...(developerName ? { developerName } : {}),
+    ...(developerSapId ? { developerSapId } : {})
+  }
 }
 
 export interface DownloadedItemFile {
@@ -712,12 +765,18 @@ export const marketApi = {
       try {
         const arrayBuffer = await getBuffer()
         if (typeof window.api?.plugins?.install === "function") {
+          const developer = await resolveMarketPluginDeveloper(item?.user_id)
           const installResult = await window.api.plugins.install(
             arrayBuffer,
             filename,
             "market",
             item?.version,
-            { name, id: item?.id }
+            {
+              name,
+              id: item?.id,
+              ...(developer.developerName ? { developerName: developer.developerName } : {}),
+              ...(developer.developerSapId ? { developerSapId: developer.developerSapId } : {})
+            }
           )
           return {
             success: installResult.success,

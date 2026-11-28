@@ -689,8 +689,12 @@ async function main(): Promise<void> {
 
     await page.getByRole("tab", { name: "项目模式", exact: true }).click()
     await page.getByText("暂无项目", { exact: true }).waitFor()
-    assert.equal(await page.getByRole("button", { name: "自定义设置", exact: true }).count(), 0)
-    pass("project mode keeps its existing entry visibility")
+    const projectMain = await page.locator("main").elementHandle()
+    await open()
+    await close()
+    assert(await projectMain!.evaluate((element) => element.isConnected))
+    await page.getByText("暂无项目", { exact: true }).waitFor()
+    pass("project mode exposes settings button and stays mounted after settings")
     await page.getByRole("tab", { name: "对话模式", exact: true }).click()
 
     const currentThread = page.locator("[data-chat-thread-id]")

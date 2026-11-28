@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { Popover, PopoverAnchor } from "@/components/ui/popover"
 import { Input } from "@/components/ui/input"
 import type { HarnessEnterpriseProjectSearchItem } from "../../../../shared/harness-board-types"
+import { isImeComposing, resolveNormalizedInputValue } from "./harness-ime-input"
 
 export const harnessProjectCreateInputClassName =
   "bg-background text-foreground placeholder:text-muted-foreground/45"
@@ -51,6 +52,7 @@ export function EnterpriseProjectSearchInput({
   const [searched, setSearched] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState("")
   const requestIdRef = useRef(0)
+  const isComposingRef = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const keyword = searchKeyword.trim() === value.trim() ? searchKeyword.trim() : ""
@@ -116,6 +118,18 @@ export function EnterpriseProjectSearchInput({
     onSelect(project)
   }
 
+  const applyInputValue = (rawValue: string, composing: boolean): void => {
+    const nextValue = resolveNormalizedInputValue(rawValue, composing, normalizeValue)
+    requestIdRef.current += 1
+    setSearchKeyword(composing ? "" : nextValue)
+    setLoading(false)
+    setProjects([])
+    setHasMore(false)
+    setSearched(false)
+    onValueChange(nextValue)
+    setOpen(!composing && nextValue.trim().length > 0)
+  }
+
   return (
     <Popover
       open={shouldShowPopover}
@@ -132,18 +146,24 @@ export function EnterpriseProjectSearchInput({
           ref={inputRef}
           autoFocus={autoFocus}
           value={value}
+          onCompositionStart={() => {
+            isComposingRef.current = true
+          }}
+          onCompositionEnd={(event) => {
+            isComposingRef.current = false
+            applyInputValue(event.currentTarget.value, false)
+          }}
+          onBlur={(event) => {
+            if (!isComposingRef.current) return
+            isComposingRef.current = false
+            applyInputValue(event.currentTarget.value, false)
+          }}
           onChange={(event) => {
-            const nextValue = normalizeValue
-              ? normalizeValue(event.target.value)
-              : event.target.value
-            requestIdRef.current += 1
-            setSearchKeyword(nextValue)
-            setLoading(false)
-            setProjects([])
-            setHasMore(false)
-            setSearched(false)
-            onValueChange(nextValue)
-            setOpen(nextValue.trim().length > 0)
+            const composing = isImeComposing(
+              isComposingRef.current,
+              event.nativeEvent as InputEvent
+            )
+            applyInputValue(event.target.value, composing)
           }}
           onFocus={() => {
             if (keyword) setOpen(true)

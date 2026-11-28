@@ -392,6 +392,27 @@ async function installPluginFromDir(
     // local upload) shouldn't silently flip it. Caller's explicit origin wins,
     // otherwise inherit from the existing record, defaulting to "local".
     const resolvedOrigin: "market" | "local" = origin ?? existing?.origin ?? "local"
+    const resolvedMarketplace: PluginMetadata["marketplace"] =
+      resolvedOrigin === "market" && (marketplace || existing?.marketplace)
+        ? (() => {
+            const base = marketplace ?? existing!.marketplace!
+            const previous = existing?.marketplace
+            const sapChanged =
+              Boolean(base.developerSapId) &&
+              Boolean(previous?.developerSapId) &&
+              base.developerSapId !== previous?.developerSapId
+            const developerName =
+              base.developerName ?? (!sapChanged ? previous?.developerName : undefined)
+            const developerSapId = base.developerSapId ?? previous?.developerSapId
+            const id = base.id ?? previous?.id
+            return {
+              name: base.name,
+              ...(id ? { id } : {}),
+              ...(developerName ? { developerName } : {}),
+              ...(developerSapId ? { developerSapId } : {})
+            }
+          })()
+        : undefined
     const meta: PluginMetadata = {
       id: existing?.id ?? uuid(),
       name: parsed.name,
@@ -407,9 +428,7 @@ async function installPluginFromDir(
       hookPath: parsed.hookPath,
       origin: resolvedOrigin,
       ...(resolvedOrigin === "market" && sourceAccess ? { sourceAccess } : {}),
-      ...(resolvedOrigin === "market" && (marketplace ?? existing?.marketplace)
-        ? { marketplace: marketplace ?? existing?.marketplace }
-        : {}),
+      ...(resolvedMarketplace ? { marketplace: resolvedMarketplace } : {}),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
     }
@@ -790,13 +809,25 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           !marketplace.name.trim() ||
           marketplace.name.length > 512 ||
           (marketplace.id !== undefined &&
-            (typeof marketplace.id !== "string" || marketplace.id.length > 512))
+            (typeof marketplace.id !== "string" || marketplace.id.length > 512)) ||
+          (marketplace.developerName !== undefined &&
+            (typeof marketplace.developerName !== "string" ||
+              marketplace.developerName.length > 256)) ||
+          (marketplace.developerSapId !== undefined &&
+            (typeof marketplace.developerSapId !== "string" ||
+              marketplace.developerSapId.length > 128))
         ) {
           return { success: false, error: "无效的市场插件标识" }
         }
         marketIdentity = {
           name: marketplace.name.trim(),
-          ...(marketplace.id?.trim() ? { id: marketplace.id.trim() } : {})
+          ...(marketplace.id?.trim() ? { id: marketplace.id.trim() } : {}),
+          ...(marketplace.developerName?.trim()
+            ? { developerName: marketplace.developerName.trim() }
+            : {}),
+          ...(marketplace.developerSapId?.trim()
+            ? { developerSapId: marketplace.developerSapId.trim() }
+            : {})
         }
       }
       const sourceAccess = sanitizedOrigin === "market"

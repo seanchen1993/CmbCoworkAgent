@@ -223,6 +223,20 @@ function projectPluginMetadata(plugin: PluginMetadata): PluginMetadata {
     ...(plugin.origin === "market" || plugin.origin === "local" ? { origin: plugin.origin } : {}),
     ...(plugin.sourceAccess === "owner" || plugin.sourceAccess === "whitelist"
       ? { sourceAccess: plugin.sourceAccess } : {}),
+    ...(isRecord(plugin.marketplace) && text(plugin.marketplace.name, 512)
+      ? {
+          marketplace: {
+            name: text(plugin.marketplace.name, 512),
+            ...(text(plugin.marketplace.id, 512) ? { id: text(plugin.marketplace.id, 512) } : {}),
+            ...(text(plugin.marketplace.developerName, 256)
+              ? { developerName: text(plugin.marketplace.developerName, 256) }
+              : {}),
+            ...(text(plugin.marketplace.developerSapId, 128)
+              ? { developerSapId: text(plugin.marketplace.developerSapId, 128) }
+              : {})
+          }
+        }
+      : {}),
     createdAt: text(plugin.createdAt, 128),
     updatedAt: text(plugin.updatedAt, 128)
   }

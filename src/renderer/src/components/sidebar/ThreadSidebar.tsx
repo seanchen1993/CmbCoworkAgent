@@ -2120,7 +2120,7 @@ export const ThreadSidebar = memo(function ThreadSidebar({
             <UpdateActionButton variant="tag" />
           </div>
         </div>
-        {activeSidebarTab === "chat" ? <SidebarSettingsButton /> : <div aria-hidden="true" />}
+        <SidebarSettingsButton />
       </div>
       {forkDialogThread ? (
         <ThreadForkCheckpointDialog
