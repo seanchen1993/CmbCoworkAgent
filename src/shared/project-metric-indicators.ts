@@ -56,7 +56,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "特性审批完成到开发完成耗时",
     unit: "工作日",
     sample: "approvalDevelopment",
-    percentile: { label: "特性审批完成到开发完成耗时", read: (p) => p.approvalDevelopmentDays },
+    percentile: {
+      label: "特性审批完成到开发完成耗时",
+      read: (p) => p.approvalDevelopmentDays,
+      hint: "每个项目关联特性中最早审批完成日期到开发完成日期（首次 ST 发起日期；无 ST 取首次 UAT 发起日期）的工作日，取所选分位数。"
+    },
     formula:
       "在项目维度，取关联特性中最早审批完成的日期到开发完成日期。开发完成日期定义：首次 ST 发起日期；没有 ST、但有 UAT 流程时，取首次 UAT 发起日期。"
   },
@@ -65,7 +69,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "特性审批完成到立项完成耗时",
     unit: "工作日",
     sample: "approvalCreation",
-    percentile: { label: "特性审批完成到立项完成耗时", read: (p) => p.approvalCreationDays },
+    percentile: {
+      label: "特性审批完成到立项完成耗时",
+      read: (p) => p.approvalCreationDays,
+      hint: "每个项目关联特性中最早审批完成日期到立项完成日期的工作日，取所选分位数。"
+    },
     formula: "在项目维度，取关联特性中最早审批完成的日期到立项完成日期。"
   },
   {
@@ -73,7 +81,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均缺陷数",
     unit: "个",
     sample: "bug",
-    percentile: { label: "缺陷数", read: (p) => p.bugNum },
+    percentile: {
+      label: "缺陷数",
+      read: (p) => p.bugNum,
+      hint: "每个有效项目的缺陷数（无缺陷项目按 0 计入），取所选分位数。"
+    },
     formula: "有效项目缺陷数之和 ÷ 有效项目数。"
   },
   {
@@ -81,7 +93,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均非功能问题数",
     unit: "个",
     sample: "kenanIssue",
-    percentile: { label: "非功能问题数", read: (p) => p.kenanIssueCount ?? 0 },
+    percentile: {
+      label: "非功能问题数",
+      read: (p) => p.kenanIssueCount ?? 0,
+      hint: "每个样本项目的非功能问题数（项目上线流程关联的 label 对应的 UAT 流水线构建的柯南问题，零问题计 0），取所选分位数。"
+    },
     formula: "累计非功能问题数之和 ÷ 全部样本项目数，包含零问题项目。"
   },
   {
@@ -89,7 +105,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均功能点",
     unit: "功能点",
     sample: "functionPoint",
-    percentile: { label: "项目功能点", read: (p) => p.notAdjustFuns },
+    percentile: {
+      label: "项目功能点",
+      read: (p) => p.notAdjustFuns,
+      hint: "每个已有功能点结算项目的功能点，取所选分位数。"
+    },
     formula: "已结算功能点之和 ÷ 有功能点的项目数。"
   },
   {
@@ -109,7 +129,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均发起 ST 耗时",
     unit: "工作日",
     sample: "testLead",
-    percentile: { label: "发起 ST 耗时", read: (p) => p.testLeadDays },
+    percentile: {
+      label: "发起 ST 耗时",
+      read: (p) => p.testLeadDays,
+      hint: "每个有效项目立项日期至首次 ST 发起日期的工作日，取所选分位数。"
+    },
     formula: "项目立项至首次 ST 发起的平均工作日。"
   },
   {
@@ -117,7 +141,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均发起 UAT 耗时",
     unit: "工作日",
     sample: "uatLead",
-    percentile: { label: "发起 UAT 耗时", read: (p) => p.uatLeadDays },
+    percentile: {
+      label: "发起 UAT 耗时",
+      read: (p) => p.uatLeadDays,
+      hint: "每个有效项目立项日期至首次 UAT 发起日期的工作日，取所选分位数。"
+    },
     formula: "项目立项至首次 UAT 发起的平均工作日。"
   },
   {
@@ -125,7 +153,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均特性上线耗时",
     unit: "工作日",
     sample: "delivery",
-    percentile: { label: "特性上线耗时", read: (p) => p.deliveryDays },
+    percentile: {
+      label: "特性上线耗时",
+      read: (p) => p.deliveryDays,
+      hint: "每个有效项目最早关联特性审批至首次上线日期的工作日，取所选分位数。"
+    },
     formula: "项目最早关联特性审批至项目首次上线的平均工作日，按项目统计。"
   },
   {
@@ -133,7 +165,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均输入 Token",
     unit: "Token",
     sample: "token",
-    percentile: { label: "项目累计输入 Token", read: (p) => p.totalInputTokens },
+    percentile: {
+      label: "项目累计输入 Token",
+      read: (p) => p.totalInputTokens,
+      hint: "每个智能化项目的累计输入 Token（无 trace 项目计 0），取所选分位数。"
+    },
     formula: "智能化项目累计输入 Token 之和 ÷ 命中项目数，无 trace 的智能化项目计零。"
   },
   {
@@ -141,7 +177,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均输出 Token",
     unit: "Token",
     sample: "token",
-    percentile: { label: "项目累计输出 Token", read: (p) => p.totalOutputTokens },
+    percentile: {
+      label: "项目累计输出 Token",
+      read: (p) => p.totalOutputTokens,
+      hint: "每个智能化项目的累计输出 Token（无 trace 项目计 0），取所选分位数。"
+    },
     formula: "智能化项目累计输出 Token 之和 ÷ 命中项目数，无 trace 的智能化项目计零。"
   },
   {
@@ -149,7 +189,11 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     label: "平均代码行数",
     unit: "行",
     sample: "codeLines",
-    percentile: { label: "项目累计入库代码行数", read: (p) => p.pushedAdoptedLines },
+    percentile: {
+      label: "项目累计入库代码行数",
+      read: (p) => p.pushedAdoptedLines,
+      hint: "每个智能化项目的累计已 Push 采纳行数（无代码项目计 0），取所选分位数。"
+    },
     formula: "智能化项目累计已 Push 采纳行之和 ÷ 命中项目数，无代码的智能化项目计零。"
   },
   {

@@ -1,4 +1,8 @@
-import type { ProjectMetricFilters, ProjectMetricProjectItem } from "./project-metrics"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricGroup,
+  ProjectMetricProjectItem
+} from "./project-metrics"
 
 export type PersonalEfficiencyFilters = Pick<
   ProjectMetricFilters,
@@ -74,7 +78,8 @@ export const PERSONAL_EFFICIENCY_METRICS: Array<{
 
 export function visiblePersonalEfficiencyMetrics(includeMonthly: boolean, groupScoped = false) {
   return PERSONAL_EFFICIENCY_METRICS.filter(
-    (metric) => !metric.monthly || (groupScoped ? metric.key === "devclawPushedLines" : includeMonthly)
+    (metric) =>
+      !metric.monthly || (includeMonthly && (!groupScoped || metric.key === "devclawPushedLines"))
   )
 }
 
@@ -107,6 +112,7 @@ export interface PersonalEfficiencyCodeItem {
   harnessProjectId: string
   prjCode: string
   roomName: string
+  groupName?: string
   pushedAdoptedLines: number
   pushedEffectiveGeneratedLines: number
 }
@@ -135,4 +141,8 @@ export interface PersonalEfficiencyData {
   people: PersonalEfficiencyPerson[]
   month: string | null
   warnings: string[]
+  scope?: {
+    rooms: string[] | null
+    groups: ProjectMetricGroup[]
+  }
 }

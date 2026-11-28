@@ -21,6 +21,8 @@ interface EfficiencyGroupFilterProps extends ProjectMetricGroupOptions {
   refreshKey: number
 }
 
+const UNCLASSIFIED_ORG = "__unclassified__"
+
 export function EfficiencyGroupFilter({
   range,
   granularity,
@@ -30,13 +32,19 @@ export function EfficiencyGroupFilter({
   onChange,
   refreshKey
 }: EfficiencyGroupFilterProps): React.JSX.Element {
-  const filters = useMemo(
-    () => ({ range, granularity, upperOrgLv1, dateBasis }),
-    [range, granularity, upperOrgLv1, dateBasis]
+  const realRooms = useMemo(
+    () => (upperOrgLv1 ?? []).filter((room) => room !== UNCLASSIFIED_ORG),
+    [upperOrgLv1]
   )
+  const filters = useMemo(
+    () => ({ range, granularity, upperOrgLv1: realRooms, dateBasis }),
+    [range, granularity, realRooms, dateBasis]
+  )
+  const [retry, setRetry] = useState(0)
   const [result, setResult] = useState<{
     filters: ProjectMetricGroupOptions
     refreshKey: number
+    retry: number
     options: ProjectMetricGroup[]
     error?: string
   }>()
@@ -49,29 +57,39 @@ export function EfficiencyGroupFilter({
         setResult({
           filters,
           refreshKey,
+          retry,
           options: response.data ?? [],
           error: response.success ? undefined : response.error || "获取组失败"
         })
       },
       () => {
-        if (!cancelled) setResult({ filters, refreshKey, options: [], error: "获取组失败" })
+        if (!cancelled)
+          setResult({ filters, refreshKey, retry, options: [], error: "获取组失败" })
       }
     )
     return () => {
       cancelled = true
     }
-  }, [filters, refreshKey])
+  }, [filters, refreshKey, retry])
 
-  const enabled = Boolean(upperOrgLv1?.length)
-  const current = result?.filters === filters && result.refreshKey === refreshKey ? result : undefined
+  const enabled = realRooms.length > 0
+  const current =
+    result?.filters === filters && result.refreshKey === refreshKey && result.retry === retry
+      ? result
+      : undefined
   const selected = new Set(value.map(projectMetricGroupKey))
   const options = new Map(value.map((group) => [projectMetricGroupKey(group), group]))
   for (const group of current?.options ?? []) options.set(projectMetricGroupKey(group), group)
   const list = [...options.values()].sort(
-    (a, b) => a.roomName.localeCompare(b.roomName) || a.groupName.localeCompare(b.groupName)
+    (a, b) =>
+      a.roomName.localeCompare(b.roomName, "zh-CN") ||
+      a.groupName.trim().localeCompare(b.groupName.trim(), "zh-CN") ||
+      a.groupName.localeCompare(b.groupName)
   )
-  const label = (group: ProjectMetricGroup): string =>
-    (upperOrgLv1?.length ?? 0) > 1 ? `${group.roomName}／${group.groupName}` : group.groupName
+  const label = (group: ProjectMetricGroup): string => {
+    const displayGroup = group.groupName.trim()
+    return realRooms.length > 1 ? `${group.roomName}／${displayGroup}` : displayGroup
+  }
   const title =
     value.length === 1 ? label(value[0]) : value.length ? `已选 ${value.length} 个组` : "全部"
   const toggleGroup = (group: ProjectMetricGroup, key: string): void => {
@@ -131,8 +149,23 @@ export function EfficiencyGroupFilter({
               )
             })}
             {(!current || current.error || !list.length) && (
-              <div className="px-2 py-2 text-center text-xs text-muted-foreground" aria-live="polite">
-                {current?.error || (current ? "暂无可选组" : "加载中…")}
+              <div
+                className={cn(
+                  "px-2 py-2 text-center text-xs",
+                  current?.error ? "text-destructive" : "text-muted-foreground"
+                )}
+                aria-live="polite"
+              >
+                <span>{current?.error || (current ? "暂无可选组" : "加载中…")}</span>
+                {current?.error ? (
+                  <button
+                    type="button"
+                    className="ml-1.5 text-primary underline-offset-2 hover:underline"
+                    onClick={() => setRetry((n) => n + 1)}
+                  >
+                    重试
+                  </button>
+                ) : null}
               </div>
             )}
           </div>

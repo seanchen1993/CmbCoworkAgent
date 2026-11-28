@@ -626,7 +626,10 @@ export function projectMetricIndicatorSheets(
     })
   const summaryMetadata: DashboardExcelCell[][] = [
     ...metadata,
-    ["分位数口径", "P50、P80、P90 由有效项目的指标值按 PERCENTILE.INC 的线性插值口径计算。"]
+    [
+      "分位数口径",
+      "P50、P80、P90 及分位数样本项目数为导出快照值，由有效项目的指标值按 PERCENTILE.INC 线性插值计算。"
+    ]
   ]
   const teamTable = makeTable("团队指标", summaryFields, summaryMetadata)
   const roomTable = makeTable("各室指标", summaryFields, summaryMetadata)
@@ -837,25 +840,6 @@ export function projectMetricIndicatorSheets(
       100,
       code?.pushedAdoptionRate == null ? null : code.pushedAdoptionRate * 100
     )
-    if (scope.group) {
-      addSummary(
-        table,
-        {
-          scope: scope.name,
-          group: scope.group ?? "",
-          metric: "DevClaw 入库行数",
-          mode: "总体",
-          numeratorName: "已Push采纳行数",
-          unit: "行",
-          samples: "—",
-          numeratorLink: link(codeTable)
-        },
-        sum(codeTable, "lines", codeConditions, code?.pushedAdoptedLines ?? null),
-        1,
-        1,
-        code?.pushedAdoptedLines ?? null
-      )
-    }
     if (overview.monthly) {
       const monthly = overview.monthly
       const manualConditions: Array<[string, string | number]> = [

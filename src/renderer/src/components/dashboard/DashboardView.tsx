@@ -362,21 +362,15 @@ function OrgFilterBar({
   value,
   options,
   loading,
-  efficiencyStyle,
   onChange
 }: {
   value: string[]
   options: string[]
   loading: boolean
-  efficiencyStyle: boolean
   onChange: (orgList: string[]) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const selectedSet = new Set(value)
-  const optionClassName = efficiencyStyle
-    ? EFFICIENCY_FILTER_OPTION
-    : "rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
-  const checkClassName = cn("size-3.5 shrink-0", !efficiencyStyle && "text-primary")
 
   const toggleOrg = (org: string): void => {
     if (selectedSet.has(org)) {
@@ -402,11 +396,7 @@ function OrgFilterBar({
           <Button
             variant="outline"
             size="sm"
-            className={
-              efficiencyStyle
-                ? cn(EFFICIENCY_FILTER_TRIGGER, EFFICIENCY_ORG_FILTER_WIDTH)
-                : "h-7 w-[240px] justify-between gap-1 text-xs font-normal"
-            }
+            className={cn(EFFICIENCY_FILTER_TRIGGER, EFFICIENCY_ORG_FILTER_WIDTH)}
             title={triggerLabel}
             disabled={loading && options.length === 0}
           >
@@ -418,33 +408,19 @@ function OrgFilterBar({
         </PopoverTrigger>
         <PopoverContent
           align="start"
-          className={
-            efficiencyStyle
-              ? cn(EFFICIENCY_FILTER_MENU, "w-[var(--radix-popover-trigger-width)] p-1")
-              : "w-[240px] p-1"
-          }
+          className={cn(EFFICIENCY_FILTER_MENU, "w-[var(--radix-popover-trigger-width)] p-1")}
         >
           <button
             type="button"
-            aria-pressed={efficiencyStyle ? !value.length : undefined}
-            className={cn("flex w-full items-center justify-between", optionClassName)}
+            aria-pressed={!value.length}
+            className={cn("flex w-full items-center justify-between", EFFICIENCY_FILTER_OPTION)}
             onClick={() => onChange([])}
           >
-            <span
-              className={
-                !efficiencyStyle
-                  ? value.length === 0
-                    ? "font-medium text-foreground"
-                    : "text-muted-foreground"
-                  : undefined
-              }
-            >
-              全部
-            </span>
-            {value.length === 0 && <Check className={checkClassName} />}
+            <span>全部</span>
+            {value.length === 0 && <Check className="size-3.5 shrink-0" />}
           </button>
           <div className="my-1 h-px bg-border" />
-          <div className={cn("max-h-64 overflow-y-auto", efficiencyStyle ? "space-y-0.5" : "pr-1")}>
+          <div className="max-h-64 space-y-0.5 overflow-y-auto">
             {options.length === 0 ? (
               <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
                 暂无可选室
@@ -456,17 +432,17 @@ function OrgFilterBar({
                   <button
                     key={org}
                     type="button"
-                    aria-pressed={efficiencyStyle ? checked : undefined}
+                    aria-pressed={checked}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 text-left",
-                      optionClassName
+                      EFFICIENCY_FILTER_OPTION
                     )}
                     onClick={() => toggleOrg(org)}
                   >
                     <span className={cn("truncate", checked && "font-medium text-foreground")}>
                       {orgOptionLabel(org)}
                     </span>
-                    {checked && <Check className={checkClassName} />}
+                    {checked && <Check className="size-3.5 shrink-0" />}
                   </button>
                 )
               })
@@ -4634,7 +4610,6 @@ function DashboardContent({
                 value={selectedOrgLv1List}
                 options={orgOptions}
                 loading={loading}
-                efficiencyStyle={activeMainTab === "efficiency"}
                 onChange={(rooms) => {
                   setEfficiencyGroups((groups) =>
                     groups.some((group) => !rooms.includes(group.roomName))

@@ -424,8 +424,8 @@ describe("研发效能组筛选", () => {
   it("仅聚合室和组，周日期前后各扩展15天，按月不扩展，沿用项目日期口径和室权限", async () => {
     const query = vi.fn<ProjectMetricDependencies["query"]>()
       .mockResolvedValueOnce({
-        aggregations: { groups: { buckets: [{ key: { room: "A室", group: "一组" } }],
-          after_key: { room: "A室", group: "一组" } } }
+        aggregations: { groups: { buckets: [{ key: { room: "A室", group: " 一组 " } }],
+          after_key: { room: "A室", group: " 一组 " } } }
       })
       .mockResolvedValueOnce({ aggregations: { groups: { buckets: [{ key: { room: "A室", group: "二组" } }] } } })
       .mockResolvedValueOnce({ aggregations: { groups: { buckets: [] } } })
@@ -438,14 +438,14 @@ describe("研发效能组筛选", () => {
       granularity: "week" as const
     }
     expect(await fetchProjectMetricGroupOptions(options, deps)).toEqual([
-      { roomName: "A室", groupName: "一组" }, { roomName: "A室", groupName: "二组" }
+      { roomName: "A室", groupName: "二组" }, { roomName: "A室", groupName: " 一组 " }
     ])
     const firstQuery = JSON.stringify(query.mock.calls[0][1])
     expect(firstQuery).toContain('"gte":"2026-10-25 00:00:00","lt":"2026-12-01 00:00:00"')
     expect(firstQuery).toContain('"terms":{"roomName":["A室"]}')
     expect(firstQuery).toContain('"field":"groupName.keyword"')
     expect(query.mock.calls[0][1]).toMatchObject({ size: 0, track_total_hits: false })
-    expect(JSON.stringify(query.mock.calls[1][1])).toContain('"after":{"room":"A室","group":"一组"}')
+    expect(JSON.stringify(query.mock.calls[1][1])).toContain('"after":{"room":"A室","group":" 一组 "}')
     await fetchProjectMetricGroupOptions({ ...options, range: october.range, granularity: "month",
       dateBasis: "developmentCompleted" }, deps)
     const monthQuery = JSON.stringify(query.mock.calls[2][1])
@@ -473,6 +473,17 @@ describe("研发效能组筛选", () => {
     const filters = { ...october, upperOrgLv1: ["A室", "B室"], selectedGroups }
     expect((await fetchProjectMetricProjects(filters, {}, deps)).items.map((p) => p.prjCode).sort())
       .toEqual(["P1", "P2"])
+    expect(
+      (await fetchProjectMetricProjects({ ...october }, { departmentKeyword: "二组" }, deps)).items.map(
+        (p) => p.prjCode
+      )
+    ).toEqual(["P2"])
+    await expect(
+      fetchProjectMetricIndicatorExport(
+        { ...october, selectedGroups: [{ roomName: "__unclassified__", groupName: "一组" }] },
+        deps
+      )
+    ).rejects.toThrow("组筛选无效")
     const groupFilters = { ...filters, upperOrgLv1: ["A室"], selectedGroups: [selectedGroups[0]] }
     const overview = await fetchProjectMetricOverview(groupFilters, deps)
     expect(codeStats).toHaveBeenCalledWith(october.range, ["A室"], ["h-P2"], [selectedGroups[0]])
@@ -503,6 +514,7 @@ describe("研发效能组筛选", () => {
     expect(groups.find((row) => row["组"] === "三组" && row["指标"] === "AI代码入库率"))
       .toMatchObject({ 室: "A室", 结果: 80, 分子: 40, 分母: 50 })
     expect(groups.some((row) => String(row["指标"]).includes("硅碳比"))).toBe(false)
+    expect(groups.some((row) => row["指标"] === "DevClaw 入库行数")).toBe(false)
   })
 
   it("选中未归类的室时保留未填写室的 DevClaw 代码来源", async () => {
@@ -575,16 +587,33 @@ describe("有效样本明细筛选", () => {
       await buildDashboardExcelBuffer(projectMetricIndicatorSheets(exported, filters)),
       { type: "buffer" }
     )
+    const groupTable = workbookTable(workbook, "组级指标", "室")
     const findMetric = (label: string, mode = "常规") =>
-      workbookTable(workbook, "组级指标", "室").rows.find(
+      groupTable.rows.find(
         (row) => row["指标"] === label && row["项目类型或来源"] === mode
       )
+    const cellFormula = (
+      sheetName: string,
+      table: ReturnType<typeof workbookTable>,
+      rowIndex: number,
+      column: string
+    ) =>
+      workbook.Sheets[sheetName][
+        XLSX.utils.encode_cell({ r: table.startRow - 1 + rowIndex, c: table.header.indexOf(column) })
+      ]?.f
+    const productivityRowIndex = groupTable.rows.findIndex(
+      (row) => row["指标"] === "每人月产出功能点" && row["项目类型或来源"] === "常规"
+    )
+    expect(cellFormula("组级指标", groupTable, productivityRowIndex, "分位数样本项目数")).toBeUndefined()
     expect(findMetric("每人月产出功能点")).toMatchObject({
       结果: 36, P50: 20, P80: 32, P90: 36, 分位数样本项目数: 3
     })
     expect(findMetric("每人月上线特性数")?.P50 || "").toBe("")
     expect(findMetric("平均缺陷数", "智能化")).toMatchObject({ P50: "—", 分位数样本项目数: 0 })
-    const evidence = workbookTable(workbook, "项目依据", "项目编号").rows
+    const evidenceTable = workbookTable(workbook, "项目依据", "项目编号")
+    const evidence = evidenceTable.rows
+    const p1Index = evidence.findIndex((row) => row["项目编号"] === "P1")
+    expect(cellFormula("项目依据", evidenceTable, p1Index, "每人月产出功能点")).toBeUndefined()
     expect(evidence.find((row) => row["项目编号"] === "P0")?.["每人月产出功能点"]).toBe("—")
     expect(evidence.map((row) => row["每人月产出功能点"]).filter((value) => typeof value === "number"))
       .toEqual([10, 20, 40])

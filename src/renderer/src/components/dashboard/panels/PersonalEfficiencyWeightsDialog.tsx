@@ -71,7 +71,7 @@ export function PersonalEfficiencyWeightsDialog({
                   <h3 className="mb-1 text-xs font-medium text-muted-foreground">{group.title}</h3>
                   <div className="divide-y divide-border/60">
                     {metrics
-                      .filter((metric) => Boolean(metric.monthly && !(groupScoped && metric.key === "devclawPushedLines")) === group.monthly)
+                      .filter((metric) => Boolean(metric.monthly) === group.monthly)
                       .map(({ key, label }) => (
                         <label
                           key={key}

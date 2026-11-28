@@ -167,6 +167,7 @@ export function PersonalEfficiencyDetail({
                         {[
                           "项目",
                           "所属室",
+                          "所属组",
                           "关联特性",
                           "功能点",
                           "缺陷数",
@@ -190,6 +191,7 @@ export function PersonalEfficiencyDetail({
                             <div className="text-muted-foreground">{project.prjCode}</div>
                           </td>
                           <td className="p-2">{project.roomName || "—"}</td>
+                          <td className="p-2">{project.groupName || "—"}</td>
                           <td className="p-2">
                             {project.features.map((feature) => (
                               <div key={feature.featureCode}>
@@ -238,6 +240,7 @@ export function PersonalEfficiencyDetail({
                       {[
                         "项目编号",
                         "代码所属室",
+                        "代码所属组",
                         "已 Push 采纳行数",
                         "对应有效生成行数",
                         "AI代码入库率"
@@ -251,11 +254,12 @@ export function PersonalEfficiencyDetail({
                   <tbody>
                     {detail.code.map((code) => (
                       <tr
-                        key={`${code.harnessProjectId}:${code.roomName}`}
+                        key={`${code.harnessProjectId}:${code.roomName}:${code.groupName ?? ""}`}
                         className="border-b border-border/60"
                       >
                         <td className="p-2">{code.prjCode}</td>
                         <td className="p-2">{code.roomName || "—"}</td>
+                        <td className="p-2">{code.groupName || "—"}</td>
                         <td className="p-2 tabular-nums">
                           {formatPersonalMetric(code.pushedAdoptedLines)}
                         </td>

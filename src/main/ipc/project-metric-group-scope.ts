@@ -1,11 +1,16 @@
 import type { ProjectMetricGroup } from "../../shared/project-metrics"
-import { readOrgText } from "./dashboard-org-fields"
+import { DASHBOARD_UNCLASSIFIED_ORG, readOrgText } from "./dashboard-org-fields"
 
 export function validateProjectMetricGroups(groups: ProjectMetricGroup[] | undefined): void {
   if (
     groups !== undefined &&
     (!Array.isArray(groups) ||
-      groups.some((group) => !readOrgText(group?.roomName) || !readOrgText(group?.groupName)))
+      groups.some(
+        (group) =>
+          !readOrgText(group?.roomName) ||
+          readOrgText(group?.roomName) === DASHBOARD_UNCLASSIFIED_ORG ||
+          !readOrgText(group?.groupName)
+      ))
   )
     throw new Error("组筛选无效")
 }
@@ -19,9 +24,11 @@ export function projectMetricGroupFilter(
   if (!groups?.length) return null
   const byRoom = new Map<string, Set<string>>()
   for (const group of groups) {
-    const names = byRoom.get(group.roomName) ?? new Set<string>()
+    const room = readOrgText(group.roomName)
+    if (!room || !readOrgText(group.groupName)) continue
+    const names = byRoom.get(room) ?? new Set<string>()
     names.add(group.groupName)
-    byRoom.set(group.roomName, names)
+    byRoom.set(room, names)
   }
   return {
     bool: {

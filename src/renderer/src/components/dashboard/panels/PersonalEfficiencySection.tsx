@@ -32,7 +32,7 @@ export function PersonalEfficiencySection({
     [range, upperOrgLv1, selectedGroups, dateBasis]
   )
   const groupScoped = Boolean(selectedGroups?.length)
-  const months = groupScoped ? [] : projectCompleteMonths(range)
+  const months = projectCompleteMonths(range)
   const monthLabel = months.length ? projectMonthlyPeriodLabel(months) : null
   const [result, setResult] = useState<{
     filters: PersonalEfficiencyFilters
@@ -177,8 +177,7 @@ export function PersonalEfficiencySection({
               </TooltipTrigger>
               <TooltipContent className="max-w-sm text-xs leading-relaxed">
                 <p>
-                  项目指标按照项目经理的维度统计到人
-                  统计，受项目所属室和项目日期筛选控制；代码生成指标按项目模式关联的精益项目统计。
+                  项目指标按项目经理统计，受项目所属室、组和项目日期筛选控制；代码生成指标按项目模式关联的精益项目及代码上报室、组统计。
                 </p>
               </TooltipContent>
             </Tooltip>

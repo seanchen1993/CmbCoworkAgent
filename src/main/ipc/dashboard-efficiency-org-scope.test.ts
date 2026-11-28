@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import { emptyOrgValueClauses, TRACE_BUDGET_PLACEHOLDER } from "./dashboard-org-fields"
+import { projectMetricGroupFilter } from "./project-metric-group-scope"
 
 type Row = Record<string, unknown>
 const source = readFileSync(new URL("./dashboard.ts", import.meta.url), "utf8")
@@ -9,6 +10,7 @@ const ast = ts.createSourceFile("dashboard.ts", source, ts.ScriptTarget.Latest, 
 const names = new Set([
   "fetchDashboardPersonalEfficiency",
   "projectMetricDependencies",
+  "projectMetricTelemetryFilters",
   "projectMetricHarnessFilter",
   "buildUpperOrgLv1ListFilter",
   "buildUnclassifiedOrgClause",
@@ -40,6 +42,7 @@ function fixture(rooms: string[] | null) {
     DASHBOARD_UNCLASSIFIED_ORG: "__unclassified__",
     PROJECT_METRIC_TEAM: "统计团队",
     emptyOrgValueClauses,
+    projectMetricGroupFilter,
     projectMetricAllowedRoomNames: () => null,
     getEsIndex: (name: string) => name,
     esQuery: vi.fn(),

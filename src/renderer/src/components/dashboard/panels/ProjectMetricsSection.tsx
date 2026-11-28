@@ -232,7 +232,7 @@ function SummaryMetricValue({
       <button
         type="button"
         className="block text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:no-underline disabled:opacity-50"
-        disabled={sampleDisabled || (percentile !== null && sampleCount === 0)}
+        disabled={sampleDisabled}
         aria-label={`查看${row.label}的${tone === "devclaw" ? "CMBDevClaw" : "非CMBDevClaw"}有效样本`}
         onClick={() =>
           onSelectSample({

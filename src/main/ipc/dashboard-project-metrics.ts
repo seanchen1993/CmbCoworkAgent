@@ -767,7 +767,7 @@ function selectProjectMetricProjects(
         options.developmentMode === "all" ||
         p.developmentMode === options.developmentMode) &&
       (!keyword || `${p.prjCode} ${p.prjName}`.toLowerCase().includes(keyword)) &&
-      (!department || p.roomName.toLowerCase().includes(department))
+      (!department || `${p.roomName} ${p.groupName}`.toLowerCase().includes(department))
   )
   const key = options.sortBy ?? "deliveryDays"
   selectedItems.sort((a, b) => {
@@ -1112,7 +1112,10 @@ export async function fetchProjectMetricIndicatorExport(
     )
       throw new Error("周期代码项目依据行数无效")
     const roomName = readOrgText(code.roomName) ?? (wholeTeam ? "" : DASHBOARD_UNCLASSIFIED_ORG)
-    const groupName = !wholeTeam && readOrgText(code.groupName) ? code.groupName : undefined
+    const groupName =
+      !wholeTeam && typeof code.groupName === "string" && readOrgText(code.groupName)
+        ? code.groupName
+        : undefined
     if (rooms !== null && !rooms.includes(roomName)) continue
     if (!matchesProjectMetricGroups({ roomName, groupName }, selectedGroups)) continue
     if (groupName) groupsWithCode.push({ roomName, groupName })
@@ -1205,7 +1208,12 @@ export async function fetchProjectMetricIndicatorExport(
       }
     }),
     code: [...codeByProject.values()]
-      .sort((a, b) => a.roomName.localeCompare(b.roomName) || a.prjCode.localeCompare(b.prjCode))
+      .sort(
+        (a, b) =>
+          a.roomName.localeCompare(b.roomName, "zh-CN") ||
+          (a.groupName ?? "").localeCompare(b.groupName ?? "", "zh-CN") ||
+          a.prjCode.localeCompare(b.prjCode)
+      )
       .map((code) => ({
         ...code,
         prjName: visibleByCode.get(code.prjCode)?.prjName || null,
@@ -1225,7 +1233,7 @@ export async function fetchProjectMetricIndicatorExport(
     }))
   }
   const exportRooms = rooms
-    ? [...rooms].sort((a, b) => a.localeCompare(b))
+    ? [...rooms].sort((a, b) => a.localeCompare(b, "zh-CN"))
     : strings([
         ...options,
         ...roomFacts.map((p) => p.roomName),
@@ -1319,7 +1327,7 @@ function uniqueGroups(records: Array<{ roomName: string; groupName?: string }>):
     if (
       roomName &&
       roomName !== DASHBOARD_UNCLASSIFIED_ORG &&
-      record.groupName &&
+      typeof record.groupName === "string" &&
       readOrgText(record.groupName)
     ) {
       const group = { roomName, groupName: record.groupName }
@@ -1327,7 +1335,10 @@ function uniqueGroups(records: Array<{ roomName: string; groupName?: string }>):
     }
   }
   return [...groups.values()].sort(
-    (a, b) => a.roomName.localeCompare(b.roomName) || a.groupName.localeCompare(b.groupName)
+    (a, b) =>
+      a.roomName.localeCompare(b.roomName, "zh-CN") ||
+      a.groupName.trim().localeCompare(b.groupName.trim(), "zh-CN") ||
+      a.groupName.localeCompare(b.groupName)
   )
 }
 
