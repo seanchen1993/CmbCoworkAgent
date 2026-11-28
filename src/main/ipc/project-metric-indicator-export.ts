@@ -1,5 +1,6 @@
 import {
   PROJECT_METRIC_TEAM,
+  PROJECT_METRIC_PERCENTILES,
   type ProjectMetricFilters,
   type ProjectMetricIndicatorExportData,
   type ProjectMetricProjectEvidence,
@@ -11,7 +12,8 @@ import {
   PROJECT_METRIC_INDICATORS,
   PROJECT_AI_RATE_TIP,
   PROJECT_FEATURE_COVERAGE_TIP,
-  PROJECT_MONTHLY_TIP
+  PROJECT_MONTHLY_TIP,
+  readProjectMetricPercentileSample
 } from "../../shared/project-metric-indicators"
 import { formatProjectDate, projectDateMillis } from "../../shared/project-metric-calendar"
 import {
@@ -27,6 +29,8 @@ import {
   type DashboardExcelCell,
   type DashboardExcelSheet
 } from "./dashboard-excel-workbook"
+
+import { DASHBOARD_UNCLASSIFIED_ORG } from "./dashboard-org-fields"
 
 type Field = [key: string, label: string]
 type RecordCells = Record<string, DashboardExcelCell>
@@ -46,6 +50,7 @@ const modeNames = { devclaw: "智能化", non_devclaw: "常规" }
 const num = (value: number | null | undefined): DashboardExcelCell =>
   value == null || !Number.isFinite(value) ? "—" : value
 const text = (value: string | null | undefined): string => value || "—"
+const roomLabel = (room: string): string => room === DASHBOARD_UNCLASSIFIED_ORG ? "未归类" : text(room)
 function date(value: string | null): string {
   const time = projectDateMillis(value)
   return time === null ? text(value) : formatProjectDate(time)
@@ -108,6 +113,7 @@ function sum(
 }
 interface Scope {
   room: string | null
+  group?: string
   name: string
   level: string
   summary: ProjectMetricSummaryData
@@ -117,6 +123,7 @@ function projectConditions(scope: Scope, mode?: string): Array<[string, string |
   return [
     ["team", PROJECT_METRIC_TEAM],
     ...(scope.room === null ? [] : [["room", scope.room] as [string, string]]),
+    ...(scope.group ? [["group", scope.group] as [string, string]] : []),
     ...(mode ? [["mode", mode] as [string, string]] : [])
   ]
 }
@@ -149,8 +156,8 @@ const featureFields: Field[] = [
   ["room", "项目所属室"],
   ["coverageSmart", "对应用研发智能化特性占比分子贡献"],
   ["coverageTotal", "对应用研发智能化特性占比分母贡献"],
-  ["throughputSmart", "对月人均特性吞吐率分子贡献（智能化项目）"],
-  ["throughputRegular", "对月人均特性吞吐率分子贡献（常规项目）"],
+  ["throughputSmart", "对每人月上线特性数分子贡献（智能化项目）"],
+  ["throughputRegular", "对每人月上线特性数分子贡献（常规项目）"],
   ["featureMode", "应用研发智能化特性占比分类（按全部关联项目判断）"],
   ["approved", "特性审批完成日期"]
 ]
@@ -313,6 +320,11 @@ const metricFields: Field[] = [
     })
   ).entries()
 ]
+const percentileBasisFields: Field[] = PROJECT_METRIC_INDICATORS.flatMap((metric) =>
+  metric.percentile && operands[metric.key].denominatorColumn
+    ? [[`percentile:${metric.key}`, metric.percentile.label] as Field]
+    : []
+)
 function countNumbers(
   table: Table,
   column: string,
@@ -339,7 +351,9 @@ const summaryFields: Field[] = [
   ["samples", "有效样本项目数"],
   ["formula", "计算说明"],
   ["numeratorLink", "分子依据"],
-  ["denominatorLink", "分母依据"]
+  ["denominatorLink", "分母依据"],
+  ...PROJECT_METRIC_PERCENTILES.map((percent): Field => [`p${percent}`, `P${percent}`]),
+  ["percentileSamples", "分位数样本项目数"]
 ]
 
 export function projectMetricIndicatorSheets(
@@ -348,11 +362,26 @@ export function projectMetricIndicatorSheets(
 ): DashboardExcelSheet[] {
   const projectDateLabel =
     filters.dateBasis === "created" ? "立项日期" : "开发完成日期（ST发起优先，无ST取UAT发起）"
+  const scoped = data.team === null
+  const exportedRooms = [
+    ...new Set([...data.rooms, ...(data.groups ?? [])].map((scope) => roomLabel(scope.roomName)))
+  ]
   const metadata: DashboardExcelCell[][] = [
     ["团队", PROJECT_METRIC_TEAM],
     ["统计开始", date(filters.range.from)],
     ["统计结束", date(filters.range.to)],
     ["项目日期筛选", projectDateLabel],
+    ...(scoped
+      ? [
+          ["室筛选", exportedRooms.join("、")],
+          [
+            "组筛选",
+            filters.selectedGroups?.length
+              ? data.groups?.map((group) => `${group.roomName}／${group.groupName}`).join("、") || "—"
+              : "全部"
+          ]
+        ]
+      : []),
     ["项目阶段", filters.phaseStatuses?.join("、") || "全部"],
     ["功能点区间", `${filters.functionPointMin ?? "不限"}～${filters.functionPointMax ?? "不限"}`],
     ["智能化项目插件", filters.adapterName || "全部"],
@@ -374,7 +403,9 @@ export function projectMetricIndicatorSheets(
     "项目依据",
     [
       ...projectFields,
+      ...(scoped ? [["group", "项目所属组"] as Field] : []),
       ...metricFields,
+      ...percentileBasisFields,
       ...categories.map((category): Field => [`category:${category}`, `非功能问题－${category}`]),
       ...projectDateFields
     ],
@@ -383,18 +414,25 @@ export function projectMetricIndicatorSheets(
       [
         "说明",
         "每个项目一行，不参与该指标的值显示—，有效零值显示0。均值按数值项目计数；比率先分别合计对应分子、分母再计算。报工、代码和Token为项目累计值。"
-      ]
+      ],
+      ["分位数依据", "对同一组织和项目类型的有效项目值取分位数。项目比率使用本表的逐项目比率。"]
     ]
   )
-  const featureTable = makeTable("特性依据", featureFields, [
+  const featureTable = makeTable("特性依据", [
+    ...featureFields,
+    ...(scoped ? [["group", "统计组"] as Field] : [])
+  ], [
     ...metadata,
-    ["说明", "同一统计组织内特性去重计数；报工仅在项目依据累加。其他室、周期外关联可用于全局分类。"]
+    ["说明", "同一统计组织内特性去重计数，报工在项目依据累加。智能化分类依据全部关联项目。"]
   ])
-  const codeTable = makeTable("代码入库依据", codeFields, [
+  const codeTable = makeTable("代码入库依据", [
+    ...codeFields,
+    ...(scoped ? [["group", "代码统计组"] as Field] : [])
+  ], [
     ...metadata,
     [
       "说明",
-      "CMBDevClaw按企业项目及代码上报室汇总周期数据；其他来源保留组织月度填报值。入库代码行数按数据来源区分渠道行数和组织总量；组织总量仅在专用行记录一次。"
+      "CMBDevClaw 按企业项目和代码上报组织汇总周期数据，其他来源保留组织月度填报值。组织总入库行数在专用行记录一次。"
     ]
   ])
   const byProject = new Map(data.evidence.projects.map((p) => [p.project.prjCode, p]))
@@ -402,12 +440,12 @@ export function projectMetricIndicatorSheets(
   const evaluated = new Map<string, { reasons: ProjectMetricSampleReasons; candidate: boolean }>()
   for (const entry of data.evidence.projects) {
     const p = entry.project
-    const reasons = projectMetricSampleReasons(p, { ...filters, upperOrgLv1: [] })
+    const reasons = projectMetricSampleReasons(p, filters)
     if (!entry.factAvailable)
       for (const key of PROJECT_METRIC_SAMPLE_KEYS)
         reasons[key] = "项目事实未保存，不能用于项目指标"
     const candidate =
-      entry.factAvailable && !projectCandidateReason(p, { ...filters, upperOrgLv1: [] })
+      entry.factAvailable && !projectCandidateReason(p, filters)
     evaluated.set(p.prjCode, { reasons, candidate })
     if (!Object.values(reasons).some((reason) => reason === null)) continue
     const row: RecordCells = {
@@ -415,6 +453,7 @@ export function projectMetricIndicatorSheets(
       name: text(p.prjName),
       team: text(p.teamName),
       room: text(p.roomName),
+      group: text(p.groupName),
       mode: modeNames[p.developmentMode],
       phase: text(p.phaseStatus),
       features: p.featureCodes.join("\n") || "—",
@@ -451,6 +490,11 @@ export function projectMetricIndicatorSheets(
         row[metricColumn(metric.key, "denominator")] = included
           ? num(values[operand.denominatorColumn])
           : "—"
+      if (metric.percentile && operand.denominatorColumn) {
+        row[`percentile:${metric.key}`] = included
+          ? num(readProjectMetricPercentileSample(metric, p))
+          : "—"
+      }
     }
     row.fp = reasons.functionPoint === null ? num(p.notAdjustFuns) : "—"
     row.bugs = reasons.bug === null ? num(p.bugNum) : "—"
@@ -464,21 +508,30 @@ export function projectMetricIndicatorSheets(
     projectRows.set(p.prjCode, projectTable.add(row))
   }
   const scopes: Scope[] = [
-    { room: null, name: PROJECT_METRIC_TEAM, level: "团队", ...data.team },
+    ...(data.team ? [{ room: null, name: PROJECT_METRIC_TEAM, level: "团队", ...data.team }] : []),
     ...data.rooms.map((room) => ({
       room: room.roomName,
-      name: room.roomName,
+      name: roomLabel(room.roomName),
       level: "室",
       ...room
+    })),
+    ...(data.groups ?? []).map((group) => ({
+      room: group.roomName,
+      group: group.groupName,
+      name: group.roomName,
+      level: "组",
+      ...group
     }))
   ]
   const belongs = (entry: ProjectMetricProjectEvidence, scope: Scope): boolean =>
     entry.project.teamName === PROJECT_METRIC_TEAM &&
-    (scope.room === null || entry.project.roomName === scope.room)
+    (scope.room === null || entry.project.roomName === scope.room) &&
+    (!scope.group || entry.project.groupName === scope.group)
   const projectReference = (prjCode: string): DashboardExcelCell => {
     const row = projectRows.get(prjCode)
     return row ? link(projectTable, row, prjCode) : prjCode
   }
+  const scopeKey = (scope: Scope): string => JSON.stringify([scope.level, scope.name, scope.group])
   const firstFeatureRows = new Map<string, number>()
   for (const scope of scopes) {
     for (const feature of data.evidence.features) {
@@ -502,15 +555,16 @@ export function projectMetricIndicatorSheets(
           evaluated.get(p.project.prjCode)?.reasons.throughput === null
       )
       if (!candidates.length && !smartThroughput && !regularThroughput) continue
-      const intelligent = associated.some((p) => p.eligibleBindingCount > 0)
+      const intelligent = feature.intelligent ?? associated.some((p) => p.eligibleBindingCount > 0)
       if (candidates.length && !feature.classificationComplete)
         throw new Error("特性关联在导出期间发生变化，请重新导出")
-      for (const entry of associated) {
+      for (const entry of scoped ? associated.filter((entry) => belongs(entry, scope)) : associated) {
         const p = entry.project
         const counted = candidates[0]?.project.prjCode === p.prjCode
         const row = featureTable.add({
           level: scope.level,
           scope: scope.name,
+          group: scope.group ?? "",
           feature: feature.featureCode,
           name: text(feature.featureName),
           approved: date(feature.approvedDate),
@@ -528,7 +582,7 @@ export function projectMetricIndicatorSheets(
           throughputSmart: smartThroughput?.project.prjCode === p.prjCode ? 1 : "—",
           throughputRegular: regularThroughput?.project.prjCode === p.prjCode ? 1 : "—"
         })
-        const key = `${scope.level}:${scope.name}`
+        const key = scopeKey(scope)
         if (!firstFeatureRows.has(key)) firstFeatureRows.set(key, row)
       }
     }
@@ -558,8 +612,9 @@ export function projectMetricIndicatorSheets(
   }
   for (const record of data.evidence.code)
     codeTable.add({
-      level: "室",
-      scope: text(record.roomName),
+      level: scoped && record.groupName ? "组" : "室",
+      scope: roomLabel(record.roomName),
+      group: text(record.groupName),
       team: PROJECT_METRIC_TEAM,
       period: `${date(filters.range.from)} 至 ${date(filters.range.to)}`,
       source: "CMBDevClaw",
@@ -569,8 +624,18 @@ export function projectMetricIndicatorSheets(
       lines: record.pushedAdoptedLines,
       effective: record.pushedEffectiveGeneratedLines
     })
-  const teamTable = makeTable("团队指标", summaryFields, metadata)
-  const roomTable = makeTable("各室指标", summaryFields, metadata)
+  const summaryMetadata: DashboardExcelCell[][] = [
+    ...metadata,
+    [
+      "分位数口径",
+      "P50、P80、P90 及分位数样本项目数为导出快照值，由有效项目的指标值按 PERCENTILE.INC 线性插值计算。"
+    ]
+  ]
+  const teamTable = makeTable("团队指标", summaryFields, summaryMetadata)
+  const roomTable = makeTable("各室指标", summaryFields, summaryMetadata)
+  const groupTable = makeTable("组级指标", [
+    ["scope", "室"], ["group", "组"], ...summaryFields.slice(1)
+  ], summaryMetadata)
   const addSummary = (
     table: Table,
     record: RecordCells,
@@ -584,6 +649,10 @@ export function projectMetricIndicatorSheets(
       d = cell(table, "denominator", row)
     const unit = String(record.unit)
     table.add({
+      p50: "",
+      p80: "",
+      p90: "",
+      percentileSamples: "",
       ...record,
       numerator,
       denominator,
@@ -595,10 +664,11 @@ export function projectMetricIndicatorSheets(
     })
   }
   for (const scope of scopes) {
-    const table = scope.room === null ? teamTable : roomTable
+    const table = scope.group ? groupTable : scope.room === null ? teamTable : roomTable
     const featureConditions: Array<[string, string | number]> = [
       ["level", scope.level],
-      ["scope", scope.name]
+      ["scope", scope.name],
+      ...(scope.group ? [["group", scope.group] as [string, string]] : [])
     ]
     const overview = scope.overview
     const coverage = overview.features
@@ -606,6 +676,7 @@ export function projectMetricIndicatorSheets(
       table,
       {
         scope: scope.name,
+        group: scope.group ?? "",
         metric: "应用研发智能化特性占比",
         mode: "总体",
         numeratorName: "智能化去重特性数",
@@ -615,8 +686,8 @@ export function projectMetricIndicatorSheets(
           ([code, e]) => e.candidate && belongs(byProject.get(code)!, scope)
         ).length,
         formula: PROJECT_FEATURE_COVERAGE_TIP,
-        numeratorLink: link(featureTable, firstFeatureRows.get(`${scope.level}:${scope.name}`)),
-        denominatorLink: link(featureTable, firstFeatureRows.get(`${scope.level}:${scope.name}`))
+        numeratorLink: link(featureTable, firstFeatureRows.get(scopeKey(scope))),
+        denominatorLink: link(featureTable, firstFeatureRows.get(scopeKey(scope)))
       },
       sum(featureTable, "coverageSmart", featureConditions, coverage?.intelligent ?? null),
       sum(featureTable, "coverageTotal", featureConditions, coverage?.total ?? null),
@@ -630,6 +701,16 @@ export function projectMetricIndicatorSheets(
         const notApplicable =
           group.developmentMode === "non_devclaw" &&
           ["token", "codeLines", "tokensPerLine"].includes(operand.sample)
+        const distribution = notApplicable ? undefined : group.percentiles?.[metric.key]
+        const percentiles: RecordCells = {}
+        if (distribution) {
+          percentiles.percentileSamples = distribution.sampleCount
+          for (const percent of PROJECT_METRIC_PERCENTILES) {
+            const value = distribution.values[percent]
+            percentiles[`p${percent}`] =
+              value === null ? "—" : { value, numberFormat: `0.00" ${metric.unit}"` }
+          }
+        }
         const conditions = projectConditions(scope, modeNames[group.developmentMode])
         if (metric.key === "functionPointsPerPersonMonth")
           conditions.push(["fp", ">=0"], [metricColumn(metric.key, "denominator"), ">=0"])
@@ -649,15 +730,17 @@ export function projectMetricIndicatorSheets(
           table,
           {
             scope: scope.name,
+            group: scope.group ?? "",
             metric: metric.label,
             mode: modeNames[group.developmentMode],
+            ...percentiles,
             numeratorName: operand.numeratorName,
             denominatorName: operand.denominatorName,
             unit: metric.unit,
             samples: notApplicable ? "—" : group.samples[operand.sample],
             formula: `${metric.formula}${group.samples[operand.sample] === 0 ? " 无有效样本。" : calculation.denominator === 0 ? " 分母为零。" : ""}`,
             numeratorLink: featureNumerator
-              ? link(featureTable, firstFeatureRows.get(`${scope.level}:${scope.name}`))
+              ? link(featureTable, firstFeatureRows.get(scopeKey(scope)))
               : projectLink,
             denominatorLink: projectLink
           },
@@ -705,6 +788,7 @@ export function projectMetricIndicatorSheets(
           table,
           {
             scope: scope.name,
+            group: scope.group ?? "",
             metric: `平均非功能问题数－${category}`,
             mode: modeNames[group.developmentMode],
             numeratorName: "该类别问题数合计",
@@ -728,13 +812,15 @@ export function projectMetricIndicatorSheets(
       }
     const codeConditions: Array<[string, string | number]> = [
       ["source", "CMBDevClaw"],
-      ...(scope.room === null ? [] : [["scope", scope.room] as [string, string]])
+      ...(scope.room === null ? [] : [["scope", scope.name] as [string, string]]),
+      ...(scope.group ? [["group", scope.group] as [string, string]] : [])
     ]
     const code = overview.code
     addSummary(
       table,
       {
         scope: scope.name,
+        group: scope.group ?? "",
         metric: "AI代码入库率",
         mode: "总体",
         numeratorName: "已Push采纳行数",
@@ -742,7 +828,7 @@ export function projectMetricIndicatorSheets(
         unit: "%",
         samples: new Set(
           data.evidence.code
-            .filter((c) => scope.room === null || c.roomName === scope.room)
+            .filter((c) => (scope.room === null || c.roomName === scope.room) && (!scope.group || c.groupName === scope.group))
             .map((c) => c.prjCode)
         ).size,
         formula: PROJECT_AI_RATE_TIP,
@@ -796,6 +882,7 @@ export function projectMetricIndicatorSheets(
           table,
           {
             scope: scope.name,
+            group: scope.group ?? "",
             metric: `代码入库情况－${sourceNames[source.source]}`,
             mode: sourceNames[source.source],
             numeratorName: source.source === "cumulative" ? "四渠道入库行数合计" : "该渠道入库行数",
@@ -814,7 +901,8 @@ export function projectMetricIndicatorSheets(
       }
     }
   }
-  for (const table of [teamTable, roomTable]) {
+  for (const table of [teamTable, roomTable, groupTable]) {
+    const groupColumn = table.columns.get("group")
     const scopeColumn = table.columns.get("scope")!
     const metricColumn = table.columns.get("metric")!
     const modeColumn = table.columns.get("mode")!
@@ -823,6 +911,7 @@ export function projectMetricIndicatorSheets(
       const current = table.sheet.rows[i]
       if (
         previous[scopeColumn] !== current[scopeColumn] ||
+        (groupColumn !== undefined && previous[groupColumn] !== current[groupColumn]) ||
         previous[metricColumn] !== current[metricColumn] ||
         previous[modeColumn] !== "智能化" ||
         current[modeColumn] !== "常规"
@@ -834,5 +923,12 @@ export function projectMetricIndicatorSheets(
       }
     }
   }
-  return [teamTable.sheet, roomTable.sheet, projectTable.sheet, featureTable.sheet, codeTable.sheet]
+  return [
+    ...(data.team ? [teamTable.sheet] : []),
+    ...(data.team || data.rooms.length ? [roomTable.sheet] : []),
+    ...(data.groups ? [groupTable.sheet] : []),
+    projectTable.sheet,
+    featureTable.sheet,
+    codeTable.sheet
+  ]
 }

@@ -9,7 +9,7 @@ import {
 } from "../../../../../shared/project-metric-calendar"
 import { PersonalEfficiencyWeightsDialog } from "./PersonalEfficiencyWeightsDialog"
 import {
-  PERSONAL_EFFICIENCY_METRICS,
+  visiblePersonalEfficiencyMetrics,
   defaultPersonalEfficiencyWeights,
   type PersonalEfficiencyData,
   type PersonalEfficiencyFilters,
@@ -23,13 +23,15 @@ import { formatPersonalMetric } from "./personal-efficiency-format"
 export function PersonalEfficiencySection({
   range,
   upperOrgLv1,
+  selectedGroups,
   dateBasis,
   refreshKey
 }: PersonalEfficiencyFilters & { refreshKey: number }): React.JSX.Element {
   const filters = useMemo(
-    () => ({ range, upperOrgLv1, dateBasis }),
-    [range, upperOrgLv1, dateBasis]
+    () => ({ range, upperOrgLv1, selectedGroups, dateBasis }),
+    [range, upperOrgLv1, selectedGroups, dateBasis]
   )
+  const groupScoped = Boolean(selectedGroups?.length)
   const months = projectCompleteMonths(range)
   const monthLabel = months.length ? projectMonthlyPeriodLabel(months) : null
   const [result, setResult] = useState<{
@@ -90,11 +92,10 @@ export function PersonalEfficiencySection({
     }
   }, [filters, refreshKey, retry])
 
-  const effectiveSort =
-    !monthLabel &&
-    PERSONAL_EFFICIENCY_METRICS.some((metric) => metric.key === sort && metric.monthly)
-      ? "score"
-      : sort
+  const metrics = visiblePersonalEfficiencyMetrics(Boolean(monthLabel), groupScoped)
+  const effectiveSort = sort === "score" || metrics.some((metric) => metric.key === sort)
+    ? sort
+    : "score"
   const rows = useMemo(
     () =>
       rankPersonalEfficiency(
@@ -102,15 +103,15 @@ export function PersonalEfficiencySection({
         weights,
         effectiveSort,
         ascending ? "asc" : "desc",
-        Boolean(monthLabel)
+        Boolean(monthLabel),
+        groupScoped
       ).filter(({ person }) =>
         `${person.userName} ${person.sapId}`.toLowerCase().includes(keyword.trim().toLowerCase())
       ),
-    [data, weights, effectiveSort, ascending, keyword, monthLabel]
+    [data, weights, effectiveSort, ascending, keyword, monthLabel, groupScoped]
   )
   const pages = Math.max(1, Math.ceil(rows.length / 20))
   const currentPage = Math.min(page, pages)
-  const metrics = PERSONAL_EFFICIENCY_METRICS.filter((metric) => !metric.monthly || monthLabel)
   const hasWeights = metrics.some(({ key }) => weights[key] !== 0)
   function changeSort(key: PersonalEfficiencyMetric | "score"): void {
     setAscending(effectiveSort === key ? !ascending : false)
@@ -176,8 +177,7 @@ export function PersonalEfficiencySection({
               </TooltipTrigger>
               <TooltipContent className="max-w-sm text-xs leading-relaxed">
                 <p>
-                  项目指标按照项目经理的维度统计到人
-                  统计，受项目所属室和项目日期筛选控制；代码生成指标按项目模式关联的精益项目统计。
+                  项目指标按项目经理统计，受项目所属室、组和项目日期筛选控制；代码生成指标按项目模式关联的精益项目及代码上报室、组统计。
                 </p>
               </TooltipContent>
             </Tooltip>
@@ -354,6 +354,7 @@ export function PersonalEfficiencySection({
         <PersonalEfficiencyWeightsDialog
           weights={weights}
           includeMonthly={Boolean(monthLabel)}
+          groupScoped={groupScoped}
           onClose={() => setWeightOpen(false)}
           onApply={(next) => {
             setWeights(next)

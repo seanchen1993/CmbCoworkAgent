@@ -17,6 +17,7 @@ import {
 } from "./dashboard-project-metrics"
 import { assertProjectModeResultComplete } from "./project-mode-query-scope"
 import { normalizeCodeStatsFromContainer } from "./dashboard-code-stats"
+import { readOrgText } from "./dashboard-org-fields"
 
 type Row = Record<string, unknown>
 const record = (v: unknown): Row =>
@@ -91,7 +92,8 @@ export async function fetchPersonalEfficiencyCode(
     [
       { sapId: { terms: { field: "sapId" } } },
       { project: { terms: { field: "properties.harnessProjectId" } } },
-      { room: { terms: { field: "upperOrgLv1", missing_bucket: true } } }
+      { room: { terms: { field: "upperOrgLv1", missing_bucket: true } } },
+      { group: { terms: { field: "upperOrgLv0", missing_bucket: true } } }
     ],
     {
       ...perBucketAggs,
@@ -100,21 +102,47 @@ export async function fetchPersonalEfficiencyCode(
       }
     }
   )
-  return buckets.map((bucket) => {
+  const merged = new Map<string, { row: PersonalEfficiencyCodeRow; latestSort: number }>()
+  for (const bucket of buckets) {
     const key = record(bucket.key)
-    if (!text(key.sapId) || !text(key.project) || !bucket.code_adopt_pushed)
+    const sapId = text(key.sapId)
+    const harnessProjectId = text(key.project)
+    if (!sapId || !harnessProjectId || !bucket.code_adopt_pushed)
       throw new Error("个人代码统计缺少人员、项目或采纳数据")
     const stats = normalizeCodeStatsFromContainer(bucket)
-    return {
-      sapId: text(key.sapId),
-      userName: text(source(bucket).userName),
-      harnessProjectId: text(key.project),
-      prjCode: "",
-      roomName: text(key.room),
-      pushedAdoptedLines: stats.pushedAdoptedLines,
-      pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines
+    const roomName = readOrgText(key.room) ?? ""
+    const groupName = readOrgText(key.group) ?? ""
+    const hits = record(record(bucket.latest).hits).hits
+    const firstHit = record(Array.isArray(hits) ? hits[0] : undefined)
+    const sortValue = Array.isArray(firstHit.sort) ? Number(firstHit.sort[0]) : Number.NaN
+    const latestSort = Number.isFinite(sortValue) ? sortValue : -Infinity
+    const userName = text(record(firstHit._source).userName)
+    const mergeKey = JSON.stringify([sapId, harnessProjectId, roomName, groupName])
+    const existing = merged.get(mergeKey)
+    if (existing) {
+      existing.row.pushedAdoptedLines += stats.pushedAdoptedLines
+      existing.row.pushedEffectiveGeneratedLines += stats.pushedEffectiveGeneratedLines
+      if (userName && (!existing.row.userName || latestSort > existing.latestSort)) {
+        existing.row.userName = userName
+        existing.latestSort = latestSort
+      }
+    } else {
+      merged.set(mergeKey, {
+        row: {
+          sapId,
+          userName,
+          harnessProjectId,
+          prjCode: "",
+          roomName,
+          groupName,
+          pushedAdoptedLines: stats.pushedAdoptedLines,
+          pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines
+        },
+        latestSort
+      })
     }
-  })
+  }
+  return [...merged.values()].map(({ row }) => row)
 }
 
 async function monthlyRecords(
@@ -204,7 +232,9 @@ export function assemblePersonalEfficiency(
   projects: ProjectMetricProjectItem[],
   code: PersonalEfficiencyCodeRow[] | null,
   monthly: Row[],
-  month: string | null
+  month: string | null,
+  groupScoped = false,
+  includeMonthly = Boolean(month)
 ): { people: PersonalEfficiencyPerson[]; missingPmCount: number } {
   const people = new Map<string, PersonalEfficiencyPerson>()
   const ensure = (sapId: string, userName: string): PersonalEfficiencyPerson => {
@@ -286,6 +316,7 @@ export function assemblePersonalEfficiency(
       person.pushedEffectiveGeneratedLines !== null && person.pushedEffectiveGeneratedLines > 0
         ? (person.pushedAdoptedLines! * 100) / person.pushedEffectiveGeneratedLines
         : null
+    if (groupScoped && includeMonthly) v.devclawPushedLines = person.pushedAdoptedLines
     if (month) {
       const row = monthByPerson.get(person.sapId)
       v.idePushedLines = count(row?.devagentIdePushedLines)
@@ -326,16 +357,23 @@ export async function fetchPersonalEfficiency(
     includeAllProjectNames
   )
   const rooms = selectedRooms(filters, deps)
+  const selectedGroups =
+    filters.selectedGroups
+      ?.filter((group) => rooms === null || rooms.includes(group.roomName))
+      .map((group) => ({ roomName: group.roomName.trim(), groupName: group.groupName.trim() })) ??
+    []
+  const groupScoped = Boolean(filters.selectedGroups?.length)
   const [codes, monthly] = await Promise.allSettled([
     codeQuery([...new Set(context.bindings.map((p) => p.harnessProjectId))], rooms),
-    detailSapId ? Promise.resolve([]) : monthlyRecords(filters, deps)
+    detailSapId || groupScoped ? Promise.resolve([]) : monthlyRecords(filters, deps)
   ])
   const warnings = [...context.warnings]
   if (codes.status === "rejected") warnings.push(`个人代码数据不可用：${errorText(codes.reason)}`)
   if (monthly.status === "rejected")
     warnings.push(`个人月度数据不可用：${errorText(monthly.reason)}`)
   const bindings = new Map(context.bindings.map((p) => [p.harnessProjectId, p.prjCode]))
-  const month = projectMonthlyPeriodLabel(projectCompleteMonths(filters.range)) || null
+  const completeMonthLabel = projectMonthlyPeriodLabel(projectCompleteMonths(filters.range)) || null
+  const month = groupScoped ? null : completeMonthLabel
   const result = assemblePersonalEfficiency(
     context.projects,
     codes.status === "fulfilled"
@@ -345,11 +383,18 @@ export async function fetchPersonalEfficiency(
         }))
       : null,
     monthly.status === "fulfilled" ? monthly.value : [],
-    month
+    month,
+    groupScoped,
+    Boolean(completeMonthLabel)
   )
   if (result.missingPmCount)
     warnings.push(`${result.missingPmCount} 个项目的 PM 姓名或 sapId 缺失，未计入个人项目指标`)
-  return { people: result.people, month, warnings }
+  return {
+    people: result.people,
+    month,
+    warnings,
+    scope: { rooms, groups: selectedGroups }
+  }
 }
 
 /** 沿用研发效能开发环境样例，不写入任何事实数据。 */
@@ -368,10 +413,13 @@ export function makeMockPersonalEfficiency(
     harnessProjectId: `h-${project.prjCode}`,
     prjCode: project.prjCode,
     roomName: project.roomName,
+    groupName: project.groupName,
     pushedAdoptedLines: 120 + index * 30,
     pushedEffectiveGeneratedLines: 200 + index * 50
   }))
-  const months = projectCompleteMonths(filters.range)
+  const groupScoped = Boolean(filters.selectedGroups?.length)
+  const completeMonths = projectCompleteMonths(filters.range)
+  const months = groupScoped ? [] : completeMonths
   const month = projectMonthlyPeriodLabel(months) || null
   const monthly = aggregatePersonalMonthlyRecords(
     months,
@@ -386,8 +434,19 @@ export function makeMockPersonalEfficiency(
     )
   )
   return {
-    people: assemblePersonalEfficiency(projects, code, monthly, month).people,
+    people: assemblePersonalEfficiency(
+      projects,
+      code,
+      monthly,
+      month,
+      groupScoped,
+      completeMonths.length > 0
+    ).people,
     month,
-    warnings: []
+    warnings: [],
+    scope: {
+      rooms: filters.upperOrgLv1?.length ? filters.upperOrgLv1 : null,
+      groups: filters.selectedGroups ?? []
+    }
   }
 }

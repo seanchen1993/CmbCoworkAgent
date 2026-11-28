@@ -1,11 +1,10 @@
 import { Info } from "lucide-react"
+import { Select, SelectValue } from "@/components/ui/select"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select"
+  EfficiencySelectContent,
+  EfficiencySelectItem,
+  EfficiencySelectTrigger
+} from "../EfficiencyFilterSelect"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ProjectMetricFilters } from "../../../../../shared/project-metrics"
 
@@ -38,26 +37,13 @@ export function ProjectMetricDateBasisSelect({
         </Tooltip>
       </TooltipProvider>
       <Select value={value} onValueChange={onChange}>
-        <SelectTrigger
-          aria-label="项目日期口径"
-          className="h-8 w-40 justify-between rounded-md border-input bg-background px-3 text-xs font-normal shadow-sm [&>svg]:shrink-0"
-        >
+        <EfficiencySelectTrigger aria-label="项目日期口径" className="w-40">
           <SelectValue />
-        </SelectTrigger>
-        <SelectContent align="start" className="w-40 p-2" viewportClassName="space-y-0.5 p-0">
-          <SelectItem
-            value="developmentCompleted"
-            className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
-          >
-            开发完成日期
-          </SelectItem>
-          <SelectItem
-            value="created"
-            className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
-          >
-            立项日期
-          </SelectItem>
-        </SelectContent>
+        </EfficiencySelectTrigger>
+        <EfficiencySelectContent>
+          <EfficiencySelectItem value="developmentCompleted">开发完成日期</EfficiencySelectItem>
+          <EfficiencySelectItem value="created">立项日期</EfficiencySelectItem>
+        </EfficiencySelectContent>
       </Select>
     </div>
   )

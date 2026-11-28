@@ -1,8 +1,12 @@
-import type { ProjectMetricFilters, ProjectMetricProjectItem } from "./project-metrics"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricGroup,
+  ProjectMetricProjectItem
+} from "./project-metrics"
 
 export type PersonalEfficiencyFilters = Pick<
   ProjectMetricFilters,
-  "range" | "upperOrgLv1" | "dateBasis"
+  "range" | "upperOrgLv1" | "dateBasis" | "selectedGroups"
 >
 
 export interface PersonalEfficiencyValues {
@@ -72,6 +76,13 @@ export const PERSONAL_EFFICIENCY_METRICS: Array<{
   { key: "totalPushedLines", label: "总 Push 行数", unit: "行", monthly: true }
 ]
 
+export function visiblePersonalEfficiencyMetrics(includeMonthly: boolean, groupScoped = false) {
+  return PERSONAL_EFFICIENCY_METRICS.filter(
+    (metric) =>
+      !metric.monthly || (includeMonthly && (!groupScoped || metric.key === "devclawPushedLines"))
+  )
+}
+
 export function defaultPersonalEfficiencyWeights(): PersonalEfficiencyWeights {
   return Object.fromEntries(
     PERSONAL_EFFICIENCY_METRICS.map(({ key }) => [key, key === "adoptionRate" ? 100 : 0])
@@ -101,6 +112,7 @@ export interface PersonalEfficiencyCodeItem {
   harnessProjectId: string
   prjCode: string
   roomName: string
+  groupName?: string
   pushedAdoptedLines: number
   pushedEffectiveGeneratedLines: number
 }
@@ -129,4 +141,8 @@ export interface PersonalEfficiencyData {
   people: PersonalEfficiencyPerson[]
   month: string | null
   warnings: string[]
+  scope?: {
+    rooms: string[] | null
+    groups: ProjectMetricGroup[]
+  }
 }

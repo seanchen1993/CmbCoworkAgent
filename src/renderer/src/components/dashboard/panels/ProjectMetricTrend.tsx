@@ -10,6 +10,12 @@ import {
   YAxis
 } from "recharts"
 import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
+import {
+  EFFICIENCY_FILTER_MENU,
+  EFFICIENCY_FILTER_OPTION,
+  EFFICIENCY_FILTER_TRIGGER
+} from "../efficiency-filter-styles"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   PROJECT_METRIC_TOOLTIP_CLASS,
@@ -271,7 +277,7 @@ export function ProjectMetricTrend({
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 max-w-80 gap-2 text-xs"
+                className={cn(EFFICIENCY_FILTER_TRIGGER, "max-w-80")}
                 title={firstSelectedLabel ?? "选择指标"}
                 aria-label={`选择指标：${firstSelectedLabel ?? "未选择"}${selected.length > 1 ? `，另选 ${selected.length - 1} 项` : ""}`}
               >
@@ -281,10 +287,10 @@ export function ProjectMetricTrend({
                     +{selected.length - 1}
                   </span>
                 ) : null}
-                <ChevronDown className="size-3.5 shrink-0" />
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="start" className="w-72 p-2">
+            <PopoverContent align="start" className={cn(EFFICIENCY_FILTER_MENU, "w-72 p-1")}>
               <div className="mb-1 flex items-center justify-between border-b border-border px-2 pb-2">
                 <span className="text-xs text-muted-foreground">已选 {selected.length} 项</span>
                 <Button
@@ -300,7 +306,8 @@ export function ProjectMetricTrend({
               {METRICS.map((metric) => (
                 <label
                   key={metric.key}
-                  className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted"
+                  data-selected={selected.includes(metric.key)}
+                  className={cn(EFFICIENCY_FILTER_OPTION, "flex items-center gap-2")}
                 >
                   <input
                     type="checkbox"

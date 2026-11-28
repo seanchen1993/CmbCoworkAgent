@@ -16,18 +16,26 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Select, SelectValue } from "@/components/ui/select"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select"
+  EfficiencySelectContent as SelectContent,
+  EfficiencySelectItem as SelectItem,
+  EfficiencySelectTrigger as SelectTrigger
+} from "../EfficiencyFilterSelect"
+import {
+  EFFICIENCY_FILTER_CONTROL,
+  EFFICIENCY_FILTER_MENU,
+  EFFICIENCY_FILTER_OPTION,
+  EFFICIENCY_FILTER_TRIGGER
+} from "../efficiency-filter-styles"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { ProjectMetricOverview } from "./ProjectMetricOverview"
 import { PROJECT_CALENDAR_NOTE } from "../../../../../shared/project-metric-calendar"
-import { PROJECT_METRIC_INDICATORS } from "../../../../../shared/project-metric-indicators"
+import {
+  PROJECT_METRIC_BY_KEY,
+  PROJECT_METRIC_INDICATORS
+} from "../../../../../shared/project-metric-indicators"
 import { ProjectMetricTrend } from "./ProjectMetricTrend"
 import { projectMetricExportSheet } from "./project-metric-export"
 import {
@@ -35,14 +43,17 @@ import {
   ProjectMetricIssueBreakdown,
   ProjectMetricProjectIssueBreakdown
 } from "./ProjectMetricIssueBreakdown"
-import type {
-  ProjectMetricFilters,
-  ProjectMetricListOptions,
-  ProjectMetricProjectsData,
-  ProjectMetricProjectItem,
-  ProjectMetricSummaryData,
-  ProjectMetricSummaryGroup,
-  ProjectMetricTrendFilters
+import {
+  PROJECT_METRIC_PERCENTILES,
+  type ProjectMetricFilters,
+  type ProjectMetricListOptions,
+  type ProjectMetricPercentile,
+  type ProjectMetricProjectsData,
+  type ProjectMetricProjectItem,
+  type ProjectMetricSummaryData,
+  type ProjectMetricSummaryGroup,
+  type ProjectMetricTrendFilters,
+  type ProjectMetricValueKey
 } from "../../../../../shared/project-metrics"
 
 const PHASE_OPTIONS = [
@@ -59,8 +70,6 @@ const PHASE_OPTIONS = [
 ]
 
 const ALL_VALUE = "__all__"
-const FILTER_CONTROL_CLASS =
-  "h-8 rounded-md border-input bg-background text-xs font-normal shadow-sm"
 
 function nullableNumber(value: string): number | null {
   if (!value.trim()) return null
@@ -189,13 +198,14 @@ function SummaryTokenPerLineValue({
 interface SummaryMetricRow {
   label: string
   hint: React.ReactNode
-  read?: (group: ProjectMetricSummaryGroup) => number | null
-  readPair?: (group: ProjectMetricSummaryGroup) => { input: number | null; output: number | null }
-  sample?: keyof ProjectMetricSummaryGroup["samples"]
+  key: ProjectMetricValueKey
+  pairWith?: ProjectMetricValueKey
+  sample: keyof ProjectMetricSummaryGroup["samples"]
   formatter?: (value: number | null) => string
 }
 interface ProjectMetricSampleSelection {
   key: NonNullable<ProjectMetricListOptions["metricSample"]>
+  percentileMetric?: ProjectMetricValueKey
   label: string
   developmentMode: "devclaw" | "non_devclaw"
 }
@@ -204,46 +214,52 @@ function SummaryMetricValue({
   row,
   group,
   tone,
+  percentile,
   onSelectSample,
   sampleDisabled
 }: {
   row: SummaryMetricRow
   group: ProjectMetricSummaryGroup | null
   tone: "devclaw" | "non_devclaw"
+  percentile: ProjectMetricPercentile | null
   onSelectSample: (sample: ProjectMetricSampleSelection) => void
   sampleDisabled: boolean
 }): React.JSX.Element {
-  const sampleKey = row.sample
+  const sampleCount =
+    percentile === null ? group?.samples[row.sample] : group?.percentiles?.[row.key]?.sampleCount
   const sample =
-    sampleKey && group ? (
+    sampleCount !== undefined ? (
       <button
         type="button"
         className="block text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:no-underline disabled:opacity-50"
         disabled={sampleDisabled}
         aria-label={`查看${row.label}的${tone === "devclaw" ? "CMBDevClaw" : "非CMBDevClaw"}有效样本`}
-        onClick={() => onSelectSample({ key: sampleKey, label: row.label, developmentMode: tone })}
+        onClick={() =>
+          onSelectSample({
+            key: row.sample,
+            label: row.label,
+            developmentMode: tone,
+            ...(percentile === null ? {} : { percentileMetric: row.key })
+          })
+        }
       >
-        有效样本 {group.samples[sampleKey]}
+        有效样本 {sampleCount}
       </button>
     ) : undefined
-  if (row.readPair) {
-    const pair = group ? row.readPair(group) : { input: null, output: null }
+  const read = (key: ProjectMetricValueKey): number | null =>
+    (percentile === null ? group?.[key] : group?.percentiles?.[key]?.values[percentile]) ?? null
+  if (row.pairWith) {
     return (
       <SummaryTokenPerLineValue
-        input={pair.input}
-        output={pair.output}
+        input={read(row.key)}
+        output={read(row.pairWith)}
         sample={sample}
         tone={tone}
       />
     )
   }
   return (
-    <SummaryValue
-      value={group && row.read ? row.read(group) : null}
-      sample={sample}
-      formatter={row.formatter}
-      tone={tone}
-    />
+    <SummaryValue value={read(row.key)} sample={sample} formatter={row.formatter} tone={tone} />
   )
 }
 
@@ -251,6 +267,7 @@ function SummaryMetricCell({
   row,
   group,
   tone,
+  percentile,
   issueGroups,
   onSelectSample,
   sampleDisabled
@@ -258,6 +275,7 @@ function SummaryMetricCell({
   row: SummaryMetricRow
   group: ProjectMetricSummaryGroup | null
   tone: "devclaw" | "non_devclaw"
+  percentile: ProjectMetricPercentile | null
   issueGroups: ProjectMetricSummaryGroup[]
   onSelectSample: (sample: ProjectMetricSampleSelection) => void
   sampleDisabled: boolean
@@ -271,11 +289,12 @@ function SummaryMetricCell({
       row={row}
       group={group}
       tone={tone}
+      percentile={percentile}
       onSelectSample={onSelectSample}
       sampleDisabled={sampleDisabled}
     />
   )
-  if (row.sample !== "kenanIssue") {
+  if (row.sample !== "kenanIssue" || percentile !== null) {
     return <td className={`${cellClassName} px-4 py-2.5`}>{value}</td>
   }
   return (
@@ -306,6 +325,8 @@ function SummaryComparison({
   error,
   adapterName,
   tokenConsumptionFiltered,
+  percentile,
+  onPercentileChange,
   onSelectSample
 }: {
   data: ProjectMetricSummaryData | null
@@ -313,6 +334,8 @@ function SummaryComparison({
   error: string | null
   adapterName: string
   tokenConsumptionFiltered: boolean
+  percentile: ProjectMetricPercentile | null
+  onPercentileChange: (percentile: ProjectMetricPercentile | null) => void
   onSelectSample: (sample: ProjectMetricSampleSelection) => void
 }): React.JSX.Element {
   const devclaw = summaryGroup(data, "devclaw")
@@ -328,7 +351,7 @@ function SummaryComparison({
           metric.unit === "工作日"
             ? metric.formula
             : `${metric.formula} ${metric.online ? "按首次上线日期选样本，不叠加立项或开发完成日期条件。" : "按所选项目日期口径选样本。"}`,
-        read: (group) => group[metric.key],
+        key: metric.key,
         sample: metric.sample,
         formatter:
           metric.unit === "工作日"
@@ -339,79 +362,92 @@ function SummaryComparison({
     {
       label: "平均缺陷数",
       hint: "无缺陷的项目按 0 计算",
-      read: (group) => group.avgBugCount,
+      key: "avgBugCount",
       sample: "bug"
     },
     {
       label: "平均非功能问题数",
       hint: "项目上线流程关联的 label 对应的 UAT 流水线构建的柯南问题",
-      read: (group) => group.avgKenanIssueCount,
+      key: "avgKenanIssueCount",
       sample: "kenanIssue"
     },
     {
       label: "平均功能点",
       hint: "仅统计已有功能点结算的项目",
-      read: (group) => group.avgFuncPointCount,
+      key: "avgFuncPointCount",
       sample: "functionPoint"
     },
     {
       label: "平均缺陷密度",
       hint: "缺陷密度 = 有效项目的缺陷数之和 × 100 ÷ 功能点之和，不计算未结算功能点的项目",
-      read: (group) => group.defectDensityPer100Fp,
+      key: "defectDensityPer100Fp",
       sample: "defectDensity"
     },
     {
       label: "平均发起 ST 耗时",
       hint: "ST 发起日期 - 立项日期",
-      read: (group) => group.avgTestLeadDays,
+      key: "avgTestLeadDays",
       sample: "testLead",
       formatter: formatDays
     },
     {
       label: "平均发起 UAT 耗时",
       hint: "UAT 发起日期 - 立项日期",
-      read: (group) => group.avgUatLeadDays,
+      key: "avgUatLeadDays",
       sample: "uatLead",
       formatter: formatDays
     },
     {
       label: "平均特性上线耗时",
       hint: "项目首次上线日期 - 特性审批通过日期",
-      read: (group) => group.avgDeliveryDays,
+      key: "avgDeliveryDays",
       sample: "delivery",
       formatter: formatDays
     },
     {
       label: "平均输入 Token",
       hint: "CMBDevClaw 项目的累计输入 Token 之和 ÷ CMBDevClaw 项目数",
-      read: (group) => group.avgInputTokens,
+      key: "avgInputTokens",
       sample: "token",
       formatter: formatCompact
     },
     {
       label: "平均输出 Token",
       hint: "CMBDevClaw 项目的累计输出 Token 之和 ÷ CMBDevClaw 项目数",
-      read: (group) => group.avgOutputTokens,
+      key: "avgOutputTokens",
       sample: "token",
       formatter: formatCompact
     },
     {
       label: "平均代码行数",
       hint: "CMBDevClaw 项目的累计已 Push 采纳行数之和 ÷ CMBDevClaw 项目数。没有采纳行的项目按 0 计入。",
-      read: (group) => group.avgPushedAdoptedLines,
+      key: "avgPushedAdoptedLines",
       sample: "codeLines",
       formatter: formatCompact
     },
     {
       label: "平均单行代码消耗 Token",
       hint: "CMBDevClaw 项目的累计输入 Token、累计输出 Token ÷ 同一批项目的累计已 Push 采纳行数。只统计代码行数大于 0 的项目。",
-      readPair: (group) => ({
-        input: group.inputTokensPerAdoptedLine,
-        output: group.outputTokensPerAdoptedLine
-      }),
+      key: "inputTokensPerAdoptedLine",
+      pairWith: "outputTokensPerAdoptedLine",
       sample: "tokensPerLine"
     }
   ]
+
+  const visibleRows =
+    percentile === null
+      ? rows
+      : rows.flatMap((row) => {
+          const definition = PROJECT_METRIC_BY_KEY.get(row.key)?.percentile
+          if (!definition) return []
+          return [{
+            ...row,
+            label: row.pairWith ? "项目单行代码消耗 Token" : definition.label,
+            hint: row.pairWith
+              ? "每个项目分别计算输入、输出 Token ÷ 已 Push 采纳行数，只统计采纳行数大于零的项目。"
+              : definition.hint ?? "对每个有效项目的指标值取所选分位数。"
+          }]
+        })
 
   if (loading && !data) {
     return (
@@ -451,6 +487,26 @@ function SummaryComparison({
               <th className="w-[38%] bg-muted/40 px-4 py-3 font-medium text-muted-foreground">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span>对比指标</span>
+                  <Select
+                    value={percentile === null ? "summary" : String(percentile)}
+                    onValueChange={(value) =>
+                      onPercentileChange(
+                        PROJECT_METRIC_PERCENTILES.find((item) => String(item) === value) ?? null
+                      )
+                    }
+                  >
+                    <SelectTrigger className="w-28" aria-label="对比指标统计方式">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="summary">汇总值</SelectItem>
+                      {PROJECT_METRIC_PERCENTILES.map((item) => (
+                        <SelectItem key={item} value={String(item)}>
+                          {item} 分位
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <span className="text-[10px] font-normal text-muted-foreground">
                     点击有效样本可查看对应明细
                   </span>
@@ -476,8 +532,8 @@ function SummaryComparison({
             </tr>
           </thead>
           <tbody className="divide-y divide-border/70">
-            {rows.map((row) => (
-              <tr key={row.label} className="transition-colors hover:bg-muted/20">
+            {visibleRows.map((row) => (
+              <tr key={row.key} className="transition-colors hover:bg-muted/20">
                 <td className="bg-muted/[0.16] px-4 py-2.5 font-medium text-muted-foreground">
                   <div className="flex items-center gap-1.5">
                     <span>{row.label}</span>
@@ -488,6 +544,7 @@ function SummaryComparison({
                   row={row}
                   group={devclaw}
                   tone="devclaw"
+                  percentile={percentile}
                   issueGroups={issueGroups}
                   onSelectSample={onSelectSample}
                   sampleDisabled={loading || Boolean(error)}
@@ -496,6 +553,7 @@ function SummaryComparison({
                   row={row}
                   group={nonDevclaw}
                   tone="non_devclaw"
+                  percentile={percentile}
                   issueGroups={issueGroups}
                   onSelectSample={onSelectSample}
                   sampleDisabled={loading || Boolean(error)}
@@ -522,17 +580,20 @@ function PhaseFilter({
         <Button
           variant="outline"
           size="sm"
-          className={cn(FILTER_CONTROL_CLASS, "w-40 justify-between px-3")}
+          className={cn(EFFICIENCY_FILTER_TRIGGER, "w-40")}
         >
           <span className="truncate">
             {value.length === 0 ? "全部阶段" : `已选 ${value.length} 个阶段`}
           </span>
-          <ChevronDown className="size-4 shrink-0 opacity-50" />
+          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-56 p-2">
+      <PopoverContent align="start" className={cn(EFFICIENCY_FILTER_MENU, "w-56 p-1")}>
         <div className="max-h-64 space-y-0.5 overflow-y-auto">
-          <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted">
+          <label
+            data-selected={value.length === 0}
+            className={cn(EFFICIENCY_FILTER_OPTION, "flex items-center gap-2")}
+          >
             <input type="checkbox" checked={value.length === 0} onChange={() => onChange([])} />
             全部阶段
           </label>
@@ -541,7 +602,8 @@ function PhaseFilter({
             return (
               <label
                 key={phase}
-                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted"
+                data-selected={checked}
+                className={cn(EFFICIENCY_FILTER_OPTION, "flex items-center gap-2")}
               >
                 <input
                   type="checkbox"
@@ -774,14 +836,17 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
 export function ProjectMetricsSection({
   range,
   upperOrgLv1,
+  selectedGroups,
   refreshKey,
   dateBasis
 }: {
   range: { from: string; to: string }
   upperOrgLv1: string[]
+  selectedGroups: NonNullable<ProjectMetricFilters["selectedGroups"]>
   refreshKey: number
   dateBasis: NonNullable<ProjectMetricFilters["dateBasis"]>
 }): React.JSX.Element {
+  const [percentile, setPercentile] = useState<ProjectMetricPercentile | null>(null)
   const [indicatorExporting, setIndicatorExporting] = useState(false)
   const [retry, setRetry] = useState(0)
   const [phaseStatuses, setPhaseStatuses] = useState<string[]>([])
@@ -802,9 +867,10 @@ export function ProjectMetricsSection({
   const [departmentKeyword, setDepartmentKeyword] = useState("")
   const [debouncedDepartmentKeyword, setDebouncedDepartmentKeyword] = useState("")
   const [page, setPage] = useState(1)
-  const [previousDateBasis, setPreviousDateBasis] = useState(dateBasis)
-  if (previousDateBasis !== dateBasis) {
-    setPreviousDateBasis(dateBasis)
+  const scopeKey = JSON.stringify([dateBasis, upperOrgLv1, selectedGroups])
+  const [previousScopeKey, setPreviousScopeKey] = useState(scopeKey)
+  if (previousScopeKey !== scopeKey) {
+    setPreviousScopeKey(scopeKey)
     setPage(1)
   }
   const [pageSize, setPageSize] = useState<20 | 50 | 100>(20)
@@ -842,6 +908,7 @@ export function ProjectMetricsSection({
   const trendFilters = useMemo<ProjectMetricTrendFilters>(
     () => ({
       upperOrgLv1,
+      selectedGroups,
       dateBasis,
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
@@ -858,7 +925,8 @@ export function ProjectMetricsSection({
       debouncedTokenConsumptionMin,
       phaseStatuses,
       dateBasis,
-      upperOrgLv1
+      upperOrgLv1,
+      selectedGroups
     ]
   )
   const filters = useMemo<ProjectMetricFilters>(
@@ -869,6 +937,7 @@ export function ProjectMetricsSection({
     () => ({
       developmentMode,
       metricSample: activeSample?.key,
+      percentileMetric: activeSample?.percentileMetric,
       keyword: debouncedKeyword,
       departmentKeyword: debouncedDepartmentKeyword,
       page,
@@ -940,6 +1009,15 @@ export function ProjectMetricsSection({
   }, [filters, listOptions, refreshKey, retry])
 
   const totalPages = Math.max(1, Math.ceil((projects?.total ?? 0) / pageSize))
+  const clearSample = (): void => {
+    setActiveSample(null)
+    setDevelopmentMode("all")
+    setPage(1)
+  }
+  const changePercentile = (next: ProjectMetricPercentile | null): void => {
+    if (activeSample && (percentile === null) !== (next === null)) clearSample()
+    setPercentile(next)
+  }
   const selectSample = (sample: ProjectMetricSampleSelection): void => {
     setActiveSample(sample)
     setDevelopmentMode(sample.developmentMode)
@@ -975,11 +1053,10 @@ export function ProjectMetricsSection({
     }
   }
   const exportIndicators = async (): Promise<void> => {
-    const exportFilters = { ...filters, upperOrgLv1: [] }
     setIndicatorExporting(true)
     setExportError(null)
     try {
-      const saved = await window.api.dashboard.projectMetricIndicatorExport(exportFilters)
+      const saved = await window.api.dashboard.projectMetricIndicatorExport(filters)
       if (!saved.success && !saved.canceled) throw new Error(saved.error || "导出指标失败")
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error))
@@ -1082,27 +1159,18 @@ export function ProjectMetricsSection({
             setPage(1)
           }}
         >
-          <SelectTrigger
-            className={cn(FILTER_CONTROL_CLASS, "w-40 justify-between px-3 [&>svg]:shrink-0")}
-          >
+          <SelectTrigger className="w-40">
             <SelectValue placeholder="全部插件" />
           </SelectTrigger>
-          <SelectContent
-            align="start"
-            className="w-80 max-w-[calc(100vw-2rem)] p-2"
-            viewportClassName="max-h-64 space-y-0.5 p-0"
-          >
-            <SelectItem
-              value={ALL_VALUE}
-              className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
-            >
+          <SelectContent className="w-80">
+            <SelectItem value={ALL_VALUE}>
               全部插件
             </SelectItem>
             {(summary?.pluginOptions ?? []).map((plugin) => (
               <SelectItem
                 key={plugin}
                 value={plugin}
-                className="cursor-pointer whitespace-normal break-words rounded py-1.5 pr-8 text-xs leading-5 focus:bg-muted focus:text-foreground"
+                className="whitespace-normal break-words"
               >
                 {plugin}
               </SelectItem>
@@ -1118,7 +1186,7 @@ export function ProjectMetricsSection({
             setPage(1)
           }}
           placeholder="功能点下限"
-          className={cn(FILTER_CONTROL_CLASS, "w-28")}
+          className={cn(EFFICIENCY_FILTER_CONTROL, "w-28")}
         />
         <span className="text-xs text-muted-foreground">至</span>
         <Input
@@ -1130,7 +1198,7 @@ export function ProjectMetricsSection({
             setPage(1)
           }}
           placeholder="功能点上限"
-          className={cn(FILTER_CONTROL_CLASS, "w-28")}
+          className={cn(EFFICIENCY_FILTER_CONTROL, "w-28")}
         />
         <Input
           type="number"
@@ -1142,7 +1210,7 @@ export function ProjectMetricsSection({
             setPage(1)
           }}
           placeholder="Token 消耗下限"
-          className={cn(FILTER_CONTROL_CLASS, "w-32")}
+          className={cn(EFFICIENCY_FILTER_CONTROL, "w-32")}
         />
         <span className="text-xs text-muted-foreground">至</span>
         <Input
@@ -1155,7 +1223,7 @@ export function ProjectMetricsSection({
             setPage(1)
           }}
           placeholder="Token 消耗上限"
-          className={cn(FILTER_CONTROL_CLASS, "w-32")}
+          className={cn(EFFICIENCY_FILTER_CONTROL, "w-32")}
         />
       </div>
 
@@ -1169,6 +1237,8 @@ export function ProjectMetricsSection({
             nullableNumber(debouncedTokenConsumptionMin) !== null ||
             nullableNumber(debouncedTokenConsumptionMax) !== null
           }
+          percentile={percentile}
+          onPercentileChange={changePercentile}
           onSelectSample={selectSample}
         />
       </div>
@@ -1214,7 +1284,7 @@ export function ProjectMetricsSection({
                 setPage(1)
               }}
             >
-              <SelectTrigger className={cn(FILTER_CONTROL_CLASS, "w-40")}>
+              <SelectTrigger className="w-40">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1232,7 +1302,7 @@ export function ProjectMetricsSection({
                   setPage(1)
                 }}
                 placeholder="搜索项目编号 / 名称"
-                className={cn(FILTER_CONTROL_CLASS, "w-52 pl-8")}
+                className={cn(EFFICIENCY_FILTER_CONTROL, "w-52 pl-8")}
               />
             </div>
             <div className="relative">
@@ -1244,7 +1314,7 @@ export function ProjectMetricsSection({
                   setPage(1)
                 }}
                 placeholder="搜索室 / 组"
-                className={cn(FILTER_CONTROL_CLASS, "w-52 pl-8")}
+                className={cn(EFFICIENCY_FILTER_CONTROL, "w-52 pl-8")}
               />
             </div>
           </div>
@@ -1253,18 +1323,14 @@ export function ProjectMetricsSection({
         {activeSample ? (
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>
-              有效样本：{activeSample.label} ·{" "}
+              {activeSample.percentileMetric ? "分位数样本" : "有效样本"}：{activeSample.label} ·{" "}
               {activeSample.developmentMode === "devclaw" ? "CMBDevClaw" : "非 CMBDevClaw 项目"}
             </span>
             <Button
               variant="ghost"
               size="sm"
               className="h-6 px-2 text-xs"
-              onClick={() => {
-                setActiveSample(null)
-                setDevelopmentMode("all")
-                setPage(1)
-              }}
+              onClick={clearSample}
             >
               清除样本筛选
             </Button>
@@ -1399,7 +1465,7 @@ export function ProjectMetricsSection({
                 setPage(1)
               }}
             >
-              <SelectTrigger className="h-8 w-24 text-xs">
+              <SelectTrigger className="w-28">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

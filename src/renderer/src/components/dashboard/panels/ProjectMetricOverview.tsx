@@ -74,6 +74,7 @@ export function ProjectMetricOverview({
   const [retry, setRetry] = useState(0)
   const range = filters.range
   const rooms = filters.upperOrgLv1
+  const selectedGroups = filters.selectedGroups
   const dateBasis = filters.dateBasis
   useEffect(() => {
     let active = true
@@ -85,6 +86,7 @@ export function ProjectMetricOverview({
         const result = await window.api.dashboard.projectMetricOverview({
           range,
           upperOrgLv1: rooms,
+          selectedGroups,
           dateBasis
         })
         if (!active) return
@@ -100,7 +102,7 @@ export function ProjectMetricOverview({
     return () => {
       active = false
     }
-  }, [range, rooms, dateBasis, refreshKey, retry])
+  }, [range, rooms, selectedGroups, dateBasis, refreshKey, retry])
   const failed = error || data?.featureError || data?.codeError || data?.monthlyError
   return (
     <div className="mt-4 space-y-3" aria-busy={loading}>

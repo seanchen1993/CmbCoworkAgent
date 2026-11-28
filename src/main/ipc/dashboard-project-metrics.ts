@@ -1,5 +1,9 @@
 import {
   PROJECT_METRIC_TEAM,
+  matchesProjectMetricGroups,
+  projectMetricGroupKey,
+  type ProjectMetricGroup,
+  type ProjectMetricGroupOptions,
   type ProjectMetricFilters,
   type ProjectMetricListOptions,
   type ProjectMetricProjectItem,
@@ -16,6 +20,7 @@ import {
 import {
   formatProjectDate,
   projectCompleteMonths,
+  projectDateMillis,
   projectMonthlyPeriodLabel,
   projectRangeBounds,
   projectWorkingDays,
@@ -23,7 +28,8 @@ import {
 } from "../../shared/project-metric-calendar"
 import { fetchTestProjectIds } from "./project-mode-test-projects"
 import { assertProjectModeResultComplete } from "./project-mode-query-scope"
-import { readOrgText } from "./dashboard-org-fields"
+import { DASHBOARD_UNCLASSIFIED_ORG, readOrgText } from "./dashboard-org-fields"
+import { projectMetricGroupFilter, validateProjectMetricGroups } from "./project-metric-group-scope"
 import {
   advancedProjectReason,
   projectCandidateReason,
@@ -31,6 +37,10 @@ import {
   PROJECT_METRIC_SAMPLE_KEYS
 } from "../../shared/project-metric-samples"
 import { projectInPeriod, projectMetricGroups } from "./dashboard-project-metric-calculations"
+import {
+  PROJECT_METRIC_BY_KEY,
+  readProjectMetricPercentileSample
+} from "../../shared/project-metric-indicators"
 import {
   PROJECT_METRIC_MOCK_ROOMS,
   PROJECT_METRIC_MOCK_PROJECTS,
@@ -56,14 +66,18 @@ export interface ProjectMetricDependencies {
   /** null 表示管理员不限室；空数组表示无可访问室。 */
   allowedRoomNames: string[] | null
   validateFactFields?: () => Promise<void>
+  factGroupField?: () => Promise<string>
   codeEvidence?: (
     range: ProjectMetricFilters["range"],
-    harnessIds: string[]
+    harnessIds: string[],
+    rooms: string[] | null,
+    groups?: ProjectMetricGroup[]
   ) => Promise<ProjectMetricPeriodCode[]>
   codeStats?: (
     range: ProjectMetricFilters["range"],
     rooms: string[] | null,
-    harnessIds: string[]
+    harnessIds: string[],
+    groups?: ProjectMetricGroup[]
   ) => Promise<ProjectMetricCodeOverview>
 }
 interface SnapshotProject {
@@ -327,7 +341,7 @@ function validateFilters(filters: ProjectMetricFilters): void {
     (!Array.isArray(filters.upperOrgLv1) || filters.upperOrgLv1.some((v) => typeof v !== "string"))
   )
     throw new Error("室筛选无效")
-  if (filters.groupNames?.length) throw new Error("本期不支持组筛选")
+  validateProjectMetricGroups(filters.selectedGroups)
 }
 function roomsFor(filters: ProjectMetricFilters, deps: ProjectMetricDependencies): string[] | null {
   const requested = strings(filters.upperOrgLv1)
@@ -335,13 +349,28 @@ function roomsFor(filters: ProjectMetricFilters, deps: ProjectMetricDependencies
   const allowed = new Set(deps.allowedRoomNames)
   return requested.length ? requested.filter((room) => allowed.has(room)) : [...allowed]
 }
+const PROJECT_RETENTION_FILTER = { range: { createDate: { gte: "2026-06-01 00:00:00" } } }
+
 function organizationFilters(rooms: string[] | null): RecordValue[] {
   return [
     { term: { teamName: PROJECT_METRIC_TEAM } },
-    { range: { createDate: { gte: "2026-06-01 00:00:00" } } },
+    PROJECT_RETENTION_FILTER,
     ...(rooms === null ? [] : [terms("roomName", rooms)])
   ]
 }
+async function projectScopeFilters(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies
+): Promise<RecordValue[]> {
+  const clauses = organizationFilters(roomsFor(filters, deps))
+  if (filters.selectedGroups?.length) {
+    const field = (await deps.factGroupField?.()) ?? "groupName"
+    const groups = projectMetricGroupFilter(filters.selectedGroups, "roomName", field)
+    if (groups) clauses.push(groups)
+  }
+  return clauses
+}
+
 function periodFilter(filters: ProjectMetricFilters, online = false): RecordValue {
   const range = projectRangeBounds(filters.range)
   if (online) return { range: { firstOnlineDate: range } }
@@ -382,7 +411,8 @@ function parseFact(source: RecordValue, state: Snapshot): ProjectMetricProjectIt
     prjName: string(source.prjName),
     teamName: string(source.teamName),
     roomName: string(source.roomName),
-    groupName: string(source.groupName),
+    groupName:
+      typeof source.groupName === "string" && readOrgText(source.groupName) ? source.groupName : "",
     phaseStatus: string(source.phaseStatus),
     developmentMode: smart ? "devclaw" : "non_devclaw",
     plugins: strings(state.byCode.get(prjCode)?.map((p) => p.adapterName)),
@@ -467,7 +497,7 @@ export async function fetchPersonalEfficiencyProjectContext(
   await deps.validateFactFields?.()
   const state = await snapshot(deps)
   const raw = await facts(deps, [
-    ...organizationFilters(roomsFor(filters, deps)),
+    ...(await projectScopeFilters(filters, deps)),
     periodFilter(filters)
   ])
   const parsed = raw.map((source) => parseFact(source, state))
@@ -560,7 +590,7 @@ async function context(
   await deps.validateFactFields?.()
   const s = state ?? (await snapshot(deps))
   const raw = await facts(deps, [
-    ...organizationFilters(roomsFor(filters, deps)),
+    ...(await projectScopeFilters(filters, deps)),
     {
       bool: {
         should: [periodFilter(filters), periodFilter(filters, true)],
@@ -653,7 +683,7 @@ export async function fetchProjectMetricTrend(
   return {
     months: months.map(({ month, range }) => ({
       month,
-      groups: summarize(ctx, { ...filters, range }).groups
+      groups: projectMetricGroups(ctx.items, { ...filters, range }, false)
     })),
     truncated: false,
     warnings: ctx.warnings
@@ -704,6 +734,11 @@ function validateMetricSample(options: ProjectMetricListOptions): void {
     !PROJECT_METRIC_SAMPLE_KEYS.includes(options.metricSample)
   )
     throw new Error("项目指标样本筛选无效")
+  if (options.percentileMetric !== undefined) {
+    const indicator = PROJECT_METRIC_BY_KEY.get(options.percentileMetric)
+    if (!indicator?.percentile || indicator.sample !== options.metricSample)
+      throw new Error("项目分位数样本筛选无效")
+  }
 }
 function selectProjectMetricProjects(
   items: ProjectMetricProjectItem[],
@@ -712,9 +747,14 @@ function selectProjectMetricProjects(
 ): Pick<ProjectMetricProjectsData, "items" | "total" | "page" | "pageSize"> {
   const keyword = string(options.keyword).toLowerCase()
   const department = string(options.departmentKeyword).toLowerCase()
+  const percentileMetric = options.percentileMetric
+    ? PROJECT_METRIC_BY_KEY.get(options.percentileMetric)
+    : undefined
   const selectedItems = items.filter(
     (p) =>
       (!filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(p.roomName)) &&
+      matchesProjectMetricGroups(p, filters.selectedGroups) &&
+      (!percentileMetric || readProjectMetricPercentileSample(percentileMetric, p) !== null) &&
       (options.metricSample
         ? projectMetricSampleReasons(p, filters)[options.metricSample] === null
         : projectInPeriod(
@@ -727,7 +767,7 @@ function selectProjectMetricProjects(
         options.developmentMode === "all" ||
         p.developmentMode === options.developmentMode) &&
       (!keyword || `${p.prjCode} ${p.prjName}`.toLowerCase().includes(keyword)) &&
-      (!department || p.roomName.toLowerCase().includes(department))
+      (!department || `${p.roomName} ${p.groupName}`.toLowerCase().includes(department))
   )
   const key = options.sortBy ?? "deliveryDays"
   selectedItems.sort((a, b) => {
@@ -754,7 +794,7 @@ async function featureCoverage(
   await deps.validateFactFields?.()
   const raw = await facts(
     deps,
-    [...organizationFilters(roomsFor(filters, deps)), periodFilter(filters)],
+    [...(await projectScopeFilters(filters, deps)), periodFilter(filters)],
     ["prjCode", "featureCodes"]
   )
   const candidates = new Set(raw.flatMap((p) => strings(p.featureCodes)))
@@ -763,10 +803,7 @@ async function featureCoverage(
     // 只返回分类结果，不泄露其他室的事实；反查不按组织、周期收窄。
     const associated = await facts(
       deps,
-      [
-        { range: { createDate: { gte: "2026-06-01 00:00:00" } } },
-        { terms: { featureCodes: batch } }
-      ],
+      [PROJECT_RETENTION_FILTER, { terms: { featureCodes: batch } }],
       ["prjCode", "featureCodes"]
     )
     for (const p of associated)
@@ -781,7 +818,8 @@ async function featureCoverage(
 }
 async function monthlyRecords(
   months: string[],
-  deps: ProjectMetricDependencies
+  deps: ProjectMetricDependencies,
+  rooms: string[] | null
 ): Promise<RecordValue[]> {
   const raw = await query(
     deps,
@@ -795,7 +833,9 @@ async function monthlyRecords(
           filter: [
             { term: { teamName: PROJECT_METRIC_TEAM } },
             { terms: { timeRange: months } },
-            { terms: { orgLevel: ["team", "room"] } }
+            ...(rooms === null
+              ? [{ terms: { orgLevel: ["team", "room"] } }]
+              : [{ term: { orgLevel: "room" } }, terms("roomName", rooms)])
           ]
         }
       },
@@ -935,16 +975,21 @@ async function overview(
   monthly?: RecordValue[]
 ): Promise<ProjectMetricOverviewData> {
   const rooms = roomsFor(filters, deps)
-  const months = projectCompleteMonths(filters.range)
+  const months = filters.selectedGroups?.length ? [] : projectCompleteMonths(filters.range)
   const [features, code, records] = await Promise.allSettled([
     featureCoverage(filters, deps, s),
     deps.codeStats
-      ? deps.codeStats(filters.range, rooms, strings(s.projects.map((p) => p.harnessProjectId)))
+      ? deps.codeStats(
+          filters.range,
+          rooms,
+          strings(s.projects.map((p) => p.harnessProjectId)),
+          filters.selectedGroups
+        )
       : Promise.reject(new Error("代码查询未配置")),
     months.length
       ? monthly
         ? Promise.resolve(monthly)
-        : monthlyRecords(months, deps)
+        : monthlyRecords(months, deps, rooms)
       : Promise.resolve([])
   ])
   const data: ProjectMetricOverviewData = {
@@ -976,24 +1021,37 @@ export async function fetchProjectMetricIndicatorExport(
   filters: ProjectMetricFilters,
   deps: ProjectMetricDependencies
 ): Promise<ProjectMetricIndicatorExportData> {
-  if (deps.allowedRoomNames !== null) throw new Error("导出团队及各室指标需要全团队读取权限")
+  validateFilters(filters)
+  const effectiveRooms = roomsFor(filters, deps)
+  const selectedGroups =
+    filters.selectedGroups?.filter(
+      (group) => effectiveRooms === null || effectiveRooms.includes(group.roomName)
+    ) ?? []
+  const groupScoped = Boolean(filters.selectedGroups?.length)
+  if (effectiveRooms?.length === 0 || (groupScoped && !selectedGroups.length))
+    throw new Error("当前没有可导出的室或组")
+  const wholeTeam = effectiveRooms === null && !groupScoped
+  const rooms =
+    effectiveRooms ?? (groupScoped ? strings(selectedGroups.map((g) => g.roomName)) : null)
+  const scopedFilters = { ...filters, upperOrgLv1: rooms ?? [], selectedGroups }
   if (!deps.codeEvidence) throw new Error("周期代码项目依据查询未配置")
-  const teamFilters = { ...filters, upperOrgLv1: [] }
-  const ctx = await context(teamFilters, deps)
+  const ctx = await context(scopedFilters, deps)
   if (ctx.warnings.some((w) => w.includes("不可用")))
     throw new Error("项目累计代码或Token查询失败，请重试后导出")
-  const months = projectCompleteMonths(filters.range)
-  const results = await Promise.allSettled([
-    months.length ? monthlyRecords(months, deps) : Promise.resolve([]),
-    facts(deps, organizationFilters(null), ["prjCode", "roomName"]),
-    traceRooms(filters, deps),
-    deps.codeEvidence(filters.range, strings(ctx.snapshot.projects.map((p) => p.harnessProjectId)))
+  const months = groupScoped ? [] : projectCompleteMonths(filters.range)
+  const [monthly, roomFacts, options, periodCode] = await Promise.all([
+    months.length ? monthlyRecords(months, deps, rooms) : Promise.resolve([]),
+    wholeTeam
+      ? facts(deps, organizationFilters(null), ["prjCode", "roomName"])
+      : Promise.resolve([]),
+    wholeTeam ? traceRooms(filters, deps) : Promise.resolve([]),
+    deps.codeEvidence(
+      filters.range,
+      strings(ctx.snapshot.projects.map((p) => p.harnessProjectId)),
+      rooms,
+      selectedGroups
+    )
   ] as const)
-  for (const result of results) if (result.status === "rejected") throw result.reason
-  const monthly = (results[0] as PromiseFulfilledResult<RecordValue[]>).value
-  const roomFacts = (results[1] as PromiseFulfilledResult<RecordValue[]>).value
-  const options = (results[2] as PromiseFulfilledResult<string[]>).value
-  const periodCode = (results[3] as PromiseFulfilledResult<ProjectMetricPeriodCode[]>).value
   const projects = new Map(
     ctx.items.map((project) => [
       project.prjCode,
@@ -1019,18 +1077,26 @@ export async function fetchProjectMetricIndicatorExport(
       eligibleBindingCount: ctx.snapshot.byCode.get(code)?.length ?? 0
     })
   }
+  const intelligentFeatures = new Set<string>()
   for (const batch of chunks(fullRelationFeatures)) {
-    const associated = await facts(deps, [
-      { range: { createDate: { gte: "2026-06-01 00:00:00" } } },
-      { terms: { featureCodes: batch } }
-    ])
-    for (const raw of associated) addReference(raw)
+    const associated = await facts(
+      deps,
+      [PROJECT_RETENTION_FILTER, { terms: { featureCodes: batch } }],
+      wholeTeam ? FACT_FIELDS : ["prjCode", "featureCodes"]
+    )
+    for (const raw of associated) {
+      if (wholeTeam) addReference(raw)
+      if (ctx.snapshot.byCode.has(string(raw.prjCode)))
+        for (const feature of strings(raw.featureCodes)) intelligentFeatures.add(feature)
+    }
   }
   const byHarness = new Map(ctx.snapshot.projects.map((p) => [p.harnessProjectId, p.prjCode]))
+  const groupsWithCode: ProjectMetricGroup[] = []
   const codeByProject = new Map<
     string,
     {
       roomName: string
+      groupName?: string
       prjCode: string
       pushedAdoptedLines: number
       pushedEffectiveGeneratedLines: number
@@ -1045,9 +1111,19 @@ export async function fetchProjectMetricIndicatorExport(
       )
     )
       throw new Error("周期代码项目依据行数无效")
-    const key = JSON.stringify([code.roomName, prjCode])
+    const roomName = readOrgText(code.roomName) ?? (wholeTeam ? "" : DASHBOARD_UNCLASSIFIED_ORG)
+    const groupName =
+      !wholeTeam && typeof code.groupName === "string" && readOrgText(code.groupName)
+        ? code.groupName
+        : undefined
+    if (rooms !== null && !rooms.includes(roomName)) continue
+    if (!matchesProjectMetricGroups({ roomName, groupName }, selectedGroups)) continue
+    if (groupName) groupsWithCode.push({ roomName, groupName })
+    if (code.hasPushedCode === false) continue
+    const key = JSON.stringify([roomName, groupName, prjCode])
     const entry = codeByProject.get(key) ?? {
-      roomName: code.roomName,
+      roomName,
+      ...(groupName === undefined ? {} : { groupName }),
       prjCode,
       pushedAdoptedLines: 0,
       pushedEffectiveGeneratedLines: 0
@@ -1059,12 +1135,12 @@ export async function fetchProjectMetricIndicatorExport(
   const missing = strings([...codeByProject.values()].map((c) => c.prjCode)).filter(
     (code) => !projects.has(code)
   )
+  const referenceScope = wholeTeam
+    ? [PROJECT_RETENTION_FILTER]
+    : await projectScopeFilters(scopedFilters, deps)
   for (const batch of chunks(missing)) {
-    for (const raw of await facts(deps, [
-      { terms: { prjCode: batch } },
-      { range: { createDate: { gte: "2026-06-01 00:00:00" } } }
-    ]))
-      addReference(raw)
+    const related = await facts(deps, [{ terms: { prjCode: batch } }, ...referenceScope])
+    for (const raw of related) addReference(raw)
   }
   for (const code of missing)
     if (!projects.has(code))
@@ -1087,9 +1163,19 @@ export async function fetchProjectMetricIndicatorExport(
       featureProjects.set(featureCode, codes)
     }
   const completeRelations = new Set(fullRelationFeatures)
-  const featureCodes = strings(
-    [...projects.values()].flatMap(({ project }) => project.featureCodes)
+  const projectList = [...projects.values()].sort((a, b) =>
+    a.project.prjCode.localeCompare(b.project.prjCode)
   )
+  const visibleProjects = wholeTeam
+    ? projectList
+    : projectList.filter(
+        ({ project }) =>
+          project.teamName === PROJECT_METRIC_TEAM &&
+          rooms?.includes(project.roomName) &&
+          matchesProjectMetricGroups(project, selectedGroups)
+      )
+  const visibleByCode = new Map(visibleProjects.map(({ project }) => [project.prjCode, project]))
+  const featureCodes = strings(visibleProjects.flatMap(({ project }) => project.featureCodes))
   for (const batch of chunks(featureCodes)) {
     for (const raw of await facts(
       deps,
@@ -1100,18 +1186,16 @@ export async function fetchProjectMetricIndicatorExport(
     ))
       featureRecords.set(string(raw.featureCode), raw)
   }
-  const projectList = [...projects.values()].sort((a, b) =>
-    a.project.prjCode.localeCompare(b.project.prjCode)
-  )
-  for (const { project } of projectList)
+  for (const { project } of visibleProjects)
     project.features = project.featureCodes.map((featureCode) => ({
       featureCode,
       featureName: string(featureRecords.get(featureCode)?.featureName) || null
     }))
   const evidence: ProjectMetricIndicatorExportData["evidence"] = {
-    projects: projectList,
+    projects: visibleProjects,
     features: featureCodes.map((featureCode) => {
       const raw = featureRecords.get(featureCode)
+      const associated = featureProjects.get(featureCode) ?? []
       return {
         featureCode,
         featureName: string(raw?.featureName) || null,
@@ -1119,15 +1203,21 @@ export async function fetchProjectMetricIndicatorExport(
         syncedAt: string(raw?.syncedAt) || null,
         syncBatchNo: string(raw?.syncBatchNo) || null,
         classificationComplete: completeRelations.has(featureCode),
-        projectCodes: (featureProjects.get(featureCode) ?? []).sort()
+        intelligent: intelligentFeatures.has(featureCode),
+        projectCodes: associated.filter((code) => visibleByCode.has(code)).sort()
       }
     }),
     code: [...codeByProject.values()]
-      .sort((a, b) => a.roomName.localeCompare(b.roomName) || a.prjCode.localeCompare(b.prjCode))
+      .sort(
+        (a, b) =>
+          a.roomName.localeCompare(b.roomName, "zh-CN") ||
+          (a.groupName ?? "").localeCompare(b.groupName ?? "", "zh-CN") ||
+          a.prjCode.localeCompare(b.prjCode)
+      )
       .map((code) => ({
         ...code,
-        prjName: projects.get(code.prjCode)?.project.prjName || null,
-        projectRoomName: projects.get(code.prjCode)?.project.roomName || null
+        prjName: visibleByCode.get(code.prjCode)?.prjName || null,
+        projectRoomName: visibleByCode.get(code.prjCode)?.roomName || null
       })),
     monthly: monthly.map((raw) => ({
       orgLevel: raw.orgLevel as "team" | "room",
@@ -1142,31 +1232,35 @@ export async function fetchProjectMetricIndicatorExport(
       updatedBy: string(raw.updatedBy) || null
     }))
   }
-  const rooms = strings([
-    ...options,
-    ...roomFacts.map((p) => p.roomName),
-    ...monthly.filter((p) => p.orgLevel === "room").map((p) => p.roomName),
-    ...evidence.code.map((p) => readOrgText(p.roomName))
-  ])
+  const exportRooms = rooms
+    ? [...rooms].sort((a, b) => a.localeCompare(b, "zh-CN"))
+    : strings([
+        ...options,
+        ...roomFacts.map((p) => p.roomName),
+        ...monthly.filter((p) => p.orgLevel === "room").map((p) => p.roomName),
+        ...evidence.code.map((p) => readOrgText(p.roomName))
+      ])
   const completeContext = {
     ...ctx,
-    items: projectList.filter((p) => p.factAvailable).map((p) => p.project)
+    items: visibleProjects.filter((p) => p.factAvailable).map((p) => p.project)
   }
-  const forScope = (roomName: string | null): ProjectMetricIndicatorExportData["team"] => {
-    const scopeFilters = { ...teamFilters, upperOrgLv1: roomName === null ? [] : [roomName] }
+  const forScope = (roomName: string | null, group?: ProjectMetricGroup) => {
+    const scopeFilters = {
+      ...scopedFilters,
+      upperOrgLv1: roomName === null ? [] : [roomName],
+      selectedGroups: group ? [group] : []
+    }
     const candidates = new Set(
       completeContext.items
         .filter((p) => !projectCandidateReason(p, scopeFilters))
         .flatMap((p) => p.featureCodes)
     )
-    const intelligent = evidence.features.filter(
-      (feature) =>
-        candidates.has(feature.featureCode) &&
-        feature.projectCodes.some(
-          (code) => projects.get(code)?.project.developmentMode === "devclaw"
-        )
-    ).length
-    const lines = evidence.code.filter((p) => roomName === null || p.roomName === roomName)
+    const intelligent = [...candidates].filter((feature) => intelligentFeatures.has(feature)).length
+    const lines = evidence.code.filter(
+      (p) =>
+        (roomName === null || p.roomName === roomName) &&
+        (!group || p.groupName === group.groupName)
+    )
     const pushedAdoptedLines = lines.reduce((sum, p) => sum + p.pushedAdoptedLines, 0)
     const pushedEffectiveGeneratedLines = lines.reduce(
       (sum, p) => sum + p.pushedEffectiveGeneratedLines,
@@ -1189,39 +1283,113 @@ export async function fetchProjectMetricIndicatorExport(
           rate: candidates.size ? intelligent / candidates.size : null
         },
         code,
-        monthly: months.length
-          ? monthlyOverview(months, monthly, roomName === null ? null : [roomName], code)
-          : null,
+        monthly:
+          months.length && !group
+            ? monthlyOverview(months, monthly, roomName === null ? null : [roomName], code)
+            : null,
         featureError: null,
         codeError: null,
         monthlyError: null
       }
     }
   }
+  const groups = wholeTeam
+    ? undefined
+    : uniqueGroups(groupScoped ? selectedGroups : [...ctx.items, ...groupsWithCode])
   return {
-    team: forScope(null),
-    rooms: rooms.map((roomName) => ({ roomName, ...forScope(roomName) })),
+    team: wholeTeam ? forScope(null) : null,
+    rooms: groupScoped ? [] : exportRooms.map((roomName) => ({ roomName, ...forScope(roomName) })),
+    groups: groups?.map((group) => ({ ...group, ...forScope(group.roomName, group) })),
     evidence,
     exportedAt: formatProjectDate(Date.now())
   }
 }
 
-// 保留现有接口；研发效能页面不再请求组数据。
-export async function fetchProjectMetricGroupOptions(
-  filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">,
-  deps: ProjectMetricDependencies
-): Promise<string[]> {
-  validateFilters(filters)
-  if (!filters.upperOrgLv1?.length) return []
-  const raw = await facts(
-    deps,
-    [...organizationFilters(roomsFor(filters, deps)), periodFilter(filters)],
-    ["prjCode", "groupName"]
-  )
-  return strings(raw.map((p) => p.groupName))
+function groupOptionProjectFilters(options: ProjectMetricGroupOptions): ProjectMetricFilters {
+  validateFilters(options)
+  if (!["month", "week", "day", "custom"].includes(options.granularity))
+    throw new Error("组候选日期类型无效")
+  if (options.granularity === "month") return options
+  const day = 86_400_000
+  return {
+    ...options,
+    range: {
+      from: formatProjectDate(projectDateMillis(options.range.from)! - 15 * day),
+      to: formatProjectDate(projectDateMillis(options.range.to)! + 15 * day)
+    }
+  }
 }
-export function makeMockProjectMetricGroupOptions(): string[] {
-  return []
+
+function uniqueGroups(records: Array<{ roomName: string; groupName?: string }>): ProjectMetricGroup[] {
+  const groups = new Map<string, ProjectMetricGroup>()
+  for (const record of records) {
+    const roomName = readOrgText(record.roomName)
+    if (
+      roomName &&
+      roomName !== DASHBOARD_UNCLASSIFIED_ORG &&
+      typeof record.groupName === "string" &&
+      readOrgText(record.groupName)
+    ) {
+      const group = { roomName, groupName: record.groupName }
+      groups.set(projectMetricGroupKey(group), group)
+    }
+  }
+  return [...groups.values()].sort(
+    (a, b) =>
+      a.roomName.localeCompare(b.roomName, "zh-CN") ||
+      a.groupName.trim().localeCompare(b.groupName.trim(), "zh-CN") ||
+      a.groupName.localeCompare(b.groupName)
+  )
+}
+
+export async function fetchProjectMetricGroupOptions(
+  options: ProjectMetricGroupOptions,
+  deps: ProjectMetricDependencies
+): Promise<ProjectMetricGroup[]> {
+  const filters = groupOptionProjectFilters(options)
+  const rooms = roomsFor(filters, deps)
+  if (!rooms?.length) return []
+  const field = (await deps.factGroupField?.()) ?? "groupName"
+  const groups: ProjectMetricGroup[] = []
+  const cursors = new Set<string>()
+  let after: RecordValue | undefined
+  for (;;) {
+    const raw = await query(deps, "项目室组候选", deps.factIndex, {
+      size: 0,
+      track_total_hits: false,
+      query: { bool: { filter: [...organizationFilters(rooms), periodFilter(filters)] } },
+      aggs: {
+        groups: {
+          composite: {
+            size: PAGE_SIZE,
+            sources: [{ room: { terms: { field: "roomName" } } }, { group: { terms: { field } } }],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })
+    const page = record(raw.aggregations?.groups)
+    if (!Array.isArray(page.buckets)) throw new Error("项目室组候选未完整返回")
+    for (const bucket of page.buckets) {
+      const key = record(record(bucket).key)
+      if (typeof key.room === "string" && typeof key.group === "string")
+        groups.push({ roomName: key.room, groupName: key.group })
+    }
+    if (!page.buckets.length || !page.after_key) return uniqueGroups(groups)
+    after = record(page.after_key)
+    const cursor = JSON.stringify(after)
+    if (typeof after.room !== "string" || typeof after.group !== "string" || cursors.has(cursor))
+      throw new Error("项目室组候选分页游标无效")
+    cursors.add(cursor)
+  }
+}
+
+export function makeMockProjectMetricGroupOptions(
+  options: ProjectMetricGroupOptions
+): ProjectMetricGroup[] {
+  const filters = groupOptionProjectFilters(options)
+  if (!filters.upperOrgLv1?.length) return []
+  return uniqueGroups(mockItems().filter((project) => !projectCandidateReason(project, filters)))
 }
 function mockItems(): ProjectMetricProjectItem[] {
   const snapshot: Snapshot = { projects: [], byCode: new Map(), pluginOptions: ["CMBDevClaw"] }
@@ -1268,6 +1436,7 @@ function mockCodeEvidence(
       const project = PROJECT_METRIC_MOCK_PROJECTS.find((item) => item.prjCode === event.prjCode)!
       return {
         roomName: PROJECT_METRIC_MOCK_ROOMS[event.room],
+        groupName: `示例开发组${event.room + 1}`,
         prjCode: event.prjCode,
         prjName: project.prjName,
         projectRoomName: project.roomName,
@@ -1295,7 +1464,8 @@ function mockOverview(
   )
   const intelligentCount = [...candidates].filter((code) => intelligent.has(code)).length
   const selectedCode = codeEvidence.filter(
-    (row) => !filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(row.roomName)
+    (row) => (!filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(row.roomName)) &&
+      matchesProjectMetricGroups(row, filters.selectedGroups)
   )
   const pushedAdoptedLines = selectedCode.reduce((sum, row) => sum + row.pushedAdoptedLines, 0)
   const pushedEffectiveGeneratedLines = selectedCode.reduce(
@@ -1317,7 +1487,7 @@ function mockOverview(
       rate: candidates.size ? intelligentCount / candidates.size : null
     },
     code,
-    monthly: months.length
+    monthly: months.length && !filters.selectedGroups?.length
       ? monthlyOverview(
           months,
           monthlyRecords,
@@ -1353,7 +1523,7 @@ export function makeMockProjectMetricTrend(
   return {
     months: recentMonths().map(({ month, range }) => ({
       month,
-      groups: mockSummary(items, { ...filters, range }).groups
+      groups: projectMetricGroups(items, { ...filters, range }, false)
     })),
     truncated: false,
     warnings: [PROJECT_CALENDAR_NOTE]
@@ -1372,19 +1542,39 @@ export function makeMockProjectMetricOverview(
 export function makeMockProjectMetricIndicatorExport(
   filters: ProjectMetricFilters
 ): ProjectMetricIndicatorExportData {
-  const projects = mockItems()
-  const code = mockCodeEvidence(filters.range)
-  const records = projectMetricMockMonthlyRecords(projectCompleteMonths(filters.range))
-  const forScope = (rooms: string[]) => {
-    const scope = { ...filters, upperOrgLv1: rooms }
+  const allProjects = mockItems()
+  const groups = filters.selectedGroups ?? []
+  const roomNames = groups.length
+    ? strings(groups.map((group) => group.roomName)).filter(
+        (room) => !filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(room)
+      )
+    : filters.upperOrgLv1?.length ? filters.upperOrgLv1 : PROJECT_METRIC_MOCK_ROOMS
+  const wholeTeam = !filters.upperOrgLv1?.length && !groups.length
+  const projects = allProjects.filter(
+    (p) => roomNames.includes(p.roomName) && matchesProjectMetricGroups(p, groups)
+  )
+  const code = mockCodeEvidence(filters.range).filter(
+    (row) => roomNames.includes(row.roomName) && matchesProjectMetricGroups(row, groups)
+  )
+  const records = groups.length ? [] : projectMetricMockMonthlyRecords(projectCompleteMonths(filters.range))
+    .filter((row) => wholeTeam || (row.orgLevel === "room" && roomNames.includes(row.roomName)))
+  const forScope = (rooms: string[], scopeGroups: ProjectMetricGroup[] = []) => {
+    const scope = { ...filters, upperOrgLv1: rooms, selectedGroups: scopeGroups }
     return {
       summary: mockSummary(projects, scope),
-      overview: mockOverview(scope, projects, code, records)
+      overview: mockOverview(scope, allProjects, code, records)
     }
   }
+  const exportGroups = wholeTeam ? undefined : uniqueGroups(groups.length
+    ? groups.filter((group) => roomNames.includes(group.roomName))
+    : [
+        ...projects.filter((p) => !projectCandidateReason(p, filters) || !projectCandidateReason(p, filters, true)),
+        ...code.map(({ roomName, groupName }) => ({ roomName, groupName: groupName ?? "" }))
+      ])
   return {
-    team: forScope([]),
-    rooms: PROJECT_METRIC_MOCK_ROOMS.map((roomName) => ({ roomName, ...forScope([roomName]) })),
+    team: wholeTeam ? forScope([]) : null,
+    rooms: groups.length ? [] : roomNames.map((roomName) => ({ roomName, ...forScope([roomName]) })),
+    groups: exportGroups?.map((group) => ({ ...group, ...forScope([group.roomName], [group]) })),
     evidence: {
       projects: projects.map((project) => ({
         project,
@@ -1398,6 +1588,9 @@ export function makeMockProjectMetricIndicatorExport(
         projectCodes: projects
           .filter((project) => project.featureCodes.includes(feature.featureCode))
           .map((project) => project.prjCode),
+        intelligent: allProjects.some((p) =>
+          p.developmentMode === "devclaw" && p.featureCodes.includes(feature.featureCode)
+        ),
         classificationComplete: true
       })),
       code,

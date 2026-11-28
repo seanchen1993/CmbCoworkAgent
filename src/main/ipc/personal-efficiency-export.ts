@@ -1,12 +1,18 @@
 import {
   PERSONAL_EFFICIENCY_METRICS,
   defaultPersonalEfficiencyWeights,
+  visiblePersonalEfficiencyMetrics,
   type PersonalEfficiencyData,
   type PersonalEfficiencyFilters
 } from "../../shared/personal-efficiency"
 import { rankPersonalEfficiency } from "../../shared/personal-efficiency-ranking"
 import type { PersonalEfficiencyExportOptions } from "../../shared/personal-efficiency-export"
-import { formatProjectDate, projectRangeBounds } from "../../shared/project-metric-calendar"
+import {
+  formatProjectDate,
+  projectCompleteMonths,
+  projectRangeBounds
+} from "../../shared/project-metric-calendar"
+import { DASHBOARD_UNCLASSIFIED_ORG } from "./dashboard-org-fields"
 import type { DashboardExcelSheet } from "./dashboard-excel-workbook"
 
 export function validatePersonalEfficiencyExportOptions(
@@ -49,13 +55,18 @@ export function personalEfficiencyExportSheets(
   const weights = options.weights ?? defaultPersonalEfficiencyWeights()
   const sortBy = options.sortBy ?? "score"
   const sortOrder = options.sortOrder ?? "desc"
-  const metrics = PERSONAL_EFFICIENCY_METRICS.filter((metric) => !metric.monthly || data.month)
+  const groupScoped = Boolean(filters.selectedGroups?.length)
+  const includeMonthly = groupScoped
+    ? projectCompleteMonths(filters.range).length > 0
+    : Boolean(data.month)
+  const metrics = visiblePersonalEfficiencyMetrics(includeMonthly, groupScoped)
   const sorted = rankPersonalEfficiency(
     data.people,
     weights,
     sortBy,
     sortOrder,
-    Boolean(data.month)
+    includeMonthly,
+    groupScoped
   )
   const keyword = options.keyword?.trim().toLowerCase() ?? ""
   const selected = sorted.filter(({ person }) =>
@@ -65,10 +76,26 @@ export function personalEfficiencyExportSheets(
   )
   if (!selected.length) throw new Error("当前范围内没有可导出的个人数据")
   const range = projectRangeBounds(filters.range)
+  const roomLabel = (room: string): string => (room === DASHBOARD_UNCLASSIFIED_ORG ? "未归类" : room)
+  const exportedRooms = data.scope ? data.scope.rooms : (filters.upperOrgLv1 ?? null)
+  const exportedGroups = data.scope ? data.scope.groups : (filters.selectedGroups ?? [])
   const summaryRows: DashboardExcelSheet["summaryRows"] = [
     ["统计开始", range.gte],
     ["统计结束（不含）", range.lt],
-    ["室筛选", filters.upperOrgLv1?.join("、") || "全部（权限范围内）"],
+    [
+      "室筛选",
+      exportedRooms?.length ? exportedRooms.map(roomLabel).join("、") : "全部（权限范围内）"
+    ],
+    ...(groupScoped
+      ? [
+          [
+            "组筛选",
+            exportedGroups.length
+              ? exportedGroups.map((group) => `${group.roomName}／${group.groupName}`).join("、")
+              : "—"
+          ]
+        ]
+      : []),
     ["项目日期口径", filters.dateBasis === "created" ? "立项日期" : "开发完成日期"],
     ["导出时间", exportedAt],
     ...data.warnings.map((warning) => ["数据提示", warning])
@@ -83,6 +110,7 @@ export function personalEfficiencyExportSheets(
       "项目编号",
       "项目名称",
       "所属室",
+      "所属组",
       "关联特性",
       "功能点",
       "缺陷数",
@@ -99,6 +127,7 @@ export function personalEfficiencyExportSheets(
         project.prjCode,
         project.prjName,
         project.roomName,
+        project.groupName,
         project.features
           .map((feature) => [feature.featureCode, feature.featureName].filter(Boolean).join(" "))
           .join("\n"),
@@ -122,6 +151,7 @@ export function personalEfficiencyExportSheets(
       "精益项目编号",
       "Harness 项目 ID",
       "代码所属室",
+      "代码所属组",
       "已 Push 采纳行数",
       "对应有效生成行数",
       "AI 代码入库率（%）"
@@ -133,6 +163,7 @@ export function personalEfficiencyExportSheets(
         item.prjCode,
         item.harnessProjectId,
         item.roomName,
+        item.groupName ?? "",
         item.pushedAdoptedLines,
         item.pushedEffectiveGeneratedLines,
         item.pushedEffectiveGeneratedLines > 0

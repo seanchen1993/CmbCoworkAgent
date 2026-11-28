@@ -286,12 +286,12 @@ describe("个人代码完整分页", () => {
           people: {
             buckets: [
               {
-                key: { sapId: "8001", project: "h1", room: "A室" },
+                key: { sapId: "8001", project: "h1", room: "A室", group: "一组" },
                 code_adopt_pushed: {},
                 latest: { hits: { hits: [{ _source: { userName: "甲" } }] } }
               }
             ],
-            after_key: { sapId: "8001", project: "h1", room: "A室" }
+            after_key: { sapId: "8001", project: "h1", room: "A室", group: "一组" }
           }
         }
       })
@@ -300,14 +300,68 @@ describe("个人代码完整分页", () => {
     const result = await fetchPersonalEfficiencyCode(query, "event", filters, {
       code_adopt_pushed: { filter: {} }
     })
-    expect(result[0]).toMatchObject({ sapId: "8001", userName: "甲", harnessProjectId: "h1" })
+    expect(result[0]).toMatchObject({
+      sapId: "8001",
+      userName: "甲",
+      harnessProjectId: "h1",
+      roomName: "A室",
+      groupName: "一组"
+    })
     expect(query).toHaveBeenCalledTimes(2)
     expect(query.mock.calls[0][1].query.bool.filter).toEqual(filters)
     expect(query.mock.calls[1][1].aggs.people.composite.after).toEqual({
       sapId: "8001",
       project: "h1",
-      room: "A室"
+      room: "A室",
+      group: "一组"
     })
+  })
+  it("缺失、空串和历史占位组织桶归一化后合并为单条代码明细，不重复行键", async () => {
+    const query = vi.fn().mockResolvedValue({
+      aggregations: {
+        people: {
+          buckets: [
+            {
+              key: { sapId: "8001", project: "h1", room: "A室", group: null },
+              code_adopt_pushed: {
+                pushed_adopted_lines: { value: 10 },
+                pushed_effective_generated_lines: { value: 20 }
+              },
+              latest: { hits: { hits: [{ sort: [100], _source: { userName: "旧名" } }] } }
+            },
+            {
+              key: { sapId: "8001", project: "h1", room: "A室", group: "" },
+              code_adopt_pushed: {
+                pushed_adopted_lines: { value: 20 },
+                pushed_effective_generated_lines: { value: 30 }
+              },
+              latest: { hits: { hits: [{ sort: [300], _source: { userName: "甲" } }] } }
+            },
+            {
+              key: { sapId: "8001", project: "h1", room: "A室", group: "[trace budget exhausted]" },
+              code_adopt_pushed: {
+                pushed_adopted_lines: { value: 30 },
+                pushed_effective_generated_lines: { value: 50 }
+              },
+              latest: { hits: { hits: [{ sort: [200], _source: { userName: "中名" } }] } }
+            }
+          ]
+        }
+      }
+    })
+    const result = await fetchPersonalEfficiencyCode(query, "event", [], {})
+    expect(result).toEqual([
+      {
+        sapId: "8001",
+        userName: "甲",
+        harnessProjectId: "h1",
+        prjCode: "",
+        roomName: "A室",
+        groupName: "",
+        pushedAdoptedLines: 60,
+        pushedEffectiveGeneratedLines: 100
+      }
+    ])
   })
   it("分片失败、缺少人员或聚合时拒绝不完整排名", async () => {
     for (const response of [
@@ -359,6 +413,41 @@ describe("个人查询权限和失败隔离", () => {
     expect(dependencies.query.mock.calls[0][1].query.bool.filter).toContainEqual({
       terms: { timeRange: ["2026-10"] }
     })
+  })
+  it("组选中后用统计周期的 DevClaw 行数，不查询整室的个人月度填报", async () => {
+    context()
+    const dependencies = deps()
+    const groupFilters = { ...filters, selectedGroups: [{ roomName: "A室", groupName: "一组" }] }
+    const result = await fetchPersonalEfficiency(
+      groupFilters,
+      dependencies,
+      vi.fn().mockResolvedValue([code("8001")])
+    )
+    expect(dependencies.query).not.toHaveBeenCalled()
+    expect(projectMetrics.fetchPersonalEfficiencyProjectContext).toHaveBeenCalledWith(
+      groupFilters,
+      dependencies,
+      undefined,
+      false
+    )
+    expect(result.month).toBeNull()
+    expect(result.scope).toEqual({
+      rooms: ["A室"],
+      groups: [{ roomName: "A室", groupName: "一组" }]
+    })
+    expect(result.people[0].values).toMatchObject({
+      adoptionRate: 60,
+      devclawPushedLines: 60,
+      devclawPushRate: null,
+      totalPushedLines: null,
+      aiPushRate: null
+    })
+    const partialGroup = await fetchPersonalEfficiency(
+      { ...groupFilters, range: { from: "2026-10-01", to: "2026-10-15" } },
+      dependencies,
+      vi.fn().mockResolvedValue([code("8001")])
+    )
+    expect(partialGroup.people[0].values.devclawPushedLines).toBeNull()
   })
   it("非自然月不查询月度；代码读取失败仍保留 PM 项目并明确提示", async () => {
     context()

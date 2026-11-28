@@ -1,10 +1,37 @@
 export type ProjectMetricDevelopmentMode = "devclaw" | "non_devclaw"
 
+export interface ProjectMetricGroup {
+  roomName: string
+  groupName: string
+}
+
+export function projectMetricGroupKey(group: ProjectMetricGroup): string {
+  return JSON.stringify([group.roomName, group.groupName])
+}
+
+export function matchesProjectMetricGroups(
+  organization: { roomName: string; groupName?: string },
+  groups?: ProjectMetricGroup[]
+): boolean {
+  return (
+    !groups?.length ||
+    groups.some(
+      (group) =>
+        group.roomName === organization.roomName && group.groupName === organization.groupName
+    )
+  )
+}
+
+export type ProjectMetricGroupOptions = Pick<
+  ProjectMetricFilters,
+  "range" | "upperOrgLv1" | "dateBasis"
+> & { granularity: "month" | "week" | "day" | "custom" }
+
 export interface ProjectMetricFilters {
   range: { from: string; to: string }
   dateBasis?: "developmentCompleted" | "created"
   upperOrgLv1?: string[]
-  groupNames?: string[]
+  selectedGroups?: ProjectMetricGroup[]
   phaseStatuses?: string[]
   functionPointMin?: number | null
   functionPointMax?: number | null
@@ -18,6 +45,7 @@ export interface ProjectMetricListOptions {
   developmentMode?: "all" | ProjectMetricDevelopmentMode
   /** 项目明细按指定指标的有效样本过滤，先筛选再分页。 */
   metricSample?: keyof ProjectMetricSamples
+  percentileMetric?: ProjectMetricValueKey
   keyword?: string
   departmentKeyword?: string
   page?: number
@@ -72,6 +100,14 @@ export type ProjectMetricValueKey =
   | "inputTokensPerAdoptedLine"
   | "outputTokensPerAdoptedLine"
 
+export const PROJECT_METRIC_PERCENTILES = [50, 80, 90] as const
+export type ProjectMetricPercentile = (typeof PROJECT_METRIC_PERCENTILES)[number]
+
+export interface ProjectMetricDistribution {
+  sampleCount: number
+  values: Record<ProjectMetricPercentile, number | null>
+}
+
 export interface ProjectMetricCalculation {
   numerator: number
   denominator: number
@@ -82,6 +118,7 @@ export interface ProjectMetricSummaryGroup {
   developmentMode: ProjectMetricDevelopmentMode
   projectCount: number
   calculations: Record<ProjectMetricValueKey, ProjectMetricCalculation>
+  percentiles?: Partial<Record<ProjectMetricValueKey, ProjectMetricDistribution>>
   functionPointsPerPersonMonth: number | null
   featuresPerPersonMonth: number | null
   avgApprovalDevelopmentDays: number | null
@@ -210,8 +247,14 @@ export interface ProjectMetricOverviewData {
   monthlyError: string | null
 }
 
+interface ProjectMetricExportSummary {
+  summary: ProjectMetricSummaryData
+  overview: ProjectMetricOverviewData
+}
+
 export interface ProjectMetricIndicatorExportData {
-  team: { summary: ProjectMetricSummaryData; overview: ProjectMetricOverviewData }
+  team: ProjectMetricExportSummary | null
+  groups?: Array<ProjectMetricGroup & ProjectMetricExportSummary>
   rooms: Array<{
     roomName: string
     summary: ProjectMetricSummaryData
@@ -224,6 +267,8 @@ export interface ProjectMetricIndicatorExportData {
 export interface ProjectMetricPeriodCode {
   harnessProjectId: string
   roomName: string
+  groupName?: string
+  hasPushedCode?: boolean
   pushedAdoptedLines: number
   pushedEffectiveGeneratedLines: number
 }
@@ -235,6 +280,7 @@ export interface ProjectMetricProjectEvidence {
 }
 
 export interface ProjectMetricFeatureEvidence {
+  intelligent?: boolean
   classificationComplete: boolean
   featureCode: string
   featureName: string | null
@@ -246,6 +292,7 @@ export interface ProjectMetricFeatureEvidence {
 
 export interface ProjectMetricCodeEvidence {
   roomName: string
+  groupName?: string
   prjCode: string
   prjName: string | null
   projectRoomName: string | null

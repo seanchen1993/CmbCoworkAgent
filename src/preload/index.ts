@@ -255,6 +255,8 @@ import {
 } from "../shared/harness-board-types"
 import type {
   ProjectMetricFilters,
+  ProjectMetricGroup,
+  ProjectMetricGroupOptions,
   ProjectMetricListOptions,
   ProjectMetricTrendFilters
 } from "../shared/project-metrics"
@@ -4265,12 +4267,12 @@ const api = {
       ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
+      opts?: { upperOrgLv1?: string | string[] | null; selectedGroups?: ProjectMetricGroup[] } & EfficiencyPluginFilter
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
     projectMetricGroupOptions: (
-      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
-    ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
+      filters: ProjectMetricGroupOptions
+    ): Promise<{ success: boolean; data?: ProjectMetricGroup[]; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
     personalEfficiency: (
       filters: PersonalEfficiencyFilters,

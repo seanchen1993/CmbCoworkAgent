@@ -1,4 +1,12 @@
 import { UserGenerationDistribution } from "./UserGenerationDistribution"
+import type { ProjectMetricFilters, ProjectMetricGroup } from "../../../../shared/project-metrics"
+import { EfficiencyGroupFilter } from "./EfficiencyGroupFilter"
+import {
+  EFFICIENCY_FILTER_MENU,
+  EFFICIENCY_FILTER_OPTION,
+  EFFICIENCY_FILTER_TRIGGER,
+  EFFICIENCY_ORG_FILTER_WIDTH
+} from "./efficiency-filter-styles"
 import { TimeControlBar } from "./TimeControlBar"
 import {
   formatRangeLabel,
@@ -389,7 +397,7 @@ function OrgFilterBar({
           <Button
             variant="outline"
             size="sm"
-            className="h-7 w-[240px] justify-between gap-1 text-xs font-normal"
+            className={cn(EFFICIENCY_FILTER_TRIGGER, EFFICIENCY_ORG_FILTER_WIDTH)}
             title={triggerLabel}
             disabled={loading && options.length === 0}
           >
@@ -399,23 +407,21 @@ function OrgFilterBar({
             <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-[240px] p-1">
+        <PopoverContent
+          align="start"
+          className={cn(EFFICIENCY_FILTER_MENU, "w-[var(--radix-popover-trigger-width)] p-1")}
+        >
           <button
             type="button"
-            className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-xs hover:bg-muted/60"
+            aria-pressed={!value.length}
+            className={cn("flex w-full items-center justify-between", EFFICIENCY_FILTER_OPTION)}
             onClick={() => onChange([])}
           >
-            <span
-              className={
-                value.length === 0 ? "font-medium text-foreground" : "text-muted-foreground"
-              }
-            >
-              全部
-            </span>
-            {value.length === 0 && <Check className="size-3.5 text-primary" />}
+            <span>全部</span>
+            {value.length === 0 && <Check className="size-3.5 shrink-0" />}
           </button>
           <div className="my-1 h-px bg-border" />
-          <div className="max-h-64 overflow-y-auto pr-1">
+          <div className="max-h-64 space-y-0.5 overflow-y-auto">
             {options.length === 0 ? (
               <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
                 暂无可选室
@@ -427,13 +433,17 @@ function OrgFilterBar({
                   <button
                     key={org}
                     type="button"
-                    className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/60"
+                    aria-pressed={checked}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 text-left",
+                      EFFICIENCY_FILTER_OPTION
+                    )}
                     onClick={() => toggleOrg(org)}
                   >
                     <span className={cn("truncate", checked && "font-medium text-foreground")}>
                       {orgOptionLabel(org)}
                     </span>
-                    {checked && <Check className="size-3.5 shrink-0 text-primary" />}
+                    {checked && <Check className="size-3.5 shrink-0" />}
                   </button>
                 )
               })
@@ -2238,6 +2248,9 @@ function DashboardContent({
 
   const [exporting, setExporting] = useState(false)
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
+  const [efficiencyDateBasis, setEfficiencyDateBasis] =
+    useState<NonNullable<ProjectMetricFilters["dateBasis"]>>("developmentCompleted")
+  const [efficiencyGroups, setEfficiencyGroups] = useState<ProjectMetricGroup[]>([])
   const [botRefreshKey, setBotRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
@@ -2588,8 +2601,8 @@ function DashboardContent({
   // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
   useEffect(() => {
     if (activeMainTab !== "efficiency" || !projectModeAllowed) return
-    void fetchEfficiency(range, selectedOrgLv1List)
-  }, [activeMainTab, fetchEfficiency, projectModeAllowed, range, selectedOrgLv1List])
+    void fetchEfficiency(range, selectedOrgLv1List, efficiencyGroups)
+  }, [activeMainTab, fetchEfficiency, projectModeAllowed, range, selectedOrgLv1List, efficiencyGroups])
 
   // 评奖辅助看板懒加载：进入 tab + 名单可见时拉取；时间范围变化重拉。
   // 技能贡献奖需待应用市场技能（个人构建）加载完成后再查。
@@ -3200,7 +3213,7 @@ function DashboardContent({
       }
     }
     if (activeMainTab === "efficiency") {
-      void fetchEfficiency(range, selectedOrgLv1List)
+      void fetchEfficiency(range, selectedOrgLv1List, efficiencyGroups)
       setProjectMetricRefreshKey((current) => current + 1)
     }
   }, [
@@ -3209,6 +3222,7 @@ function DashboardContent({
     fetchProjectMode,
     fetchKnowledgeCommitRate,
     fetchEfficiency,
+    efficiencyGroups,
     granularity,
     range,
     refresh,
@@ -4608,9 +4622,25 @@ function DashboardContent({
                 options={orgOptions}
                 loading={loading}
                 onChange={(rooms) => {
+                  setEfficiencyGroups((groups) =>
+                    groups.some((group) => !rooms.includes(group.roomName))
+                      ? groups.filter((group) => rooms.includes(group.roomName))
+                      : groups
+                  )
                   setOrgFilter(rooms)
                 }}
               />
+              {activeMainTab === "efficiency" && projectModeAllowed && (
+                <EfficiencyGroupFilter
+                  range={range}
+                  granularity={granularity}
+                  upperOrgLv1={selectedOrgLv1List}
+                  dateBasis={efficiencyDateBasis}
+                  value={efficiencyGroups}
+                  onChange={setEfficiencyGroups}
+                  refreshKey={projectMetricRefreshKey}
+                />
+              )}
             </>
           ) : null
         }
@@ -4865,6 +4895,9 @@ function DashboardContent({
               error={efficiencyError}
               range={range}
               upperOrgLv1={selectedOrgLv1List}
+              selectedGroups={efficiencyGroups}
+              dateBasis={efficiencyDateBasis}
+              onDateBasisChange={setEfficiencyDateBasis}
               projectMetricRefreshKey={projectMetricRefreshKey}
             />
           ) : (

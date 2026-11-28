@@ -222,6 +222,8 @@ import type {
 } from "../shared/knowledge-base-types"
 import type {
   ProjectMetricFilters,
+  ProjectMetricGroup,
+  ProjectMetricGroupOptions,
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
   ProjectMetricOverviewData,
@@ -2877,11 +2879,11 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
+      opts?: { upperOrgLv1?: string | string[] | null; selectedGroups?: ProjectMetricGroup[] } & EfficiencyPluginFilter
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
     projectMetricGroupOptions: (
-      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
-    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
+      filters: ProjectMetricGroupOptions
+    ) => Promise<{ success: boolean; data?: ProjectMetricGroup[]; error?: string }>
     personalEfficiency: (
       filters: PersonalEfficiencyFilters,
       sapId?: string

@@ -14,6 +14,7 @@ import { projectMetricIndicatorSheets } from "./project-metric-indicator-export"
 import { PROJECT_METRIC_INDICATORS } from "../../shared/project-metric-indicators"
 import { buildDashboardExcelBuffer, type DashboardExcelCell } from "./dashboard-excel-workbook"
 import {
+  fetchProjectMetricGroupOptions,
   fetchProjectMetricIndicatorExport,
   fetchProjectMetricOverview,
   fetchProjectMetricProjects,
@@ -337,7 +338,7 @@ describe("研发效能统一项目口径", () => {
     expect(result.groups.map((g) => g.throughputFeatureCount)).toEqual([1, 1])
     expect(result.groups.map((g) => g.throughputWorkHours)).toEqual([217, 434])
     await fetchProjectMetricOverview(october, deps)
-    expect(codeStats).toHaveBeenCalledWith(october.range, null, ["good-2"])
+    expect(codeStats).toHaveBeenCalledWith(october.range, null, ["good-2"], undefined)
   })
   it("常规侧不受插件和Token区间影响，单指标缺失不删除其他有效样本", async () => {
     const { deps } = fixture({
@@ -409,11 +410,215 @@ describe("研发效能统一项目口径", () => {
       (await fetchProjectMetricProjects({ ...october, upperOrgLv1: ["B室"] }, {}, deps)).total
     ).toBe(0)
     expect((await fetchProjectMetricProjects(october, {}, deps)).total).toBe(1)
-    await expect(fetchProjectMetricIndicatorExport(october, deps)).rejects.toThrow("全团队读取权限")
+    const data = await fetchProjectMetricIndicatorExport(october, deps)
+    expect(data.team).toBeNull()
+    expect(data.rooms.map((room) => room.roomName)).toEqual(["A室"])
+    expect(data.evidence.projects.map(({ project }) => project.prjCode)).toEqual(["P1"])
+    await expect(
+      fetchProjectMetricIndicatorExport({ ...october, upperOrgLv1: ["B室"] }, deps)
+    ).rejects.toThrow("没有可导出的室或组")
+  })
+})
+
+describe("研发效能组筛选", () => {
+  it("仅聚合室和组，周日期前后各扩展15天，按月不扩展，沿用项目日期口径和室权限", async () => {
+    const query = vi.fn<ProjectMetricDependencies["query"]>()
+      .mockResolvedValueOnce({
+        aggregations: { groups: { buckets: [{ key: { room: "A室", group: " 一组 " } }],
+          after_key: { room: "A室", group: " 一组 " } } }
+      })
+      .mockResolvedValueOnce({ aggregations: { groups: { buckets: [{ key: { room: "A室", group: "二组" } }] } } })
+      .mockResolvedValueOnce({ aggregations: { groups: { buckets: [] } } })
+    const deps = { ...fixture().deps, query, allowedRoomNames: ["A室"],
+      factGroupField: async () => "groupName.keyword" }
+    const options = {
+      range: { from: "2026-11-09", to: "2026-11-15" },
+      upperOrgLv1: ["A室", "B室"],
+      dateBasis: "created" as const,
+      granularity: "week" as const
+    }
+    expect(await fetchProjectMetricGroupOptions(options, deps)).toEqual([
+      { roomName: "A室", groupName: "二组" }, { roomName: "A室", groupName: " 一组 " }
+    ])
+    const firstQuery = JSON.stringify(query.mock.calls[0][1])
+    expect(firstQuery).toContain('"gte":"2026-10-25 00:00:00","lt":"2026-12-01 00:00:00"')
+    expect(firstQuery).toContain('"terms":{"roomName":["A室"]}')
+    expect(firstQuery).toContain('"field":"groupName.keyword"')
+    expect(query.mock.calls[0][1]).toMatchObject({ size: 0, track_total_hits: false })
+    expect(JSON.stringify(query.mock.calls[1][1])).toContain('"after":{"room":"A室","group":" 一组 "}')
+    await fetchProjectMetricGroupOptions({ ...options, range: october.range, granularity: "month",
+      dateBasis: "developmentCompleted" }, deps)
+    const monthQuery = JSON.stringify(query.mock.calls[2][1])
+    expect(monthQuery).toContain('"firstStStartDate":{"gte":"2026-10-01 00:00:00","lt":"2026-11-01 00:00:00"}')
+    expect(monthQuery).toContain('"firstUatStartDate"')
+  })
+
+  it("选组按室组配对；跨组关联只用于智能化分类，整室导出保留只有代码数据的组", async () => {
+    const { deps, codeEvidence, codeStats } = fixture({
+      projects: [
+        project("P1", { groupName: "一组" }),
+        project("P2", { groupName: "二组", roomName: "B室" }),
+        project("P3", { groupName: "一组", roomName: "B室", featureCodes: [] })
+      ],
+      snapshots: [harness("P2")],
+      periodCodes: [
+        { harnessProjectId: "h-P2", roomName: "A室", groupName: "三组", pushedAdoptedLines: 40, pushedEffectiveGeneratedLines: 50 },
+        { harnessProjectId: "h-P2", roomName: "A室", groupName: "四组", hasPushedCode: false, pushedAdoptedLines: 0, pushedEffectiveGeneratedLines: 0 },
+        { harnessProjectId: "h-P2", roomName: "B室", groupName: "一组", pushedAdoptedLines: 80, pushedEffectiveGeneratedLines: 100 }
+      ]
+    })
+    const selectedGroups = [
+      { roomName: "A室", groupName: "一组" }, { roomName: "B室", groupName: "二组" }
+    ]
+    const filters = { ...october, upperOrgLv1: ["A室", "B室"], selectedGroups }
+    expect((await fetchProjectMetricProjects(filters, {}, deps)).items.map((p) => p.prjCode).sort())
+      .toEqual(["P1", "P2"])
+    expect(
+      (await fetchProjectMetricProjects({ ...october }, { departmentKeyword: "二组" }, deps)).items.map(
+        (p) => p.prjCode
+      )
+    ).toEqual(["P2"])
+    await expect(
+      fetchProjectMetricIndicatorExport(
+        { ...october, selectedGroups: [{ roomName: "__unclassified__", groupName: "一组" }] },
+        deps
+      )
+    ).rejects.toThrow("组筛选无效")
+    const groupFilters = { ...filters, upperOrgLv1: ["A室"], selectedGroups: [selectedGroups[0]] }
+    const overview = await fetchProjectMetricOverview(groupFilters, deps)
+    expect(codeStats).toHaveBeenCalledWith(october.range, ["A室"], ["h-P2"], [selectedGroups[0]])
+    expect(overview.monthly).toBeNull()
+    expect(overview.features).toEqual({ total: 1, intelligent: 1, rate: 1 })
+
+    const selected = await fetchProjectMetricIndicatorExport(groupFilters, deps)
+    expect(selected.team).toBeNull()
+    expect(selected.rooms).toEqual([])
+    expect(selected.groups?.[0].overview.features).toEqual(overview.features)
+    expect(selected.evidence.projects.map((p) => p.project.prjCode)).toEqual(["P1"])
+    expect(selected.evidence.features[0]).toMatchObject({ intelligent: true, projectCodes: ["P1"] })
+    expect(projectMetricIndicatorSheets(selected, groupFilters).map((sheet) => sheet.name))
+      .toEqual(["组级指标", "项目依据", "特性依据", "代码入库依据"])
+
+    const roomFilters = { ...october, upperOrgLv1: ["A室"] }
+    const room = await fetchProjectMetricIndicatorExport(roomFilters, deps)
+    expect(codeEvidence).toHaveBeenCalledWith(october.range, ["h-P2"], ["A室"], [])
+    expect(room.groups?.map((group) => group.groupName)).toEqual(expect.arrayContaining(["一组", "三组", "四组"]))
+    expect(room.groups?.find((group) => group.groupName === "四组")?.overview.code?.pushedAdoptionRate).toBeNull()
+    expect(room.evidence.code).toHaveLength(1)
+    expect(room.groups?.find((group) => group.groupName === "三组")?.overview.code?.pushedAdoptionRate).toBe(0.8)
+    expect(room.evidence.code[0]).toMatchObject({ prjName: null, projectRoomName: null })
+    const workbook = XLSX.read(
+      await buildDashboardExcelBuffer(projectMetricIndicatorSheets(room, roomFilters)), { type: "buffer" }
+    )
+    const groups = workbookTable(workbook, "组级指标", "室").rows
+    expect(groups.find((row) => row["组"] === "三组" && row["指标"] === "AI代码入库率"))
+      .toMatchObject({ 室: "A室", 结果: 80, 分子: 40, 分母: 50 })
+    expect(groups.some((row) => String(row["指标"]).includes("硅碳比"))).toBe(false)
+    expect(groups.some((row) => row["指标"] === "DevClaw 入库行数")).toBe(false)
+  })
+
+  it("选中未归类的室时保留未填写室的 DevClaw 代码来源", async () => {
+    const { deps } = fixture({
+      periodCodes: [{ harnessProjectId: "h-P1", roomName: "", pushedAdoptedLines: 10, pushedEffectiveGeneratedLines: 20 }]
+    })
+    const filters = { ...october, upperOrgLv1: ["__unclassified__"] }
+    const data = await fetchProjectMetricIndicatorExport(filters, deps)
+    expect(data.rooms[0].overview.code?.pushedAdoptionRate).toBe(0.5)
+    expect(data.groups).toEqual([])
+    const workbook = XLSX.read(await buildDashboardExcelBuffer(projectMetricIndicatorSheets(data, filters)), { type: "buffer" })
+    const rooms = workbookTable(workbook, "各室指标", "统计组织").rows
+    expect(rooms.find((row) => row["指标"] === "AI代码入库率"))
+      .toMatchObject({ 统计组织: "未归类", 结果: 50, 分子: 10, 分母: 20 })
   })
 })
 
 describe("有效样本明细筛选", () => {
+  it("分位数按项目内插并对齐明细和 Excel，零报工仍按原汇总口径处理", async () => {
+    const roomName = "A室"
+    const groupName = "一组"
+    const { deps } = fixture({
+      projects: [
+        project("P0", { groupName, devWorkHours: 0, notAdjustFuns: 10, bugNum: null }),
+        project("P1", { groupName, devWorkHours: 152.25, notAdjustFuns: 10, bugNum: 0 }),
+        project("P2", { groupName, devWorkHours: 152.25, notAdjustFuns: 20, bugNum: 2 }),
+        project("P3", { groupName, devWorkHours: 1218, notAdjustFuns: 320, bugNum: 4 }),
+        project("P4", { groupName: "二组", devWorkHours: 152.25, notAdjustFuns: 999 })
+      ],
+      snapshots: []
+    })
+    const filters = { ...october, upperOrgLv1: [roomName], selectedGroups: [{ roomName, groupName }] }
+    const result = await fetchProjectMetricSummary(filters, deps)
+    const group = result.groups[1]
+    expect(group.functionPointsPerPersonMonth).toBe(36)
+    expect(group.samples.productivity).toBe(4)
+    expect(group.percentiles?.functionPointsPerPersonMonth).toEqual({
+      sampleCount: 3,
+      values: { 50: 20, 80: 32, 90: 36 }
+    })
+    expect(group.percentiles?.avgBugCount).toMatchObject({ sampleCount: 3, values: { 50: 2 } })
+    expect(group.percentiles?.featuresPerPersonMonth).toBeUndefined()
+    expect(result.groups[0].percentiles?.avgBugCount).toEqual({
+      sampleCount: 0,
+      values: { 50: null, 80: null, 90: null }
+    })
+    const singleton = await fetchProjectMetricSummary(
+      { ...filters, selectedGroups: [{ roomName, groupName: "二组" }] },
+      deps
+    )
+    expect(singleton.groups[1].percentiles?.functionPointsPerPersonMonth).toEqual({
+      sampleCount: 1,
+      values: { 50: 999, 80: 999, 90: 999 }
+    })
+
+    const details = await fetchProjectMetricProjects(
+      filters,
+      { metricSample: "productivity", percentileMetric: "functionPointsPerPersonMonth", exportAll: true },
+      deps
+    )
+    expect(details.items.map((item) => item.prjCode).sort()).toEqual(["P1", "P2", "P3"])
+    await expect(fetchProjectMetricProjects(
+      filters,
+      { metricSample: "throughput", percentileMetric: "featuresPerPersonMonth" },
+      deps
+    )).rejects.toThrow("项目分位数样本筛选无效")
+
+    const exported = await fetchProjectMetricIndicatorExport(filters, deps)
+    const workbook = XLSX.read(
+      await buildDashboardExcelBuffer(projectMetricIndicatorSheets(exported, filters)),
+      { type: "buffer" }
+    )
+    const groupTable = workbookTable(workbook, "组级指标", "室")
+    const findMetric = (label: string, mode = "常规") =>
+      groupTable.rows.find(
+        (row) => row["指标"] === label && row["项目类型或来源"] === mode
+      )
+    const cellFormula = (
+      sheetName: string,
+      table: ReturnType<typeof workbookTable>,
+      rowIndex: number,
+      column: string
+    ) =>
+      workbook.Sheets[sheetName][
+        XLSX.utils.encode_cell({ r: table.startRow - 1 + rowIndex, c: table.header.indexOf(column) })
+      ]?.f
+    const productivityRowIndex = groupTable.rows.findIndex(
+      (row) => row["指标"] === "每人月产出功能点" && row["项目类型或来源"] === "常规"
+    )
+    expect(cellFormula("组级指标", groupTable, productivityRowIndex, "分位数样本项目数")).toBeUndefined()
+    expect(findMetric("每人月产出功能点")).toMatchObject({
+      结果: 36, P50: 20, P80: 32, P90: 36, 分位数样本项目数: 3
+    })
+    expect(findMetric("每人月上线特性数")?.P50 || "").toBe("")
+    expect(findMetric("平均缺陷数", "智能化")).toMatchObject({ P50: "—", 分位数样本项目数: 0 })
+    const evidenceTable = workbookTable(workbook, "项目依据", "项目编号")
+    const evidence = evidenceTable.rows
+    const p1Index = evidence.findIndex((row) => row["项目编号"] === "P1")
+    expect(cellFormula("项目依据", evidenceTable, p1Index, "每人月产出功能点")).toBeUndefined()
+    expect(evidence.find((row) => row["项目编号"] === "P0")?.["每人月产出功能点"]).toBe("—")
+    expect(evidence.map((row) => row["每人月产出功能点"]).filter((value) => typeof value === "number"))
+      .toEqual([10, 20, 40])
+  })
+
   it("同日审批晚于日期精度的立项仍以零耗时计入，跨日倒置继续排除", async () => {
     const { deps } = fixture({
       projects: [
@@ -709,11 +914,11 @@ describe("特性覆盖、月度占比和导出", () => {
     expect(result.monthlyError).toContain("重复填报")
     await expect(fetchProjectMetricIndicatorExport(october, deps)).rejects.toThrow("重复填报")
   })
-  it("指标导出恰好五个Sheet，固定全团队及各室，保留共用依据、公式和数值", async () => {
+  it("未选室时导出五个Sheet，保留全团队及各室的共用依据、公式和数值", async () => {
     const { deps } = fixture({ projects: [project("P1"), project("P2", { roomName: "B室" })] })
-    const data = await fetchProjectMetricIndicatorExport({ ...october, upperOrgLv1: ["B室"] }, deps)
+    const data = await fetchProjectMetricIndicatorExport(october, deps)
     expect(data.rooms.map((r) => r.roomName)).toEqual(["A室", "B室"])
-    expect(data.team.summary.groups.map((g) => g.projectCount)).toEqual([1, 1])
+    expect(data.team?.summary.groups.map((g) => g.projectCount)).toEqual([1, 1])
     expect(data.exportedAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
     const sheets = projectMetricIndicatorSheets(data, october)
     expect(sheets.map((s) => s.name)).toEqual([
@@ -993,13 +1198,13 @@ describe("五Sheet指标追溯", () => {
     expect(data.evidence.projects).toHaveLength(4)
     expect(data.evidence.code).toHaveLength(3)
     expect(data.evidence.code.find((c) => c.prjCode === "P003")?.pushedAdoptedLines).toBe(200)
-    expect(data.team.summary.groups[0].inputTokensPerAdoptedLine).toBe(50)
+    expect(data.team?.summary.groups[0].inputTokensPerAdoptedLine).toBe(50)
     const sheets = projectMetricIndicatorSheets(data, october)
     const expectedMetrics = [
       "应用研发智能化特性占比",
       "AI代码入库率",
-      "月人均产出功能点",
-      "月人均特性吞吐率",
+      "每人月产出功能点",
+      "每人月上线特性数",
       "特性审批完成到开发完成耗时",
       "特性审批完成到立项完成耗时",
       "平均缺陷数",
@@ -1106,7 +1311,7 @@ describe("五Sheet指标追溯", () => {
         expect(denominator).toBeCloseTo(Number(dCell.v), 8)
         expect(result.f).toContain("ISNUMBER")
         const factor =
-          row["指标"] === "月人均产出功能点" || row["指标"] === "月人均特性吞吐率"
+          row["指标"] === "每人月产出功能点" || row["指标"] === "每人月上线特性数"
             ? 152.25
             : percentage || row["指标"] === "平均缺陷密度"
               ? 100
@@ -1219,8 +1424,8 @@ describe("五Sheet指标追溯", () => {
     expect(featureHeaders.slice(8)).toEqual([
       "对应用研发智能化特性占比分子贡献",
       "对应用研发智能化特性占比分母贡献",
-      "对月人均特性吞吐率分子贡献（智能化项目）",
-      "对月人均特性吞吐率分子贡献（常规项目）",
+      "对每人月上线特性数分子贡献（智能化项目）",
+      "对每人月上线特性数分子贡献（常规项目）",
       "应用研发智能化特性占比分类（按全部关联项目判断）",
       "特性审批完成日期"
     ])
@@ -1229,8 +1434,8 @@ describe("五Sheet指标追溯", () => {
         "应用研发智能化特性占比分类（按全部关联项目判断）",
         "对应用研发智能化特性占比分母贡献",
         "对应用研发智能化特性占比分子贡献",
-        "对月人均特性吞吐率分子贡献（智能化项目）",
-        "对月人均特性吞吐率分子贡献（常规项目）"
+        "对每人月上线特性数分子贡献（智能化项目）",
+        "对每人月上线特性数分子贡献（常规项目）"
       ])
     )
     const aFeature = workbookTable(workbook, "特性依据", "统计层级").rows.filter(
@@ -1254,7 +1459,7 @@ describe("五Sheet指标追溯", () => {
       roomRows.find(
         (r) =>
           r["统计组织"] === "A室" &&
-          r["指标"] === "月人均特性吞吐率" &&
+          r["指标"] === "每人月上线特性数" &&
           r["项目类型或来源"] === "智能化"
       )?.["结果"]
     ).toBeCloseTo(4 / 3)
@@ -1317,8 +1522,8 @@ describe("五Sheet指标追溯", () => {
     const { deps } = fixture({ projects: [project("P1", { notAdjustFuns: 10 })] })
     const filters = { ...october, functionPointMin: 50 }
     const data = await fetchProjectMetricIndicatorExport(filters, deps)
-    expect(data.team.summary.groups[0].projectCount).toBe(0)
-    expect(data.team.overview.features).toEqual({ total: 1, intelligent: 1, rate: 1 })
+    expect(data.team?.summary.groups[0].projectCount).toBe(0)
+    expect(data.team?.overview.features).toEqual({ total: 1, intelligent: 1, rate: 1 })
     const workbook = XLSX.read(
       await buildDashboardExcelBuffer(projectMetricIndicatorSheets(data, filters)),
       { type: "buffer" }
@@ -1340,10 +1545,10 @@ describe("五Sheet指标追溯", () => {
       ]
     })
     const ordinary = await fetchProjectMetricIndicatorExport(october, deps)
-    expect(ordinary.team.summary.groups[0].projectCount).toBe(0)
+    expect(ordinary.team?.summary.groups[0].projectCount).toBe(0)
     const filters: ProjectMetricFilters = { ...october, dateBasis: "created" }
     const created = await fetchProjectMetricIndicatorExport(filters, deps)
-    expect(created.team.summary.groups[0].projectCount).toBe(1)
+    expect(created.team?.summary.groups[0].projectCount).toBe(1)
     const workbook = XLSX.read(
       await buildDashboardExcelBuffer(projectMetricIndicatorSheets(created, filters)),
       { type: "buffer" }
@@ -1427,7 +1632,7 @@ describe("五Sheet指标追溯", () => {
     expect(projects.map((row) => row["缺陷数"])).toEqual([7, "—", 3, 0])
     const team = workbookTable(workbook, "团队指标", "统计组织")
     for (const [metric, numerator, denominator, result, samples] of [
-      ["月人均产出功能点", 120, 304.5, 60, 3],
+      ["每人月产出功能点", 120, 304.5, 60, 3],
       ["平均缺陷密度", 3, 150, 2, 2],
       ["平均功能点", 180, 4, 45, 4],
       ["平均缺陷数", 10, 3, 10 / 3, 3]
@@ -1485,7 +1690,7 @@ describe("五Sheet指标追溯", () => {
       "应用研发智能化特性占比分类（按全部关联项目判断）": "智能化",
       对应用研发智能化特性占比分母贡献: "—"
     })
-    expect(data.team.overview.features).toEqual({ total: 1, intelligent: 1, rate: 1 })
+    expect(data.team?.overview.features).toEqual({ total: 1, intelligent: 1, rate: 1 })
     const feature = sheets.find((sheet) => sheet.name === "特性依据")!
     const projectColumn = feature.header.indexOf("关联项目编号")
     expect(feature.rows.some((row) => row[projectColumn] === "P2")).toBe(true)
@@ -1521,11 +1726,11 @@ describe("2026年10月完整mock", () => {
     ).toHaveLength(6)
     expect(data.evidence.code).toHaveLength(7)
     expect(data.rooms.map((room) => room.roomName)).toEqual(["测试 1 部", "开发二部", "平台三部"])
-    expect(data.team.summary).toEqual(makeMockProjectMetricSummary(october))
-    expect(data.team.summary.groups.map((group) => group.projectCount)).toEqual([5, 6])
-    expect(data.team.overview).toEqual(makeMockProjectMetricOverview(october))
-    expect(data.team.overview.features).toEqual({ total: 12, intelligent: 8, rate: 8 / 12 })
-    expect(data.team.overview.code).toEqual({
+    expect(data.team?.summary).toEqual(makeMockProjectMetricSummary(october))
+    expect(data.team?.summary.groups.map((group) => group.projectCount)).toEqual([5, 6])
+    expect(data.team?.overview).toEqual(makeMockProjectMetricOverview(october))
+    expect(data.team?.overview.features).toEqual({ total: 12, intelligent: 8, rate: 8 / 12 })
+    expect(data.team?.overview.code).toEqual({
       pushedAdoptedLines: 6800,
       pushedEffectiveGeneratedLines: 8500,
       pushedAdoptionRate: 0.8
@@ -1541,7 +1746,7 @@ describe("2026年10月完整mock", () => {
     expect(b.features).toEqual({ total: 4, intelligent: 3, rate: 0.75 })
     expect(b.code?.pushedAdoptedLines).toBe(2300)
     expect(makeMockProjectMetricOverview({ ...october, functionPointMin: 99999 })).toEqual(
-      data.team.overview
+      data.team?.overview
     )
   })
   it("日期、组织、阶段、搜索和排序筛选真实生效，字段缺失与跨月上线各自影响指标", () => {
@@ -1589,7 +1794,11 @@ describe("2026年10月完整mock", () => {
       const octoberTrend = makeMockProjectMetricTrend({}).months.find(
         (month) => month.month === "2026-10"
       )
-      expect(octoberTrend?.groups).toEqual(makeMockProjectMetricSummary(october).groups)
+      const comparison = makeMockProjectMetricSummary(october)
+      expect(octoberTrend?.groups).toEqual(comparison.groups.map((group) => ({
+        ...group,
+        percentiles: undefined
+      })))
     } finally {
       vi.useRealTimers()
     }
@@ -1626,7 +1835,7 @@ describe("2026年10月完整mock", () => {
         expect(d).toBeCloseTo(Number(denominator.v), 8)
         const metric = String(table.rows[i]["指标"])
         const factor =
-          metric === "月人均产出功能点" || metric === "月人均特性吞吐率"
+          metric === "每人月产出功能点" || metric === "每人月上线特性数"
             ? 152.25
             : metric === "平均缺陷密度" ||
                 metric === "应用研发智能化特性占比" ||
@@ -1690,7 +1899,7 @@ describe("完整自然月份区间的组织代码累计", () => {
         }
       ).bool.filter
     ).toContainEqual({ terms: { timeRange: quarterMonths } })
-    expect(deps.codeStats).toHaveBeenCalledWith(thirdQuarter.range, null, ["h-P1"])
+    expect(deps.codeStats).toHaveBeenCalledWith(thirdQuarter.range, null, ["h-P1"], undefined)
     const rooms = await fetchProjectMetricOverview(
       { ...thirdQuarter, upperOrgLv1: ["A室", "B室"] },
       deps
@@ -1742,8 +1951,8 @@ describe("完整自然月份区间的组织代码累计", () => {
     expect((await fetchProjectMetricOverview(partial, deps)).monthly).toBeNull()
     expect(queries.some((query) => query.index === "monthly")).toBe(false)
     const mock = makeMockProjectMetricIndicatorExport(thirdQuarter)
-    expect(mock.team.overview.monthly?.month).toBe("2026-07 至 2026-09")
-    expect(mock.team.overview.monthly?.totalPushedLines).toBe(1055649 * 3)
+    expect(mock.team?.overview.monthly?.month).toBe("2026-07 至 2026-09")
+    expect(mock.team?.overview.monthly?.totalPushedLines).toBe(1055649 * 3)
     expect(
       mock.evidence.monthly.filter((row) => row.orgLevel === "team").map((row) => row.month)
     ).toEqual(quarterMonths)
