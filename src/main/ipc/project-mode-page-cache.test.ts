@@ -36,3 +36,21 @@ it("bounds entries and memory instead of retaining every historic page", () => {
   cache.set("huge", "x".repeat(1024 * 1024))
   expect(cache.get("huge")).toBeUndefined()
 })
+
+it("evicts expired entries before live entries and preserves recently read entries (LRU)", () => {
+  const now = vi.spyOn(Date, "now").mockReturnValue(1000)
+  const cache = new ProjectModePageCache<string>(2, 1024, 2048, 30_000, (value) => value.length)
+  cache.set("a", "1234")
+  cache.set("b", "5678")
+  expect(cache.get("a")).toBe("1234")
+  cache.set("c", "9012")
+  expect(cache.get("a")).toBe("1234")
+  expect(cache.get("b")).toBeUndefined()
+  expect(cache.get("c")).toBe("9012")
+
+  now.mockReturnValue(32_000)
+  cache.set("d", "abcd")
+  expect(cache.get("a")).toBeUndefined()
+  expect(cache.get("c")).toBeUndefined()
+  expect(cache.get("d")).toBe("abcd")
+})

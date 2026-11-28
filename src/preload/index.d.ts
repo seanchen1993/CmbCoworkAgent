@@ -2879,7 +2879,11 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; selectedGroups?: ProjectMetricGroup[] } & EfficiencyPluginFilter
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        selectedGroups?: ProjectMetricGroup[]
+        factRefreshKey?: number
+      } & EfficiencyPluginFilter
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
     projectMetricGroupOptions: (
       filters: ProjectMetricGroupOptions

@@ -258,11 +258,15 @@ import {
   buildPendingScalability,
   computeUnmeasuredRatio,
   makeMockEfficiency,
+  mergeEfficiencyAdoptionResults,
   normalizeChangeKindBuckets,
   normalizeNewRatioHistogram,
   type DashboardEfficiencyData
 } from "./dashboard-efficiency"
-import { fetchEfficiencyCompute } from "./dashboard-efficiency-full"
+import {
+  fetchEfficiencyCompute,
+  mergeEfficiencyComputeResults
+} from "./dashboard-efficiency-full"
 import type { EfficiencyPluginFilter } from "../../shared/dashboard-efficiency-compute"
 import {
   DASHBOARD_ES_FALLBACK_BYTE_LIMIT,
@@ -332,11 +336,17 @@ import type {
   ProjectMetricGroup,
   ProjectMetricGroupOptions
 } from "../../shared/project-metrics"
+import {
+  chunkProjectMetricChatRoots,
+  projectMetricChatRootFilter,
+  type ProjectMetricChatBinding
+} from "./project-metric-chat-bindings"
 import { fetchProjectMetricPeriodCode } from "./project-metric-period-code"
 import {
   fetchPersonalEfficiency,
   fetchPersonalEfficiencyCode,
-  makeMockPersonalEfficiency
+  makeMockPersonalEfficiency,
+  mergePersonalEfficiencyCodeRows
 } from "./dashboard-personal-efficiency"
 import type {
   PersonalEfficiencyData,
@@ -355,7 +365,7 @@ import { projectMetricIndicatorSheets } from "./project-metric-indicator-export"
 import { buildDashboardExcelBuffer, type DashboardExcelSheet } from "./dashboard-excel-workbook"
 import { formatProjectDate } from "../../shared/project-metric-calendar"
 import {
-  fetchProjectMetricEligibleHarnessIds,
+  fetchProjectMetricTelemetryScope,
   fetchProjectMetricOverview,
   fetchProjectMetricIndicatorExport,
   makeMockProjectMetricOverview,
@@ -1665,9 +1675,38 @@ function projectMetricHarnessFilter(field: string, ids: string[]): Record<string
     : { match_none: {} }
 }
 
+function projectMetricChatScope(bindings: ProjectMetricChatBinding[], prefix = "properties.") {
+  return {
+    bool: {
+      filter: [projectMetricChatRootFilter(bindings, prefix + "rootThreadId")],
+      must_not: [{ exists: { field: prefix + "harnessProjectId" } }]
+    }
+  }
+}
+
+function projectMetricTelemetryScope(
+  harnessIds: string[],
+  bindings: ProjectMetricChatBinding[],
+  prefix = "properties."
+) {
+  const harness = projectMetricHarnessFilter(prefix + "harnessProjectId", harnessIds)
+  return bindings.length
+    ? {
+        bool: {
+          should: [harness, projectMetricChatScope(bindings, prefix)],
+          minimum_should_match: 1
+        }
+      }
+    : harness
+}
+
 type DashboardEfficiencyFilters = OrgFilterOptions & EfficiencyPluginFilter & {
   selectedGroups?: ProjectMetricGroup[]
+  factRefreshKey?: number
 }
+
+const projectMetricFactGroupFieldCache = new Map<string, Promise<string>>()
+const projectMetricFactFieldsCheckedCache = new Map<string, Promise<void>>()
 
 function projectMetricTelemetryFilters(
   rooms: string[] | null,
@@ -1683,97 +1722,160 @@ function projectMetricTelemetryFilters(
 }
 
 function projectMetricDependencies(access: DashboardAccessContext): ProjectMetricDependencies {
-  let groupField: Promise<string> | undefined
-  let fieldsChecked: Promise<void> | undefined
+  const factIndex = getEsIndex("projectFact")
   return {
     query: esQuery,
     eventIndex: getEsIndex("event"),
     traceIndex: getEsIndex("trace"),
-    factIndex: getEsIndex("projectFact"),
+    factIndex,
     featureIndex: (import.meta.env.VITE_ES_INDEX_FEATURE_INFO as string) || "devclaw_feature_info",
     monthlyIndex:
       (import.meta.env.VITE_ES_INDEX_GITEE_PUSH_INFO as string) || "devclaw_gitee_push_info",
     allowedRoomNames: projectMetricAllowedRoomNames(access),
     factGroupField: () => {
-      groupField ??= (async () => {
-        const raw = asRecord(await esQuery(
-          getEsIndex("projectFact"),
-          { fields: ["groupName", "groupName.keyword"] },
-          { operation: "field_caps" }
-        ))
-        const fields = asRecord(raw.fields)
-        const field = ["groupName", "groupName.keyword"].find((name) => {
-          const keyword = asRecord(asRecord(fields[name]).keyword)
-          return keyword.searchable === true && keyword.aggregatable === true
+      let cached = projectMetricFactGroupFieldCache.get(factIndex)
+      if (!cached) {
+        cached = (async () => {
+          const raw = asRecord(
+            await esQuery(
+              factIndex,
+              { fields: ["groupName", "groupName.keyword"] },
+              { operation: "field_caps" }
+            )
+          )
+          const fields = asRecord(raw.fields)
+          const field = ["groupName", "groupName.keyword"].find((name) => {
+            const keyword = asRecord(asRecord(fields[name]).keyword)
+            return keyword.searchable === true && keyword.aggregatable === true
+          })
+          if (!field) throw new Error("项目索引缺少可精确查询和聚合的组名字段")
+          return field
+        })().catch((error: unknown) => {
+          if (projectMetricFactGroupFieldCache.get(factIndex) === cached)
+            projectMetricFactGroupFieldCache.delete(factIndex)
+          throw error
         })
-        if (!field) throw new Error("项目索引缺少可精确查询和聚合的组名字段")
-        return field
-      })()
-      return groupField
+        projectMetricFactGroupFieldCache.set(factIndex, cached)
+      }
+      return cached
     },
     validateFactFields: () => {
-      fieldsChecked ??= (async () => {
-        const raw = asRecord(
-          await esQuery(
-            getEsIndex("projectFact"),
-            { fields: ["featureCodes", "devWorkHours"] },
-            { operation: "field_caps" }
+      let cached = projectMetricFactFieldsCheckedCache.get(factIndex)
+      if (!cached) {
+        cached = (async () => {
+          const raw = asRecord(
+            await esQuery(
+              factIndex,
+              { fields: ["featureCodes", "devWorkHours"] },
+              { operation: "field_caps" }
+            )
           )
-        )
-        const fields = asRecord(raw.fields)
-        const feature = asRecord(asRecord(fields.featureCodes).keyword)
-        const hours = Object.values(asRecord(fields.devWorkHours)).map(asRecord)
-        if (
-          feature.searchable !== true ||
-          !hours.length ||
-          hours.some(
-            (field) =>
-              ![
-                "long",
-                "integer",
-                "short",
-                "float",
-                "double",
-                "scaled_float",
-                "half_float"
-              ].includes(String(field.type)) || field.searchable !== true
-          )
-        ) {
-          throw new Error(
-            "项目索引 mapping 需包含可查询的 featureCodes(keyword) 和 devWorkHours(数值)，仅写入 _source 不足以统计"
-          )
-        }
-      })()
-      return fieldsChecked
+          const fields = asRecord(raw.fields)
+          const feature = asRecord(asRecord(fields.featureCodes).keyword)
+          const hours = Object.values(asRecord(fields.devWorkHours)).map(asRecord)
+          if (
+            feature.searchable !== true ||
+            !hours.length ||
+            hours.some(
+              (field) =>
+                ![
+                  "long",
+                  "integer",
+                  "short",
+                  "float",
+                  "double",
+                  "scaled_float",
+                  "half_float"
+                ].includes(String(field.type)) || field.searchable !== true
+            )
+          ) {
+            throw new Error(
+              "项目索引 mapping 需包含可查询的 featureCodes(keyword) 和 devWorkHours(数值)，仅写入 _source 不足以统计"
+            )
+          }
+        })().catch((error: unknown) => {
+          if (projectMetricFactFieldsCheckedCache.get(factIndex) === cached)
+            projectMetricFactFieldsCheckedCache.delete(factIndex)
+          throw error
+        })
+        projectMetricFactFieldsCheckedCache.set(factIndex, cached)
+      }
+      return cached
     },
-    codeEvidence: async (range, ids, rooms, groups) => {
-      if (!ids.length || rooms?.length === 0) return []
-      const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(null, range, [
-        ...projectMetricTelemetryFilters(rooms, groups),
-        projectMetricHarnessFilter("properties.harnessProjectId", ids)
-      ])
-      return fetchProjectMetricPeriodCode(
-        esQuery,
-        getEsIndex("event"),
-        codeAdoptFilters,
-        perBucketAggs.code_adopt_pushed,
-        rooms !== null,
-        rooms !== null && !groups?.length ? codeGenFilters : undefined
+    codeEvidence: async (range, ids, rooms, groups, chatBindings = []) => {
+      if (rooms?.length === 0) return []
+      const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+        null,
+        range
       )
-    },
-    codeStats: async (range, rooms, ids, groups) => {
-      const raw = await fetchProjectModeCodeAggs(null, range, (aggs) => aggs, [
-        ...projectMetricTelemetryFilters(rooms, groups),
-        projectMetricHarnessFilter("properties.harnessProjectId", ids)
+      const telemetry = projectMetricTelemetryFilters(rooms, groups)
+      const read = (scope: Record<string, unknown>, chat?: ProjectMetricChatBinding[]) =>
+        fetchProjectMetricPeriodCode(
+          esQuery,
+          getEsIndex("event"),
+          codeAdoptFilters,
+          perBucketAggs.code_adopt_pushed,
+          rooms !== null,
+          rooms !== null && !groups?.length ? codeGenFilters : undefined,
+          chat,
+          [...telemetry, scope]
+        )
+      const chatBatches = chunkProjectMetricChatRoots(chatBindings)
+      const [harness, ...chatResults] = await Promise.all([
+        ids.length ? read(projectMetricHarnessFilter("properties.harnessProjectId", ids)) : [],
+        ...chatBatches.map((batch) => read(projectMetricChatScope(batch), batch))
       ])
-      assertProjectModeResultComplete(raw)
-      if (!asRecord(asRecord(raw).aggregations).code_adopt_pushed)
-        throw new Error("代码采纳统计未完整返回，请重试")
-      const stats = normalizeCodeStatsFromAggs(raw)
+      return [...harness, ...chatResults.flat()]
+    },
+    codeStats: async (range, rooms, ids, groups, chatBindings = []) => {
+      const telemetry = projectMetricTelemetryFilters(rooms, groups)
+      const readScope = async (scope: Record<string, unknown>) => {
+        const raw = await fetchProjectModeCodeAggs(
+          null,
+          range,
+          ({ code_adopt_pushed }) => ({ code_adopt_pushed }),
+          telemetry,
+          {
+            bool: {
+              filter: [
+                { term: { eventName: "code_adopt" } },
+                { term: { "properties.pushed": true } },
+                scope
+              ]
+            }
+          }
+        )
+        assertProjectModeResultComplete(raw)
+        if (!asRecord(asRecord(raw).aggregations).code_adopt_pushed)
+          throw new Error("代码采纳统计未完整返回，请重试")
+        return normalizeCodeStatsFromAggs(raw)
+      }
+      const chatBatches = chunkProjectMetricChatRoots(chatBindings)
+      if (chatBatches.length <= 1) {
+        const stats = await readScope(projectMetricTelemetryScope(ids, chatBindings))
+        return {
+          pushedAdoptedLines: stats.pushedAdoptedLines,
+          pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines,
+          pushedAdoptionRate: stats.pushedAdoptionRate
+        }
+      }
+      const scopes = [
+        ...(ids.length ? [projectMetricHarnessFilter("properties.harnessProjectId", ids)] : []),
+        ...chatBatches.map((batch) => projectMetricChatScope(batch))
+      ]
+      const results = await Promise.all(scopes.map(readScope))
+      const pushedAdoptedLines = results.reduce((sum, item) => sum + item.pushedAdoptedLines, 0)
+      const pushedEffectiveGeneratedLines = results.reduce(
+        (sum, item) => sum + item.pushedEffectiveGeneratedLines,
+        0
+      )
       return {
-        pushedAdoptedLines: stats.pushedAdoptedLines,
-        pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines,
-        pushedAdoptionRate: stats.pushedAdoptionRate
+        pushedAdoptedLines,
+        pushedEffectiveGeneratedLines,
+        pushedAdoptionRate:
+          pushedEffectiveGeneratedLines > 0
+            ? pushedAdoptedLines / pushedEffectiveGeneratedLines
+            : null
       }
     }
   }
@@ -1792,33 +1894,46 @@ async function fetchDashboardPersonalEfficiency(
   return fetchPersonalEfficiency(
     filters,
     deps,
-    async (ids, rooms) => {
-      if (!ids.length || rooms?.length === 0) return []
+    async (ids, rooms, chatBindings = []) => {
+      if (rooms?.length === 0) return []
       const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
         null,
         filters.range,
         [
           ...projectMetricTelemetryFilters(rooms, filters.selectedGroups),
-          ...(sapId ? [{ term: { sapId } }] : []),
-          projectMetricHarnessFilter("properties.harnessProjectId", ids)
+          ...(sapId ? [{ term: { sapId } }] : [])
         ]
       )
-      return fetchPersonalEfficiencyCode(
-        esQuery,
-        getEsIndex("event"),
-        [
-          {
-            bool: {
-              should: [
-                { bool: { filter: codeGenFilters } },
-                { bool: { filter: codeAdoptFilters } }
-              ],
-              minimum_should_match: 1
-            }
-          }
-        ],
-        perBucketAggs
-      )
+      const read = (scope: Record<string, unknown>, chat?: ProjectMetricChatBinding[]) =>
+        fetchPersonalEfficiencyCode(
+          esQuery,
+          getEsIndex("event"),
+          [
+            {
+              bool: {
+                should: [
+                  { bool: { filter: codeGenFilters } },
+                  { bool: { filter: codeAdoptFilters } }
+                ],
+                minimum_should_match: 1
+              }
+            },
+            scope
+          ],
+          { code_adopt_pushed: perBucketAggs.code_adopt_pushed },
+          chat
+        )
+      const chat = sapId ? chatBindings.filter((binding) => binding.sapId === sapId) : chatBindings
+      const chatBatches = chunkProjectMetricChatRoots(chat)
+      const [projectRows, ...chatBatchesRows] = await Promise.all([
+        ids.length ? read(projectMetricHarnessFilter("properties.harnessProjectId", ids)) : [],
+        ...chatBatches.map((batch) => read(projectMetricChatScope(batch), batch))
+      ])
+      const chatRows =
+        chatBatchesRows.length > 1
+          ? mergePersonalEfficiencyCodeRows(chatBatchesRows.flat())
+          : (chatBatchesRows[0] ?? [])
+      return [...projectRows, ...chatRows]
     },
     sapId,
     includeAllProjectNames
@@ -13727,7 +13842,8 @@ async function fetchProjectModeCodeAggs(
     perBucketAggs: Record<string, unknown>,
     scopedProjectIds: string[]
   ) => Record<string, unknown>,
-  extraFilters: Record<string, unknown>[] = []
+  extraFilters: Record<string, unknown>[] = [],
+  scopeFilter?: Record<string, unknown>
 ): Promise<unknown | null> {
   if (projectIds && projectIds.length === 0) return null
   const scopedProjectIds = projectIds?.slice(0, PROJECT_MODE_PROJECT_ID_LIMIT) ?? []
@@ -13738,8 +13854,10 @@ async function fetchProjectModeCodeAggs(
   )
   const body = {
     size: 0,
+    ...(scopeFilter ? { track_total_hits: false } : {}),
     query: {
       bool: {
+        ...(scopeFilter ? { filter: [scopeFilter] } : {}),
         should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
         minimum_should_match: 1
       }
@@ -14664,14 +14782,7 @@ async function fetchProjectModeProjectCommits(
   }
 }
 
-/**
- * 研发效能面板 payload.
- *
- * Scope is fixed rather than user-toggleable: project mode AND bound to a Lean
- * project. That is the premise the three metrics are defined against, so it is
- * applied here instead of being exposed as a filter the viewer could turn off
- * and silently change what the numbers mean.
- */
+/** 研发效能面板按当前有效精益绑定统计。 */
 async function fetchDashboardEfficiency(
   range: TimeRange,
   opts?: DashboardEfficiencyFilters
@@ -14682,71 +14793,107 @@ async function fetchDashboardEfficiency(
   const groups = projectMetricGroupFilter(opts?.selectedGroups, "upperOrgLv1", "upperOrgLv0")
   const orgFilterClause = rooms && groups ? { bool: { filter: [rooms, groups] } } : rooms ?? groups
 
-  // Lean project ids come from the self-healing snapshot (the sole source of
-  // truth for projectFromLean). An empty set is meaningful, not an error: it
-  // means no Lean-bound projects matched, and every terms IN [] below then
-  // aggregates to zero.
-  const leanProjectIds = await fetchProjectMetricEligibleHarnessIds(
-    projectMetricDependencies(access)
+  const { harnessIds, chatBindings } = await fetchProjectMetricTelemetryScope(
+    projectMetricDependencies(access),
+    opts?.factRefreshKey
   )
-  const truncated = false
-
-  const codeExtraFilters = [
+  const organization = [
     { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
-    ...(orgFilterClause ? [orgFilterClause] : []),
-    { exists: { field: "properties.harnessProjectId" } },
-    projectMetricHarnessFilter("properties.harnessProjectId", leanProjectIds)
+    ...(orgFilterClause ? [orgFilterClause] : [])
   ]
-
-  const traceFilters = [
-    ...projectModeTraceFilters(range, orgFilterClause),
-    { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
-    projectMetricHarnessFilter("harnessProjectId", leanProjectIds)
-  ]
+  const traceTimeAndOrg = [...projectModeMetricTimeFilters("startedAt", range), ...organization]
   const computeQuery = (index: "trace" | "event", body: Record<string, unknown>) =>
     esQuery(getEsIndex(index), body)
-  const [changeKindRaw, overallRaw, computeResult, projectRaw] = await Promise.all([
-    // 指标 2 — adoption split by 新增 / 存量.
-    fetchProjectModeCodeAggs(
-      null,
-      range,
-      (perBucketAggs) => ({
-        ...buildChangeKindAggs(perBucketAggs),
-        ...buildNewRatioHistogramAgg()
-      }),
-      codeExtraFilters
+  const chatBatches = chunkProjectMetricChatRoots(chatBindings)
+  const scopes =
+    chatBatches.length <= 1
+      ? [
+          {
+            event: projectMetricTelemetryScope(harnessIds, chatBindings),
+            trace: projectMetricTelemetryScope(harnessIds, chatBindings, "")
+          }
+        ]
+      : [
+          ...(harnessIds.length
+            ? [
+                {
+                  event: projectMetricHarnessFilter("properties.harnessProjectId", harnessIds),
+                  trace: projectMetricHarnessFilter("harnessProjectId", harnessIds)
+                }
+              ]
+            : []),
+          ...chatBatches.map((batch) => ({
+            event: projectMetricChatScope(batch),
+            trace: projectMetricChatScope(batch, "")
+          }))
+        ]
+  const computeSelection = {
+    ...opts,
+    scope: opts?.scope ?? "dev"
+  }
+  const [adoptionBatches, computeBatches, projectRaw] = await Promise.all([
+    // 总量、分组和新增比例分布复用同一批代码事件；超大批次按不重叠范围拆查再合并。
+    Promise.all(
+      scopes.map(async (scope) => {
+        const raw = await fetchProjectModeCodeAggs(
+          null,
+          range,
+          (perBucketAggs) => ({
+            ...perBucketAggs,
+            ...buildChangeKindAggs(perBucketAggs),
+            ...buildNewRatioHistogramAgg()
+          }),
+          organization,
+          scope.event
+        )
+        assertProjectModeResultComplete(raw)
+        const overall = normalizeCodeStatsFromAggs(raw)
+        return {
+          overall,
+          byChangeKind: normalizeChangeKindBuckets(raw),
+          newRatioHistogram: normalizeNewRatioHistogram(raw),
+          unmeasuredRatio: computeUnmeasuredRatio(overall)
+        }
+      })
     ),
-    // Unsplit totals, used for the unmeasured-share credibility indicator.
-    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, codeExtraFilters),
-    fetchEfficiencyCompute(computeQuery, traceFilters, codeExtraFilters, range, {
-      ...opts,
-      scope: opts?.scope ?? "dev"
-    }),
-    // The panel-wide project count keeps its original active-project scope;
-    // compute-only plugin/stage filters must not alter the adoption section.
+    Promise.all(
+      scopes.map((scope) =>
+        fetchEfficiencyCompute(
+          computeQuery,
+          [...traceTimeAndOrg, scope.trace],
+          [...organization, scope.event],
+          range,
+          computeSelection
+        )
+      )
+    ),
+    // 此计数展示周期内活跃的 Harness 项目数。精益项目数在项目对比中按编号去重。
     esQuery(getEsIndex("trace"), {
       size: 0,
-      query: { bool: { filter: traceFilters } },
+      query: {
+        bool: {
+          filter: [
+            ...traceTimeAndOrg,
+            projectMetricHarnessFilter("harnessProjectId", harnessIds)
+          ]
+        }
+      },
       aggs: { project_count: { cardinality: { field: "harnessProjectId" } } }
     })
   ])
 
-  const overall = normalizeCodeStatsFromAggs(overallRaw)
+  const adoption = mergeEfficiencyAdoptionResults(adoptionBatches)
+  const computeResult = mergeEfficiencyComputeResults(computeBatches)
 
   return {
     scalability: buildPendingScalability(),
-    adoption: {
-      overall,
-      byChangeKind: normalizeChangeKindBuckets(changeKindRaw),
-      newRatioHistogram: normalizeNewRatioHistogram(changeKindRaw),
-      unmeasuredRatio: computeUnmeasuredRatio(overall)
-    },
+    adoption,
     ...computeResult,
     meta: {
       projectCount: asNumber(
         asRecord(asRecord(asRecord(projectRaw).aggregations).project_count).value
       ),
-      truncated
+      truncated: false
     }
   }
 }

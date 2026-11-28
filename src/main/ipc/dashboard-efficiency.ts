@@ -280,6 +280,88 @@ export function computeUnmeasuredRatio(stats: DashboardCodeStats): number | null
   return stats.unmeasuredGeneratedLines / denominator
 }
 
+/** Combine disjoint code-stats batches by summing raw counters and recomputing rates. */
+export function mergeDashboardCodeStats(
+  statsList: readonly DashboardCodeStats[]
+): DashboardCodeStats {
+  let generatedLines = 0
+  let deletedLines = 0
+  let measuredGeneratedLines = 0
+  let effectiveGeneratedLines = 0
+  let adoptedLines = 0
+  let pushedMeasuredGeneratedLines = 0
+  let pushedEffectiveGeneratedLines = 0
+  let pushedAdoptedLines = 0
+  let pushedCommitCount = 0
+  for (const stats of statsList) {
+    generatedLines += stats.generatedLines
+    deletedLines += stats.deletedLines
+    measuredGeneratedLines += stats.measuredGeneratedLines
+    effectiveGeneratedLines += stats.effectiveGeneratedLines
+    adoptedLines += stats.adoptedLines
+    pushedMeasuredGeneratedLines += stats.pushedMeasuredGeneratedLines
+    pushedEffectiveGeneratedLines += stats.pushedEffectiveGeneratedLines
+    pushedAdoptedLines += stats.pushedAdoptedLines
+    pushedCommitCount += stats.pushedCommitCount
+  }
+  return makeDashboardCodeStats({
+    generatedLines,
+    deletedLines,
+    measuredGeneratedLines,
+    effectiveGeneratedLines,
+    adoptedLines,
+    pushedMeasuredGeneratedLines,
+    pushedEffectiveGeneratedLines,
+    pushedAdoptedLines,
+    pushedCommitCount
+  })
+}
+
+/** Combine disjoint adoption batches (e.g. Harness + chunked chat scopes). */
+export function mergeEfficiencyAdoptionResults(
+  results: readonly EfficiencyAdoptionData[]
+): EfficiencyAdoptionData {
+  if (results.length === 1) return results[0]
+  const overall = mergeDashboardCodeStats(results.map((item) => item.overall))
+  const byKind = new Map<
+    EfficiencyChangeKind | typeof UNCLASSIFIED_CHANGE_KIND,
+    DashboardCodeStats[]
+  >()
+  for (const item of results) {
+    for (const row of item.byChangeKind) {
+      const list = byKind.get(row.changeKind) ?? []
+      list.push(row)
+      byKind.set(row.changeKind, list)
+    }
+  }
+  const byChangeKind: EfficiencyChangeKindStats[] = EFFICIENCY_CHANGE_KINDS.map((changeKind) => ({
+    ...mergeDashboardCodeStats(byKind.get(changeKind) ?? []),
+    changeKind
+  }))
+  const unclassifiedList = byKind.get(UNCLASSIFIED_CHANGE_KIND)
+  if (unclassifiedList?.length) {
+    const merged = mergeDashboardCodeStats(unclassifiedList)
+    if (hasAnyLines(merged)) {
+      byChangeKind.push({ ...merged, changeKind: UNCLASSIFIED_CHANGE_KIND })
+    }
+  }
+  const bins = new Map<number, number>()
+  for (const item of results) {
+    for (const bin of item.newRatioHistogram) {
+      bins.set(bin.from, (bins.get(bin.from) ?? 0) + bin.docCount)
+    }
+  }
+  const newRatioHistogram = [...bins.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([from, docCount]) => ({ from, docCount }))
+  return {
+    overall,
+    byChangeKind,
+    newRatioHistogram,
+    unmeasuredRatio: computeUnmeasuredRatio(overall)
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Metric assembly
 // ─────────────────────────────────────────────────────────

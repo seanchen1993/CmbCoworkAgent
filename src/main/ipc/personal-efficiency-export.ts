@@ -1,3 +1,4 @@
+import { PROJECT_METRIC_DEVELOPMENT_LABELS } from "../../shared/project-metrics"
 import {
   PERSONAL_EFFICIENCY_METRICS,
   defaultPersonalEfficiencyWeights,
@@ -150,6 +151,7 @@ export function personalEfficiencyExportSheets(
       "员工号",
       "精益项目编号",
       "Harness 项目 ID",
+      "开发方式",
       "代码所属室",
       "代码所属组",
       "已 Push 采纳行数",
@@ -162,6 +164,9 @@ export function personalEfficiencyExportSheets(
         person.sapId,
         item.prjCode,
         item.harnessProjectId,
+        item.harnessProjectId
+          ? PROJECT_METRIC_DEVELOPMENT_LABELS.devclaw_project
+          : PROJECT_METRIC_DEVELOPMENT_LABELS.devclaw_chat,
         item.roomName,
         item.groupName ?? "",
         item.pushedAdoptedLines,

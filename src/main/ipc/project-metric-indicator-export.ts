@@ -167,7 +167,7 @@ const codeFields: Field[] = [
   ["team", "代码统计团队"],
   ["period", "统计周期"],
   ["source", "数据来源"],
-  ["project", "项目模式项目编号"],
+  ["project", "精益项目编号"],
   ["projectName", "项目名称"],
   ["projectRoom", "项目所属室"],
   ["lines", "入库代码行数"],

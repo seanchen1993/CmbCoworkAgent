@@ -6,7 +6,7 @@ import type {
  * 研发效能面板
  *
  * 展示 AI 编码有效性与算力产出效能。
- * 范围固定为「项目模式 + 已绑定精益项目」。算力指标默认 Dev，
+ * 范围为已绑定精益项目的项目与对话。算力指标默认 Dev，
  * 可切换原有全流程口径，并单独筛选项目绑定的插件及其版本。
  */
 import React, { useMemo, useState } from "react"
@@ -909,9 +909,9 @@ export function EfficiencyPanel({
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                <span>统计范围：项目模式 · 已绑定精益项目</span>
+                <span>统计范围：已绑定精益项目的项目与对话</span>
                 <span>·</span>
-                <span>{formatCount(data.meta.projectCount)} 个项目</span>
+                <span>{formatCount(data.meta.projectCount)} 个活跃 Harness 项目</span>
                 {data.meta.truncated ? (
                   <>
                     <span>·</span>

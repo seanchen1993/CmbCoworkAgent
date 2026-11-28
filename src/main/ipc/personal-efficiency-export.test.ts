@@ -159,7 +159,21 @@ describe("个人独立 Excel 导出", () => {
     expect(sheets[0].header).toContain("所属组")
     expect(sheets[0].rows[0][6]).toBe("F1 特性一")
     expect(sheets[1].header).toContain("代码所属组")
-    expect(sheets[1].rows[0].slice(0, 4)).toEqual(["甲", "8001", "CODE-A", "h-a"])
+    expect(sheets[1].header).toContain("开发方式")
+    expect(sheets[1].rows[0].slice(0, 5)).toEqual(["甲", "8001", "CODE-A", "h-a", "项目模式"])
+  })
+  it("本人代码明细区分项目模式与对话模式来源", () => {
+    const data = fixture()
+    data.people[0].code.push({
+      harnessProjectId: "",
+      prjCode: "CODE-A",
+      roomName: "A室",
+      pushedAdoptedLines: 30,
+      pushedEffectiveGeneratedLines: 50
+    })
+    const codeSheet = personalEfficiencyExportSheets(data, filters, { sapId: "8001" }, exportedAt)[1]
+    const modeIdx = codeSheet.header.indexOf("开发方式")
+    expect(codeSheet.rows.map((row) => row[modeIdx])).toEqual(["项目模式", "对话模式"])
   })
   it("非完整自然月隐藏月度列，全部零权重时名次和综合分留空", () => {
     const data = fixture()

@@ -7,9 +7,12 @@ import {
   buildNewRatioHistogramAgg,
   buildPendingScalability,
   computeUnmeasuredRatio,
+  mergeEfficiencyAdoptionResults,
   normalizeChangeKindBuckets,
   normalizeNewRatioHistogram
 } from "./dashboard-efficiency"
+import { mergeEfficiencyComputeResults } from "./dashboard-efficiency-full"
+import { emptyDevCompute, finishDevCompute } from "./dashboard-efficiency-compute"
 import { makeDashboardCodeStats } from "./dashboard-code-stats"
 
 /** Shape one `by_change_kind` bucket the way ES nests the shared code aggs. */
@@ -339,5 +342,152 @@ describe("buildPendingScalability", () => {
     const scalability = buildPendingScalability()
     expect(scalability.slope).toBeNull()
     expect(scalability.pendingReason).toContain("需求特性")
+  })
+})
+
+describe("batch merge helpers", () => {
+  it("merges disjoint adoption batches and recomputes weighted rates and histogram bins", () => {
+    const firstOverall = makeDashboardCodeStats({
+      generatedLines: 100,
+      deletedLines: 10,
+      measuredGeneratedLines: 80,
+      effectiveGeneratedLines: 80,
+      adoptedLines: 60,
+      pushedEffectiveGeneratedLines: 80,
+      pushedAdoptedLines: 60,
+      pushedCommitCount: 2
+    })
+    const secondOverall = makeDashboardCodeStats({
+      generatedLines: 200,
+      deletedLines: 20,
+      measuredGeneratedLines: 200,
+      effectiveGeneratedLines: 200,
+      adoptedLines: 180,
+      pushedEffectiveGeneratedLines: 120,
+      pushedAdoptedLines: 100,
+      pushedCommitCount: 3
+    })
+    const merged = mergeEfficiencyAdoptionResults([
+      {
+        overall: firstOverall,
+        byChangeKind: [
+          { ...firstOverall, changeKind: "new" },
+          {
+            ...makeDashboardCodeStats({
+              generatedLines: 0,
+              deletedLines: 0,
+              measuredGeneratedLines: 0,
+              effectiveGeneratedLines: 0,
+              adoptedLines: 0
+            }),
+            changeKind: "legacy"
+          }
+        ],
+        newRatioHistogram: [
+          { from: 0.7, docCount: 3 },
+          { from: 0.9, docCount: 5 }
+        ],
+        unmeasuredRatio: computeUnmeasuredRatio(firstOverall)
+      },
+      {
+        overall: secondOverall,
+        byChangeKind: [
+          { ...secondOverall, changeKind: "new" },
+          {
+            ...makeDashboardCodeStats({
+              generatedLines: 0,
+              deletedLines: 0,
+              measuredGeneratedLines: 0,
+              effectiveGeneratedLines: 0,
+              adoptedLines: 0
+            }),
+            changeKind: "legacy"
+          }
+        ],
+        newRatioHistogram: [
+          { from: 0.7, docCount: 4 },
+          { from: 0.8, docCount: 2 }
+        ],
+        unmeasuredRatio: computeUnmeasuredRatio(secondOverall)
+      }
+    ])
+    expect(merged.overall.pushedAdoptedLines).toBe(160)
+    expect(merged.overall.pushedEffectiveGeneratedLines).toBe(200)
+    expect(merged.overall.pushedAdoptionRate).toBeCloseTo(0.8)
+    expect(merged.overall.pushedCommitCount).toBe(5)
+    expect(merged.byChangeKind[0].pushedAdoptedLines).toBe(160)
+    expect(merged.newRatioHistogram).toEqual([
+      { from: 0.7, docCount: 7 },
+      { from: 0.8, docCount: 2 },
+      { from: 0.9, docCount: 5 }
+    ])
+    expect(merged.unmeasuredRatio).toBeCloseTo(20 / 300)
+  })
+
+  it("merges disjoint compute batches and recomputes token/line ratios and plugin options", () => {
+    const mk = (tokens: number, lines: number, traces: number, adapter: string | null) => {
+      const compute = finishDevCompute({
+        ...emptyDevCompute(),
+        totalInputTokens: tokens * 0.8,
+        totalOutputTokens: tokens * 0.2,
+        totalTokens: tokens,
+        generatedLines: lines * 2,
+        pushedAdoptedLines: lines,
+        traceCount: traces,
+        codeProducingTraceCount: Math.floor(traces / 2)
+      })
+      return {
+        computeScope: "dev" as const,
+        compute,
+        legacyCompute: emptyDevCompute(),
+        stageDistribution: [
+          { stage: "biz" as const, totalTokens: 0, generatedLines: 0, pushedAdoptedLines: 0 },
+          {
+            stage: "dev" as const,
+            totalTokens: adapter ? tokens : 0,
+            generatedLines: adapter ? lines * 2 : 0,
+            pushedAdoptedLines: adapter ? lines : 0
+          },
+          { stage: "ops" as const, totalTokens: 0, generatedLines: 0, pushedAdoptedLines: 0 },
+          {
+            stage: "unattributed" as const,
+            totalTokens: adapter ? 0 : tokens,
+            generatedLines: adapter ? 0 : lines * 2,
+            pushedAdoptedLines: adapter ? 0 : lines
+          }
+        ],
+        computeByPlugin: [
+          {
+            adapterName: adapter,
+            versions: adapter ? ["1.0.0"] : [],
+            compute,
+            legacyCompute: emptyDevCompute()
+          }
+        ],
+        computeCoverage: {
+          scopeTraces: traces,
+          preciseDevTraces: adapter ? traces : 0,
+          legacyDevTraces: 0,
+          unattributedTraces: adapter ? 0 : traces
+        },
+        pluginOptions: adapter ? [{ adapterName: adapter, versions: ["1.0.0"] }] : []
+      }
+    }
+    const merged = mergeEfficiencyComputeResults([
+      mk(1000, 10, 4, "WorkflowA"),
+      mk(3000, 30, 6, null)
+    ])
+    expect(merged.compute.totalTokens).toBe(4000)
+    expect(merged.compute.pushedAdoptedLines).toBe(40)
+    expect(merged.compute.tokensPerAdoptedLine).toBe(100)
+    expect(merged.compute.traceCount).toBe(10)
+    expect(merged.computeCoverage).toEqual({
+      scopeTraces: 10,
+      preciseDevTraces: 4,
+      legacyDevTraces: 0,
+      unattributedTraces: 6
+    })
+    expect(merged.computeByPlugin.map((row) => row.adapterName)).toEqual([null, "WorkflowA"])
+    expect(merged.pluginOptions).toEqual([{ adapterName: "WorkflowA", versions: ["1.0.0"] }])
   })
 })

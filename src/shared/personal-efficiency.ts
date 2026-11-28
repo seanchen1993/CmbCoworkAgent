@@ -6,7 +6,7 @@ import type {
 
 export type PersonalEfficiencyFilters = Pick<
   ProjectMetricFilters,
-  "range" | "upperOrgLv1" | "dateBasis" | "selectedGroups"
+  "range" | "upperOrgLv1" | "dateBasis" | "selectedGroups" | "factRefreshKey"
 >
 
 export interface PersonalEfficiencyValues {

@@ -324,5 +324,90 @@ export async function fetchEfficiencyCompute(
   }
 }
 
+/** Combine disjoint compute batches (e.g. Harness + chunked chat scopes). */
+export function mergeEfficiencyComputeResults(
+  results: readonly EfficiencyDevComputeResult[]
+): EfficiencyDevComputeResult {
+  if (results.length === 1) return results[0]
+  const computeScope = results[0]?.computeScope ?? "dev"
+  const compute = emptyDevCompute()
+  const legacyCompute = emptyDevCompute()
+  const stages = Object.fromEntries(
+    COMPUTE_STAGES.map((stage) => [
+      stage,
+      { stage, totalTokens: 0, generatedLines: 0, pushedAdoptedLines: 0 }
+    ])
+  ) as Record<
+    (typeof COMPUTE_STAGES)[number],
+    NonNullable<EfficiencyDevComputeResult["stageDistribution"]>[number]
+  >
+  const plugins = new Map<
+    string,
+    {
+      adapterName: string | null
+      versions: Set<string>
+      compute: EfficiencyDevComputeData
+      legacyCompute: EfficiencyDevComputeData
+    }
+  >()
+  const options = new Map<string, Set<string>>()
+  const coverage = {
+    scopeTraces: 0,
+    preciseDevTraces: 0,
+    legacyDevTraces: 0,
+    unattributedTraces: 0
+  }
+  for (const item of results) {
+    addDevCompute(compute, item.compute)
+    addDevCompute(legacyCompute, item.legacyCompute)
+    for (const row of item.stageDistribution ?? []) {
+      stages[row.stage].totalTokens += row.totalTokens
+      stages[row.stage].generatedLines += row.generatedLines
+      stages[row.stage].pushedAdoptedLines += row.pushedAdoptedLines
+    }
+    for (const row of item.computeByPlugin) {
+      const key = row.adapterName ?? ""
+      const existing = plugins.get(key) ?? {
+        adapterName: row.adapterName,
+        versions: new Set<string>(),
+        compute: emptyDevCompute(),
+        legacyCompute: emptyDevCompute()
+      }
+      for (const version of row.versions) existing.versions.add(version)
+      addDevCompute(existing.compute, row.compute)
+      addDevCompute(existing.legacyCompute, row.legacyCompute)
+      plugins.set(key, existing)
+    }
+    for (const option of item.pluginOptions) {
+      const versions = options.get(option.adapterName) ?? new Set<string>()
+      for (const version of option.versions) versions.add(version)
+      options.set(option.adapterName, versions)
+    }
+    coverage.scopeTraces += item.computeCoverage.scopeTraces
+    coverage.preciseDevTraces += item.computeCoverage.preciseDevTraces
+    coverage.legacyDevTraces += item.computeCoverage.legacyDevTraces
+    coverage.unattributedTraces += item.computeCoverage.unattributedTraces
+  }
+  return {
+    computeScope,
+    compute: finishDevCompute(compute),
+    legacyCompute: computeScope === "all" ? emptyDevCompute() : finishDevCompute(legacyCompute),
+    stageDistribution: COMPUTE_STAGES.map((stage) => stages[stage]),
+    computeByPlugin: [...plugins.values()]
+      .map((row) => ({
+        adapterName: row.adapterName,
+        versions: [...row.versions].sort(),
+        compute: finishDevCompute(row.compute),
+        legacyCompute:
+          computeScope === "all" ? emptyDevCompute() : finishDevCompute(row.legacyCompute)
+      }))
+      .sort((a, b) => b.compute.totalTokens - a.compute.totalTokens),
+    computeCoverage: coverage,
+    pluginOptions: [...options]
+      .map(([adapterName, versions]) => ({ adapterName, versions: [...versions].sort() }))
+      .sort((a, b) => a.adapterName.localeCompare(b.adapterName))
+  }
+}
+
 /** Compatibility name for the full-flow query; selection can also request its Dev partition. */
 export const fetchFullCompute = fetchEfficiencyCompute

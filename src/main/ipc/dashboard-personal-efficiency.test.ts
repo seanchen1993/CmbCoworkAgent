@@ -363,6 +363,35 @@ describe("个人代码完整分页", () => {
       }
     ])
   })
+  it("将同一人员的多个对话按当前精益编号归并", async () => {
+    const query = vi.fn().mockResolvedValue({
+      aggregations: {
+        people: {
+          buckets: ["chat-a", "chat-b"].map((project) => ({
+            key: { sapId: "8001", project, room: "A室", group: null },
+            code_adopt_pushed: {
+              pushed_adopted_lines: { value: 20 },
+              pushed_effective_generated_lines: { value: 25 }
+            }
+          }))
+        }
+      }
+    })
+    const bindings = ["chat-a", "chat-b"].map((rootThreadId) => ({
+      sapId: "8001",
+      rootThreadId,
+      prjCode: "P2"
+    }))
+    const rows = await fetchPersonalEfficiencyCode(query, "event", [], {}, bindings)
+    expect(rows).toEqual([
+      expect.objectContaining({
+        sapId: "8001",
+        prjCode: "P2",
+        pushedAdoptedLines: 40,
+        pushedEffectiveGeneratedLines: 50
+      })
+    ])
+  })
   it("分片失败、缺少人员或聚合时拒绝不完整排名", async () => {
     for (const response of [
       { timed_out: true },
@@ -385,6 +414,7 @@ describe("个人查询权限和失败隔离", () => {
     vi.spyOn(projectMetrics, "fetchPersonalEfficiencyProjectContext").mockResolvedValue({
       projects: [project("P1")],
       bindings: [{ harnessProjectId: "h1", prjCode: "P1", adapterName: "" }],
+      chatBindings: [],
       warnings: []
     })
   }

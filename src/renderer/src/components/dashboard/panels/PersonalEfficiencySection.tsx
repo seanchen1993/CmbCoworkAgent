@@ -28,8 +28,8 @@ export function PersonalEfficiencySection({
   refreshKey
 }: PersonalEfficiencyFilters & { refreshKey: number }): React.JSX.Element {
   const filters = useMemo(
-    () => ({ range, upperOrgLv1, selectedGroups, dateBasis }),
-    [range, upperOrgLv1, selectedGroups, dateBasis]
+    () => ({ range, upperOrgLv1, selectedGroups, dateBasis, factRefreshKey: refreshKey }),
+    [range, upperOrgLv1, selectedGroups, dateBasis, refreshKey]
   )
   const groupScoped = Boolean(selectedGroups?.length)
   const months = projectCompleteMonths(range)
@@ -177,7 +177,7 @@ export function PersonalEfficiencySection({
               </TooltipTrigger>
               <TooltipContent className="max-w-sm text-xs leading-relaxed">
                 <p>
-                  项目指标按项目经理统计，受项目所属室、组和项目日期筛选控制；代码生成指标按项目模式关联的精益项目及代码上报室、组统计。
+                  项目指标按项目经理统计，受项目所属室、组和项目日期筛选控制；代码指标按项目模式和对话模式当前关联的精益项目，以及代码上报室、组统计。
                 </p>
               </TooltipContent>
             </Tooltip>

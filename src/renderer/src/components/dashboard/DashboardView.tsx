@@ -2601,8 +2601,16 @@ function DashboardContent({
   // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
   useEffect(() => {
     if (activeMainTab !== "efficiency" || !projectModeAllowed) return
-    void fetchEfficiency(range, selectedOrgLv1List, efficiencyGroups)
-  }, [activeMainTab, fetchEfficiency, projectModeAllowed, range, selectedOrgLv1List, efficiencyGroups])
+    void fetchEfficiency(range, selectedOrgLv1List, efficiencyGroups, projectMetricRefreshKey)
+  }, [
+    activeMainTab,
+    fetchEfficiency,
+    projectModeAllowed,
+    range,
+    selectedOrgLv1List,
+    efficiencyGroups,
+    projectMetricRefreshKey
+  ])
 
   // 评奖辅助看板懒加载：进入 tab + 名单可见时拉取；时间范围变化重拉。
   // 技能贡献奖需待应用市场技能（个人构建）加载完成后再查。
@@ -3213,16 +3221,14 @@ function DashboardContent({
       }
     }
     if (activeMainTab === "efficiency") {
-      void fetchEfficiency(range, selectedOrgLv1List, efficiencyGroups)
-      setProjectMetricRefreshKey((current) => current + 1)
+      const refreshTime = Date.now()
+      setProjectMetricRefreshKey((current) => Math.max(current + 1, refreshTime))
     }
   }, [
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
     fetchKnowledgeCommitRate,
-    fetchEfficiency,
-    efficiencyGroups,
     granularity,
     range,
     refresh,

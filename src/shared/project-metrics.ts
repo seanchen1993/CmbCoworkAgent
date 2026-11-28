@@ -1,5 +1,20 @@
 export type ProjectMetricDevelopmentMode = "devclaw" | "non_devclaw"
 
+export const PROJECT_METRIC_DEVELOPMENT_LABELS = {
+  non_devclaw: "非智能化项目",
+  devclaw_project: "项目模式",
+  devclaw_chat: "对话模式"
+} as const
+
+export type ProjectMetricDevClawSource = Exclude<
+  keyof typeof PROJECT_METRIC_DEVELOPMENT_LABELS,
+  "non_devclaw"
+>
+export type ProjectMetricDevelopmentFilter =
+  | "all"
+  | ProjectMetricDevelopmentMode
+  | ProjectMetricDevClawSource
+
 export interface ProjectMetricGroup {
   roomName: string
   groupName: string
@@ -29,6 +44,8 @@ export type ProjectMetricGroupOptions = Pick<
 
 export interface ProjectMetricFilters {
   range: { from: string; to: string }
+  /** 一次手动刷新触发的各请求共用此值。 */
+  factRefreshKey?: number
   dateBasis?: "developmentCompleted" | "created"
   upperOrgLv1?: string[]
   selectedGroups?: ProjectMetricGroup[]
@@ -42,7 +59,7 @@ export interface ProjectMetricFilters {
 
 export interface ProjectMetricListOptions {
   exportAll?: boolean
-  developmentMode?: "all" | ProjectMetricDevelopmentMode
+  developmentMode?: ProjectMetricDevelopmentFilter
   /** 项目明细按指定指标的有效样本过滤，先筛选再分页。 */
   metricSample?: keyof ProjectMetricSamples
   percentileMetric?: ProjectMetricValueKey
@@ -171,6 +188,7 @@ export interface ProjectMetricProjectItem {
   approvalDevelopmentDays: number | null
   approvalCreationDays: number | null
   developmentMode: ProjectMetricDevelopmentMode
+  devclawSources: ProjectMetricDevClawSource[]
   plugins: string[]
   phaseStatus: string
   roomName: string
@@ -195,6 +213,14 @@ export interface ProjectMetricProjectItem {
   inputTokensPerAdoptedLine: number | null
   outputTokensPerAdoptedLine: number | null
   tokensPerAdoptedLine: number | null
+}
+
+export function projectMetricDevelopmentLabels(
+  item: Pick<ProjectMetricProjectItem, "devclawSources">
+): string[] {
+  return item.devclawSources.length
+    ? item.devclawSources.map((source) => PROJECT_METRIC_DEVELOPMENT_LABELS[source])
+    : [PROJECT_METRIC_DEVELOPMENT_LABELS.non_devclaw]
 }
 
 export interface ProjectMetricProjectsData {
@@ -266,6 +292,7 @@ export interface ProjectMetricIndicatorExportData {
 
 export interface ProjectMetricPeriodCode {
   harnessProjectId: string
+  prjCode?: string
   roomName: string
   groupName?: string
   hasPushedCode?: boolean

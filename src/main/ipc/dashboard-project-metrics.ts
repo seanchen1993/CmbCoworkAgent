@@ -1,11 +1,13 @@
 import {
   PROJECT_METRIC_TEAM,
+  PROJECT_METRIC_DEVELOPMENT_LABELS,
   matchesProjectMetricGroups,
   projectMetricGroupKey,
   type ProjectMetricGroup,
   type ProjectMetricGroupOptions,
   type ProjectMetricFilters,
   type ProjectMetricListOptions,
+  type ProjectMetricDevClawSource,
   type ProjectMetricProjectItem,
   type ProjectMetricProjectsData,
   type ProjectMetricSummaryData,
@@ -49,6 +51,19 @@ import {
   PROJECT_METRIC_MOCK_CODE,
   projectMetricMockMonthlyRecords
 } from "./project-metric-mock-data"
+import {
+  chunkProjectMetricChatRoots,
+  fetchProjectMetricChatBindings,
+  projectMetricChatRootFilter,
+  projectMetricChatRootKey,
+  projectMetricChatRootSources,
+  type ProjectMetricChatBinding
+} from "./project-metric-chat-bindings"
+import {
+  SharedDashboardCache,
+  peekCachedProjectMetricFacts,
+  readCachedProjectMetricFacts
+} from "./project-metric-fact-cache"
 
 type RecordValue = Record<string, unknown>
 type Query = (
@@ -71,13 +86,15 @@ export interface ProjectMetricDependencies {
     range: ProjectMetricFilters["range"],
     harnessIds: string[],
     rooms: string[] | null,
-    groups?: ProjectMetricGroup[]
+    groups?: ProjectMetricGroup[],
+    chatBindings?: ProjectMetricChatBinding[]
   ) => Promise<ProjectMetricPeriodCode[]>
   codeStats?: (
     range: ProjectMetricFilters["range"],
     rooms: string[] | null,
     harnessIds: string[],
-    groups?: ProjectMetricGroup[]
+    groups?: ProjectMetricGroup[],
+    chatBindings?: ProjectMetricChatBinding[]
   ) => Promise<ProjectMetricCodeOverview>
 }
 interface SnapshotProject {
@@ -89,6 +106,8 @@ interface Snapshot {
   projects: SnapshotProject[]
   byCode: Map<string, SnapshotProject[]>
   pluginOptions: string[]
+  chatByCode: Map<string, ProjectMetricChatBinding[]>
+  chatBindings: ProjectMetricChatBinding[]
 }
 interface Hit {
   _source?: RecordValue
@@ -101,10 +120,11 @@ interface Response {
 const PAGE_SIZE = 500
 const TERMS_BATCH_SIZE = 1000
 const SNAPSHOT_CACHE_TTL_MS = 5 * 60 * 1000
-const snapshotCache = new WeakMap<
-  Query,
-  Map<string, { expiresAt: number; projects: SnapshotProject[] }>
->()
+const snapshotCache = new WeakMap<Query, SharedDashboardCache<SnapshotProject[]>>()
+// In-flight deduplication only (ttlMs = 0): concurrent panels share one query while
+// sequential requests still observe newly added/removed test project flags.
+const testProjectInflight = new WeakMap<Query, SharedDashboardCache<string[]>>()
+const telemetryCache = new WeakMap<Query, SharedDashboardCache<Map<string, CumulativeTelemetry>>>()
 const FACT_FIELDS = [
   "pm",
   "prjCode",
@@ -232,89 +252,135 @@ async function facts(
   return result
 }
 
-/** 不限制周期或当前室，否则跨室关联会误判。分类只返回主进程内部使用。 */
-async function snapshot(deps: ProjectMetricDependencies): Promise<Snapshot> {
-  const excluded = new Set(await fetchTestProjectIds(deps.eventIndex, [], deps.query))
-  let cache = snapshotCache.get(deps.query)
-  if (!cache) {
-    cache = new Map()
-    snapshotCache.set(deps.query, cache)
+async function readSnapshotProjects(
+  deps: ProjectMetricDependencies,
+  refreshKey?: number
+): Promise<SnapshotProject[]> {
+  let shared = snapshotCache.get(deps.query)
+  if (!shared) {
+    shared = new SharedDashboardCache<SnapshotProject[]>({
+      maxEntries: 4,
+      maxEntryBytes: 16 * 1024 * 1024,
+      maxTotalBytes: 32 * 1024 * 1024,
+      ttlMs: SNAPSHOT_CACHE_TTL_MS,
+      measureBytes: (rows) => rows.length * 192 + 64
+    })
+    snapshotCache.set(deps.query, shared)
   }
-  const cached = cache.get(deps.eventIndex)
-  const useCache = Boolean(cached && cached.expiresAt > Date.now())
-  const snapshotProjects: SnapshotProject[] = useCache ? cached!.projects : []
-  let after: RecordValue | undefined
-  const cursors = new Set<string>()
-  for (; !useCache; ) {
-    const raw = await query(deps, "精益非测试项目快照", deps.eventIndex, {
-      size: 0,
-      query: {
-        bool: {
-          filter: [
-            { term: { eventName: "harness.project.snapshot" } },
-            { term: { "properties.projectFromLean": true } },
-            { exists: { field: "properties.projectCode" } }
-          ]
-        }
-      },
-      aggs: {
-        projects: {
-          composite: {
-            size: PAGE_SIZE,
-            sources: [{ projectId: { terms: { field: "properties.projectId" } } }],
-            ...(after ? { after } : {})
-          },
-          aggs: {
-            snapshot: {
-              top_hits: {
-                size: 1,
-                _source: {
-                  includes: [
-                    "properties.projectId",
-                    "properties.projectCode",
-                    "properties.adapterName"
-                  ]
+  const key = JSON.stringify([deps.eventIndex, refreshKey ?? 0])
+  return shared.read(key, async () => {
+    const snapshotProjects: SnapshotProject[] = []
+    let after: RecordValue | undefined
+    const cursors = new Set<string>()
+    for (;;) {
+      const raw = await query(deps, "精益非测试项目快照", deps.eventIndex, {
+        size: 0,
+        track_total_hits: false,
+        query: {
+          bool: {
+            filter: [
+              { term: { eventName: "harness.project.snapshot" } },
+              { term: { "properties.projectFromLean": true } },
+              { exists: { field: "properties.projectCode" } }
+            ]
+          }
+        },
+        aggs: {
+          projects: {
+            composite: {
+              size: PAGE_SIZE,
+              sources: [{ projectId: { terms: { field: "properties.projectId" } } }],
+              ...(after ? { after } : {})
+            },
+            aggs: {
+              snapshot: {
+                top_hits: {
+                  size: 1,
+                  _source: {
+                    includes: [
+                      "properties.projectId",
+                      "properties.projectCode",
+                      "properties.adapterName"
+                    ]
+                  }
                 }
               }
             }
           }
         }
+      })
+      const aggregation = record(raw.aggregations?.projects)
+      if (!Array.isArray(aggregation.buckets)) throw new Error("精益项目快照未完整返回，请重试")
+      for (const value of aggregation.buckets) {
+        const bucket = record(value)
+        const hits = record(record(bucket.snapshot).hits).hits
+        if (!Array.isArray(hits) || hits.length !== 1) throw new Error("精益项目快照缺少项目事实")
+        const p = record(record(record(hits[0])._source).properties)
+        const harnessProjectId = string(p.projectId)
+        const prjCode = string(p.projectCode)
+        if (harnessProjectId && prjCode)
+          snapshotProjects.push({ harnessProjectId, prjCode, adapterName: string(p.adapterName) })
       }
-    })
-    const aggregation = record(raw.aggregations?.projects)
-    if (!Array.isArray(aggregation.buckets)) throw new Error("精益项目快照未完整返回，请重试")
-    for (const value of aggregation.buckets) {
-      const bucket = record(value)
-      const hits = record(record(bucket.snapshot).hits).hits
-      if (!Array.isArray(hits) || hits.length !== 1) throw new Error("精益项目快照缺少项目事实")
-      const p = record(record(record(hits[0])._source).properties)
-      const harnessProjectId = string(p.projectId)
-      const prjCode = string(p.projectCode)
-      if (harnessProjectId && prjCode)
-        snapshotProjects.push({ harnessProjectId, prjCode, adapterName: string(p.adapterName) })
+      if (!aggregation.buckets.length || aggregation.buckets.length < PAGE_SIZE || !aggregation.after_key)
+        break
+      after = record(aggregation.after_key)
+      const cursor = JSON.stringify(after)
+      if (!string(after.projectId) || cursors.has(cursor)) throw new Error("精益项目快照分页游标无效")
+      cursors.add(cursor)
     }
-    if (!aggregation.buckets.length || !aggregation.after_key) break
-    after = record(aggregation.after_key)
-    const cursor = JSON.stringify(after)
-    if (!string(after.projectId) || cursors.has(cursor)) throw new Error("精益项目快照分页游标无效")
-    cursors.add(cursor)
+    return snapshotProjects
+  })
+}
+
+async function readExcludedTestProjectIds(deps: ProjectMetricDependencies): Promise<string[]> {
+  let shared = testProjectInflight.get(deps.query)
+  if (!shared) {
+    shared = new SharedDashboardCache<string[]>({ ttlMs: 0 })
+    testProjectInflight.set(deps.query, shared)
   }
-  if (!useCache)
-    cache.set(deps.eventIndex, {
-      expiresAt: Date.now() + SNAPSHOT_CACHE_TTL_MS,
-      projects: snapshotProjects
-    })
-  // 测试标记每次重新读取；缓存只复用项目关联，不缓存测试排除结果。
+  return shared.read(deps.eventIndex, () => fetchTestProjectIds(deps.eventIndex, [], deps.query))
+}
+
+/** 不限制周期或当前室，否则跨室关联会误判。分类只返回主进程内部使用。 */
+async function snapshot(deps: ProjectMetricDependencies, refreshKey?: number): Promise<Snapshot> {
+  // 测试标记不缓存结果，仅并发去重；项目及对话绑定在 5 分钟内复用，手动刷新按 refreshKey 立即更新。
+  const [excludedIds, chatBindings, snapshotProjects] = await Promise.all([
+    readExcludedTestProjectIds(deps),
+    fetchProjectMetricChatBindings(deps.query, deps.eventIndex, refreshKey),
+    readSnapshotProjects(deps, refreshKey)
+  ])
+  const excluded = new Set(excludedIds)
   const projects = snapshotProjects.filter((p) => !excluded.has(p.harnessProjectId))
   const byCode = new Map<string, SnapshotProject[]>()
   for (const p of projects) byCode.set(p.prjCode, [...(byCode.get(p.prjCode) ?? []), p])
-  return { projects, byCode, pluginOptions: strings(projects.map((p) => p.adapterName)) }
+  const chatByCode = new Map<string, ProjectMetricChatBinding[]>()
+  for (const binding of chatBindings) {
+    const list = chatByCode.get(binding.prjCode) ?? []
+    list.push(binding)
+    chatByCode.set(binding.prjCode, list)
+  }
+  return {
+    projects,
+    byCode,
+    chatBindings,
+    chatByCode,
+    pluginOptions: strings(projects.map((p) => p.adapterName))
+  }
 }
 
-export async function fetchProjectMetricEligibleHarnessIds(
-  deps: ProjectMetricDependencies
-): Promise<string[]> {
-  return strings((await snapshot(deps)).projects.map((p) => p.harnessProjectId))
+export async function fetchProjectMetricTelemetryScope(
+  deps: ProjectMetricDependencies,
+  refreshKey?: number
+) {
+  const state = await snapshot(deps, refreshKey)
+  return {
+    harnessIds: strings(state.projects.map((p) => p.harnessProjectId)),
+    chatBindings: state.chatBindings
+  }
+}
+
+function bindingCount(state: Snapshot, code: string): number {
+  return (state.byCode.get(code)?.length ?? 0) + (state.chatByCode.get(code)?.length ?? 0)
 }
 
 function validateFilters(filters: ProjectMetricFilters): void {
@@ -390,13 +456,53 @@ function periodFilter(filters: ProjectMetricFilters, online = false): RecordValu
     }
   }
 }
+async function scopedProjectFacts(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies,
+  includeOnline = false
+): Promise<RecordValue[]> {
+  const scope = await projectScopeFilters(filters, deps)
+  const period = periodFilter(filters)
+  const onlineClause = {
+    bool: { should: [period, periodFilter(filters, true)], minimum_should_match: 1 }
+  }
+  const cacheKey = (clauses: RecordValue[]) =>
+    JSON.stringify([deps.factIndex, deps.allowedRoomNames, clauses, filters.factRefreshKey ?? 0])
+  if (!includeOnline) {
+    const superset = peekCachedProjectMetricFacts(deps.query, cacheKey([...scope, onlineClause]))
+    if (superset) {
+      return superset.filter((row) =>
+        projectInPeriod(
+          filters.dateBasis === "created"
+            ? string(row.createDate) || null
+            : string(row.firstStStartDate) || string(row.firstUatStartDate) || null,
+          filters.range
+        )
+      )
+    }
+  }
+  const clauses = [...scope, includeOnline ? onlineClause : period]
+  const key = cacheKey(clauses)
+  return readCachedProjectMetricFacts(deps.query, key, async () => {
+    const rows = await facts(deps, clauses)
+    const codes = rows.map((row) => string(row.prjCode))
+    if (codes.some((code) => !code) || new Set(codes).size !== rows.length)
+      throw new Error("项目事实编号缺失或重复")
+    return rows
+  })
+}
+
 function inAdvancedScope(item: ProjectMetricProjectItem, filters: ProjectMetricFilters): boolean {
   return advancedProjectReason(item, filters) === null
 }
 
 function parseFact(source: RecordValue, state: Snapshot): ProjectMetricProjectItem {
   const prjCode = string(source.prjCode)
-  const smart = state.byCode.has(prjCode)
+  const harness = state.byCode.get(prjCode)
+  const devclawSources: ProjectMetricDevClawSource[] = []
+  if (harness?.length) devclawSources.push("devclaw_project")
+  if (state.chatByCode.get(prjCode)?.length) devclawSources.push("devclaw_chat")
+  const smart = devclawSources.length > 0
   const date = (key: string): string | null => string(source[key]) || null
   const approvedDate = date("approvedDate")
   const createDate = date("createDate")
@@ -415,7 +521,8 @@ function parseFact(source: RecordValue, state: Snapshot): ProjectMetricProjectIt
       typeof source.groupName === "string" && readOrgText(source.groupName) ? source.groupName : "",
     phaseStatus: string(source.phaseStatus),
     developmentMode: smart ? "devclaw" : "non_devclaw",
-    plugins: strings(state.byCode.get(prjCode)?.map((p) => p.adapterName)),
+    devclawSources,
+    plugins: strings(harness?.map((p) => p.adapterName)),
     bugNum: bug,
     notAdjustFuns: fp,
     kenanIssueCount: number(source.kenanIssueCount),
@@ -491,35 +598,62 @@ export async function fetchPersonalEfficiencyProjectContext(
 ): Promise<{
   projects: ProjectMetricProjectItem[]
   bindings: SnapshotProject[]
+  chatBindings: ProjectMetricChatBinding[]
   warnings: string[]
 }> {
   validateFilters(filters)
   await deps.validateFactFields?.()
-  const state = await snapshot(deps)
-  const raw = await facts(deps, [
-    ...(await projectScopeFilters(filters, deps)),
-    periodFilter(filters)
-  ])
+  const state = await snapshot(deps, filters.factRefreshKey)
+  const raw = await scopedProjectFacts(filters, deps)
   const parsed = raw.map((source) => parseFact(source, state))
-  if (
-    new Set(parsed.map((p) => p.prjCode)).size !== parsed.length ||
-    parsed.some((p) => !p.prjCode)
-  )
-    throw new Error("项目事实编号缺失或重复")
   const projects = detailSapId
     ? parsed.filter((project) => project.pm?.split("/")[1]?.trim() === detailSapId)
     : parsed
   const warnings: string[] = []
   if (detailSapId || includeAllProjectNames) await fillProjectFeatureNames(projects, deps, warnings)
-  return { projects, bindings: state.projects, warnings }
+  return { projects, bindings: state.projects, chatBindings: state.chatBindings, warnings }
+}
+
+type CumulativeTelemetry = { input: number; output: number; lines: number }
+type CumulativeKind = "code" | "token"
+
+function cumulativeFilters(kind: CumulativeKind): RecordValue[] {
+  return kind === "token"
+    ? []
+    : [
+        { term: { eventName: "code_adopt" } },
+        { term: { "properties.pushed": true } },
+        ...["adoptedLineCount", "generatedLineCount", "effectiveGeneratedLineCount"].map(
+          (field) => ({
+            exists: { field: `properties.${field}` }
+          })
+        )
+      ]
+}
+
+function cumulativeAggs(kind: CumulativeKind) {
+  return kind === "code"
+    ? { lines: { sum: { field: "properties.adoptedLineCount" } } }
+    : {
+        input: { sum: { field: "totalInputTokens" } },
+        output: { sum: { field: "totalOutputTokens" } }
+      }
+}
+
+function readCumulative(bucket: RecordValue): CumulativeTelemetry {
+  return {
+    lines: number(record(bucket.lines).value) ?? 0,
+    input: number(record(bucket.input).value) ?? 0,
+    output: number(record(bucket.output).value) ?? 0
+  }
 }
 
 async function cumulative(
   deps: ProjectMetricDependencies,
   ids: string[],
   kind: "code" | "token"
-): Promise<Map<string, { input: number; output: number; lines: number }>> {
-  const result = new Map<string, { input: number; output: number; lines: number }>()
+): Promise<Map<string, CumulativeTelemetry>> {
+  const result = new Map<string, CumulativeTelemetry>()
   for (const batch of chunks(ids)) {
     const code = kind === "code"
     const raw = await query(
@@ -532,17 +666,7 @@ async function cumulative(
           bool: {
             filter: [
               { terms: { [code ? "properties.harnessProjectId" : "harnessProjectId"]: batch } },
-              ...(code
-                ? [
-                    { term: { eventName: "code_adopt" } },
-                    { term: { "properties.pushed": true } },
-                    ...[
-                      "adoptedLineCount",
-                      "generatedLineCount",
-                      "effectiveGeneratedLineCount"
-                    ].map((f) => ({ exists: { field: `properties.${f}` } }))
-                  ]
-                : [])
+              ...cumulativeFilters(kind)
             ]
           }
         },
@@ -552,12 +676,7 @@ async function cumulative(
               field: code ? "properties.harnessProjectId" : "harnessProjectId",
               size: batch.length
             },
-            aggs: code
-              ? { lines: { sum: { field: "properties.adoptedLineCount" } } }
-              : {
-                  input: { sum: { field: "totalInputTokens" } },
-                  output: { sum: { field: "totalOutputTokens" } }
-                }
+            aggs: cumulativeAggs(kind)
           }
         }
       }
@@ -567,15 +686,88 @@ async function cumulative(
       throw new Error("项目累计遥测未完整返回")
     for (const value of aggregation.buckets) {
       const b = record(value)
-      result.set(string(b.key), {
-        input: number(record(b.input).value) ?? 0,
-        output: number(record(b.output).value) ?? 0,
-        lines: number(record(b.lines).value) ?? 0
-      })
+      result.set(string(b.key), readCumulative(b))
     }
   }
   return result
 }
+async function cumulativeChat(
+  deps: ProjectMetricDependencies,
+  bindings: ProjectMetricChatBinding[],
+  kind: CumulativeKind
+): Promise<Map<string, CumulativeTelemetry>> {
+  const result = new Map<string, CumulativeTelemetry>()
+  const code = kind === "code"
+  const prefix = code ? "properties." : ""
+  const rootField = prefix + "rootThreadId"
+  // Each batch has at most CHAT_ROOT_MAX_SHOULD_CLAUSES owners and PAGE_SIZE distinct (owner, root) keys.
+  for (const batch of chunkProjectMetricChatRoots(bindings, undefined, PAGE_SIZE)) {
+    const projects = new Map(
+      batch.map((binding) => [
+        projectMetricChatRootKey(binding.sapId, binding.rootThreadId),
+        binding.prjCode
+      ])
+    )
+    const raw = await query(
+      deps,
+      code ? "对话累计已Push采纳行数" : "对话累计Token",
+      code ? deps.eventIndex : deps.traceIndex,
+      {
+        size: 0,
+        track_total_hits: false,
+        query: {
+          bool: {
+            filter: [projectMetricChatRootFilter(batch, rootField), ...cumulativeFilters(kind)],
+            must_not: [{ exists: { field: prefix + "harnessProjectId" } }]
+          }
+        },
+        aggs: {
+          sessions: {
+            composite: { size: batch.length, sources: projectMetricChatRootSources(rootField) },
+            aggs: cumulativeAggs(kind)
+          }
+        }
+      }
+    )
+    const buckets = record(raw.aggregations?.sessions).buckets
+    if (!Array.isArray(buckets)) throw new Error("对话项目累计遥测未完整返回")
+    for (const value of buckets) {
+      const bucket = record(value)
+      const key = record(bucket.key)
+      const project = projects.get(
+        projectMetricChatRootKey(string(key.sapId), string(key.rootThreadId))
+      )
+      if (!project) throw new Error("对话项目累计遥测缺少有效绑定")
+      const totals = result.get(project) ?? { lines: 0, input: 0, output: 0 }
+      const entry = readCumulative(bucket)
+      totals.lines += entry.lines
+      totals.input += entry.input
+      totals.output += entry.output
+      result.set(project, totals)
+    }
+  }
+  return result
+}
+
+function readCachedTelemetry(
+  deps: ProjectMetricDependencies,
+  key: string,
+  load: () => Promise<Map<string, CumulativeTelemetry>>
+): Promise<Map<string, CumulativeTelemetry>> {
+  let shared = telemetryCache.get(deps.query)
+  if (!shared) {
+    shared = new SharedDashboardCache<Map<string, CumulativeTelemetry>>({
+      maxEntries: 16,
+      maxEntryBytes: 8 * 1024 * 1024,
+      maxTotalBytes: 24 * 1024 * 1024,
+      ttlMs: 30_000,
+      measureBytes: (map) => map.size * 96 + 64
+    })
+    telemetryCache.set(deps.query, shared)
+  }
+  return shared.read(key, load)
+}
+
 interface Context {
   snapshot: Snapshot
   items: ProjectMetricProjectItem[]
@@ -588,30 +780,34 @@ async function context(
 ): Promise<Context> {
   validateFilters(filters)
   await deps.validateFactFields?.()
-  const s = state ?? (await snapshot(deps))
-  const raw = await facts(deps, [
-    ...(await projectScopeFilters(filters, deps)),
-    {
-      bool: {
-        should: [periodFilter(filters), periodFilter(filters, true)],
-        minimum_should_match: 1
-      }
-    }
-  ])
-  const codes = new Set<string>()
-  const items = raw.map((p) => {
-    const code = string(p.prjCode)
-    if (!code || codes.has(code)) throw new Error("项目事实编号缺失或重复")
-    codes.add(code)
-    return parseFact(p, s)
-  })
+  const s = state ?? (await snapshot(deps, filters.factRefreshKey))
+  const raw = await scopedProjectFacts(filters, deps, true)
+  const items = raw.map((source) => parseFact(source, s))
   const ids = strings(
     items.flatMap((p) => s.byCode.get(p.prjCode)?.map((h) => h.harnessProjectId) ?? [])
   )
-  const [code, token] = await Promise.allSettled([
-    cumulative(deps, ids, "code"),
-    cumulative(deps, ids, "token")
-  ])
+  const chatBindings = items.flatMap((item) => s.chatByCode.get(item.prjCode) ?? [])
+  const refreshKey = filters.factRefreshKey ?? 0
+  const telemetry = (kind: CumulativeKind) => {
+    const index = kind === "code" ? deps.eventIndex : deps.traceIndex
+    return Promise.all([
+      ids.length
+        ? readCachedTelemetry(
+            deps,
+            JSON.stringify(["harness", kind, index, ids, refreshKey]),
+            () => cumulative(deps, ids, kind)
+          )
+        : Promise.resolve(new Map<string, CumulativeTelemetry>()),
+      chatBindings.length
+        ? readCachedTelemetry(
+            deps,
+            JSON.stringify(["chat", kind, index, chatBindings, refreshKey]),
+            () => cumulativeChat(deps, chatBindings, kind)
+          )
+        : Promise.resolve(new Map<string, CumulativeTelemetry>())
+    ])
+  }
+  const [code, token] = await Promise.allSettled([telemetry("code"), telemetry("token")])
   const warnings = [PROJECT_CALENDAR_NOTE]
   if (code.status === "rejected") warnings.push(`代码数据不可用：${failure(code.reason)}`)
   if (token.status === "rejected") {
@@ -622,18 +818,20 @@ async function context(
   for (const item of items) {
     if (item.developmentMode !== "devclaw") continue
     const harness = s.byCode.get(item.prjCode) ?? []
-    item.pushedAdoptedLines =
-      code.status === "fulfilled"
-        ? harness.reduce((sum, h) => sum + (code.value.get(h.harnessProjectId)?.lines ?? 0), 0)
-        : null
-    item.totalInputTokens =
-      token.status === "fulfilled"
-        ? harness.reduce((sum, h) => sum + (token.value.get(h.harnessProjectId)?.input ?? 0), 0)
-        : null
-    item.totalOutputTokens =
-      token.status === "fulfilled"
-        ? harness.reduce((sum, h) => sum + (token.value.get(h.harnessProjectId)?.output ?? 0), 0)
-        : null
+    const total = (
+      [byHarness, byChatProject]: [
+        Map<string, CumulativeTelemetry>,
+        Map<string, CumulativeTelemetry>
+      ],
+      field: keyof CumulativeTelemetry
+    ) =>
+      harness.reduce(
+        (sum, binding) => sum + (byHarness.get(binding.harnessProjectId)?.[field] ?? 0),
+        byChatProject.get(item.prjCode)?.[field] ?? 0
+      )
+    item.pushedAdoptedLines = code.status === "fulfilled" ? total(code.value, "lines") : null
+    item.totalInputTokens = token.status === "fulfilled" ? total(token.value, "input") : null
+    item.totalOutputTokens = token.status === "fulfilled" ? total(token.value, "output") : null
     const lines = item.pushedAdoptedLines
     if (
       lines !== null &&
@@ -718,9 +916,12 @@ export async function fetchProjectMetricProjects(
   if (options.sortBy && !sortKeys.includes(options.sortBy)) throw new Error("项目排序字段无效")
   if (options.sortOrder && !["asc", "desc"].includes(options.sortOrder))
     throw new Error("项目排序方向无效")
+  const mode = options.developmentMode
   if (
-    options.developmentMode &&
-    !["all", "devclaw", "non_devclaw"].includes(options.developmentMode)
+    mode &&
+    mode !== "all" &&
+    mode !== "devclaw" &&
+    !Object.hasOwn(PROJECT_METRIC_DEVELOPMENT_LABELS, mode)
   )
     throw new Error("项目开发方式无效")
   const ctx = await context(filters, deps)
@@ -740,6 +941,15 @@ function validateMetricSample(options: ProjectMetricListOptions): void {
       throw new Error("项目分位数样本筛选无效")
   }
 }
+function matchesDevelopmentMode(
+  project: ProjectMetricProjectItem,
+  mode: ProjectMetricListOptions["developmentMode"]
+): boolean {
+  if (!mode || mode === "all") return true
+  if (mode === "devclaw" || mode === "non_devclaw") return project.developmentMode === mode
+  return project.devclawSources.includes(mode)
+}
+
 function selectProjectMetricProjects(
   items: ProjectMetricProjectItem[],
   filters: ProjectMetricFilters,
@@ -763,9 +973,7 @@ function selectProjectMetricProjects(
               : p.firstStStartDate || p.firstUatStartDate,
             filters.range
           ) && inAdvancedScope(p, filters)) &&
-      (!options.developmentMode ||
-        options.developmentMode === "all" ||
-        p.developmentMode === options.developmentMode) &&
+      matchesDevelopmentMode(p, options.developmentMode) &&
       (!keyword || `${p.prjCode} ${p.prjName}`.toLowerCase().includes(keyword)) &&
       (!department || `${p.roomName} ${p.groupName}`.toLowerCase().includes(department))
   )
@@ -792,11 +1000,7 @@ async function featureCoverage(
   s: Snapshot
 ) {
   await deps.validateFactFields?.()
-  const raw = await facts(
-    deps,
-    [...(await projectScopeFilters(filters, deps)), periodFilter(filters)],
-    ["prjCode", "featureCodes"]
-  )
+  const raw = await scopedProjectFacts(filters, deps, false)
   const candidates = new Set(raw.flatMap((p) => strings(p.featureCodes)))
   const smart = new Set<string>()
   for (const batch of chunks([...candidates])) {
@@ -807,7 +1011,7 @@ async function featureCoverage(
       ["prjCode", "featureCodes"]
     )
     for (const p of associated)
-      if (s.byCode.has(string(p.prjCode)))
+      if (bindingCount(s, string(p.prjCode)))
         for (const code of strings(p.featureCodes)) if (candidates.has(code)) smart.add(code)
   }
   return {
@@ -983,7 +1187,8 @@ async function overview(
           filters.range,
           rooms,
           strings(s.projects.map((p) => p.harnessProjectId)),
-          filters.selectedGroups
+          filters.selectedGroups,
+          ...(s.chatBindings.length ? ([s.chatBindings] as const) : [])
         )
       : Promise.reject(new Error("代码查询未配置")),
     months.length
@@ -1015,7 +1220,7 @@ export async function fetchProjectMetricOverview(
   deps: ProjectMetricDependencies
 ): Promise<ProjectMetricOverviewData> {
   validateFilters(filters)
-  return overview(filters, deps, await snapshot(deps))
+  return overview(filters, deps, await snapshot(deps, filters.factRefreshKey))
 }
 export async function fetchProjectMetricIndicatorExport(
   filters: ProjectMetricFilters,
@@ -1049,7 +1254,8 @@ export async function fetchProjectMetricIndicatorExport(
       filters.range,
       strings(ctx.snapshot.projects.map((p) => p.harnessProjectId)),
       rooms,
-      selectedGroups
+      selectedGroups,
+      ...(ctx.snapshot.chatBindings.length ? ([ctx.snapshot.chatBindings] as const) : [])
     )
   ] as const)
   const projects = new Map(
@@ -1058,7 +1264,7 @@ export async function fetchProjectMetricIndicatorExport(
       {
         project,
         factAvailable: true,
-        eligibleBindingCount: ctx.snapshot.byCode.get(project.prjCode)?.length ?? 0
+        eligibleBindingCount: bindingCount(ctx.snapshot, project.prjCode)
       }
     ])
   )
@@ -1074,7 +1280,7 @@ export async function fetchProjectMetricIndicatorExport(
     projects.set(code, {
       project,
       factAvailable: true,
-      eligibleBindingCount: ctx.snapshot.byCode.get(code)?.length ?? 0
+      eligibleBindingCount: bindingCount(ctx.snapshot, code)
     })
   }
   const intelligentFeatures = new Set<string>()
@@ -1086,7 +1292,7 @@ export async function fetchProjectMetricIndicatorExport(
     )
     for (const raw of associated) {
       if (wholeTeam) addReference(raw)
-      if (ctx.snapshot.byCode.has(string(raw.prjCode)))
+      if (bindingCount(ctx.snapshot, string(raw.prjCode)))
         for (const feature of strings(raw.featureCodes)) intelligentFeatures.add(feature)
     }
   }
@@ -1103,7 +1309,7 @@ export async function fetchProjectMetricIndicatorExport(
     }
   >()
   for (const code of periodCode) {
-    const prjCode = byHarness.get(code.harnessProjectId)
+    const prjCode = code.prjCode ?? byHarness.get(code.harnessProjectId)
     if (!prjCode) throw new Error("周期代码依据存在无有效精益关联的项目")
     if (
       ![code.pushedAdoptedLines, code.pushedEffectiveGeneratedLines].every(
@@ -1152,7 +1358,7 @@ export async function fetchProjectMetricIndicatorExport(
           totalOutputTokens: null
         },
         factAvailable: false,
-        eligibleBindingCount: ctx.snapshot.byCode.get(code)?.length ?? 0
+        eligibleBindingCount: bindingCount(ctx.snapshot, code)
       })
   const featureRecords = new Map<string, RecordValue>()
   const featureProjects = new Map<string, string[]>()
@@ -1392,7 +1598,13 @@ export function makeMockProjectMetricGroupOptions(
   return uniqueGroups(mockItems().filter((project) => !projectCandidateReason(project, filters)))
 }
 function mockItems(): ProjectMetricProjectItem[] {
-  const snapshot: Snapshot = { projects: [], byCode: new Map(), pluginOptions: ["CMBDevClaw"] }
+  const snapshot: Snapshot = {
+    projects: [],
+    byCode: new Map(),
+    pluginOptions: ["CMBDevClaw"],
+    chatBindings: [],
+    chatByCode: new Map()
+  }
   for (const row of PROJECT_METRIC_MOCK_TELEMETRY)
     snapshot.byCode.set(row.prjCode, [
       { harnessProjectId: `mock-${row.prjCode}`, prjCode: row.prjCode, adapterName: "CMBDevClaw" }

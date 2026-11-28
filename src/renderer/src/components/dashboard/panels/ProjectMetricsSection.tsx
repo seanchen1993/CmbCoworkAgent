@@ -45,6 +45,9 @@ import {
 } from "./ProjectMetricIssueBreakdown"
 import {
   PROJECT_METRIC_PERCENTILES,
+  PROJECT_METRIC_DEVELOPMENT_LABELS,
+  projectMetricDevelopmentLabels,
+  type ProjectMetricDevelopmentFilter,
   type ProjectMetricFilters,
   type ProjectMetricListOptions,
   type ProjectMetricPercentile,
@@ -696,10 +699,50 @@ function ProjectDateMetric({
   )
 }
 
+function ProjectFeatureCell({
+  features
+}: {
+  features: ProjectMetricProjectItem["features"]
+}): React.JSX.Element {
+  const [first] = features
+  if (!first) return <td className="px-3 py-2 text-xs">—</td>
+  const firstLabel = `${first.featureCode} ${first.featureName ?? "名称暂不可用"}`
+  return (
+    <td className="px-3 py-2 text-xs">
+      {features.length === 1 ? (
+        <div className="truncate" title={firstLabel}>
+          {firstLabel}
+        </div>
+      ) : (
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button type="button" className="flex w-full cursor-help items-center gap-1.5 text-left">
+                <span className="min-w-0 truncate">{firstLabel}</span>
+                <span className="shrink-0 text-muted-foreground">+{features.length - 1}</span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent align="start" className="max-h-64 max-w-sm overflow-y-auto">
+              <ul className="space-y-1">
+                {features.map(({ featureCode, featureName }) => (
+                  <li key={featureCode} className="break-words">
+                    <span className="font-mono">{featureCode}</span>{" "}
+                    <span>{featureName ?? "名称暂不可用"}</span>
+                  </li>
+                ))}
+              </ul>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+    </td>
+  )
+}
+
 function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Element {
   const projectName = item.prjName || "—"
   const projectCode = item.prjCode || "—"
-  const pluginNames = item.developmentMode === "devclaw" ? item.plugins.join("、") || "--" : "--"
+  const developmentLabels = projectMetricDevelopmentLabels(item)
   return (
     <tr className="border-t border-border align-top">
       <td className="min-w-0 overflow-hidden px-3 py-2">
@@ -713,30 +756,16 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           {projectCode}
         </div>
       </td>
-      <td className="min-w-0 overflow-hidden px-3 py-2 text-muted-foreground">
-        <div className="truncate whitespace-nowrap" title={pluginNames}>
-          {pluginNames}
-        </div>
+      <td className="px-3 py-2 text-muted-foreground">
+        {developmentLabels.map((label) => (
+          <div key={label}>{label}</div>
+        ))}
       </td>
       <td className="px-3 py-2">
         <div>{item.roomName || "—"}</div>
         <div className="mt-0.5 text-[10px] text-muted-foreground">{item.groupName || "—"}</div>
       </td>
-      <td className="px-3 py-2 text-xs">
-        {item.features.length
-          ? item.features.map((feature) => (
-              <div key={feature.featureCode} className="mb-1">
-                <div className="font-mono text-[10px]">{feature.featureCode}</div>
-                <div
-                  className="max-w-60 truncate text-muted-foreground"
-                  title={feature.featureName ?? "名称暂不可用"}
-                >
-                  {feature.featureName ?? "名称暂不可用"}
-                </div>
-              </div>
-            ))
-          : "—"}
-      </td>
+      <ProjectFeatureCell features={item.features} />
       <td className="px-3 py-2 text-right tabular-nums">{formatMetric(item.devWorkHours)} 小时</td>
       <td className="px-3 py-2 text-right">
         <ProjectDateMetric
@@ -859,7 +888,7 @@ export function ProjectMetricsSection({
   const [debouncedTokenConsumptionMin, setDebouncedTokenConsumptionMin] = useState("")
   const [debouncedTokenConsumptionMax, setDebouncedTokenConsumptionMax] = useState("")
   const [adapterName, setAdapterName] = useState("")
-  const [developmentMode, setDevelopmentMode] = useState<"all" | "devclaw" | "non_devclaw">("all")
+  const [developmentMode, setDevelopmentMode] = useState<ProjectMetricDevelopmentFilter>("all")
   const [activeSample, setActiveSample] = useState<ProjectMetricSampleSelection | null>(null)
   const detailRef = useRef<HTMLDivElement>(null)
   const [keyword, setKeyword] = useState("")
@@ -910,6 +939,7 @@ export function ProjectMetricsSection({
       upperOrgLv1,
       selectedGroups,
       dateBasis,
+      factRefreshKey: refreshKey,
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
       functionPointMax: nullableNumber(debouncedFunctionPointMax),
@@ -924,6 +954,7 @@ export function ProjectMetricsSection({
       debouncedTokenConsumptionMax,
       debouncedTokenConsumptionMin,
       phaseStatuses,
+      refreshKey,
       dateBasis,
       upperOrgLv1,
       selectedGroups
@@ -1271,7 +1302,7 @@ export function ProjectMetricsSection({
             </Button>
             <Select
               value={developmentMode}
-              onValueChange={(value: "all" | "devclaw" | "non_devclaw") => {
+              onValueChange={(value: ProjectMetricDevelopmentFilter) => {
                 setActiveSample(null)
                 setDevelopmentMode(value)
                 if (value === "non_devclaw") {
@@ -1284,13 +1315,17 @@ export function ProjectMetricsSection({
                 setPage(1)
               }}
             >
-              <SelectTrigger className="w-40">
+              <SelectTrigger className="w-[220px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">全部开发方式</SelectItem>
-                <SelectItem value="devclaw">CMBDevClaw</SelectItem>
-                <SelectItem value="non_devclaw">非 CMBDevClaw 项目</SelectItem>
+                <SelectItem value="devclaw">项目模式和对话模式</SelectItem>
+                {Object.entries(PROJECT_METRIC_DEVELOPMENT_LABELS).map(([value, label]) => (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <div className="relative">
@@ -1324,7 +1359,9 @@ export function ProjectMetricsSection({
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>
               {activeSample.percentileMetric ? "分位数样本" : "有效样本"}：{activeSample.label} ·{" "}
-              {activeSample.developmentMode === "devclaw" ? "CMBDevClaw" : "非 CMBDevClaw 项目"}
+              {activeSample.developmentMode === "devclaw"
+                ? "项目模式和对话模式"
+                : PROJECT_METRIC_DEVELOPMENT_LABELS.non_devclaw}
             </span>
             <Button
               variant="ghost"
@@ -1375,7 +1412,7 @@ export function ProjectMetricsSection({
             <thead className="bg-muted/40 text-left text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">项目编号 / 名称</th>
-                <th className="px-3 py-2 font-medium">CMBDevClaw 插件</th>
+                <th className="px-3 py-2 font-medium">开发方式</th>
                 <th className="px-3 py-2 font-medium">部门</th>
                 <th className="px-3 py-2 text-left font-medium">关联特性编号及名称</th>
                 <th className="px-3 py-2 text-right font-medium">开发报工工时</th>

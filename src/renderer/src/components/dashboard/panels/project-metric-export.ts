@@ -1,9 +1,12 @@
-import type { ProjectMetricProjectItem } from "../../../../../shared/project-metrics"
+import {
+  projectMetricDevelopmentLabels,
+  type ProjectMetricProjectItem
+} from "../../../../../shared/project-metrics"
 
 const HEADER = [
   "项目编号",
   "项目名称",
-  "CMBDevClaw 插件",
+  "开发方式",
   "室",
   "组",
   "立项日期",
@@ -53,7 +56,7 @@ export function projectMetricExportSheet(items: ProjectMetricProjectItem[]): {
     rows: items.map((item) => [
       item.prjCode || "—",
       item.prjName || "—",
-      item.developmentMode === "devclaw" ? item.plugins.join("、") || "--" : "--",
+      projectMetricDevelopmentLabels(item).join("\n"),
       item.roomName || "—",
       item.groupName || "—",
       dateOrDash(item.createDate),

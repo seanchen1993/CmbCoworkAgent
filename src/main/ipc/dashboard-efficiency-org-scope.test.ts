@@ -2,6 +2,12 @@ import { readFileSync } from "node:fs"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import { emptyOrgValueClauses, TRACE_BUDGET_PLACEHOLDER } from "./dashboard-org-fields"
+import {
+  chunkProjectMetricChatRoots,
+  projectMetricChatRootFilter,
+  type ProjectMetricChatBinding
+} from "./project-metric-chat-bindings"
+import { mergePersonalEfficiencyCodeRows } from "./dashboard-personal-efficiency"
 import { projectMetricGroupFilter } from "./project-metric-group-scope"
 
 type Row = Record<string, unknown>
@@ -12,6 +18,8 @@ const names = new Set([
   "projectMetricDependencies",
   "projectMetricTelemetryFilters",
   "projectMetricHarnessFilter",
+  "projectMetricChatScope",
+  "projectMetricTelemetryScope",
   "buildUpperOrgLv1ListFilter",
   "buildUnclassifiedOrgClause",
   "appendOptionalFilter"
@@ -34,7 +42,11 @@ const compiled = ts.transpileModule(
   }
 ).outputText
 
-function fixture(rooms: string[] | null) {
+function fixture(
+  rooms: string[] | null,
+  ids = ["h1"],
+  chat: ProjectMetricChatBinding[] = []
+) {
   const personal = vi.fn(async () => [])
   const organization = vi.fn(async () => ({ aggregations: { code_adopt_pushed: {} } }))
   const range = { from: "2026-10-01", to: "2026-10-31" }
@@ -43,6 +55,11 @@ function fixture(rooms: string[] | null) {
     PROJECT_METRIC_TEAM: "统计团队",
     emptyOrgValueClauses,
     projectMetricGroupFilter,
+    chunkProjectMetricChatRoots,
+    projectMetricChatRootFilter,
+    mergePersonalEfficiencyCodeRows,
+    projectMetricFactGroupFieldCache: new Map(),
+    projectMetricFactFieldsCheckedCache: new Map(),
     projectMetricAllowedRoomNames: () => null,
     getEsIndex: (name: string) => name,
     esQuery: vi.fn(),
@@ -54,8 +71,12 @@ function fixture(rooms: string[] | null) {
     fetchPersonalEfficiency: (
       _filters: unknown,
       _deps: unknown,
-      query: (ids: string[], rooms: string[] | null) => Promise<unknown>
-    ) => query(["h1"], rooms),
+      query: (
+        ids: string[],
+        rooms: string[] | null,
+        chat: ProjectMetricChatBinding[]
+      ) => Promise<unknown>
+    ) => query(ids, rooms, chat),
     fetchPersonalEfficiencyCode: personal,
     fetchProjectModeCodeAggs: organization,
     assertProjectModeResultComplete: () => {},
@@ -72,7 +93,13 @@ function fixture(rooms: string[] | null) {
   )(...Object.values(dependencies)) as {
     fetchDashboardPersonalEfficiency: (filters: unknown, access: unknown) => Promise<unknown>
     projectMetricDependencies: (access: unknown) => {
-      codeStats: (range: unknown, rooms: string[] | null, ids: string[]) => Promise<unknown>
+      codeStats: (
+        range: unknown,
+        rooms: string[] | null,
+        ids: string[],
+        groups?: unknown,
+        chat?: ProjectMetricChatBinding[]
+      ) => Promise<unknown>
     }
   }
   return {
@@ -80,7 +107,7 @@ function fixture(rooms: string[] | null) {
     organization,
     run: async () => {
       await api.fetchDashboardPersonalEfficiency({ range }, {})
-      await api.projectMetricDependencies({}).codeStats(range, rooms, ["h1"])
+      await api.projectMetricDependencies({}).codeStats(range, rooms, ids, undefined, chat)
     }
   }
 }
@@ -120,9 +147,33 @@ describe("研发效能复用全局室筛选口径", () => {
             { bool: { filter: expect.arrayContaining([clause]) } }
           ]
         }
-      }
+      },
+      { bool: { should: [{ terms: { "properties.harnessProjectId": ["h1"] } }] } }
     ])
     expect((f.organization.mock.calls[0] as unknown as unknown[])[3]).toContainEqual(clause)
+  })
+
+  it("没有 Harness 项目时，组织和个人仍查询普通对话的代码", async () => {
+    const chat = [{ sapId: "8001", rootThreadId: "chat1", prjCode: "P1" }]
+    const f = fixture(["A室"], [], chat)
+    await f.run()
+    const scope = {
+      bool: {
+        filter: [projectMetricChatRootFilter(chat, "properties.rootThreadId")],
+        must_not: [{ exists: { field: "properties.harnessProjectId" } }]
+      }
+    }
+    const personalCall = f.personal.mock.calls[0] as unknown[]
+    expect(personalCall[2]).toContainEqual(scope)
+    const organizationCall = f.organization.mock.calls[0] as unknown[]
+    expect(organizationCall[4]).toMatchObject({
+      bool: {
+        filter: expect.arrayContaining([
+          { term: { "properties.pushed": true } },
+          { bool: { should: [{ match_none: {} }, scope], minimum_should_match: 1 } }
+        ])
+      }
+    })
   })
 
   it("空权限范围不能退化成全部室", async () => {
@@ -132,5 +183,23 @@ describe("研发效能复用全局室筛选口径", () => {
     expect((f.organization.mock.calls[0] as unknown as unknown[])[3]).toContainEqual({
       match_none: {}
     })
+  })
+
+  it("普通对话超过 200 名用户时，组织与个人查询按批次拆分避免触发 ES 子句上限", async () => {
+    const chat = Array.from({ length: 410 }, (_, i) => ({
+      sapId: `u${i}`,
+      rootThreadId: `chat-${i}`,
+      prjCode: `P${i % 5}`
+    }))
+    const f = fixture(["A室"], ["h1"], chat)
+    await f.run()
+    // 1 harness call + 3 chat batches (200 + 200 + 10)
+    expect(f.personal).toHaveBeenCalledTimes(4)
+    expect(f.organization).toHaveBeenCalledTimes(4)
+    for (const call of f.personal.mock.calls.slice(1) as unknown[][]) {
+      const filters = call[2] as Array<{ bool?: { filter?: Array<{ bool?: { should?: unknown[] } }> } }>
+      const should = filters[1]?.bool?.filter?.[0]?.bool?.should ?? []
+      expect(should.length).toBeLessThanOrEqual(200)
+    }
   })
 })

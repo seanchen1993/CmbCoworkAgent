@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
+import { PROJECT_METRIC_DEVELOPMENT_LABELS } from "../../../../../shared/project-metrics"
 import {
   type PersonalEfficiencyFilters,
   type PersonalEfficiencyPerson
@@ -233,12 +234,13 @@ export function PersonalEfficiencyDetail({
                 </div>
               </div>
               <div>
-                <h3 className="mb-2 font-semibold">项目模式代码明细</h3>
+                <h3 className="mb-2 font-semibold">DevClaw 代码明细</h3>
                 <table className="w-full text-left">
                   <thead className="bg-muted/40 text-muted-foreground">
                     <tr>
                       {[
                         "项目编号",
+                        "开发方式",
                         "代码所属室",
                         "代码所属组",
                         "已 Push 采纳行数",
@@ -254,10 +256,15 @@ export function PersonalEfficiencyDetail({
                   <tbody>
                     {detail.code.map((code) => (
                       <tr
-                        key={`${code.harnessProjectId}:${code.roomName}:${code.groupName ?? ""}`}
+                        key={`${code.harnessProjectId}:${code.prjCode}:${code.roomName}:${code.groupName ?? ""}`}
                         className="border-b border-border/60"
                       >
                         <td className="p-2">{code.prjCode}</td>
+                        <td className="p-2 text-muted-foreground">
+                          {code.harnessProjectId
+                            ? PROJECT_METRIC_DEVELOPMENT_LABELS.devclaw_project
+                            : PROJECT_METRIC_DEVELOPMENT_LABELS.devclaw_chat}
+                        </td>
                         <td className="p-2">{code.roomName || "—"}</td>
                         <td className="p-2">{code.groupName || "—"}</td>
                         <td className="p-2 tabular-nums">

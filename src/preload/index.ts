@@ -4267,7 +4267,11 @@ const api = {
       ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; selectedGroups?: ProjectMetricGroup[] } & EfficiencyPluginFilter
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        selectedGroups?: ProjectMetricGroup[]
+        factRefreshKey?: number
+      } & EfficiencyPluginFilter
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
     projectMetricGroupOptions: (

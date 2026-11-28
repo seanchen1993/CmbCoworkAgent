@@ -14,6 +14,7 @@ import { projectMetricIndicatorSheets } from "./project-metric-indicator-export"
 import { PROJECT_METRIC_INDICATORS } from "../../shared/project-metric-indicators"
 import { buildDashboardExcelBuffer, type DashboardExcelCell } from "./dashboard-excel-workbook"
 import {
+  fetchPersonalEfficiencyProjectContext,
   fetchProjectMetricGroupOptions,
   fetchProjectMetricIndicatorExport,
   fetchProjectMetricOverview,
@@ -27,6 +28,7 @@ import {
   makeMockProjectMetricTrend,
   type ProjectMetricDependencies
 } from "./dashboard-project-metrics"
+import { projectMetricExportSheet } from "../../renderer/src/components/dashboard/panels/project-metric-export"
 
 type Doc = Record<string, unknown>
 function field(doc: Doc, path: string): unknown {
@@ -113,12 +115,41 @@ function fixture({
     { featureCode: "F1", featureName: "产品需求一", approvedDate: "2026-10-09 17:29:27" }
   ] as Doc[],
   cumulativeTotals = {} as Record<string, { lines: number; input: number; output: number }>,
-  periodCodes = null as ProjectMetricPeriodCode[] | null
+  periodCodes = null as ProjectMetricPeriodCode[] | null,
+  chatEvents = [] as Doc[],
+  chatTotals = [] as Doc[]
 } = {}) {
   const queries: Array<{ index: string; body: Doc }> = []
   const query = vi.fn(async (index: string, body: Doc): Promise<unknown> => {
     queries.push({ index, body })
     const aggs = body.aggs as Doc | undefined
+    if (aggs?.sessions) {
+      const isBinding = JSON.stringify(body.query).includes("chat.project.binding")
+      const docs = (isBinding ? chatEvents : chatTotals).filter((doc) => match(doc, body.query))
+      const latest = new Map<string, Doc>()
+      for (const doc of docs) {
+        const root = index === "events" ? field(doc, "properties.rootThreadId") : doc.rootThreadId
+        const key = JSON.stringify([doc.sapId, root])
+        if (!latest.has(key) || String(latest.get(key)?.eventTime) < String(doc.eventTime))
+          latest.set(key, doc)
+      }
+      return {
+        aggregations: {
+          sessions: {
+            buckets: [...latest].map(([id, doc]) => {
+              const [sapId, rootThreadId] = JSON.parse(id)
+              return {
+                key: { sapId, rootThreadId },
+                latest: { hits: { hits: [{ _source: doc }] } },
+                lines: { value: field(doc, "properties.adoptedLineCount") },
+                input: { value: doc.totalInputTokens },
+                output: { value: doc.totalOutputTokens }
+              }
+            })
+          }
+        }
+      }
+    }
     if (index === "events" && aggs?.projects && (aggs.projects as Doc).composite) {
       const agg = aggs.projects as { composite: { after?: { projectId: string }; size: number } }
       const filtered = snapshots
@@ -215,6 +246,133 @@ function fixture({
 }
 beforeEach(() => {
   vi.spyOn(console, "log").mockImplementation(() => {})
+})
+
+describe("普通对话的精益项目归属", () => {
+  it("合并同项目的代码和 Token，识别零代码项目，改绑和解绑后按最新绑定计算", async () => {
+    const binding = (rootThreadId: string, projectCode: string | null, day: number) => ({
+      sapId: "8001",
+      eventName: "chat.project.binding",
+      eventTime: `2026-10-${day} 00:00:00`,
+      properties: {
+        rootThreadId,
+        generationMode: "chat",
+        projectCode,
+        projectFromLean: projectCode !== null
+      }
+    })
+    const chatEvents = [
+      binding("chat1", "P1", 10),
+      binding("zero-code", "P3", 10),
+      binding("unbound", "P4", 10),
+      binding("unbound", null, 11)
+    ]
+    const chatTotals = [
+      {
+        sapId: "8001",
+        eventName: "code_adopt",
+        properties: {
+          rootThreadId: "chat1",
+          projectCode: "P1",
+          pushed: true,
+          adoptedLineCount: 40,
+          generatedLineCount: 50,
+          effectiveGeneratedLineCount: 50
+        }
+      },
+      { sapId: "8001", rootThreadId: "chat1", totalInputTokens: 400, totalOutputTokens: 40 },
+      { sapId: "8002", rootThreadId: "chat1", totalInputTokens: 999, totalOutputTokens: 999 }
+    ]
+    const makeFixture = () =>
+      fixture({
+        projects: ["P1", "P2", "P3", "P4"].map((code) => project(code)),
+        cumulativeTotals: { "h-P1": { lines: 60, input: 600, output: 60 } },
+        chatEvents,
+        chatTotals,
+        periodCodes: [
+          {
+            harnessProjectId: "h-P1",
+            roomName: "A室",
+            pushedAdoptedLines: 60,
+            pushedEffectiveGeneratedLines: 100
+          },
+          {
+            harnessProjectId: "",
+            prjCode: "P1",
+            roomName: "A室",
+            pushedAdoptedLines: 40,
+            pushedEffectiveGeneratedLines: 50
+          }
+        ]
+      })
+    const f = makeFixture()
+    const [list] = await Promise.all([
+      fetchProjectMetricProjects(october, {}, f.deps),
+      fetchProjectMetricOverview(october, f.deps)
+    ])
+    const byCode = new Map(list.items.map((item) => [item.prjCode, item]))
+    expect(byCode.get("P1")).toMatchObject({
+      developmentMode: "devclaw",
+      pushedAdoptedLines: 100,
+      totalInputTokens: 1000
+    })
+    expect(byCode.get("P3")).toMatchObject({
+      developmentMode: "devclaw",
+      pushedAdoptedLines: 0
+    })
+    expect(byCode.get("P4")).toMatchObject({
+      developmentMode: "non_devclaw",
+      pushedAdoptedLines: null
+    })
+    expect(byCode.get("P1")?.devclawSources).toEqual(["devclaw_project", "devclaw_chat"])
+    expect(byCode.get("P3")?.devclawSources).toEqual(["devclaw_chat"])
+    expect(byCode.get("P4")?.devclawSources).toEqual([])
+    expect(
+      f.queries.filter(({ body }) => JSON.stringify(body.query).includes("chat.project.binding"))
+    ).toHaveLength(2) // Both requests share one candidate page and one latest-state page.
+    expect((f.codeStats.mock.calls[0] as unknown[])[4]).toEqual([
+      { sapId: "8001", rootThreadId: "chat1", prjCode: "P1" },
+      { sapId: "8001", rootThreadId: "zero-code", prjCode: "P3" }
+    ])
+
+    const [projectMode, chatMode, regular, intelligent] = await Promise.all(
+      (["devclaw_project", "devclaw_chat", "non_devclaw", "devclaw"] as const).map(
+        (developmentMode) =>
+          fetchProjectMetricProjects(october, { exportAll: true, developmentMode }, f.deps)
+      )
+    )
+    expect(projectMode.items.map(({ prjCode }) => prjCode)).toEqual(["P1"])
+    expect(chatMode.items.map(({ prjCode }) => prjCode)).toEqual(["P1", "P3"])
+    expect(regular.items.map(({ prjCode }) => prjCode)).toEqual(["P2", "P4"])
+    expect(intelligent.items.map(({ prjCode }) => prjCode)).toEqual(["P1", "P3"])
+    expect(chatMode.items[0].pushedAdoptedLines).toBe(100)
+    const exported = projectMetricExportSheet(chatMode.items)
+    expect(exported.header[2]).toBe("开发方式")
+    expect(exported.rows.map((row) => row[2])).toEqual([
+      "项目模式\n对话模式",
+      "对话模式"
+    ])
+    expect(projectMetricExportSheet(regular.items).rows[0][2]).toBe("非智能化项目")
+
+    const workbook = await fetchProjectMetricIndicatorExport(october, f.deps)
+    expect(workbook.evidence.code).toEqual([
+      expect.objectContaining({
+        prjCode: "P1",
+        pushedAdoptedLines: 100,
+        pushedEffectiveGeneratedLines: 150
+      })
+    ])
+
+    chatEvents.push(binding("chat1", "P2", 12))
+    const updated = await fetchProjectMetricProjects(october, {}, makeFixture().deps)
+    const moved = new Map(updated.items.map((item) => [item.prjCode, item]))
+    expect(moved.get("P1")).toMatchObject({ pushedAdoptedLines: 60, totalInputTokens: 600 })
+    expect(moved.get("P2")).toMatchObject({
+      developmentMode: "devclaw",
+      pushedAdoptedLines: 40,
+      totalInputTokens: 400
+    })
+  })
 })
 
 describe("研发效能统一项目口径", () => {
@@ -964,6 +1122,119 @@ describe("特性覆盖、月度占比和导出", () => {
       )
     ).toBe(false)
   })
+  it("1200 条项目事实只读三页供汇总和明细共用，翻页不重查，手动刷新重新读一次", async () => {
+    const projects = Array.from({ length: 1200 }, (_, i) =>
+      project(`P${String(i).padStart(4, "0")}`, { roomName: i < 700 ? "A室" : "B室" })
+    )
+    const { deps, queries } = fixture({ projects })
+    const factRequests = () => queries.filter(({ index }) => index === "projects").length
+    const first = await Promise.all([
+      fetchProjectMetricSummary(october, deps),
+      fetchProjectMetricProjects(october, {}, { ...deps })
+    ])
+    expect(first[1].total).toBe(1200)
+    expect(factRequests()).toBe(3)
+
+    const page = await fetchProjectMetricProjects(october, { page: 2, sortBy: "bugNum" }, deps)
+    expect(page.items).toHaveLength(20)
+    expect(factRequests()).toBe(3)
+
+    const refreshed = { ...october, factRefreshKey: 1 }
+    await Promise.all([
+      fetchProjectMetricSummary(refreshed, deps),
+      fetchProjectMetricProjects(refreshed, {}, deps)
+    ])
+    expect(factRequests()).toBe(6)
+
+    const restricted = await fetchProjectMetricProjects(refreshed, {}, {
+      ...deps,
+      allowedRoomNames: ["A室"]
+    })
+    expect(restricted.total).toBe(700)
+    expect(factRequests()).toBe(8)
+  })
+
+  it("并发汇总、明细及翻页共用快照和累计遥测，手动刷新同步刷新绑定与遥测，且概览/个人复用当期事实超集", async () => {
+    const chatEvents = [
+      {
+        sapId: "8001",
+        eventName: "chat.project.binding",
+        eventTime: "2026-10-10 00:00:00",
+        properties: {
+          rootThreadId: "c1",
+          generationMode: "chat",
+          projectCode: "P1",
+          projectFromLean: true
+        }
+      }
+    ]
+    const { deps, queries } = fixture({
+      projects: [project("P1", { pm: "甲/8001" }), project("P2", { pm: "乙/8002" })],
+      snapshots: [harness("P1")],
+      cumulativeTotals: { "h-P1": { lines: 60, input: 600, output: 60 } },
+      chatEvents
+    })
+    const snapshotQueries = () =>
+      queries.filter(
+        ({ index, body }) =>
+          index === "events" && JSON.stringify(body.query).includes("harness.project.snapshot")
+      ).length
+    const cumulativeQueries = () =>
+      queries.filter(
+        ({ index, body }) =>
+          index === "traces" ||
+          (index === "events" && JSON.stringify(body.query).includes("code_adopt"))
+      ).length
+    const factQueries = () => queries.filter(({ index }) => index === "projects").length
+
+    await Promise.all([
+      fetchProjectMetricSummary(october, deps),
+      fetchProjectMetricProjects(october, {}, deps)
+    ])
+    // Concurrent calls share one snapshot scan + one test-project scan + one cumulative code/token set.
+    expect(snapshotQueries()).toBe(2)
+    const firstCumulative = cumulativeQueries()
+    expect(firstCumulative).toBe(4) // harness code/token + chat code/token
+
+    await fetchProjectMetricProjects(october, { page: 1, sortBy: "bugNum" }, deps)
+    expect(cumulativeQueries()).toBe(firstCumulative)
+
+    // Personal efficiency & overview reuse the cached includeOnline=true superset for candidate facts.
+    const beforeReuseFacts = factQueries()
+    await fetchPersonalEfficiencyProjectContext(october, deps)
+    expect(factQueries()).toBe(beforeReuseFacts)
+    await fetchProjectMetricOverview(october, deps)
+    // Only the cross-room featureCodes reverse-lookup hits projects; candidate scan is reused.
+    expect(factQueries()).toBe(beforeReuseFacts + 1)
+
+    // Manual refresh via factRefreshKey invalidates chat binding cache immediately.
+    chatEvents.push({
+      sapId: "8001",
+      eventName: "chat.project.binding",
+      eventTime: "2026-10-12 00:00:00",
+      properties: {
+        rootThreadId: "c1",
+        generationMode: "chat",
+        projectCode: "P2",
+        projectFromLean: true
+      }
+    })
+    const refreshed = await fetchProjectMetricProjects({ ...october, factRefreshKey: 99 }, {}, deps)
+    const byCode = new Map(refreshed.items.map((item) => [item.prjCode, item]))
+    expect(byCode.get("P2")?.devclawSources).toEqual(["devclaw_chat"])
+  })
+
+  it("同范围的个人列表和个人详情复用项目事实，在主进程按 PM 筛选", async () => {
+    const { deps, queries } = fixture({
+      projects: [project("P1", { pm: "甲/8001" }), project("P2", { pm: "乙/8002" })]
+    })
+    const all = await fetchPersonalEfficiencyProjectContext(october, deps)
+    const detail = await fetchPersonalEfficiencyProjectContext(october, deps, "8002")
+    expect(all.projects).toHaveLength(2)
+    expect(detail.projects.map(({ prjCode }) => prjCode)).toEqual(["P2"])
+    expect(queries.filter(({ index }) => index === "projects")).toHaveLength(1)
+  })
+
   it("超过10000条的快照及事实完整分页，工作日排序先全量计算再分页", async () => {
     const projects = Array.from({ length: 10003 }, (_, i) =>
       project(`P${String(i).padStart(5, "0")}`, {
@@ -1398,7 +1669,7 @@ describe("五Sheet指标追溯", () => {
       ])
     )
     const codeTable = workbookTable(workbook, "代码入库依据", "统计层级")
-    expect(codeTable.header).toContain("项目模式项目编号")
+    expect(codeTable.header).toContain("精益项目编号")
     expect(codeTable.header).not.toContain("企业项目编号")
     expect(codeTable.rows.filter((row) => row["数据来源"] === "CMBDevClaw")).toHaveLength(3)
     expect(
@@ -1505,7 +1776,7 @@ describe("五Sheet指标追溯", () => {
       "2026-10-09 17:29:27"
     )
     const code = workbookTable(workbook, "代码入库依据", "统计层级").rows
-    expect(code.find((r) => r["项目模式项目编号"] === "OLD")).toMatchObject({
+    expect(code.find((r) => r["精益项目编号"] === "OLD")).toMatchObject({
       统计层级: "室",
       入库代码行数: 80,
       对应已Push有效生成行数: 100
@@ -1812,7 +2083,7 @@ describe("2026年10月完整mock", () => {
     expect(workbookTable(workbook, "项目依据", "项目编号").rows).toHaveLength(12)
     expect(
       workbookTable(workbook, "代码入库依据", "统计层级").rows.find(
-        (row) => row["项目模式项目编号"] === "T26MCB21" && row["代码统计组织"] === "开发二部"
+        (row) => row["精益项目编号"] === "T26MCB21" && row["代码统计组织"] === "开发二部"
       )
     ).toMatchObject({ 项目所属室: "测试 1 部", 入库代码行数: 500 })
     for (const name of ["团队指标", "各室指标"]) {

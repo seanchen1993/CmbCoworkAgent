@@ -2521,7 +2521,12 @@ export function useDashboard(initialOrgLv1List: string[]) {
 
   // Project-mode + Lean scope stays fixed; only compute accepts stage/plugin filters.
   const fetchEfficiency = useCallback(
-    async (r: TimeRange, orgList: string[], selectedGroups: ProjectMetricGroup[]) => {
+    async (
+      r: TimeRange,
+      orgList: string[],
+      selectedGroups: ProjectMetricGroup[],
+      factRefreshKey?: number
+    ) => {
       const id = ++efficiencyFetchIdRef.current
       setEfficiencyLoading(true)
       setEfficiencyError(null)
@@ -2529,6 +2534,7 @@ export function useDashboard(initialOrgLv1List: string[]) {
         const result = await window.api.dashboard.efficiency(r, {
           upperOrgLv1: orgList,
           selectedGroups,
+          ...(factRefreshKey !== undefined ? { factRefreshKey } : {}),
           ...efficiencyPluginFilter
         })
         if (id !== efficiencyFetchIdRef.current) return

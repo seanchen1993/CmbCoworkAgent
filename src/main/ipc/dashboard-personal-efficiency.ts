@@ -19,6 +19,11 @@ import { assertProjectModeResultComplete } from "./project-mode-query-scope"
 import { normalizeCodeStatsFromContainer } from "./dashboard-code-stats"
 import { readOrgText } from "./dashboard-org-fields"
 
+import {
+  projectMetricChatRootKey,
+  type ProjectMetricChatBinding
+} from "./project-metric-chat-bindings"
+
 type Row = Record<string, unknown>
 const record = (v: unknown): Row =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Row) : {}
@@ -50,6 +55,7 @@ async function composite(
   for (;;) {
     const body = {
       size: 0,
+      track_total_hits: false,
       query: { bool: { filter: filters } },
       aggs: {
         people: {
@@ -83,15 +89,26 @@ export async function fetchPersonalEfficiencyCode(
   query: ProjectMetricDependencies["query"],
   eventIndex: string,
   filters: Row[],
-  perBucketAggs: Row
+  perBucketAggs: Row,
+  chatBindings?: ProjectMetricChatBinding[]
 ): Promise<PersonalEfficiencyCodeRow[]> {
+  const chatProjects = new Map(
+    chatBindings?.map((binding) => [
+      projectMetricChatRootKey(binding.sapId, binding.rootThreadId),
+      binding.prjCode
+    ])
+  )
   const buckets = await composite(
     { query },
     eventIndex,
     filters,
     [
       { sapId: { terms: { field: "sapId" } } },
-      { project: { terms: { field: "properties.harnessProjectId" } } },
+      {
+        project: {
+          terms: { field: chatBindings ? "properties.rootThreadId" : "properties.harnessProjectId" }
+        }
+      },
       { room: { terms: { field: "upperOrgLv1", missing_bucket: true } } },
       { group: { terms: { field: "upperOrgLv0", missing_bucket: true } } }
     ],
@@ -106,8 +123,9 @@ export async function fetchPersonalEfficiencyCode(
   for (const bucket of buckets) {
     const key = record(bucket.key)
     const sapId = text(key.sapId)
-    const harnessProjectId = text(key.project)
-    if (!sapId || !harnessProjectId || !bucket.code_adopt_pushed)
+    const project = text(key.project)
+    const prjCode = chatBindings ? chatProjects.get(projectMetricChatRootKey(sapId, project)) : ""
+    if (!sapId || !project || prjCode === undefined || !bucket.code_adopt_pushed)
       throw new Error("个人代码统计缺少人员、项目或采纳数据")
     const stats = normalizeCodeStatsFromContainer(bucket)
     const roomName = readOrgText(key.room) ?? ""
@@ -117,7 +135,7 @@ export async function fetchPersonalEfficiencyCode(
     const sortValue = Array.isArray(firstHit.sort) ? Number(firstHit.sort[0]) : Number.NaN
     const latestSort = Number.isFinite(sortValue) ? sortValue : -Infinity
     const userName = text(record(firstHit._source).userName)
-    const mergeKey = JSON.stringify([sapId, harnessProjectId, roomName, groupName])
+    const mergeKey = JSON.stringify([sapId, chatBindings ? prjCode : project, roomName, groupName])
     const existing = merged.get(mergeKey)
     if (existing) {
       existing.row.pushedAdoptedLines += stats.pushedAdoptedLines
@@ -131,8 +149,8 @@ export async function fetchPersonalEfficiencyCode(
         row: {
           sapId,
           userName,
-          harnessProjectId,
-          prjCode: "",
+          harnessProjectId: chatBindings ? "" : project,
+          prjCode,
           roomName,
           groupName,
           pushedAdoptedLines: stats.pushedAdoptedLines,
@@ -143,6 +161,31 @@ export async function fetchPersonalEfficiencyCode(
     }
   }
   return [...merged.values()].map(({ row }) => row)
+}
+
+/** 合并多批次对话查询返回的同人同项目同组织行，避免跨批次产生重复明细。 */
+export function mergePersonalEfficiencyCodeRows(
+  rows: PersonalEfficiencyCodeRow[]
+): PersonalEfficiencyCodeRow[] {
+  const merged = new Map<string, PersonalEfficiencyCodeRow>()
+  for (const row of rows) {
+    const key = JSON.stringify([
+      row.sapId,
+      row.harnessProjectId,
+      row.prjCode,
+      row.roomName,
+      row.groupName ?? ""
+    ])
+    const existing = merged.get(key)
+    if (existing) {
+      existing.pushedAdoptedLines += row.pushedAdoptedLines
+      existing.pushedEffectiveGeneratedLines += row.pushedEffectiveGeneratedLines
+      if (!existing.userName && row.userName) existing.userName = row.userName
+    } else {
+      merged.set(key, { ...row })
+    }
+  }
+  return [...merged.values()]
 }
 
 async function monthlyRecords(
@@ -346,7 +389,11 @@ export function assemblePersonalEfficiency(
 export async function fetchPersonalEfficiency(
   filters: PersonalEfficiencyFilters,
   deps: ProjectMetricDependencies,
-  codeQuery: (ids: string[], rooms: string[] | null) => Promise<PersonalEfficiencyCodeRow[]>,
+  codeQuery: (
+    ids: string[],
+    rooms: string[] | null,
+    chatBindings?: ProjectMetricChatBinding[]
+  ) => Promise<PersonalEfficiencyCodeRow[]>,
   detailSapId?: string,
   includeAllProjectNames = false
 ): Promise<PersonalEfficiencyData> {
@@ -364,7 +411,11 @@ export async function fetchPersonalEfficiency(
     []
   const groupScoped = Boolean(filters.selectedGroups?.length)
   const [codes, monthly] = await Promise.allSettled([
-    codeQuery([...new Set(context.bindings.map((p) => p.harnessProjectId))], rooms),
+    codeQuery(
+      [...new Set(context.bindings.map((p) => p.harnessProjectId))],
+      rooms,
+      ...(context.chatBindings?.length ? ([context.chatBindings] as const) : [])
+    ),
     detailSapId || groupScoped ? Promise.resolve([]) : monthlyRecords(filters, deps)
   ])
   const warnings = [...context.warnings]
@@ -379,7 +430,7 @@ export async function fetchPersonalEfficiency(
     codes.status === "fulfilled"
       ? codes.value.map((row) => ({
           ...row,
-          prjCode: bindings.get(row.harnessProjectId) ?? row.harnessProjectId
+          prjCode: row.prjCode || bindings.get(row.harnessProjectId) || row.harnessProjectId
         }))
       : null,
     monthly.status === "fulfilled" ? monthly.value : [],
